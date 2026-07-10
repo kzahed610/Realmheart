@@ -9,6 +9,7 @@
 #include "ui/sidebar/RightSidebar.hpp"
 #include "services/Audio.hpp"
 #include "services/Brightness.hpp"
+#include "services/SessionManager.hpp"
 #include "ui/NotificationToast.hpp"
 #include "ui/OSDOverlay.hpp"
 
@@ -29,6 +30,7 @@ public:
 
         toast_ = std::make_unique<NotificationToast>(application_);
         osd_ = std::make_unique<OSDOverlay>(application_);
+        session_ = std::make_unique<services::SessionManager>();
 
         notification_server_.set_notification_handler([this](const auto& entry) {
             toast_->show(entry, 5000);
@@ -80,6 +82,14 @@ public:
         apply_bar_visibility();
     }
 
+    void lock_session() {
+        session_->lock();
+    }
+
+    void open_logout_menu() {
+        session_->logout_menu();
+    }
+
     void quit() {
         g_application_quit(G_APPLICATION(application_));
     }
@@ -116,6 +126,7 @@ private:
     services::NotificationHistory notification_history_;
     services::NotificationServer notification_server_;
     services::NotificationDaemon notification_daemon_;
+    std::unique_ptr<services::SessionManager> session_;
     std::unique_ptr<NotificationToast> toast_;
     std::unique_ptr<OSDOverlay> osd_;
     GtkWindow* bar_ = nullptr;
@@ -143,6 +154,14 @@ void toggle_bar_action(GSimpleAction*, GVariant*, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->toggle_bar();
 }
 
+void lock_session_action(GSimpleAction*, GVariant*, gpointer user_data) {
+    static_cast<ShellRuntime*>(user_data)->lock_session();
+}
+
+void open_logout_menu_action(GSimpleAction*, GVariant*, gpointer user_data) {
+    static_cast<ShellRuntime*>(user_data)->open_logout_menu();
+}
+
 void quit_action(GSimpleAction*, GVariant*, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->quit();
 }
@@ -152,6 +171,8 @@ constexpr GActionEntry kShellActions[] = {
     {"bar-toggle", toggle_bar_action, nullptr, nullptr, nullptr, {}},
     {"osd-volume", show_osd_volume_action, nullptr, nullptr, nullptr, {}},
     {"osd-brightness", show_osd_brightness_action, nullptr, nullptr, nullptr, {}},
+    {"lock-session", lock_session_action, nullptr, nullptr, nullptr, {}},
+    {"logout-menu", open_logout_menu_action, nullptr, nullptr, nullptr, {}},
     {"quit", quit_action, nullptr, nullptr, nullptr, {}},
 };
 

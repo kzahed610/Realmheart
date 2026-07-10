@@ -34,6 +34,7 @@ add_executable(realmheart
     src/services/ScopeModules.cpp
     src/services/RightSidebarServices.cpp
     src/services/Wifi.cpp
+    src/services/SessionManager.cpp
 )
 
 target_include_directories(realmheart PRIVATE src)
@@ -169,7 +170,8 @@ if(BUILD_TESTING)
         tests/NightLightTests.cpp
         src/core/Command.cpp
         src/services/NightLight.cpp
-    )
+        src/services/SessionManager.cpp
+        )
     target_include_directories(realmheart_night_light_tests PRIVATE src)
     target_compile_options(realmheart_night_light_tests PRIVATE
         -Wall -Wextra -Wpedantic
@@ -262,7 +264,7 @@ if(BUILD_TESTING)
     target_include_directories(realmheart_vertical_bar_model_tests PRIVATE src)
     target_compile_options(realmheart_vertical_bar_model_tests PRIVATE
         -Wall -Wextra -Wpedantic
-        $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>
+        $<$<BOOL:${REALMHEART_WARNINGS_as_errors}>:-Werror>
     )
 
     add_executable(realmheart_ui_foundation_tests
@@ -297,7 +299,7 @@ if(BUILD_TESTING)
     add_test(NAME realmheart_audio_mutation COMMAND realmheart_audio_tests)
     add_test(NAME realmheart_bluetooth_mutation COMMAND realmheart_bluetooth_tests)
     add_test(NAME realmheart_brightness_mutation COMMAND realmheart_brightness_tests)
-    add_test(NAME realmheart_gamemode_mutation COMMAND realmheart_gamemode_tests)
+    add_test(NAME realmheart_gamemode_mutation COMMAND realmheart mavenCentral_gamemode_tests)
     add_test(NAME realmheart_keep_awake_mutation COMMAND realmheart_keep_awake_tests)
     add_test(NAME realmheart_night_light_mutation COMMAND realmheart_night_light_tests)
     add_test(NAME realmheart_power_profile_mutation COMMAND realmheart_power_profiles_tests)

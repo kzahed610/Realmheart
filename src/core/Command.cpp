@@ -1,5 +1,4 @@
 #include "core/Command.hpp"
-
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -96,14 +95,6 @@ void drain_exec_error(
     }
 }
 
-std::string bounded_with_ellipsis(std::string text, std::size_t max_bytes) {
-    if (text.size() <= max_bytes) return text;
-    if (max_bytes <= 3) return std::string(max_bytes, '.');
-    text.resize(max_bytes - 3);
-    text += "...";
-    return text;
-}
-
 } // namespace
 
 std::string trim(std::string text) {
@@ -111,6 +102,86 @@ std::string trim(std::string text) {
     if (start == std::string::npos) return {};
     const auto end = text.find_last_not_of(" \t\n\r");
     return text.substr(start, end - start + 1);
+}
+
+std::string sanitize_command_detail(std::string_view text, std::size_t max_bytes) {
+    std::string sanitized;
+    sanitized.reserve(std::min(text.size(), max_bytes));
+    bool pending_space = false;
+
+    for (std::size_t index = 0; index < text.size();) {
+        const auto byte = static_cast<unsigned char>(text[index]);
+        if (byte == 0x1b) {
+            ++index;
+            if (index < text.size() && text[index] == '[') {
+                ++index;
+                while (index < text.size()) {
+                    const auto control = static_cast<unsigned char>(text[index++]);
+                    if (control >= 0x40 && control <= 0x7e) break;
+                }
+            } else if (index < text.size() && text[index] == ']') {
+                ++index;
+                while (index < text.size()) {
+                    if (text[index] == '\a') {
+                        ++index;
+                        break;
+                    }
+                    if (text[index] == 0x1b && index + 1 < text.size() && text[index + 1] == '\\') {
+                        index += 2;
+                        break;
+                    }
+                    ++index;
+                }
+            }
+            continue;
+        }
+        ++index;
+
+        if (std::isspace(byte)) {
+            pending_space = !sanitized.empty();
+            continue;
+        }
+        if (byte < 0x20 || byte == 0x7f) continue;
+        if (pending_space) {
+            sanitized.push_back(' ');
+            pending_space = false;
+        }
+        sanitized.push_back(static_cast<char>(byte));
+    }
+
+    if (sanitized.size() > max_bytes) {
+        sanitized.resize(max_bytes - 3);
+        sanitized += "...";
+    }
+    return sanitized;
+}
+
+std::string command_failure_detail(
+    const CommandResult& result,
+    std::string_view fallback,
+    std::size_t max_bytes
+) {
+    std::string detail;
+    switch (result.status) {
+    case CommandStatus::TimedOut:
+        detail = "command timed out";
+        break;
+    case CommandStatus::Cancelled:
+        detail = "command cancelled";
+        break;
+    case CommandStatus::SpawnFailed:
+    case CommandStatus::InvalidArguments:
+    case CommandStatus::SystemError:
+    case CommandStatus::Signaled:
+        detail = result.error;
+        break;
+    case CommandStatus::Exited:
+        detail = result.output;
+        break;
+    }
+    if (detail.empty()) detail = std::string(fallback);
+    if (result.truncated) detail += " [output truncated]";
+    return sanitize_command_detail(detail, max_bytes);
 }
 
 std::optional<std::string> find_in_path(const std::string& name) {
@@ -139,6 +210,16 @@ bool command_exists(const std::string& name) {
 
 bool CommandResult::succeeded() const noexcept {
     return status == CommandStatus::Exited && exit_code == 0;
+}
+
+bool run_background(const std::vector<std::string>& argv) {
+    if (argv.empty()) return false;
+    std::string cmd = argv[0];
+    for (size_t i = 1; i < argv.size(); ++i) {
+        cmd += " " + argv[i];
+    }
+    cmd += " &";
+    return std::system(cmd.c_str()) == 0;
 }
 
 CommandResult run_capture(const std::vector<std::string>& argv, const CommandOptions& options) {
@@ -245,7 +326,7 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
             break;
         }
         if (waited < 0 && errno != EINTR) {
-            io_error = std::string("waitpid failed: ") + std::strerror(errno);
+            io_error = std::string("read failed: ") + std::strerror(errno);
             break;
         }
 
@@ -284,7 +365,7 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
         std::memcpy(&exec_errno, exec_error_buffer.data(), sizeof(exec_errno));
         result.status = CommandStatus::SpawnFailed;
         result.exit_code = 127;
-        result.error = std::string("execvp failed: ") + std::strerror(exec_errno);
+        result.error = std::string("execvp failed: ") + std::strerror(errno);
         return result;
     }
     if (!io_error.empty() && result.status != CommandStatus::TimedOut && result.status != CommandStatus::Cancelled) {
@@ -312,86 +393,11 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
         result.error = "command terminated by signal " + std::to_string(result.term_signal);
         return result;
     }
-
-    result.status = CommandStatus::SystemError;
-    result.error = "child exited with an unknown wait status";
+    if (result.status == CommandStatus::SystemError) {
+        result.error = "child exited with an unknown wait status";
+        return result;
+    }
     return result;
-}
-
-std::string sanitize_command_detail(std::string_view text, std::size_t max_bytes) {
-    std::string sanitized;
-    sanitized.reserve(std::min(text.size(), max_bytes));
-    bool pending_space = false;
-
-    for (std::size_t index = 0; index < text.size();) {
-        const auto byte = static_cast<unsigned char>(text[index]);
-        if (byte == 0x1b) {
-            ++index;
-            if (index < text.size() && text[index] == '[') {
-                ++index;
-                while (index < text.size()) {
-                    const auto control = static_cast<unsigned char>(text[index++]);
-                    if (control >= 0x40 && control <= 0x7e) break;
-                }
-            } else if (index < text.size() && text[index] == ']') {
-                ++index;
-                while (index < text.size()) {
-                    if (text[index] == '\a') {
-                        ++index;
-                        break;
-                    }
-                    if (text[index] == 0x1b && index + 1 < text.size() && text[index + 1] == '\\') {
-                        index += 2;
-                        break;
-                    }
-                    ++index;
-                }
-            }
-            continue;
-        }
-        ++index;
-
-        if (std::isspace(byte)) {
-            pending_space = !sanitized.empty();
-            continue;
-        }
-        if (byte < 0x20 || byte == 0x7f) continue;
-        if (pending_space) {
-            sanitized.push_back(' ');
-            pending_space = false;
-        }
-        sanitized.push_back(static_cast<char>(byte));
-    }
-
-    return bounded_with_ellipsis(std::move(sanitized), max_bytes);
-}
-
-std::string command_failure_detail(
-    const CommandResult& result,
-    std::string_view fallback,
-    std::size_t max_bytes
-) {
-    std::string detail;
-    switch (result.status) {
-    case CommandStatus::TimedOut:
-        detail = "command timed out";
-        break;
-    case CommandStatus::Cancelled:
-        detail = "command cancelled";
-        break;
-    case CommandStatus::SpawnFailed:
-    case CommandStatus::InvalidArguments:
-    case CommandStatus::SystemError:
-    case CommandStatus::Signaled:
-        detail = result.error;
-        break;
-    case CommandStatus::Exited:
-        detail = result.output;
-        break;
-    }
-    if (detail.empty()) detail = std::string(fallback);
-    if (result.truncated) detail += " [output truncated]";
-    return sanitize_command_detail(detail, max_bytes);
 }
 
 } // namespace realmheart::core

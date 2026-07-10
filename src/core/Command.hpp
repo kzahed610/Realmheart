@@ -41,6 +41,7 @@ struct CommandResult {
 bool command_exists(const std::string& name);
 std::optional<std::string> find_in_path(const std::string& name);
 CommandResult run_capture(const std::vector<std::string>& argv, const CommandOptions& options = {});
+bool run_background(const std::vector<std::string>& argv);
 std::string sanitize_command_detail(std::string_view text, std::size_t max_bytes = 160);
 std::string command_failure_detail(
     const CommandResult& result,
