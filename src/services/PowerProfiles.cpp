@@ -21,7 +21,10 @@ std::optional<std::string> PowerProfiles::current() {
     if (!realmheart::core::command_exists("powerprofilesctl")) return std::nullopt;
     auto result = realmheart::core::run_capture({"powerprofilesctl", "get"});
     if (!result.succeeded() || result.truncated || result.output.empty()) return std::nullopt;
-    return result.output;
+    
+    std::string output = result.output;
+    output.erase(output.find_last_not_of(" \n\r\t") + 1);
+    return output;
 }
 
 bool PowerProfiles::set(const std::string& profile) {

@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <sstream>
 #include <string>
+#include <algorithm>
 
 namespace realmheart::services {
 
@@ -26,7 +27,8 @@ std::optional<BrightnessState> Brightness::read(const realmheart::core::CommandO
 bool Brightness::set(int value, const realmheart::core::CommandOptions& options) {
     if (!realmheart::core::command_exists("brightnessctl")) return false;
 
-    std::string arg = std::to_string(value) + "%";
+    int clamped_value = std::clamp(value, 0, 100);
+    std::string arg = std::to_string(clamped_value) + "%";
     const auto result = realmheart::core::run_capture({"brightnessctl", "set", arg}, options);
     return result.succeeded();
 }
