@@ -1,0 +1,82 @@
+#include "ui/LayerSurface.hpp"
+
+#include <gtk4-layer-shell/gtk4-layer-shell.h>
+
+#include <algorithm>
+
+namespace realmheart::ui {
+namespace {
+
+GtkLayerShellLayer to_gtk_layer(LayerSurfaceLevel layer) {
+    switch (layer) {
+    case LayerSurfaceLevel::Background: return GTK_LAYER_SHELL_LAYER_BACKGROUND;
+    case LayerSurfaceLevel::Bottom: return GTK_LAYER_SHELL_LAYER_BOTTOM;
+    case LayerSurfaceLevel::Top: return GTK_LAYER_SHELL_LAYER_TOP;
+    case LayerSurfaceLevel::Overlay: return GTK_LAYER_SHELL_LAYER_OVERLAY;
+    }
+    return GTK_LAYER_SHELL_LAYER_TOP;
+}
+
+GtkLayerShellKeyboardMode to_gtk_keyboard_mode(LayerKeyboardMode mode) {
+    switch (mode) {
+    case LayerKeyboardMode::None: return GTK_LAYER_SHELL_KEYBOARD_MODE_NONE;
+    case LayerKeyboardMode::Exclusive: return GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE;
+    case LayerKeyboardMode::OnDemand: return GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND;
+    }
+    return GTK_LAYER_SHELL_KEYBOARD_MODE_NONE;
+}
+
+} // namespace
+
+LayerSurfaceSpec make_bar_surface_spec(int width) {
+    LayerSurfaceSpec spec;
+    spec.surface_namespace = "realmheart-bar";
+    spec.layer = LayerSurfaceLevel::Top;
+    spec.keyboard_mode = LayerKeyboardMode::OnDemand;
+    spec.anchor_left = true;
+    spec.anchor_top = true;
+    spec.anchor_bottom = true;
+    spec.exclusive_zone = std::max(width, 0);
+    return spec;
+}
+
+LayerSurfaceSpec make_layer_surface_spec(std::string_view ns, LayerSurfaceLevel level, LayerKeyboardMode keyboard) {
+    LayerSurfaceSpec spec;
+    spec.surface_namespace = std::string(ns);
+    spec.layer = level;
+    spec.keyboard_mode = keyboard;
+    spec.anchor_right = true;
+    spec.anchor_top = true;
+    spec.anchor_bottom = true;
+    return spec;
+}
+
+LayerSurfaceSpec make_test_surface_spec() {
+    LayerSurfaceSpec spec;
+    spec.surface_namespace = "realmheart-test-layer";
+    spec.layer = LayerSurfaceLevel::Top;
+    spec.keyboard_mode = LayerKeyboardMode::OnDemand;
+    spec.anchor_left = true;
+    spec.anchor_top = true;
+    spec.margin_left = 16;
+    spec.margin_top = 16;
+    return spec;
+}
+
+void apply_layer_surface(GtkWindow* window, const LayerSurfaceSpec& spec) {
+    gtk_layer_init_for_window(window);
+    gtk_layer_set_namespace(window, spec.surface_namespace.c_str());
+    gtk_layer_set_layer(window, to_gtk_layer(spec.layer));
+    gtk_layer_set_keyboard_mode(window, to_gtk_keyboard_mode(spec.keyboard_mode));
+    gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_LEFT, spec.anchor_left);
+    gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_RIGHT, spec.anchor_right);
+    gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_TOP, spec.anchor_top);
+    gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_BOTTOM, spec.anchor_bottom);
+    gtk_layer_set_exclusive_zone(window, std::max(spec.exclusive_zone, 0));
+    gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_LEFT, std::max(spec.margin_left, 0));
+    gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_RIGHT, std::max(spec.margin_right, 0));
+    gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_TOP, std::max(spec.margin_top, 0));
+    gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_BOTTOM, std::max(spec.margin_bottom, 0));
+}
+
+} // namespace realmheart::ui
