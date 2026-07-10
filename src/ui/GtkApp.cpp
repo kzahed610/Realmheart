@@ -109,8 +109,16 @@ void activate_bar(GtkApplication* app, gpointer data) {
 void activate_sidebar(GtkApplication* app, gpointer data) {
     auto* state = static_cast<TimedLayerState*>(data);
     schedule_application_quit(state);
-    auto sidebar = std::make_unique<sidebar::RightSidebar>(app);
-    gtk_window_present(GTK_WINDOW(sidebar->get_window()));
+    static services::NotificationHistory notification_history;
+    auto* controller = new sidebar::RightSidebar(app, notification_history);
+    GtkWidget* window = controller->get_window();
+    g_object_set_data_full(
+        G_OBJECT(window),
+        "realmheart-sidebar-controller",
+        controller,
+        +[](gpointer value) { delete static_cast<sidebar::RightSidebar*>(value); }
+    );
+    gtk_window_present(GTK_WINDOW(window));
 }
 
 // --- Core Runner ---

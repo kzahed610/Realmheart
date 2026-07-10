@@ -1,7 +1,14 @@
 #include "RightSidebarServices.hpp"
 
 #include "core/Command.hpp"
+#include "services/Audio.hpp"
+#include "services/Bluetooth.hpp"
 #include "services/Brightness.hpp"
+#include "services/GameMode.hpp"
+#include "services/KeepAwake.hpp"
+#include "services/NightLight.hpp"
+#include "services/PowerProfiles.hpp"
+#include "services/Wifi.hpp"
 
 #include <iomanip>
 #include <iostream>
@@ -29,122 +36,64 @@ std::string format_percent(double percent) {
     return out.str();
 }
 
-bool usable_output(const realmheart::core::CommandResult& result) {
-    return result.succeeded() && !result.truncated && !result.output.empty();
-}
-
-std::string command_unavailable(
-    const realmheart::core::CommandResult& result,
-    std::string_view fallback
-) {
-    return unavailable(realmheart::core::command_failure_detail(result, fallback));
-}
-
-std::string first_active_wifi_ssid(const realmheart::core::CommandOptions& options) {
-    const auto scan = realmheart::core::run_capture(
-        {"nmcli", "-t", "-f", "ACTIVE,SSID", "dev", "wifi"},
-        options
-    );
-    if (!usable_output(scan)) return {};
-
-    std::stringstream lines(scan.output);
-    std::string line;
-    while (std::getline(lines, line)) {
-        constexpr std::string_view prefix = "yes:";
-        if (line.rfind(std::string(prefix), 0) == 0 && line.size() > prefix.size()) {
-            return realmheart::core::sanitize_command_detail(line.substr(prefix.size()), 96);
-        }
-    }
-    return {};
-}
-
-bool output_contains(const std::string& output, const std::string& needle) {
-    return output.find(needle) != std::string::npos;
-}
-
 } // namespace
 
 RightSidebarServices::RightSidebarServices(realmheart::core::CommandOptions command_options)
     : command_options_(std::move(command_options)) {}
 
 ServiceStatus RightSidebarServices::getWifiStatus() const {
-    if (!realmheart::core::command_exists("nmcli")) {
-        return {"WiFi", unavailable("nmcli not found"), false};
-    }
+    const auto wifi = Wifi::read(command_options_);
+    if (!wifi) return {"WiFi", unavailable("nmcli unavailable or unreadable"), false};
 
-    const auto radio = realmheart::core::run_capture({"nmcli", "radio", "wifi"}, command_options_);
-    if (!usable_output(radio)) {
-        return {"WiFi", command_unavailable(radio, "nmcli radio wifi failed"), false};
+    std::string status = wifi->enabled ? "Enabled" : "Disabled";
+    if (wifi->enabled) {
+        status += wifi->ssid.empty() ? " (not connected)" : " (" + wifi->ssid + ")";
     }
-
-    const bool enabled = radio.output == "enabled";
-    std::string status = enabled ? "Enabled" : "Disabled";
-    if (enabled) {
-        if (auto ssid = first_active_wifi_ssid(command_options_); !ssid.empty()) status += " (" + ssid + ")";
-        else status += " (not connected)";
-    }
-    return {"WiFi", status, enabled};
+    return {"WiFi", status, wifi->enabled};
 }
 
 ServiceStatus RightSidebarServices::getBluetoothStatus() const {
-    if (!realmheart::core::command_exists("bluetoothctl")) {
-        return {"Bluetooth", unavailable("bluetoothctl not found"), false};
+    const auto bluetooth = Bluetooth::read(command_options_);
+    if (!bluetooth) {
+        return {"Bluetooth", unavailable("bluetoothctl unavailable or unreadable"), false};
     }
-
-    const auto show = realmheart::core::run_capture({"bluetoothctl", "show"}, command_options_);
-    if (!usable_output(show)) {
-        return {"Bluetooth", command_unavailable(show, "bluetoothctl show failed"), false};
-    }
-
-    const bool powered = output_contains(show.output, "Powered: yes");
-    return {"Bluetooth", yes_no_state(powered, "Powered", "Not powered"), powered};
+    return {
+        "Bluetooth",
+        yes_no_state(bluetooth->powered, "Powered", "Not powered"),
+        bluetooth->powered
+    };
 }
 
 ServiceStatus RightSidebarServices::getKeepAwakeStatus() const {
-    if (!realmheart::core::command_exists("hypridle")) {
-        return {"Keep Awake", unavailable("hypridle not found"), false};
-    }
-    return {"Keep Awake", unavailable("no safe read-only idle-inhibit state probe available"), false};
+    KeepAwake keep_awake;
+    const bool active = keep_awake.active(command_options_);
+    return {"Keep Awake", yes_no_state(active, "Inhibiting idle", "Idle allowed"), active};
 }
 
 ServiceStatus RightSidebarServices::getNightLightStatus() const {
-    if (!realmheart::core::command_exists("hyprsunset")) {
-        return {"Night Light", unavailable("hyprsunset not found"), false};
-    }
-
-    const auto running = realmheart::core::run_capture({"pgrep", "-x", "hyprsunset"}, command_options_);
-    if (running.succeeded() && !running.output.empty()) return {"Night Light", "Running", true};
-    if (running.status == realmheart::core::CommandStatus::Exited && running.exit_code == 1) {
-        return {"Night Light", "Not running", false};
-    }
-    return {"Night Light", command_unavailable(running, "pgrep hyprsunset failed"), false};
+    const auto night_light = NightLight::read(command_options_);
+    if (!night_light) return {"Night Light", unavailable("hyprsunset IPC unavailable"), false};
+    return {
+        "Night Light",
+        std::to_string(night_light->temperature) + "K",
+        night_light->enabled
+    };
 }
 
 ServiceStatus RightSidebarServices::getGamemodeStatus() const {
-    if (!realmheart::core::command_exists("gamemoded")) {
-        return {"Gamemode", unavailable("gamemoded not found"), false};
-    }
-
-    const auto status = realmheart::core::run_capture({"gamemoded", "-s"}, command_options_);
-    if (!usable_output(status)) {
-        return {"Gamemode", command_unavailable(status, "gamemoded -s failed"), false};
-    }
-
-    const bool active = output_contains(status.output, "GameMode is active")
-        || (output_contains(status.output, "active") && !output_contains(status.output, "inactive"));
-    return {"Gamemode", realmheart::core::sanitize_command_detail(status.output), active};
+    const auto gamemode = GameMode::read(command_options_);
+    if (!gamemode) return {"Gamemode", unavailable("Hyprland option unreadable"), false};
+    return {
+        "Gamemode",
+        yes_no_state(gamemode->enabled, "Compositor effects disabled", "Normal compositor settings"),
+        gamemode->enabled
+    };
 }
 
 ServiceStatus RightSidebarServices::getPowerProfileStatus() const {
-    if (!realmheart::core::command_exists("powerprofilesctl")) {
-        return {"Power Profile", unavailable("powerprofilesctl not found"), false};
-    }
-
-    const auto profile = realmheart::core::run_capture({"powerprofilesctl", "get"}, command_options_);
-    if (!usable_output(profile)) {
-        return {"Power Profile", command_unavailable(profile, "powerprofilesctl unavailable or returned no profile"), false};
-    }
-    return {"Power Profile", realmheart::core::sanitize_command_detail(profile.output), true};
+    const auto profile = PowerProfiles::current();
+    if (!profile) return {"Power Profile", unavailable("powerprofilesctl unavailable"), false};
+    return {"Power Profile", *profile, true};
 }
 
 ServiceStatus RightSidebarServices::getBrightnessStatus() const {
@@ -154,18 +103,12 @@ ServiceStatus RightSidebarServices::getBrightnessStatus() const {
 }
 
 ServiceStatus RightSidebarServices::getVolumeStatus() const {
-    if (!realmheart::core::command_exists("wpctl")) {
-        return {"Volume", unavailable("wpctl not found"), false};
-    }
+    const auto audio = Audio::read_default_sink(command_options_);
+    if (!audio) return {"Volume", unavailable("wpctl unavailable or unreadable"), false};
 
-    const auto audio = realmheart::core::run_capture(
-        {"wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"},
-        command_options_
-    );
-    if (!usable_output(audio)) {
-        return {"Volume", command_unavailable(audio, "wpctl default sink unreadable"), false};
-    }
-    return {"Volume", realmheart::core::sanitize_command_detail(audio.output), true};
+    std::string status = format_percent(audio->volume * 100.0);
+    if (audio->muted) status += " (Muted)";
+    return {"Volume", status, true};
 }
 
 ServiceStatus RightSidebarServices::getNotificationsStatus() const {

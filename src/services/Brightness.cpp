@@ -3,6 +3,7 @@
 #include "core/Command.hpp"
 
 #include <cstdlib>
+#include <cmath>
 #include <sstream>
 #include <string>
 #include <algorithm>
@@ -30,7 +31,10 @@ bool Brightness::set(int value, const realmheart::core::CommandOptions& options)
     int clamped_value = std::clamp(value, 0, 100);
     std::string arg = std::to_string(clamped_value) + "%";
     const auto result = realmheart::core::run_capture({"brightnessctl", "set", arg}, options);
-    return result.succeeded();
+    if (!result.succeeded()) return false;
+
+    const auto readback = read(options);
+    return readback.has_value() && std::abs(readback->percent - clamped_value) <= 1.0;
 }
 
 } // namespace realmheart::services

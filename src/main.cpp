@@ -1,4 +1,6 @@
 #include "core/Diagnostics.hpp"
+#include "core/ShellCommand.hpp"
+#include "core/ShellControl.hpp"
 #include "services/Audio.hpp"
 #include "services/Brightness.hpp"
 #include "services/HyprlandWorkspaces.hpp"
@@ -6,6 +8,7 @@
 #include "services/ScopeModules.hpp"
 #include "services/RightSidebarServices.hpp"
 #include "ui/GtkApp.hpp"
+#include "ui/ShellApp.hpp"
 
 #include <charconv>
 #include <iomanip>
@@ -23,6 +26,8 @@ void print_usage() {
               << "  realmheart --cycle-power-profile Cycle battery-saver/balanced/performance\n"
               << "  realmheart --workspace-status   Print Hyprland workspace snapshot\n"
               << "  realmheart --right-sidebar-status Print right sidebar service report\n"
+              << "  realmheart --shell               Run the persistent Realmheart shell\n"
+              << "  realmheart --command NAME        Send a command to the running shell\n"
               << "  realmheart --sidebar [--timeout N] Show the right sidebar MVP layer surface\n"
               << "  realmheart --bar [--timeout N]     Show the safe vertical bar MVP layer surface\n"
               << "  realmheart --test-layer [--timeout N] Show a temporary GTK layer-shell test surface\n"
@@ -103,6 +108,43 @@ int main(int argc, char** argv) {
     }
 
     if (command == "--doctor") return doctor();
+
+    if (command == "--shell") {
+        if (argc != 2) {
+            std::cerr << "--shell does not accept additional arguments\n";
+            return 2;
+        }
+        return realmheart::ui::run_shell();
+    }
+
+    if (command == "--command") {
+        if (argc != 3) {
+            std::cerr << "--command requires exactly one command name\n"
+                      << "Supported: sidebar-right-toggle, bar-toggle, quit\n";
+            return 2;
+        }
+
+        const auto shell_command = realmheart::core::parse_shell_command(argv[2]);
+        if (!shell_command) {
+            std::cerr << "Unknown shell command: " << argv[2] << '\n'
+                      << "Supported: sidebar-right-toggle, bar-toggle, quit\n";
+            return 2;
+        }
+
+        const auto result = realmheart::core::send_shell_command(*shell_command);
+        switch (result) {
+        case realmheart::core::ShellControlResult::Delivered:
+            return 0;
+        case realmheart::core::ShellControlResult::NotRunning:
+            std::cerr << "Realmheart shell is not running\n";
+            return 1;
+        case realmheart::core::ShellControlResult::RegistrationFailed:
+            return 3;
+        case realmheart::core::ShellControlResult::ActionUnavailable:
+            std::cerr << "Running Realmheart shell does not expose command: " << argv[2] << '\n';
+            return 4;
+        }
+    }
 
     if (command == "--list-modules") {
         const auto registry = realmheart::services::build_confirmed_module_registry();

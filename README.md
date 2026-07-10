@@ -40,6 +40,12 @@ Native C++ Hyprland shell rewrite for Zahed's desktop. TBATE reference mandatory
 - [x] Final RAM optimization and performance audit.
 - [ ] Transition to `~/.config` and live deployment.
 
+### Phase 6: Future Expansions (Planned)
+- [ ] **Left Sidebar** - Implementation of an empty container for future modular expansion.
+- [ ] **Active State Mutation** - Enable Right Sidebar to actively mutate system states (Brightness, Volume, WiFi, Bluetooth, etc.).
+- [ ] **Dynamic Background** - Wallpaper management integrated with Matugen theming.
+- [ ] **Screenshot Pipeline** - Implementation of the region-capture pipeline (porting the  logic to C++).
+
 ## 🛠️ Build & Run
 
 ### Installation

@@ -1,12 +1,20 @@
 #include "ui/sidebar/RightSidebar.hpp"
 #include "ui/LayerSurface.hpp"
+#include "core/ShellCommand.hpp"
+#include "core/ShellControl.hpp"
+#include "services/Audio.hpp"
+#include "services/Bluetooth.hpp"
 #include "services/Brightness.hpp"
+#include "services/GameMode.hpp"
+#include "services/NightLight.hpp"
 #include "services/PowerProfiles.hpp"
-#include "services/RightSidebarServices.hpp"
 #include "services/Notifications.hpp"
+#include "services/Wifi.hpp"
 
 #include <gtk/gtk.h>
+#include <cmath>
 #include <iostream>
+#include <optional>
 #include <vector>
 
 namespace realmheart::ui::sidebar {
@@ -103,7 +111,7 @@ private:
 
 class ToggleModule : public SidebarModule {
 public:
-    ToggleModule(const std::string& label, std::function<void(bool)> on_toggle) 
+    ToggleModule(const std::string& label, bool initial, std::function<bool(bool)> on_toggle)
         : SidebarModule(label), on_toggle_(on_toggle) {
         box_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
         gtk_widget_set_margin_start(box_, 12);
@@ -116,11 +124,11 @@ public:
         gtk_box_append(GTK_BOX(box_), lbl_name);
 
         switch_ = gtk_switch_new();
-        g_signal_connect(switch_, "state-set", G_CALLBACK(+[](GtkSwitch* w, gboolean state, gpointer data) {
-            (void)w;
+        gtk_switch_set_active(GTK_SWITCH(switch_), initial);
+        g_signal_connect(switch_, "state-set", G_CALLBACK(+[](GtkSwitch*, gboolean state, gpointer data) -> gboolean {
             auto* self = static_cast<ToggleModule*>(data);
-            self->on_toggle_(state);
-            return FALSE;
+            if (self->on_toggle_(state)) return FALSE;
+            return TRUE;
         }), this);
         gtk_box_append(GTK_BOX(box_), switch_);
     }
@@ -130,13 +138,18 @@ public:
 private:
     GtkWidget* box_;
     GtkWidget* switch_;
-    std::function<void(bool)> on_toggle_;
+    std::function<bool(bool)> on_toggle_;
 };
 
 class SliderModule : public SidebarModule {
 public:
-    SliderModule(const std::string& label, double min, double max, double initial, std::function<void(double)> on_change)
-        : SidebarModule(label), on_change_(on_change) {
+    SliderModule(
+        const std::string& label,
+        double min,
+        double max,
+        double initial,
+        std::function<std::optional<double>(double)> on_change
+    ) : SidebarModule(label), confirmed_value_(initial), pending_value_(initial), on_change_(on_change) {
         box_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
         gtk_widget_set_margin_start(box_, 12);
         gtk_widget_set_margin_end(box_, 12);
@@ -151,9 +164,26 @@ public:
         gtk_range_set_value(GTK_RANGE(scale_), initial);
         g_signal_connect(scale_, "value-changed", G_CALLBACK(+[](GtkRange* r, gpointer data) {
             auto* self = static_cast<SliderModule*>(data);
-            self->on_change_(gtk_range_get_value(r));
+            if (self->updating_) return;
+            self->pending_value_ = gtk_range_get_value(r);
+            if (self->debounce_source_ != 0) g_source_remove(self->debounce_source_);
+            self->debounce_source_ = g_timeout_add(120, +[](gpointer callback_data) -> gboolean {
+                auto* module = static_cast<SliderModule*>(callback_data);
+                module->debounce_source_ = 0;
+                const auto actual = module->on_change_(module->pending_value_);
+                if (actual) module->confirmed_value_ = *actual;
+
+                module->updating_ = true;
+                gtk_range_set_value(GTK_RANGE(module->scale_), module->confirmed_value_);
+                module->updating_ = false;
+                return G_SOURCE_REMOVE;
+            }, self);
         }), this);
         gtk_box_append(GTK_BOX(box_), scale_);
+    }
+
+    ~SliderModule() override {
+        if (debounce_source_ != 0) g_source_remove(debounce_source_);
     }
 
     GtkWidget* get_widget() override { return box_; }
@@ -161,7 +191,11 @@ public:
 private:
     GtkWidget* box_;
     GtkWidget* scale_;
-    std::function<void(double)> on_change_;
+    guint debounce_source_ = 0;
+    bool updating_ = false;
+    double confirmed_value_ = 0.0;
+    double pending_value_ = 0.0;
+    std::function<std::optional<double>(double)> on_change_;
 };
 
 class ButtonModule : public SidebarModule {
@@ -197,7 +231,10 @@ private:
 
 // --- RightSidebar Implementation ---
 
-RightSidebar::RightSidebar(GtkApplication* app) : app_(app) {
+RightSidebar::RightSidebar(
+    GtkApplication* app,
+    services::NotificationHistory& notification_history
+) : app_(app), notification_history_(notification_history) {
     window_ = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Right Sidebar");
     gtk_window_set_default_size(GTK_WINDOW(window_), 300, 800);
@@ -227,41 +264,76 @@ void RightSidebar::add_module(std::unique_ptr<SidebarModule> module) {
     gtk_box_append(GTK_BOX(container_), modules_.back()->get_widget());
 }
 
+void RightSidebar::refresh() {
+    for (auto& module : modules_) module->refresh();
+}
+
 void RightSidebar::populate_modules() {
-    services::RightSidebarServices services;
-    auto status_list = services.getBarStatus();
-    
-    // 1. Dynamic Statuses
-    for (const auto& s : status_list) {
-        if (s.name == "Power Profile") continue; 
-        if (s.name == "Brightness") continue;
-        add_module(std::make_unique<LabelModule>(s.name, s.status));
+    if (const auto wifi = services::Wifi::read()) {
+        add_module(std::make_unique<ToggleModule>("WiFi", wifi->enabled, [](bool enabled) {
+            return services::Wifi::set_enabled(enabled).success;
+        }));
+    } else {
+        add_module(std::make_unique<LabelModule>("WiFi", "Unavailable"));
     }
-    
-    // 2. Toggles
-    add_module(std::make_unique<ToggleModule>("Gamemode", [](bool active) {
-        std::cout << "Gamemode toggle: " << active << "\n";
+
+    if (const auto bluetooth = services::Bluetooth::read()) {
+        add_module(std::make_unique<ToggleModule>("Bluetooth", bluetooth->powered, [](bool powered) {
+            return services::Bluetooth::set_powered(powered).success;
+        }));
+    } else {
+        add_module(std::make_unique<LabelModule>("Bluetooth", "Unavailable"));
+    }
+
+    add_module(std::make_unique<ToggleModule>("Keep Awake", keep_awake_.active(), [this](bool enabled) {
+        return keep_awake_.set_enabled(enabled);
     }));
-    
-    // 3. Power Profile
-    auto profile_status = services.getPowerProfileStatus();
-    add_module(std::make_unique<LabelModule>("Power Profile", profile_status.status));
+
+    if (const auto night_light = services::NightLight::read()) {
+        add_module(std::make_unique<ToggleModule>("Night Light", night_light->enabled, [](bool enabled) {
+            return services::NightLight::set_enabled(enabled).success;
+        }));
+    } else {
+        add_module(std::make_unique<LabelModule>("Night Light", "Unavailable"));
+    }
+
+    if (const auto gamemode = services::GameMode::read()) {
+        add_module(std::make_unique<ToggleModule>("Gamemode", gamemode->enabled, [](bool enabled) {
+            return services::GameMode::set_enabled(enabled).success;
+        }));
+    } else {
+        add_module(std::make_unique<LabelModule>("Gamemode", "Unavailable"));
+    }
+
+    const auto profile = services::PowerProfiles::current();
+    add_module(std::make_unique<LabelModule>("Power Profile", profile.value_or("Unavailable")));
     add_module(std::make_unique<ButtonModule>("Power Profile", []() {
         if (auto next = services::PowerProfiles::cycle()) {
             std::cout << "Power profile cycled to: " << *next << "\n";
         }
     }));
-    
-    // 4. Brightness
+
     if (auto b = services::Brightness::read()) {
-        add_module(std::make_unique<SliderModule>("Brightness", 0, 100, b->percent, [](double val) {
-            services::Brightness::set(static_cast<int>(val));
+        add_module(std::make_unique<SliderModule>("Brightness", 0, 100, b->percent, [](double value) {
+            static_cast<void>(services::Brightness::set(static_cast<int>(std::lround(value))));
+            realmheart::core::send_shell_command(realmheart::core::ShellCommand::ShowOSDBrightness);
+            const auto readback = services::Brightness::read();
+            if (!readback) return std::optional<double>{};
+            return std::optional<double>{readback->percent};
         }));
     }
 
-    // 5. Notification History (T4.4)
-    static services::NotificationHistory notification_history; 
-    add_module(std::make_unique<NotificationListModule>(notification_history));
+    if (const auto audio = services::Audio::read_default_sink()) {
+        add_module(std::make_unique<SliderModule>("Volume", 0, 150, audio->volume * 100.0, [](double value) {
+            static_cast<void>(services::Audio::set_default_sink_volume(value / 100.0));
+            realmheart::core::send_shell_command(realmheart::core::ShellCommand::ShowOSDVolume);
+            const auto readback = services::Audio::read_default_sink();
+            if (!readback) return std::optional<double>{};
+            return std::optional<double>{readback->volume * 100.0};
+        }));
+    }
+
+    add_module(std::make_unique<NotificationListModule>(notification_history_));
 }
 
 } // namespace realmheart::ui::sidebar

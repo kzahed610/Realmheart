@@ -1,4 +1,7 @@
 #pragma once
+#include "services/KeepAwake.hpp"
+#include "services/Notifications.hpp"
+
 #include <gtk/gtk.h>
 #include <vector>
 #include <memory>
@@ -20,20 +23,22 @@ protected:
 
 class RightSidebar {
 public:
-    explicit RightSidebar(GtkApplication* app);
+    RightSidebar(GtkApplication* app, services::NotificationHistory& notification_history);
     ~RightSidebar() = default;
     void add_module(std::unique_ptr<SidebarModule> module);
+    void refresh();
     GtkWidget* get_window() const { return window_; }
 
 private:
     void setup_layout();
     void populate_modules();
-    void refresh_all_modules();
 
     GtkApplication* app_;
     GtkWidget* window_ = nullptr;
     GtkWidget* container_ = nullptr;
     std::vector<std::unique_ptr<SidebarModule>> modules_;
+    services::KeepAwake keep_awake_;
+    services::NotificationHistory& notification_history_;
 };
 
 } // namespace realmheart::ui::sidebar

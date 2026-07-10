@@ -5,9 +5,24 @@
 #include <algorithm>
 
 namespace realmheart::services {
+namespace {
+
+constexpr const char* kBusName = "org.freedesktop.UPower.PowerProfiles";
+constexpr const char* kObjectPath = "/org/freedesktop/UPower/PowerProfiles";
+constexpr const char* kInterface = "org.freedesktop.UPower.PowerProfiles";
+
+std::optional<std::string> profile_from_busctl(const std::string& output) {
+    const auto first_quote = output.find('"');
+    if (first_quote == std::string::npos) return std::nullopt;
+    const auto second_quote = output.find('"', first_quote + 1);
+    if (second_quote == std::string::npos || second_quote == first_quote + 1) return std::nullopt;
+    return output.substr(first_quote + 1, second_quote - first_quote - 1);
+}
+
+} // namespace
 
 std::vector<std::string> PowerProfiles::cycle_order() {
-    return {"battery-saver", "balanced", "performance"};
+    return {"power-saver", "balanced", "performance"};
 }
 
 std::string PowerProfiles::next_after(const std::string& current) {
@@ -18,19 +33,38 @@ std::string PowerProfiles::next_after(const std::string& current) {
 }
 
 std::optional<std::string> PowerProfiles::current() {
-    if (!realmheart::core::command_exists("powerprofilesctl")) return std::nullopt;
-    auto result = realmheart::core::run_capture({"powerprofilesctl", "get"});
-    if (!result.succeeded() || result.truncated || result.output.empty()) return std::nullopt;
-    
-    std::string output = result.output;
-    output.erase(output.find_last_not_of(" \n\r\t") + 1);
-    return output;
+    if (realmheart::core::command_exists("powerprofilesctl")) {
+        const auto result = realmheart::core::run_capture({"powerprofilesctl", "get"});
+        if (result.succeeded() && !result.truncated && !result.output.empty()) {
+            return realmheart::core::trim(result.output);
+        }
+    }
+
+    if (!realmheart::core::command_exists("busctl")) return std::nullopt;
+    const auto result = realmheart::core::run_capture({
+        "busctl", "get-property", kBusName, kObjectPath, kInterface, "ActiveProfile"
+    });
+    if (!result.succeeded() || result.truncated) return std::nullopt;
+    return profile_from_busctl(result.output);
 }
 
 bool PowerProfiles::set(const std::string& profile) {
-    if (!realmheart::core::command_exists("powerprofilesctl")) return false;
-    auto result = realmheart::core::run_capture({"powerprofilesctl", "set", profile});
-    return result.succeeded();
+    bool written = false;
+    if (realmheart::core::command_exists("powerprofilesctl")) {
+        const auto result = realmheart::core::run_capture({"powerprofilesctl", "set", profile});
+        written = result.succeeded();
+    }
+    if (!written && realmheart::core::command_exists("busctl")) {
+        const auto result = realmheart::core::run_capture({
+            "busctl", "set-property", kBusName, kObjectPath, kInterface,
+            "ActiveProfile", "s", profile
+        });
+        written = result.succeeded();
+    }
+    if (!written) return false;
+
+    const auto readback = current();
+    return readback.has_value() && *readback == profile;
 }
 
 std::optional<std::string> PowerProfiles::cycle() {
