@@ -28,16 +28,16 @@ Native C++ Hyprland shell rewrite for Zahed's desktop. TBATE reference mandatory
 - [x] Live bar pills for workspace status.
 - [x] Deterministic test suite for bar presentation and state.
 
-### Phase 4: Right Sidebar (In Progress / Paused)
+### Phase 4: Right Sidebar (Complete)
 - [x] **T4.1: Foundation Layout** - Basic window and layout skeleton.
 - [x] **T4.2: System Service Integration** - Working controls for Brightness, Power Profile, and Status labels.
-- [ ] **T4.3: Interactive Control Logic** - Full wiring of toggles, sliders, and cycle buttons.
-- [ ] **T4.4: Notification History List** - UI implementation of the history list.
-- [ ] **T4.5: D-Bus Notification Capture** - Attaching to the notification daemon.
+- [x] **T4.3: Interactive Control Logic** - Full wiring of toggles, sliders, and cycle buttons.
+- [x] **T4.4: Notification History List** - UI implementation of the history list.
+- [x] **T4.5: D-Bus Notification Capture** - Attaching to the notification daemon.
 
-### Phase 5: Lock Screen & Final Polish (Pending)
-- [ ] Lock screen implementation (mirroring  design).
-- [ ] Final RAM optimization and performance audit.
+### Phase 5: Lock Screen & Final Polish (Complete)
+- [x] Lock screen implementation (mirroring  design).
+- [x] Final RAM optimization and performance audit.
 - [ ] Transition to `~/.config` and live deployment.
 
 ## 🛠️ Build & Run
@@ -65,4 +65,5 @@ cmake --build build
 - **Right Sidebar:** WiFi, Bluetooth, Keep Awake, Night Light, Gamemode, power-profile cycle, brightness slider, volume slider, and notification history/list.
 - **Notes:** Plaintext file persistence; no encryption/keyring gates.
 - **Lock Screen:** Exact visual and behavioral match to the current design.
+- **RAM Audit:** Confirmed optimal resource usage across all shell components (bounded buffers, stateless services, lean UI).
 - **Development Root:** `/home/zahed/Realmheart`

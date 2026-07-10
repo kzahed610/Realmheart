@@ -2,9 +2,12 @@
 #include "ui/LayerSurface.hpp"
 #include "services/Brightness.hpp"
 #include "services/PowerProfiles.hpp"
+#include "services/RightSidebarServices.hpp"
+#include "services/Notifications.hpp"
 
 #include <gtk/gtk.h>
 #include <iostream>
+#include <vector>
 
 namespace realmheart::ui::sidebar {
 
@@ -37,6 +40,65 @@ public:
 private:
     GtkWidget* box_;
     GtkWidget* val_label_;
+};
+
+class NotificationListModule : public SidebarModule {
+public:
+    NotificationListModule(services::NotificationHistory& history) 
+        : SidebarModule("Notifications"), history_(history) {
+        
+        box_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+        gtk_widget_set_margin_start(box_, 12);
+        gtk_widget_set_margin_end(box_, 12);
+        gtk_widget_set_margin_top(box_, 6);
+        gtk_widget_set_margin_bottom(box_, 6);
+
+        refresh();
+    }
+
+    GtkWidget* get_widget() override { return box_; }
+
+    void refresh() override {
+        // Clear existing entries
+        GtkWidget* child = gtk_widget_get_first_child(box_);
+        while (child) {
+            GtkWidget* next = gtk_widget_get_next_sibling(child);
+            gtk_box_remove(GTK_BOX(box_), child);
+            child = next;
+        }
+
+        auto snapshot = history_.snapshot();
+        if (snapshot.entries.empty()) {
+            GtkWidget* empty_lbl = gtk_label_new("No notifications");
+            gtk_widget_set_margin_top(empty_lbl, 10);
+            gtk_box_append(GTK_BOX(box_), empty_lbl);
+            return;
+        }
+
+        for (const auto& entry : snapshot.entries) {
+            GtkWidget* row = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+            gtk_widget_set_margin_bottom(row, 8);
+
+            GtkWidget* summary = gtk_label_new(entry.summary.c_str());
+            gtk_label_set_xalign(GTK_LABEL(summary), 0.0);
+            // Make unread bold or different
+            if (entry.unread) {
+                gtk_label_set_markup(GTK_LABEL(summary), ("<b>" + entry.summary + "</b>").c_str());
+            }
+            gtk_box_append(GTK_BOX(row), summary);
+
+            GtkWidget* body = gtk_label_new(entry.body.c_str());
+            gtk_label_set_xalign(GTK_LABEL(body), 0.0);
+            gtk_widget_set_margin_start(body, 10);
+            gtk_box_append(GTK_BOX(row), body);
+
+            gtk_box_append(GTK_BOX(box_), row);
+        }
+    }
+
+private:
+    GtkWidget* box_;
+    services::NotificationHistory& history_;
 };
 
 class ToggleModule : public SidebarModule {
@@ -120,6 +182,7 @@ public:
         g_signal_connect(btn_, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
             auto* self = static_cast<ButtonModule*>(data);
             self->on_click_();
+            return FALSE;
         }), this);
         gtk_box_append(GTK_BOX(box_), btn_);
     }
@@ -165,9 +228,15 @@ void RightSidebar::add_module(std::unique_ptr<SidebarModule> module) {
 }
 
 void RightSidebar::populate_modules() {
-    // 1. Simple Statuses
-    add_module(std::make_unique<LabelModule>("WiFi", "Checking..."));
-    add_module(std::make_unique<LabelModule>("Bluetooth", "Checking..."));
+    services::RightSidebarServices services;
+    auto status_list = services.getBarStatus();
+    
+    // 1. Dynamic Statuses
+    for (const auto& s : status_list) {
+        if (s.name == "Power Profile") continue; 
+        if (s.name == "Brightness") continue;
+        add_module(std::make_unique<LabelModule>(s.name, s.status));
+    }
     
     // 2. Toggles
     add_module(std::make_unique<ToggleModule>("Gamemode", [](bool active) {
@@ -175,6 +244,8 @@ void RightSidebar::populate_modules() {
     }));
     
     // 3. Power Profile
+    auto profile_status = services.getPowerProfileStatus();
+    add_module(std::make_unique<LabelModule>("Power Profile", profile_status.status));
     add_module(std::make_unique<ButtonModule>("Power Profile", []() {
         if (auto next = services::PowerProfiles::cycle()) {
             std::cout << "Power profile cycled to: " << *next << "\n";
@@ -187,6 +258,10 @@ void RightSidebar::populate_modules() {
             services::Brightness::set(static_cast<int>(val));
         }));
     }
+
+    // 5. Notification History (T4.4)
+    static services::NotificationHistory notification_history; 
+    add_module(std::make_unique<NotificationListModule>(notification_history));
 }
 
 } // namespace realmheart::ui::sidebar

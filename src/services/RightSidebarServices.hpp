@@ -20,16 +20,16 @@ public:
     std::vector<ServiceStatus> getReport() const;
     void printReport() const;
 
-private:
+    // Public access for specific UI modules
+    ServiceStatus getPowerProfileStatus() const;
+    ServiceStatus getBrightnessStatus() const;
+    ServiceStatus getVolumeStatus() const;
+    ServiceStatus getNotificationsStatus() const;
     ServiceStatus getWifiStatus() const;
     ServiceStatus getBluetoothStatus() const;
     ServiceStatus getKeepAwakeStatus() const;
     ServiceStatus getNightLightStatus() const;
     ServiceStatus getGamemodeStatus() const;
-    ServiceStatus getPowerProfileStatus() const;
-    ServiceStatus getBrightnessStatus() const;
-    ServiceStatus getVolumeStatus() const;
-    ServiceStatus getNotificationsStatus() const;
 
     realmheart::core::CommandOptions command_options_;
 };

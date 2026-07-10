@@ -34,6 +34,7 @@ add_library(realmheart_ui STATIC
     src/ui/bar/VerticalBar.cpp
     src/ui/bar/VerticalBarModel.cpp
     src/ui/sidebar/RightSidebar.cpp
+    src/ui/lockscreen/LockScreen.cpp
 )
 
 target_include_directories(realmheart_ui PRIVATE src)
