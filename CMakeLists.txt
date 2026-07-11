@@ -9,6 +9,7 @@ option(REALMHEART_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
+find_package(GTest REQUIRED)
 pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4)
 pkg_check_modules(GTK4_LAYER_SHELL REQUIRED IMPORTED_TARGET gtk4-layer-shell-0)
@@ -53,7 +54,9 @@ add_library(realmheart_ui STATIC
     src/ui/NotificationToast.cpp
     src/ui/OSDOverlay.cpp
     src/ui/lockscreen/LockScreen.cpp
-)
+    src/ui/launcher/LauncherOverlay.cpp
+    src/services/LauncherService.cpp
+ )
 
 target_sources(realmheart_ui PRIVATE
     src/services/NotesService.cpp
@@ -298,6 +301,18 @@ if(BUILD_TESTING)
         src/core/Command.cpp
         src/services/UtilityManager.cpp
     )
+
+    add_executable(realmheart_launcher_service_tests
+        tests/LauncherServiceTests.cpp
+        tests/LauncherServiceCommandTests.cpp
+        src/services/LauncherService.cpp
+    )
+    target_link_libraries(realmheart_launcher_service_tests PRIVATE GTest::gtest_main PkgConfig::GIO)
+    target_include_directories(realmheart_launcher_service_tests PRIVATE src)
+    target_compile_options(realmheart_launcher_service_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+        $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>
+    )
     target_include_directories(realmheart_utility_manager_tests PRIVATE src)
     target_compile_options(realmheart_utility_manager_tests PRIVATE
         -Wall -Wextra -Wpedantic
@@ -314,6 +329,7 @@ if(BUILD_TESTING)
     add_test(NAME realmheart_vertical_bar_model COMMAND realmheart_vertical_bar_model_tests)
     add_test(NAME realmheart_ui_foundation COMMAND realmheart_ui_foundation_tests)
     add_test(NAME realmheart_utility_manager COMMAND realmheart_utility_manager_tests)
+    add_test(NAME realmheart_launcher_service COMMAND realmheart_launcher_service_tests)
     add_test(NAME realmheart_shell_command_parser COMMAND realmheart_shell_command_tests)
     add_test(NAME realmheart_shell_surface_state COMMAND realmheart_shell_state_tests)
     add_test(NAME realmheart_audio_mutation COMMAND realmheart_audio_tests)

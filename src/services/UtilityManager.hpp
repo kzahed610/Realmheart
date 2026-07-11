@@ -37,6 +37,7 @@ public:
     
     // Wallpaper & Theme
     bool set_wallpaper(const std::string& path);
+    bool choose_wallpaper();
     bool generate_colors(const std::string& path);
     
     // Screen Recording

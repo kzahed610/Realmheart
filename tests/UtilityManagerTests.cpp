@@ -84,6 +84,21 @@ void test_launch_wofi() {
     std::cout << "test_launch_wofi PASSED\n";
 }
 
+void test_choose_wallpaper() {
+    auto mock = std::make_unique<MockUtilityExecutor>();
+    auto* mock_ptr = mock.get();
+    realmheart::services::UtilityManager util(std::move(mock));
+    if (!util.choose_wallpaper()) { std::cerr << "Wallpaper picker failed\n"; exit(1); }
+    const std::vector<std::string> expected{
+        "/home/zahed/.config/realmheart/scripts/colors/switchwall.sh"
+    };
+    if (mock_ptr->background_calls.size() != 1 || mock_ptr->background_calls[0] != expected) {
+        std::cerr << "Wallpaper picker must invoke switchwall without a fake path\n";
+        exit(1);
+    }
+    std::cout << "test_choose_wallpaper PASSED\n";
+}
+
 int main() {
     test_screenshot_full();
     test_screenshot_area();
@@ -91,6 +106,7 @@ int main() {
     test_clipboard_copy();
     test_clipboard_paste();
     test_launch_wofi();
+    test_choose_wallpaper();
     std::cout << "All UtilityManager tests PASSED (MOCKED)\n";
     return 0;
 }

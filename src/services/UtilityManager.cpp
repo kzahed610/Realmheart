@@ -38,6 +38,10 @@ bool UtilityManager::set_wallpaper(const std::string& path) {
     return executor_->run_background({"/home/zahed/.config/realmheart/scripts/colors/switchwall.sh", "--image", path});
 }
 
+bool UtilityManager::choose_wallpaper() {
+    return executor_->run_background({"/home/zahed/.config/realmheart/scripts/colors/switchwall.sh"});
+}
+
 bool UtilityManager::generate_colors(const std::string& /*path*/) {
     return executor_->run_background({"/home/zahed/.config/realmheart/scripts/colors/switchwall.sh", "--noswitch"});
 }

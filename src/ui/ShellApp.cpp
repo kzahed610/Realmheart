@@ -1,5 +1,4 @@
 #include "ui/ShellApp.hpp"
-
 #include "core/ShellControl.hpp"
 #include "services/NotificationDaemon.hpp"
 #include "services/NotificationServer.hpp"
@@ -18,9 +17,10 @@
 #include "services/NotesService.hpp"
 #include "ui/NotesOverlay.hpp"
 #include "ui/LayerSurface.hpp"
+#include "ui/launcher/LauncherOverlay.hpp"
+#include "services/LauncherService.hpp"
 
 #include <gtk/gtk.h>
-
 #include <iostream>
 #include <memory>
 #include <ctime>
@@ -40,6 +40,7 @@ public:
         notes_service_ = std::make_unique<services::NotesService>();
         utilities_ = std::make_unique<services::UtilityManager>();
         session_ = std::make_unique<services::SessionManager>();
+        launcher_service_ = std::make_unique<services::LauncherService>();
 
         notification_server_.set_notification_handler([this](const auto& entry) {
             if (toast_) toast_->show(entry, 5000);
@@ -59,6 +60,9 @@ public:
         if (bar_ != nullptr) {
             gtk_window_destroy(bar_);
             bar_ = nullptr;
+        }
+        if (launcher_overlay_) {
+            launcher_overlay_.reset();
         }
     }
 
@@ -107,15 +111,15 @@ public:
     }
 
     void launch_launcher() {
-        utilities_->launch_wofi();
+        ensure_initialized();
+        launcher_overlay_->toggle();
     }
 
-    void set_wallpaper(const std::string& path) {
-        utilities_->set_wallpaper(path);
+    void choose_wallpaper() {
+        utilities_->choose_wallpaper();
     }
 
     void generate_theme() {
-        // Use a default path for theme generation, or the current wallpaper
         utilities_->generate_colors("/home/zahed/Pictures/Wallpapers/current.png");
     }
 
@@ -175,6 +179,9 @@ private:
             gtk_window_set_child(hotspot_, button);
             gtk_window_present(hotspot_);
         }
+        if (!launcher_overlay_) {
+            launcher_overlay_ = std::make_unique<ui::LauncherOverlay>(application_, *launcher_service_);
+        }
     }
 
     void apply_right_sidebar_visibility() {
@@ -211,75 +218,77 @@ private:
     GtkWindow* bar_ = nullptr;
     GtkWindow* hotspot_ = nullptr;
     std::unique_ptr<sidebar::RightSidebar> sidebar_;
+    std::unique_ptr<ui::LauncherOverlay> launcher_overlay_;
+    std::unique_ptr<services::LauncherService> launcher_service_;
     ShellState state_;
 };
+} // namespace
 
-void activate_shell(GtkApplication*, gpointer user_data) {
+void activate_shell(GtkApplication* /*app*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->activate();
 }
 
-void toggle_right_sidebar_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void toggle_right_sidebar_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->toggle_right_sidebar();
 }
 
-void show_osd_volume_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void show_osd_volume_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->show_osd_volume();
 }
 
-void show_osd_brightness_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void show_osd_brightness_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->show_osd_brightness();
 }
 
-void toggle_bar_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void toggle_bar_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->toggle_bar();
 }
 
-void take_screenshot_full_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void take_screenshot_full_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->take_screenshot_full();
 }
 
-void take_screenshot_area_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void take_screenshot_area_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->take_screenshot_area();
 }
 
-void extract_ocr_area_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void extract_ocr_area_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->extract_ocr_area();
 }
 
-void launch_launcher_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void launch_launcher_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->launch_launcher();
 }
 
-void set_wallpaper_action(GSimpleAction*, GVariant*, gpointer user_data) {
-    // For now, we use a dummy path; in a real scenario, this would come from a file picker
-    static_cast<ShellRuntime*>(user_data)->set_wallpaper("/home/zahed/Pictures/Wallpapers/default.png");
+void set_wallpaper_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
+    static_cast<ShellRuntime*>(user_data)->choose_wallpaper();
 }
 
-void generate_theme_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void generate_theme_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->generate_theme();
 }
 
-void start_recording_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void start_recording_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->start_recording();
 }
 
-void stop_recording_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void stop_recording_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->stop_recording();
 }
 
-void toggle_notes_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void toggle_notes_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->toggle_notes();
 }
 
-void lock_session_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void lock_session_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->lock_session();
 }
 
-void open_logout_menu_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void open_logout_menu_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->open_logout_menu();
 }
 
-void quit_action(GSimpleAction*, GVariant*, gpointer user_data) {
+void quit_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->quit();
 }
 
@@ -302,24 +311,23 @@ constexpr GActionEntry kShellActions[] = {
     {"quit", quit_action, nullptr, nullptr, nullptr, {}},
 };
 
-} // namespace
 int run_shell() {
     GtkApplication* application = gtk_application_new(
         realmheart::core::shell_application_id().data(),
         G_APPLICATION_DEFAULT_FLAGS
-);
-    int status = 1;
-    {
-        ShellRuntime runtime(application);
-        g_action_map_add_action_entries(
-            G_ACTION_MAP(application),
-            kShellActions,
-            static_cast<gint>(sizeof(kShellActions) / sizeof(kShellActions[0])),
-            &runtime
-        );
-        g_signal_connect(application, "activate", G_CALLBACK(activate_shell), &runtime);
-        status = g_application_run(G_APPLICATION(application), 0, nullptr);
-    }
+    );
+
+    auto runtime = std::make_unique<ShellRuntime>(application);
+
+    g_action_map_add_action_entries(
+        G_ACTION_MAP(application),
+        kShellActions,
+        static_cast<gint>(sizeof(kShellActions) / sizeof(kShellActions[0])),
+        runtime.get()
+    );
+    g_signal_connect(application, "activate", G_CALLBACK(activate_shell), runtime.get());
+
+    int status = g_application_run(G_APPLICATION(application), 0, nullptr);
 
     g_object_unref(application);
     return status;
