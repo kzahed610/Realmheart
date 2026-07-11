@@ -103,7 +103,7 @@ void activate_test_layer(GtkApplication* app, gpointer data) {
 void activate_bar(GtkApplication* app, gpointer data) {
     auto* state = static_cast<TimedLayerState*>(data);
     schedule_application_quit(state);
-    bar::present_vertical_bar(app);
+    bar::present_vertical_bar(app, [] {});
 }
 
 void activate_sidebar(GtkApplication* app, gpointer data) {

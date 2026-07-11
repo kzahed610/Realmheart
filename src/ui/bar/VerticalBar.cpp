@@ -3,7 +3,9 @@
 #include "core/Command.hpp"
 #include "services/HyprlandWorkspaces.hpp"
 #include "services/Notifications.hpp"
-#include "services/RightSidebarServices.hpp"
+
+#include "services/BatteryService.hpp"
+#include "services/MediaService.hpp"
 #include "ui/AssetResolver.hpp"
 #include "ui/LayerSurface.hpp"
 #include "ui/bar/VerticalBarModel.hpp"
@@ -12,6 +14,7 @@
 #include <chrono>
 #include <cstdint>
 #include <ctime>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -37,6 +40,7 @@ struct StatusSectionState {
     guint timer_id = 0;
     GCancellable* cancellable = nullptr;
     std::shared_ptr<realmheart::services::NotificationHistory> notification_history;
+    std::function<void()> toggle_sidebar;
     bool in_flight = false;
 };
 
@@ -146,8 +150,8 @@ GtkWidget* make_icon_or_text(std::string_view icon_name, std::string_view fallba
     return label;
 }
 
-GtkWidget* make_status_widget(const BarStatusSlot& slot) {
-    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+GtkWidget* make_status_widget(const BarStatusSlot& slot, const std::function<void()>& on_click) {
+    GtkWidget* box = gtk_button_new();
     gtk_widget_add_css_class(box, "realmheart-bar-status");
     gtk_widget_add_css_class(box, slot.enabled ? "realmheart-bar-status-enabled" : "realmheart-bar-status-disabled");
     gtk_widget_set_tooltip_text(box, slot.tooltip.c_str());
@@ -170,12 +174,16 @@ GtkWidget* make_status_widget(const BarStatusSlot& slot) {
         gtk_overlay_add_overlay(GTK_OVERLAY(overlay), badge);
     }
 
-    gtk_box_append(GTK_BOX(box), overlay);
+    gtk_button_set_child(GTK_BUTTON(box), overlay);
+    auto* callback = new std::function<void()>(on_click);
+    g_signal_connect_data(box, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
+        (*static_cast<std::function<void()>*>(data))();
+    }), callback, +[](gpointer data, GClosure*) { delete static_cast<std::function<void()>*>(data); }, G_CONNECT_DEFAULT);
     return box;
 }
 
 GtkWidget* make_workspace_pill(const realmheart::services::WorkspaceState& workspace) {
-    GtkWidget* label = gtk_label_new(std::to_string(workspace.id).c_str());
+    GtkWidget* label = gtk_button_new_with_label(std::to_string(workspace.id).c_str());
     gtk_widget_add_css_class(label, "realmheart-bar-pill");
     if (workspace.active) gtk_widget_add_css_class(label, "realmheart-bar-pill-active");
     if (workspace.windows > 0) gtk_widget_add_css_class(label, "realmheart-bar-pill-occupied");
@@ -190,6 +198,15 @@ GtkWidget* make_workspace_pill(const realmheart::services::WorkspaceState& works
     tooltip += workspace.active ? ": active" : ": inactive";
     tooltip += ", windows=" + std::to_string(workspace.windows);
     gtk_widget_set_tooltip_text(label, tooltip.c_str());
+    g_object_set_data(G_OBJECT(label), "realmheart-workspace-id", GINT_TO_POINTER(workspace.id));
+    g_signal_connect(label, "clicked", G_CALLBACK(+[](GtkButton* button, gpointer) {
+        const int id = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button), "realmheart-workspace-id"));
+        realmheart::core::run_background({
+            "hyprctl",
+            "dispatch",
+            "hl.dsp.focus({ workspace = " + std::to_string(id) + " })"
+        });
+    }), nullptr);
     return label;
 }
 
@@ -208,12 +225,12 @@ void render_workspace_section(
     }
 }
 
-void render_status_section(GtkWidget* status_section, const StatusProbeResult& result) {
+void render_status_section(GtkWidget* status_section, const StatusProbeResult& result, const std::function<void()>& on_click) {
     while (GtkWidget* child = gtk_widget_get_first_child(status_section)) {
         gtk_box_remove(GTK_BOX(status_section), child);
     }
     for (const auto& slot : build_status_slots(result.services, result.notifications)) {
-        gtk_box_append(GTK_BOX(status_section), make_status_widget(slot));
+        gtk_box_append(GTK_BOX(status_section), make_status_widget(slot, on_click));
     }
 }
 
@@ -280,6 +297,7 @@ gboolean refresh_workspace_section(gpointer user_data) {
 }
 
 void read_status_task(GTask* task, gpointer, gpointer task_data, GCancellable* cancellable) {
+    static_cast<void>(cancellable);
     if (g_task_return_error_if_cancelled(task)) return;
     const auto* task_handle = static_cast<StatusSectionHandle*>(task_data);
     if (task_handle == nullptr || !*task_handle) {
@@ -288,9 +306,22 @@ void read_status_task(GTask* task, gpointer, gpointer task_data, GCancellable* c
     }
     const auto& state = *task_handle;
 
-    realmheart::services::RightSidebarServices service_reader(worker_command_options(cancellable));
     auto result = std::make_unique<StatusProbeResult>();
-    result->services = service_reader.getBarStatus();
+
+    // Integrate Battery
+    realmheart::services::BatteryService battery;
+    if (auto batt = battery.read()) {
+        result->services.emplace_back(realmheart::services::ServiceStatus{
+            "Battery", std::to_string(batt->percentage) + "% (" + batt->status + ")", true
+        });
+    }
+
+    // Integrate Media
+    realmheart::services::MediaService media;
+    if (auto m = media.get_current_media()) {
+        result->services.emplace_back(realmheart::services::ServiceStatus{"Media", m->title + " - " + m->artist, true});
+    }
+
     result->notifications = state->notification_history->snapshot();
     if (g_task_return_error_if_cancelled(task)) return;
     g_task_return_pointer(task, result.release(), [](gpointer data) { delete static_cast<StatusProbeResult*>(data); });
@@ -308,7 +339,7 @@ void complete_status_task(GObject*, GAsyncResult* result, gpointer) {
     );
     if (error != nullptr) g_error_free(error);
     if (state->section == nullptr || !probe) return;
-    render_status_section(state->section, *probe);
+    render_status_section(state->section, *probe, state->toggle_sidebar);
 }
 
 void launch_status_task(const StatusSectionHandle& state) {
@@ -429,7 +460,7 @@ void own_status_state(GtkWidget* section, const StatusSectionHandle& state) {
 
 } // namespace
 
-GtkWindow* present_vertical_bar(GtkApplication* application) {
+GtkWindow* present_vertical_bar(GtkApplication* application, std::function<void()> toggle_sidebar) {
     install_bar_css();
 
     GtkWidget* window = gtk_application_window_new(application);
@@ -451,7 +482,13 @@ GtkWindow* present_vertical_bar(GtkApplication* application) {
     GtkWidget* top_section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(top_section, "realmheart-bar-section");
     gtk_widget_set_vexpand(top_section, FALSE);
-    gtk_box_append(GTK_BOX(top_section), make_icon_or_text("widgets.svg", "W"));
+    GtkWidget* sidebar_button = gtk_button_new();
+    gtk_button_set_child(GTK_BUTTON(sidebar_button), make_icon_or_text("widgets.svg", "W"));
+    auto* sidebar_callback = new std::function<void()>(toggle_sidebar);
+    g_signal_connect_data(sidebar_button, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
+        (*static_cast<std::function<void()>*>(data))();
+    }), sidebar_callback, +[](gpointer data, GClosure*) { delete static_cast<std::function<void()>*>(data); }, G_CONNECT_DEFAULT);
+    gtk_box_append(GTK_BOX(top_section), sidebar_button);
     gtk_box_append(GTK_BOX(root), top_section);
 
     GtkWidget* workspace_section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -493,7 +530,10 @@ GtkWindow* present_vertical_bar(GtkApplication* application) {
     status_state->section = status_section;
     status_state->cancellable = g_cancellable_new();
     status_state->notification_history = std::make_shared<realmheart::services::NotificationHistory>();
-    render_status_section(status_section, {{}, status_state->notification_history->snapshot()});
+    status_state->toggle_sidebar = toggle_sidebar;
+    g_object_set_data_full(G_OBJECT(status_section), "realmheart-sidebar-toggle", new std::function<void()>(toggle_sidebar),
+        +[](gpointer data) { delete static_cast<std::function<void()>*>(data); });
+    render_status_section(status_section, {{}, status_state->notification_history->snapshot()}, toggle_sidebar);
     own_status_state(status_section, status_state);
     launch_status_task(status_state);
     gtk_box_append(GTK_BOX(root), status_section);

@@ -18,6 +18,11 @@
 
 namespace {
 
+std::string get_supported_commands() {
+    std::string list = "sidebar-right-toggle, bar-toggle, osd-volume, osd-brightness, lock-session, logout-menu, screenshot-full, screenshot-area, extract-ocr, start-recording, stop-recording, toggle-notes, set-wallpaper, generate-theme, launch-launcher, quit";
+    return list;
+}
+
 void print_usage() {
     std::cout << "Realmheart 0.1.0\n"
               << "Usage:\n"
@@ -120,14 +125,14 @@ int main(int argc, char** argv) {
     if (command == "--command") {
         if (argc != 3) {
             std::cerr << "--command requires exactly one command name\n"
-                      << "Supported: sidebar-right-toggle, bar-toggle, quit\n";
+                      << "Supported: " << get_supported_commands() << "\n";
             return 2;
         }
 
         const auto shell_command = realmheart::core::parse_shell_command(argv[2]);
         if (!shell_command) {
             std::cerr << "Unknown shell command: " << argv[2] << '\n'
-                      << "Supported: sidebar-right-toggle, bar-toggle, quit\n";
+                      << "Supported: " << get_supported_commands() << "\n";
             return 2;
         }
 

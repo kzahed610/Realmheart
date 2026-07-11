@@ -9,14 +9,21 @@
 #include "ui/sidebar/RightSidebar.hpp"
 #include "services/Audio.hpp"
 #include "services/Brightness.hpp"
+#include "services/UtilityManager.hpp"
 #include "services/SessionManager.hpp"
+#include "services/BatteryService.hpp"
+#include "services/MediaService.hpp"
 #include "ui/NotificationToast.hpp"
 #include "ui/OSDOverlay.hpp"
+#include "services/NotesService.hpp"
+#include "ui/NotesOverlay.hpp"
+#include "ui/LayerSurface.hpp"
 
 #include <gtk/gtk.h>
 
 #include <iostream>
 #include <memory>
+#include <ctime>
 
 namespace realmheart::ui {
 namespace {
@@ -28,12 +35,14 @@ public:
           notification_server_(notification_history_),
           notification_daemon_(notification_server_, notification_history_) {
 
-        toast_ = std::make_unique<NotificationToast>(application_);
-        osd_ = std::make_unique<OSDOverlay>(application_);
+        battery_ = std::make_unique<services::BatteryService>();
+        media_ = std::make_unique<services::MediaService>();
+        notes_service_ = std::make_unique<services::NotesService>();
+        utilities_ = std::make_unique<services::UtilityManager>();
         session_ = std::make_unique<services::SessionManager>();
 
         notification_server_.set_notification_handler([this](const auto& entry) {
-            toast_->show(entry, 5000);
+            if (toast_) toast_->show(entry, 5000);
         });
 
         if (!notification_daemon_.start()) {
@@ -42,6 +51,7 @@ public:
     }
 
     ~ShellRuntime() {
+        if (hotspot_ != nullptr) gtk_window_destroy(hotspot_);
         if (sidebar_) {
             gtk_window_destroy(GTK_WINDOW(sidebar_->get_window()));
             sidebar_.reset();
@@ -65,12 +75,14 @@ public:
     }
 
     void show_osd_volume() {
+        ensure_initialized();
         if (auto audio = services::Audio::read_default_sink()) {
             osd_->show_volume(audio->volume);
         }
     }
 
     void show_osd_brightness() {
+        ensure_initialized();
         if (auto bri = services::Brightness::read()) {
             osd_->show_brightness(bri->percent);
         }
@@ -80,6 +92,45 @@ public:
         ensure_initialized();
         state_.toggle_bar();
         apply_bar_visibility();
+    }
+
+    void take_screenshot_full() {
+        utilities_->take_screenshot_full("/home/zahed/Pictures/Screenshots/full_" + std::to_string(time(nullptr)) + ".png");
+    }
+
+    void take_screenshot_area() {
+        utilities_->take_screenshot_area("/home/zahed/Pictures/Screenshots/area_" + std::to_string(time(nullptr)) + ".png");
+    }
+
+    void extract_ocr_area() {
+        utilities_->extract_text_from_area();
+    }
+
+    void launch_launcher() {
+        utilities_->launch_wofi();
+    }
+
+    void set_wallpaper(const std::string& path) {
+        utilities_->set_wallpaper(path);
+    }
+
+    void generate_theme() {
+        // Use a default path for theme generation, or the current wallpaper
+        utilities_->generate_colors("/home/zahed/Pictures/Wallpapers/current.png");
+    }
+
+    void start_recording() {
+        std::string path = "/home/zahed/Videos/Recordings/rec_" + std::to_string(time(nullptr)) + ".mp4";
+        utilities_->start_recording(path);
+    }
+
+    void stop_recording() {
+        utilities_->stop_recording();
+    }
+
+    void toggle_notes() {
+        ensure_initialized();
+        notes_overlay_->toggle();
     }
 
     void lock_session() {
@@ -96,10 +147,33 @@ public:
 
 private:
     void ensure_initialized() {
-        if (bar_ == nullptr) bar_ = bar::present_vertical_bar(application_);
+        if (!toast_) toast_ = std::make_unique<NotificationToast>(application_);
+        if (!osd_) osd_ = std::make_unique<OSDOverlay>(application_);
+        if (!notes_overlay_) {
+            notes_overlay_ = std::make_unique<NotesOverlay>(application_, notes_service_.get());
+        }
+        if (bar_ == nullptr) bar_ = bar::present_vertical_bar(application_, [this] { toggle_right_sidebar(); });
         if (!sidebar_) {
             sidebar_ = std::make_unique<sidebar::RightSidebar>(application_, notification_history_);
             gtk_widget_set_visible(sidebar_->get_window(), FALSE);
+        }
+        if (hotspot_ == nullptr) {
+            hotspot_ = GTK_WINDOW(gtk_application_window_new(application_));
+            gtk_window_set_decorated(hotspot_, FALSE);
+            gtk_window_set_default_size(hotspot_, 16, 16);
+            LayerSurfaceSpec spec;
+            spec.surface_namespace = "realmheart-right-hotspot";
+            spec.layer = LayerSurfaceLevel::Overlay;
+            spec.anchor_right = true;
+            spec.anchor_top = true;
+            apply_layer_surface(hotspot_, spec);
+            GtkWidget* button = gtk_button_new();
+            gtk_widget_set_tooltip_text(button, "Open Realmheart controls");
+            g_signal_connect(button, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
+                static_cast<ShellRuntime*>(data)->toggle_right_sidebar();
+            }), this);
+            gtk_window_set_child(hotspot_, button);
+            gtk_window_present(hotspot_);
         }
     }
 
@@ -126,10 +200,16 @@ private:
     services::NotificationHistory notification_history_;
     services::NotificationServer notification_server_;
     services::NotificationDaemon notification_daemon_;
+    std::unique_ptr<services::UtilityManager> utilities_;
     std::unique_ptr<services::SessionManager> session_;
+    std::unique_ptr<services::BatteryService> battery_;
+    std::unique_ptr<services::MediaService> media_;
+    std::unique_ptr<services::NotesService> notes_service_;
+    std::unique_ptr<ui::NotesOverlay> notes_overlay_;
     std::unique_ptr<NotificationToast> toast_;
     std::unique_ptr<OSDOverlay> osd_;
     GtkWindow* bar_ = nullptr;
+    GtkWindow* hotspot_ = nullptr;
     std::unique_ptr<sidebar::RightSidebar> sidebar_;
     ShellState state_;
 };
@@ -154,6 +234,43 @@ void toggle_bar_action(GSimpleAction*, GVariant*, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->toggle_bar();
 }
 
+void take_screenshot_full_action(GSimpleAction*, GVariant*, gpointer user_data) {
+    static_cast<ShellRuntime*>(user_data)->take_screenshot_full();
+}
+
+void take_screenshot_area_action(GSimpleAction*, GVariant*, gpointer user_data) {
+    static_cast<ShellRuntime*>(user_data)->take_screenshot_area();
+}
+
+void extract_ocr_area_action(GSimpleAction*, GVariant*, gpointer user_data) {
+    static_cast<ShellRuntime*>(user_data)->extract_ocr_area();
+}
+
+void launch_launcher_action(GSimpleAction*, GVariant*, gpointer user_data) {
+    static_cast<ShellRuntime*>(user_data)->launch_launcher();
+}
+
+void set_wallpaper_action(GSimpleAction*, GVariant*, gpointer user_data) {
+    // For now, we use a dummy path; in a real scenario, this would come from a file picker
+    static_cast<ShellRuntime*>(user_data)->set_wallpaper("/home/zahed/Pictures/Wallpapers/default.png");
+}
+
+void generate_theme_action(GSimpleAction*, GVariant*, gpointer user_data) {
+    static_cast<ShellRuntime*>(user_data)->generate_theme();
+}
+
+void start_recording_action(GSimpleAction*, GVariant*, gpointer user_data) {
+    static_cast<ShellRuntime*>(user_data)->start_recording();
+}
+
+void stop_recording_action(GSimpleAction*, GVariant*, gpointer user_data) {
+    static_cast<ShellRuntime*>(user_data)->stop_recording();
+}
+
+void toggle_notes_action(GSimpleAction*, GVariant*, gpointer user_data) {
+    static_cast<ShellRuntime*>(user_data)->toggle_notes();
+}
+
 void lock_session_action(GSimpleAction*, GVariant*, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->lock_session();
 }
@@ -173,17 +290,24 @@ constexpr GActionEntry kShellActions[] = {
     {"osd-brightness", show_osd_brightness_action, nullptr, nullptr, nullptr, {}},
     {"lock-session", lock_session_action, nullptr, nullptr, nullptr, {}},
     {"logout-menu", open_logout_menu_action, nullptr, nullptr, nullptr, {}},
+    {"screenshot-full", take_screenshot_full_action, nullptr, nullptr, nullptr, {}},
+    {"screenshot-area", take_screenshot_area_action, nullptr, nullptr, nullptr, {}},
+    {"extract-ocr", extract_ocr_area_action, nullptr, nullptr, nullptr, {}},
+    {"start-recording", start_recording_action, nullptr, nullptr, nullptr, {}},
+    {"stop-recording", stop_recording_action, nullptr, nullptr, nullptr, {}},
+    {"toggle-notes", toggle_notes_action, nullptr, nullptr, nullptr, {}},
+    {"set-wallpaper", set_wallpaper_action, nullptr, nullptr, nullptr, {}},
+    {"generate-theme", generate_theme_action, nullptr, nullptr, nullptr, {}},
+    {"launch-launcher", launch_launcher_action, nullptr, nullptr, nullptr, {}},
     {"quit", quit_action, nullptr, nullptr, nullptr, {}},
 };
 
 } // namespace
-
 int run_shell() {
     GtkApplication* application = gtk_application_new(
         realmheart::core::shell_application_id().data(),
         G_APPLICATION_DEFAULT_FLAGS
-    );
-
+);
     int status = 1;
     {
         ShellRuntime runtime(application);

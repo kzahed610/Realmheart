@@ -14,15 +14,9 @@ struct SlotSpec {
     std::string_view fallback_text;
 };
 
-constexpr std::array<SlotSpec, 8> kServiceSlots{{
-    {"WiFi", "wifi-4.svg", "Wi"},
-    {"Bluetooth", "bluetooth.svg", "Bt"},
-    {"Keep Awake", "shield.svg", "Aw"},
-    {"Night Light", "weather-moon.svg", "NL"},
-    {"Gamemode", "games.svg", "Gm"},
-    {"Power Profile", "battery-saver.svg", "Pw"},
-    {"Brightness", "weather-sunny.svg", "Br"},
-    {"Volume", "speaker-2-filled.svg", "Vo"},
+constexpr std::array<SlotSpec, 2> kServiceSlots{{
+    {"Battery", "battery-charging.svg", "Bt"},
+    {"Media", "music-note.svg", "Md"},
 }};
 
 } // namespace

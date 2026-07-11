@@ -10,6 +10,17 @@ enum class ShellCommand {
     ToggleBar,
     ShowOSDVolume,
     ShowOSDBrightness,
+    LockSession,
+    OpenLogoutMenu,
+    ScreenshotFull,
+    ScreenshotArea,
+    ExtractOCR,
+    StartRecording,
+    StopRecording,
+    ToggleNotes,
+    SetWallpaper,
+    GenerateTheme,
+    LaunchLauncher,
     Quit,
 };
 

@@ -31,24 +31,21 @@ void test_workspace_pills_keep_defaults_and_merge_live_state() {
             "additional live workspaces must be appended in sorted order");
 }
 
-void test_status_slots_are_name_mapped_and_include_brightness() {
+void test_status_slots_only_keep_compact_bar_information() {
     const std::vector<realmheart::services::ServiceStatus> report{
-        {"Volume", "44%", true},
-        {"Brightness", "64%", true},
         {"WiFi", "Enabled (home)", true},
+        {"Battery", "84% (Discharging)", true},
+        {"Media", "Song - Artist", true},
     };
     realmheart::services::NotificationSnapshot notifications;
 
     const auto slots = realmheart::ui::bar::build_status_slots(report, notifications);
-    require(slots.size() == 9, "Phase 3 bar must expose eight service slots plus notifications");
-    require(slots[0].name == "WiFi" && slots[0].tooltip == "WiFi: Enabled (home)",
-            "service status must map by name instead of fragile report position");
-    require(slots[6].name == "Brightness" && slots[6].tooltip == "Brightness: 64%",
-            "brightness must have a live Phase 3 bar slot");
-    require(slots[7].name == "Volume" && slots[7].tooltip == "Volume: 44%",
-            "volume slot must retain its service state");
-    require(!slots[1].enabled && slots[1].tooltip == "Bluetooth: status pending",
-            "missing service state must render as explicitly pending");
+    require(slots.size() == 3, "bar must contain only battery, media, and notifications");
+    require(slots[0].name == "Battery" && slots[0].tooltip == "Battery: 84% (Discharging)",
+            "battery must remain visible on the compact bar");
+    require(slots[1].name == "Media" && slots[1].tooltip == "Media: Song - Artist",
+            "media must remain visible on the compact bar");
+    require(slots[2].name == "Notifications", "notifications must remain visible on the compact bar");
 }
 
 void test_notification_slot_reports_capture_and_unread_state() {
@@ -75,7 +72,7 @@ void test_notification_slot_reports_capture_and_unread_state() {
 
 int main() {
     test_workspace_pills_keep_defaults_and_merge_live_state();
-    test_status_slots_are_name_mapped_and_include_brightness();
+    test_status_slots_only_keep_compact_bar_information();
     test_notification_slot_reports_capture_and_unread_state();
     std::cout << "Vertical bar model tests passed\n";
     return 0;

@@ -18,6 +18,12 @@ void parses_supported_shell_commands() {
             "sidebar-right-toggle should parse");
     require(parse_shell_command("bar-toggle") == ShellCommand::ToggleBar,
             "bar-toggle should parse");
+    require(parse_shell_command("start-recording") == ShellCommand::StartRecording,
+            "start-recording should parse");
+    require(parse_shell_command("stop-recording") == ShellCommand::StopRecording,
+            "stop-recording should parse");
+    require(parse_shell_command("toggle-notes") == ShellCommand::ToggleNotes,
+            "toggle-notes should parse");
     require(parse_shell_command("quit") == ShellCommand::Quit,
             "quit should parse");
 }

@@ -241,14 +241,22 @@ RightSidebar::RightSidebar(
     gtk_window_set_resizable(GTK_WINDOW(window_), FALSE);
     gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
     
-    apply_layer_surface(GTK_WINDOW(window_), make_layer_surface_spec("realmheart-sidebar", LayerSurfaceLevel::Top, LayerKeyboardMode::Exclusive));
+    apply_layer_surface(GTK_WINDOW(window_), make_layer_surface_spec("realmheart-right-sidebar", LayerSurfaceLevel::Overlay, LayerKeyboardMode::OnDemand));
     
     setup_layout();
     populate_modules();
 }
 
 void RightSidebar::setup_layout() {
+    GtkCssProvider* provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(provider,
+        ".realmheart-right-sidebar { background: alpha(#11111b, 0.97); color: #cdd6f4; padding: 14px; border-left: 1px solid #cba6f7; }"
+        ".realmheart-right-sidebar button { min-height: 34px; }"
+    );
+    gtk_style_context_add_provider_for_display(gdk_display_get_default(), GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(provider);
     container_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(container_, "realmheart-right-sidebar");
     gtk_widget_set_size_request(container_, 300, -1);
     
     GtkWidget* header = gtk_label_new("System Controls");

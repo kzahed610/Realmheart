@@ -34,7 +34,10 @@ add_executable(realmheart
     src/services/ScopeModules.cpp
     src/services/RightSidebarServices.cpp
     src/services/Wifi.cpp
+    src/services/UtilityManager.cpp
     src/services/SessionManager.cpp
+    src/services/BatteryService.cpp
+    src/services/MediaService.cpp
 )
 
 target_include_directories(realmheart PRIVATE src)
@@ -50,6 +53,11 @@ add_library(realmheart_ui STATIC
     src/ui/NotificationToast.cpp
     src/ui/OSDOverlay.cpp
     src/ui/lockscreen/LockScreen.cpp
+)
+
+target_sources(realmheart_ui PRIVATE
+    src/services/NotesService.cpp
+    src/ui/NotesOverlay.cpp
 )
 
 target_include_directories(realmheart_ui PRIVATE src)
@@ -264,7 +272,7 @@ if(BUILD_TESTING)
     target_include_directories(realmheart_vertical_bar_model_tests PRIVATE src)
     target_compile_options(realmheart_vertical_bar_model_tests PRIVATE
         -Wall -Wextra -Wpedantic
-        $<$<BOOL:${REALMHEART_WARNINGS_as_errors}>:-Werror>
+        $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>
     )
 
     add_executable(realmheart_ui_foundation_tests
@@ -285,6 +293,17 @@ if(BUILD_TESTING)
         PkgConfig::GTK4_LAYER_SHELL
     )
 
+    add_executable(realmheart_utility_manager_tests
+        tests/UtilityManagerTests.cpp
+        src/core/Command.cpp
+        src/services/UtilityManager.cpp
+    )
+    target_include_directories(realmheart_utility_manager_tests PRIVATE src)
+    target_compile_options(realmheart_utility_manager_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+        $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>
+    )
+
     add_test(NAME realmheart_doctor COMMAND realmheart --doctor)
     add_test(NAME realmheart_modules COMMAND realmheart --list-modules)
     add_test(NAME realmheart_workspaces COMMAND realmheart --workspace-status)
@@ -294,12 +313,13 @@ if(BUILD_TESTING)
     add_test(NAME realmheart_notification_server COMMAND realmheart_notification_server_tests)
     add_test(NAME realmheart_vertical_bar_model COMMAND realmheart_vertical_bar_model_tests)
     add_test(NAME realmheart_ui_foundation COMMAND realmheart_ui_foundation_tests)
+    add_test(NAME realmheart_utility_manager COMMAND realmheart_utility_manager_tests)
     add_test(NAME realmheart_shell_command_parser COMMAND realmheart_shell_command_tests)
     add_test(NAME realmheart_shell_surface_state COMMAND realmheart_shell_state_tests)
     add_test(NAME realmheart_audio_mutation COMMAND realmheart_audio_tests)
     add_test(NAME realmheart_bluetooth_mutation COMMAND realmheart_bluetooth_tests)
     add_test(NAME realmheart_brightness_mutation COMMAND realmheart_brightness_tests)
-    add_test(NAME realmheart_gamemode_mutation COMMAND realmheart mavenCentral_gamemode_tests)
+    add_test(NAME realmheart_gamemode_mutation COMMAND realmheart_gamemode_tests)
     add_test(NAME realmheart_keep_awake_mutation COMMAND realmheart_keep_awake_tests)
     add_test(NAME realmheart_night_light_mutation COMMAND realmheart_night_light_tests)
     add_test(NAME realmheart_power_profile_mutation COMMAND realmheart_power_profiles_tests)
