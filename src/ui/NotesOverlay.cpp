@@ -1,4 +1,5 @@
 #include "ui/NotesOverlay.hpp"
+#include "ui/LayerSurface.hpp"
 #include <gtk/gtk.h>
 #include <iostream>
 
@@ -7,14 +8,21 @@ namespace realmheart::ui {
 NotesOverlay::NotesOverlay(GtkApplication* app, services::NotesService* notes_service) 
     : notes_service_(notes_service) {
     
-    window_ = gtk_application_window_new(app);
+    window_ = GTK_WIDGET(gtk_application_window_new(app));
     gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Notes");
     gtk_window_set_default_size(GTK_WINDOW(window_), 600, 800);
+    gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
     
+    LayerSurfaceSpec spec;
+    spec.surface_namespace = "realmheart-notes";
+    spec.layer = LayerSurfaceLevel::Overlay;
+    spec.keyboard_mode = LayerKeyboardMode::Exclusive;
+    apply_layer_surface(GTK_WINDOW(window_), spec);
+
     GtkCssProvider* provider = gtk_css_provider_new();
     gtk_css_provider_load_from_string(provider, 
-        "window { background-color: #1e1e2e; color: #cdd6f4; border: 2px solid #89b4fa; } "
-        "textview { background-color: #1e1e2e; color: #cdd6f4; font-family: 'JetBrains Mono'; font-size: 14px; }");
+        "window { background-color: rgba(30, 30, 46, 0.9); color: #cdd6f4; border: 2px solid #89b4fa; border-radius: 12px; } "
+        "textview { background-color: transparent; color: #cdd6f4; font-family: 'JetBrains Mono'; font-size: 14px; }");
     
     gtk_style_context_add_provider_for_display(
         gdk_display_get_default(),
@@ -34,7 +42,7 @@ NotesOverlay::NotesOverlay(GtkApplication* app, services::NotesService* notes_se
 
     g_signal_connect(buffer_, "changed", G_CALLBACK(on_text_changed_callback), this);
 
-    gtk_widget_set_visible(window_, TRUE);
+    gtk_widget_set_visible(window_, FALSE);
 }
 
 void NotesOverlay::on_text_changed_callback(GtkTextBuffer* buf, gpointer data) {
