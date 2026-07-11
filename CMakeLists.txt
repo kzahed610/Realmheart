@@ -350,3 +350,4 @@ if(BUILD_TESTING)
         COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} -- $<TARGET_FILE:realmheart_notification_daemon_tests>
     )
 endif()
+install(TARGETS realmheart RUNTIME DESTINATION bin)

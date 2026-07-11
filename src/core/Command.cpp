@@ -130,7 +130,6 @@ std::string sanitize_command_detail(std::string_view text, std::size_t max_bytes
                         index += 2;
                         break;
                     }
-                    ++index;
                 }
             }
             continue;
@@ -214,12 +213,46 @@ bool CommandResult::succeeded() const noexcept {
 
 bool run_background(const std::vector<std::string>& argv) {
     if (argv.empty()) return false;
-    std::string cmd = argv[0];
-    for (size_t i = 1; i < argv.size(); ++i) {
-        cmd += " " + argv[i];
+
+    int status_pipe[2] = {-1, -1};
+    if (::pipe2(status_pipe, O_CLOEXEC) != 0) {
+        return false;
     }
-    cmd += " &";
-    return std::system(cmd.c_str()) == 0;
+
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        ::close(status_pipe[0]);
+        ::close(status_pipe[1]);
+        return false;
+    }
+
+    if (pid == 0) {
+        ::close(status_pipe[0]);
+        if (::setsid() < 0) {
+            int err = errno;
+            ::write(status_pipe[1], &err, sizeof(err));
+            ::close(status_pipe[1]);
+            _exit(1);
+        }
+
+        std::vector<char*> exec_argv;
+        for (const auto& arg : argv) exec_argv.push_back(const_cast<char*>(arg.c_str()));
+        exec_argv.push_back(nullptr);
+
+        ::execvp(exec_argv[0], exec_argv.data());
+        
+        int err = errno;
+        ::write(status_pipe[1], &err, sizeof(err));
+        ::close(status_pipe[1]);
+        _exit(127);
+    }
+
+    ::close(status_pipe[1]);
+    int child_errno = 0;
+    ssize_t read_bytes = ::read(status_pipe[0], &child_errno, sizeof(child_errno));
+    ::close(status_pipe[0]);
+
+    return read_bytes == 0;
 }
 
 CommandResult run_capture(const std::vector<std::string>& argv, const CommandOptions& options) {
@@ -390,7 +423,7 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
     if (WIFSIGNALED(wait_status)) {
         result.status = CommandStatus::Signaled;
         result.term_signal = WTERMSIG(wait_status);
-        result.error = "command terminated by signal " + std::to_string(result.term_signal);
+        result.error = std::string("command terminated by signal ") + std::to_string(result.term_signal);
         return result;
     }
     if (result.status == CommandStatus::SystemError) {

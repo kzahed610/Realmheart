@@ -26,10 +26,10 @@ bool UtilityManager::take_screenshot_area(const std::string& path) {
 
 bool UtilityManager::take_screenshot_area_to_clipboard() {
     return executor_->run_background({
-        "sh", "-c", "geometry=$(slurp) || exit $?; grim -g \"$geometry\" - | wl-copy", "realmheart-screenshot-clipboard"
+        "sh", "-c", "geometry=$(slurp) || exit $?; if [ -n \"$geometry\" ]; then grim -g \"$geometry\" - | wl-copy --type image/png; fi",
+        "realmheart-screenshot-area"
     });
 }
-
 bool UtilityManager::extract_text_from_area() {
     return executor_->run_background({
         "sh", "-c",

@@ -1,9 +1,12 @@
 #include "core/Command.hpp"
-
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -85,6 +88,60 @@ void test_failure_detail_is_terminal_safe_and_single_line() {
     );
 }
 
+void test_background_preserves_shell_script_as_one_argument() {
+    const std::string temp_file = "/tmp/realmheart-argv-test.txt";
+    std::filesystem::remove(temp_file);
+
+    const std::string payload = "value with spaces; $(not-shell-code)";
+    const std::vector<std::string> argv = {
+        "/bin/sh",
+        "-c",
+        "printf '%s' \"$1\" > \"$2\"",
+        "realmheart-test",
+        payload,
+        temp_file
+    };
+
+    const bool spawned = realmheart::core::run_background(argv);
+    require(spawned, "run_background must report success for valid paths");
+
+    // Poll for completion
+    bool found = false;
+    for (int i = 0; i < 20; ++i) {
+        if (std::filesystem::exists(temp_file)) {
+            found = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    require(found, "background process must eventually create output file");
+
+    std::ifstream ifs(temp_file);
+    std::string result_content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    require(result_content == payload, "argv must be preserved literally; outer shell must not re-interpret tokens");
+
+    std::filesystem::remove(temp_file);
+}
+
+void test_background_reports_exec_failure() {
+    const bool spawned = realmheart::core::run_background({"/definitely/not/a/realmheart-command"});
+    require(!spawned, "run_background must report failure for non-existent executable");
+}
+
+void test_background_rejects_empty_argv() {
+    require(!realmheart::core::run_background({}), "run_background must reject empty argv");
+}
+
+void test_background_does_not_block_for_long_running_process() {
+    const auto started = std::chrono::steady_clock::now();
+    const bool spawned = realmheart::core::run_background({"/bin/sh", "-c", "sleep 2"});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    require(spawned, "long running process should spawn successfully");
+    require(elapsed < 500ms, "run_background must return promptly without waiting for process exit");
+}
+
 } // namespace
 
 int main() {
@@ -93,6 +150,10 @@ int main() {
     test_spawn_failure_is_structured();
     test_cancellation_terminates_child();
     test_failure_detail_is_terminal_safe_and_single_line();
+    test_background_preserves_shell_script_as_one_argument();
+    test_background_reports_exec_failure();
+    test_background_rejects_empty_argv();
+    test_background_does_not_block_for_long_running_process();
     std::cout << "Command runner tests passed\n";
     return 0;
 }
