@@ -52,17 +52,28 @@ public:
     }
 
     ~ShellRuntime() {
-        if (hotspot_ != nullptr) gtk_window_destroy(hotspot_);
+        // Stop callbacks that capture this before tearing down any UI owners.
+        notification_server_.set_notification_handler({});
+        notification_daemon_.stop();
+
+        launcher_overlay_.reset();
+        notes_overlay_.reset();
+        toast_.reset();
+        osd_.reset();
+
         if (sidebar_) {
-            gtk_window_destroy(GTK_WINDOW(sidebar_->get_window()));
+            GtkWindow* sidebar_window = GTK_WINDOW(sidebar_->get_window());
+            // Join module workers before destroying the widgets they may update.
             sidebar_.reset();
+            gtk_window_destroy(sidebar_window);
+        }
+        if (hotspot_ != nullptr) {
+            gtk_window_destroy(hotspot_);
+            hotspot_ = nullptr;
         }
         if (bar_ != nullptr) {
             gtk_window_destroy(bar_);
             bar_ = nullptr;
-        }
-        if (launcher_overlay_) {
-            launcher_overlay_.reset();
         }
     }
 
@@ -81,7 +92,7 @@ public:
     void show_osd_volume() {
         ensure_initialized();
         if (auto audio = services::Audio::read_default_sink()) {
-            osd_->show_volume(audio->volume);
+            osd_->show_volume(audio->volume * 100.0);
         }
     }
 
@@ -156,7 +167,11 @@ private:
         if (!notes_overlay_) {
             notes_overlay_ = std::make_unique<NotesOverlay>(application_, notes_service_.get());
         }
-        if (bar_ == nullptr) bar_ = bar::present_vertical_bar(application_, [this] { toggle_right_sidebar(); });
+        if (bar_ == nullptr) {
+            bar_ = bar::present_vertical_bar(
+                application_, notification_history_, [this] { toggle_right_sidebar(); }
+            );
+        }
         if (!sidebar_) {
             sidebar_ = std::make_unique<sidebar::RightSidebar>(application_, notification_history_);
             gtk_widget_set_visible(sidebar_->get_window(), FALSE);
@@ -329,6 +344,9 @@ int run_shell() {
 
     int status = g_application_run(G_APPLICATION(application), 0, nullptr);
 
+    // ShellRuntime owns GTK windows and callbacks; destroy it while the
+    // GtkApplication is still alive.
+    runtime.reset();
     g_object_unref(application);
     return status;
 }

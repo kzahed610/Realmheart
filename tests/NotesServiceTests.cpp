@@ -1,40 +1,103 @@
 #include "services/NotesService.hpp"
-#include <iostream>
-#include <fstream>
-#include <filesystem>
-#include <cassert>
 
-void test_notes_persistence() {
-    std::cout << "Testing NotesService persistence..." << std::endl;
-    
-    realmheart::services::NotesService service;
-    std::string test_content = "Lumen's secret notes: don't touch the purple fire.";
-    
-    // Test set and save
-    service.set_content(test_content);
-    service.save();
-    
-    // Verify file exists and has content
-    std::string path = service.get_file_path();
-    std::ifstream file(path);
-    std::string file_content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    
-    if (file_content != test_content) {
-        std::cerr << "FAIL: File content mismatch. Expected: " << test_content << " Got: " << file_content << std::endl;
-        exit(1);
-    }
-    
-    // Test reload
-    realmheart::services::NotesService service2;
-    if (service2.get_content() != test_content) {
-        std::cerr << "FAIL: Reloaded content mismatch. Expected: " << test_content << " Got: " << service2.get_content() << std::endl;
-        exit(1);
-    }
-    
-    std::cout << "NotesService persistence PASSED" << std::endl;
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <thread>
+
+namespace {
+
+using namespace std::chrono_literals;
+
+[[noreturn]] void fail(const std::string& message) {
+    std::cerr << "FAIL: " << message << '\n';
+    std::exit(1);
 }
 
+std::string read_file(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+}
+
+void test_set_content_is_debounced_and_persisted() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-notes-debounce-test";
+    const auto path = root / "notes.txt";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    {
+        realmheart::services::NotesService service(path, 100ms);
+        service.set_content("first");
+        service.set_content("second");
+
+        if (std::filesystem::exists(path)) {
+            fail("set_content performed a synchronous disk write");
+        }
+
+        std::this_thread::sleep_for(250ms);
+        if (read_file(path) != "second") {
+            fail("debounced write did not persist the latest content");
+        }
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+void test_destructor_flushes_pending_content() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-notes-flush-test";
+    const auto path = root / "notes.txt";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    {
+        realmheart::services::NotesService service(path, 5s);
+        service.set_content("survives shutdown");
+    }
+
+    if (read_file(path) != "survives shutdown") {
+        fail("destructor did not flush pending content");
+    }
+
+    realmheart::services::NotesService reloaded(path, 100ms);
+    if (reloaded.get_content() != "survives shutdown") {
+        fail("persisted content did not reload");
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+void test_save_replaces_existing_file() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-notes-save-test";
+    const auto path = root / "notes.txt";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    {
+        std::ofstream(path) << "old";
+        realmheart::services::NotesService service(path, 5s);
+        service.set_content("new");
+        service.save();
+    }
+
+    if (read_file(path) != "new") {
+        fail("save did not atomically replace existing content");
+    }
+    if (std::filesystem::exists(path.string() + ".tmp")) {
+        fail("temporary file remained after successful save");
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+} // namespace
+
 int main() {
-    test_notes_persistence();
+    test_set_content_is_debounced_and_persisted();
+    test_destructor_flushes_pending_content();
+    test_save_replaces_existing_file();
+    std::cout << "NotesService tests PASSED\n";
     return 0;
 }

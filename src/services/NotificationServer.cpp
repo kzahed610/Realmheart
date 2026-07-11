@@ -25,6 +25,7 @@ std::uint32_t NotificationServer::notify(
     entry.summary = std::move(summary);
     entry.body = std::move(body);
     entry.unread = true;
+    bound_notification_payload(entry);
     history_.upsert(entry);
     if (notification_handler_) notification_handler_(entry);
     return id;

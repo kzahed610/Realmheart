@@ -34,6 +34,20 @@ int main() {
         require(!server.close(second), "closing an already removed notification should fail");
         snapshot = history.snapshot();
         require(snapshot.entries.size() == 2, "close should remove exactly one entry");
+
+        std::string huge_app(realmheart::services::NotificationLimits::max_app_name_bytes + 100, 'a');
+        std::string huge_summary(realmheart::services::NotificationLimits::max_summary_bytes + 100, 's');
+        std::string huge_body(realmheart::services::NotificationLimits::max_body_bytes + 100, 'b');
+        const auto bounded = server.notify(huge_app, 0, huge_summary, huge_body);
+        snapshot = history.snapshot();
+        const auto& bounded_entry = snapshot.entries.back();
+        require(bounded_entry.id == bounded, "bounded notification should be stored");
+        require(bounded_entry.app_name.size() <= realmheart::services::NotificationLimits::max_app_name_bytes,
+                "app name payload must be bounded");
+        require(bounded_entry.summary.size() <= realmheart::services::NotificationLimits::max_summary_bytes,
+                "summary payload must be bounded");
+        require(bounded_entry.body.size() <= realmheart::services::NotificationLimits::max_body_bytes,
+                "body payload must be bounded");
     } catch (const std::exception& error) {
         std::cerr << "NotificationServerTests failed: " << error.what() << '\n';
         return 1;

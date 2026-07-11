@@ -45,13 +45,22 @@ NotesOverlay::NotesOverlay(GtkApplication* app, services::NotesService* notes_se
     gtk_widget_set_visible(window_, FALSE);
 }
 
+NotesOverlay::~NotesOverlay() {
+    if (buffer_ != nullptr) {
+        g_signal_handlers_disconnect_by_data(buffer_, this);
+    }
+    if (window_ != nullptr) {
+        gtk_window_destroy(GTK_WINDOW(window_));
+        window_ = nullptr;
+    }
+}
+
 void NotesOverlay::on_text_changed_callback(GtkTextBuffer* buf, gpointer data) {
     auto* self = static_cast<NotesOverlay*>(data);
     GtkTextIter start, end;
     gtk_text_buffer_get_bounds(buf, &start, &end);
     char* text = gtk_text_buffer_get_text(buf, &start, &end, FALSE);
     self->notes_service_->set_content(text);
-    self->notes_service_->save();
     g_free(text);
 }
 

@@ -1,26 +1,31 @@
 #pragma once
 
-#include <string>
+#include <filesystem>
 #include <optional>
+#include <string>
+#include <utility>
 
 namespace realmheart::services {
 
 struct BatteryStatus {
     int percentage;
     bool charging;
-    std::string status; // e.g., "Charging", "Discharging", "Full"
+    std::string status;
 };
 
 class BatteryService {
 public:
     BatteryService() = default;
+    explicit BatteryService(std::filesystem::path power_supply_root)
+        : power_supply_root_(std::move(power_supply_root)) {}
     ~BatteryService() = default;
 
-    // Read the current battery status from /sys/class/power_supply/
     std::optional<BatteryStatus> read();
 
 private:
-    std::string read_sysfs_file(const std::string& path);
+    std::filesystem::path power_supply_root_ = "/sys/class/power_supply";
+
+    static std::string read_sysfs_file(const std::filesystem::path& path);
 };
 
 } // namespace realmheart::services

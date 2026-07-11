@@ -1,5 +1,7 @@
 #include "core/Command.hpp"
 #include <chrono>
+#include <cerrno>
+#include <cstring>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -58,6 +60,10 @@ void test_spawn_failure_is_structured() {
 
     require(result.status == realmheart::core::CommandStatus::SpawnFailed, "exec failure must report SpawnFailed");
     require(!result.error.empty(), "spawn failure must include a structured error detail");
+    require(
+        result.error.find(std::strerror(ENOENT)) != std::string::npos,
+        "spawn failure must format the errno captured in the child"
+    );
 }
 
 void test_cancellation_terminates_child() {
@@ -86,6 +92,12 @@ void test_failure_detail_is_terminal_safe_and_single_line() {
         realmheart::core::sanitize_command_detail("0123456789", 8) == "01234...",
         "failure detail must have an explicit bounded ellipsis"
     );
+    require(realmheart::core::sanitize_command_detail("abcdef", 0).empty(),
+            "zero-byte failure detail must be empty");
+    require(realmheart::core::sanitize_command_detail("abcdef", 1) == "a",
+            "one-byte failure detail must not underflow");
+    require(realmheart::core::sanitize_command_detail("abcdef", 2) == "ab",
+            "two-byte failure detail must not underflow");
 }
 
 void test_background_preserves_shell_script_as_one_argument() {

@@ -1,12 +1,33 @@
 #include "services/UtilityManager.hpp"
-#include <iostream>
-#include <sstream>
+
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <sstream>
+#include <unistd.h>
 
 namespace realmheart::services {
+namespace {
 
-UtilityManager::UtilityManager(std::unique_ptr<IUtilityExecutor> executor) 
-    : executor_(std::move(executor)) {}
+std::filesystem::path default_recorder_pid_path() {
+    if (const char* runtime_dir = std::getenv("XDG_RUNTIME_DIR")) {
+        return std::filesystem::path(runtime_dir) / "realmheart/wf-recorder.pid";
+    }
+    return std::filesystem::temp_directory_path() /
+        ("realmheart-" + std::to_string(static_cast<unsigned long>(geteuid())) + "-wf-recorder.pid");
+}
+
+} // namespace
+
+UtilityManager::UtilityManager(
+    std::unique_ptr<IUtilityExecutor> executor,
+    std::filesystem::path recorder_pid_path,
+    std::filesystem::path proc_root
+) : executor_(std::move(executor)),
+    recorder_pid_path_(recorder_pid_path.empty() ? default_recorder_pid_path() : std::move(recorder_pid_path)),
+    proc_root_(std::move(proc_root)) {}
 
 bool UtilityManager::take_screenshot_full(const std::string& path) {
     if (const auto parent = std::filesystem::path(path).parent_path(); !parent.empty()) {
@@ -30,6 +51,7 @@ bool UtilityManager::take_screenshot_area_to_clipboard() {
         "realmheart-screenshot-area"
     });
 }
+
 bool UtilityManager::extract_text_from_area() {
     return executor_->run_background({
         "sh", "-c",
@@ -56,13 +78,70 @@ bool UtilityManager::start_recording(const std::string& path) {
     if (const auto parent = std::filesystem::path(path).parent_path(); !parent.empty()) {
         std::filesystem::create_directories(parent);
     }
-    return executor_->run_background({"wf-recorder", "-f", path});
+    if (const auto parent = recorder_pid_path_.parent_path(); !parent.empty()) {
+        std::error_code error;
+        std::filesystem::create_directories(parent, error);
+        if (error) return false;
+    }
+
+    return executor_->run_background({
+        "sh",
+        "-c",
+        "start=$(awk '{print $22}' /proc/$$/stat) || exit 1; "
+        "printf '%s %s\\n' \"$$\" \"$start\" > \"$1\" || exit 1; "
+        "exec wf-recorder -f \"$2\"",
+        "realmheart-recorder",
+        recorder_pid_path_.string(),
+        path
+    });
+}
+
+bool UtilityManager::recorder_identity_matches(int pid, const std::string& expected_start_time) const {
+    const auto process_dir = proc_root_ / std::to_string(pid);
+
+    std::ifstream comm_file(process_dir / "comm");
+    std::string comm;
+    std::getline(comm_file, comm);
+    if (comm != "wf-recorder") return false;
+
+    std::ifstream stat_file(process_dir / "stat");
+    std::string stat;
+    std::getline(stat_file, stat);
+    const auto command_end = stat.rfind(')');
+    if (command_end == std::string::npos || command_end + 2 >= stat.size()) return false;
+
+    std::istringstream fields(stat.substr(command_end + 2));
+    std::string value;
+    for (int field = 3; field <= 22; ++field) {
+        if (!(fields >> value)) return false;
+    }
+    return value == expected_start_time;
 }
 
 bool UtilityManager::stop_recording() {
-    // wf-recorder stops when it receives a SIGINT. 
-    // Since we run it via run_background, we need to pkill it.
-    return executor_->run_background({"pkill", "-INT", "wf-recorder"});
+    std::ifstream pid_file(recorder_pid_path_);
+    long long parsed_pid = 0;
+    std::string expected_start_time;
+    if (!(pid_file >> parsed_pid >> expected_start_time) ||
+        parsed_pid <= 0 || parsed_pid > std::numeric_limits<int>::max()) {
+        std::error_code error;
+        std::filesystem::remove(recorder_pid_path_, error);
+        return false;
+    }
+
+    const int pid = static_cast<int>(parsed_pid);
+    if (!recorder_identity_matches(pid, expected_start_time)) {
+        std::error_code error;
+        std::filesystem::remove(recorder_pid_path_, error);
+        return false;
+    }
+
+    const bool signalled = executor_->run_background({"kill", "-INT", std::to_string(pid)});
+    if (signalled) {
+        std::error_code error;
+        std::filesystem::remove(recorder_pid_path_, error);
+    }
+    return signalled;
 }
 
 bool UtilityManager::copy_to_clipboard(const std::string& text) {

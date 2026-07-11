@@ -220,15 +220,23 @@ bool LauncherService::activate(const LauncherResult& result) {
         }
         return command_executor_->run_command(result.id);
     } else if (result.kind == LauncherResultKind::Action) {
-        gchar* command = g_strdup_printf("bash -c '%s'", result.id.c_str());
-        bool success = g_spawn_command_line_async(command, nullptr);
-        g_free(command);
+        gchar* argv[] = { (gchar*)"/bin/bash", (gchar*)result.id.c_str(), nullptr };
+        GError* error = nullptr;
+        bool success = g_spawn_async(nullptr, argv, nullptr, G_SPAWN_SEARCH_PATH, nullptr, nullptr, nullptr, &error);
+        if (error) {
+            std::cerr << "Failed to launch action " << result.id << ": " << error->message << "\n";
+            g_error_free(error);
+        }
         return success;
     } else if (result.kind == LauncherResultKind::Emoji) {
         // Copy the emoji to clipboard
-        gchar* clip_cmd = g_strdup_printf("wl-copy %s", result.id.c_str());
-        bool success = g_spawn_command_line_async(clip_cmd, nullptr);
-        g_free(clip_cmd);
+        gchar* argv[] = { (gchar*)"wl-copy", (gchar*)result.id.c_str(), nullptr };
+        GError* error = nullptr;
+        bool success = g_spawn_async(nullptr, argv, nullptr, G_SPAWN_SEARCH_PATH, nullptr, nullptr, nullptr, &error);
+        if (error) {
+            std::cerr << "Failed to copy emoji " << result.id << ": " << error->message << "\n";
+            g_error_free(error);
+        }
         return success;
     } else if (result.kind == LauncherResultKind::Clipboard) {
         // This is an activate call for a clipboard entry.

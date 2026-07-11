@@ -39,7 +39,7 @@ struct StatusSectionState {
     GtkWidget* section = nullptr;
     guint timer_id = 0;
     GCancellable* cancellable = nullptr;
-    std::shared_ptr<realmheart::services::NotificationHistory> notification_history;
+    realmheart::services::NotificationHistory* notification_history = nullptr;
     std::function<void()> toggle_sidebar;
     bool in_flight = false;
 };
@@ -460,7 +460,11 @@ void own_status_state(GtkWidget* section, const StatusSectionHandle& state) {
 
 } // namespace
 
-GtkWindow* present_vertical_bar(GtkApplication* application, std::function<void()> toggle_sidebar) {
+GtkWindow* present_vertical_bar(
+    GtkApplication* application,
+    realmheart::services::NotificationHistory& notification_history,
+    std::function<void()> toggle_sidebar
+) {
     install_bar_css();
 
     GtkWidget* window = gtk_application_window_new(application);
@@ -529,7 +533,7 @@ GtkWindow* present_vertical_bar(GtkApplication* application, std::function<void(
     auto status_state = std::make_shared<StatusSectionState>();
     status_state->section = status_section;
     status_state->cancellable = g_cancellable_new();
-    status_state->notification_history = std::make_shared<realmheart::services::NotificationHistory>();
+    status_state->notification_history = &notification_history;
     status_state->toggle_sidebar = toggle_sidebar;
     g_object_set_data_full(G_OBJECT(status_section), "realmheart-sidebar-toggle", new std::function<void()>(toggle_sidebar),
         +[](gpointer data) { delete static_cast<std::function<void()>*>(data); });

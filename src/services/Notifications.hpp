@@ -8,6 +8,12 @@
 
 namespace realmheart::services {
 
+struct NotificationLimits {
+    static constexpr std::size_t max_app_name_bytes = 256;
+    static constexpr std::size_t max_summary_bytes = 4 * 1024;
+    static constexpr std::size_t max_body_bytes = 64 * 1024;
+};
+
 struct NotificationEntry {
     std::uint32_t id = 0;
     std::string app_name;
@@ -21,6 +27,8 @@ struct NotificationSnapshot {
     std::size_t unread_count = 0;
     bool capture_active = false;
 };
+
+void bound_notification_payload(NotificationEntry& entry);
 
 class NotificationHistory {
 public:

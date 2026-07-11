@@ -3,6 +3,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <thread>
 #include <cctype>
 #include <cstring>
 #include <cstdlib>
@@ -149,8 +150,12 @@ std::string sanitize_command_detail(std::string_view text, std::size_t max_bytes
     }
 
     if (sanitized.size() > max_bytes) {
-        sanitized.resize(max_bytes - 3);
-        sanitized += "...";
+        if (max_bytes <= 3) {
+            sanitized.resize(max_bytes);
+        } else {
+            sanitized.resize(max_bytes - 3);
+            sanitized += "...";
+        }
     }
     return sanitized;
 }
@@ -235,6 +240,25 @@ bool run_background(const std::vector<std::string>& argv) {
             _exit(1);
         }
 
+        // To prevent the child from becoming a zombie when it exits, 
+        // we double-fork. The first child forks a second child and exits immediately.
+        // The second child is then adopted by init (PID 1) or a subreaper.
+        pid_t grandchild = ::fork();
+        if (grandchild < 0) {
+            int err = errno;
+            ::write(status_pipe[1], &err, sizeof(err));
+            ::close(status_pipe[1]);
+            _exit(1);
+        }
+        if (grandchild > 0) {
+            // First child: reap the grandchild (just in case) and exit.
+            // Actually, since we want the grandchild to be orphaned, 
+            // the first child should just exit.
+            ::close(status_pipe[1]);
+            _exit(0);
+        }
+
+        // Grandchild: execute the command
         std::vector<char*> exec_argv;
         for (const auto& arg : argv) exec_argv.push_back(const_cast<char*>(arg.c_str()));
         exec_argv.push_back(nullptr);
@@ -251,6 +275,9 @@ bool run_background(const std::vector<std::string>& argv) {
     int child_errno = 0;
     ssize_t read_bytes = ::read(status_pipe[0], &child_errno, sizeof(child_errno));
     ::close(status_pipe[0]);
+
+    // The first child exits quickly. We must reap it to avoid a zombie.
+    static_cast<void>(::waitpid(pid, nullptr, 0));
 
     return read_bytes == 0;
 }
@@ -378,7 +405,12 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
             kill_sent = true;
         }
         if (kill_sent && now >= final_wait_at) {
-            result.error += "; child termination could not be confirmed";
+            // Attempt a final non-blocking reap to clean up if the child finally exited
+            const pid_t waited = ::waitpid(child, &wait_status, WNOHANG);
+            child_reaped = (waited == child);
+            if (!child_reaped) {
+                result.error += "; child termination could not be confirmed";
+            }
             break;
         }
     }
@@ -398,7 +430,7 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
         std::memcpy(&exec_errno, exec_error_buffer.data(), sizeof(exec_errno));
         result.status = CommandStatus::SpawnFailed;
         result.exit_code = 127;
-        result.error = std::string("execvp failed: ") + std::strerror(errno);
+        result.error = std::string("execvp failed: ") + std::strerror(exec_errno);
         return result;
     }
     if (!io_error.empty() && result.status != CommandStatus::TimedOut && result.status != CommandStatus::Cancelled) {

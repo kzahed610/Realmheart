@@ -231,6 +231,26 @@ if(BUILD_TESTING)
         $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>
     )
 
+    add_executable(realmheart_battery_service_tests
+        tests/BatteryServiceTests.cpp
+        src/services/BatteryService.cpp
+    )
+    target_include_directories(realmheart_battery_service_tests PRIVATE src)
+    target_compile_options(realmheart_battery_service_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+        $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>
+    )
+
+    add_executable(realmheart_notes_tests
+        tests/NotesServiceTests.cpp
+        src/services/NotesService.cpp
+    )
+    target_include_directories(realmheart_notes_tests PRIVATE src)
+    target_compile_options(realmheart_notes_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+        $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>
+    )
+
     add_executable(realmheart_notification_tests
         tests/NotificationsTests.cpp
         src/services/Notifications.cpp
@@ -324,6 +344,8 @@ if(BUILD_TESTING)
     add_test(NAME realmheart_workspaces COMMAND realmheart --workspace-status)
     add_test(NAME realmheart_command_runner COMMAND realmheart_command_tests)
     add_test(NAME realmheart_workspace_parser COMMAND realmheart_workspace_tests)
+    add_test(NAME realmheart_battery_service COMMAND realmheart_battery_service_tests)
+    add_test(NAME realmheart_notes_persistence COMMAND realmheart_notes_tests)
     add_test(NAME realmheart_notification_history COMMAND realmheart_notification_tests)
     add_test(NAME realmheart_notification_server COMMAND realmheart_notification_server_tests)
     add_test(NAME realmheart_vertical_bar_model COMMAND realmheart_vertical_bar_model_tests)

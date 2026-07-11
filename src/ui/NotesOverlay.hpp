@@ -8,7 +8,7 @@ namespace realmheart::ui {
 class NotesOverlay {
 public:
     NotesOverlay(GtkApplication* app, services::NotesService* notes_service);
-    ~NotesOverlay() = default;
+    ~NotesOverlay();
 
     void show();
     void hide();

@@ -1,4 +1,6 @@
 #include "services/UtilityManager.hpp"
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <vector>
 #include <string>
@@ -99,6 +101,85 @@ void test_choose_wallpaper() {
     std::cout << "test_choose_wallpaper PASSED\n";
 }
 
+void test_recorder_uses_owned_pid() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-recorder-test";
+    const auto pid_file = root / "wf-recorder.pid";
+    const auto proc_root = root / "proc";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(proc_root / "4242");
+
+    auto mock = std::make_unique<MockUtilityExecutor>();
+    auto* mock_ptr = mock.get();
+    realmheart::services::UtilityManager util(std::move(mock), pid_file, proc_root);
+
+    if (!util.start_recording("/tmp/owned recording.mp4")) {
+        std::cerr << "Recorder start failed\n";
+        exit(1);
+    }
+    const auto& start = mock_ptr->background_calls.back();
+    if (start.size() != 6 || start[0] != "sh" || start[1] != "-c" ||
+        start[4] != pid_file.string() || start[5] != "/tmp/owned recording.mp4") {
+        std::cerr << "Recorder start must write an ownership PID file with argv-safe parameters\n";
+        exit(1);
+    }
+
+    std::ofstream(proc_root / "4242/comm") << "wf-recorder\n";
+    std::ofstream stat(proc_root / "4242/stat");
+    stat << "4242 (wf-recorder) S";
+    for (int field = 4; field <= 21; ++field) stat << " 0";
+    stat << " 98765\n";
+    stat.close();
+    std::ofstream(pid_file) << "4242 98765\n";
+
+    if (!util.stop_recording()) {
+        std::cerr << "Owned recorder stop failed\n";
+        exit(1);
+    }
+    const std::vector<std::string> expected{"kill", "-INT", "4242"};
+    if (mock_ptr->background_calls.back() != expected) {
+        std::cerr << "Recorder stop must signal only the owned PID\n";
+        exit(1);
+    }
+    for (const auto& call : mock_ptr->background_calls) {
+        if (!call.empty() && call[0] == "pkill") {
+            std::cerr << "Recorder stop must never use pkill\n";
+            exit(1);
+        }
+    }
+
+    std::filesystem::remove_all(root);
+    std::cout << "test_recorder_uses_owned_pid PASSED\n";
+}
+
+void test_recorder_rejects_stale_pid_file() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-recorder-stale-test";
+    const auto pid_file = root / "wf-recorder.pid";
+    const auto proc_root = root / "proc";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(proc_root / "4242");
+    std::ofstream(proc_root / "4242/comm") << "wf-recorder\n";
+    std::ofstream stat(proc_root / "4242/stat");
+    stat << "4242 (wf-recorder) S";
+    for (int field = 4; field <= 21; ++field) stat << " 0";
+    stat << " 22222\n";
+    stat.close();
+    std::ofstream(pid_file) << "4242 11111\n";
+
+    auto mock = std::make_unique<MockUtilityExecutor>();
+    auto* mock_ptr = mock.get();
+    realmheart::services::UtilityManager util(std::move(mock), pid_file, proc_root);
+    if (util.stop_recording()) {
+        std::cerr << "Stale recorder PID must be rejected\n";
+        exit(1);
+    }
+    if (!mock_ptr->background_calls.empty()) {
+        std::cerr << "Stale PID must not signal any process\n";
+        exit(1);
+    }
+    std::filesystem::remove_all(root);
+    std::cout << "test_recorder_rejects_stale_pid_file PASSED\n";
+}
+
 int main() {
     test_screenshot_full();
     test_screenshot_area();
@@ -107,6 +188,8 @@ int main() {
     test_clipboard_paste();
     test_launch_wofi();
     test_choose_wallpaper();
+    test_recorder_uses_owned_pid();
+    test_recorder_rejects_stale_pid_file();
     std::cout << "All UtilityManager tests PASSED (MOCKED)\n";
     return 0;
 }
