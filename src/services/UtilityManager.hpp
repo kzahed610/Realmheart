@@ -33,6 +33,7 @@ public:
     // Screenshots
     bool take_screenshot_full(const std::string& path);
     bool take_screenshot_area(const std::string& path);
+    bool take_screenshot_area_to_clipboard();
     bool extract_text_from_area();
     
     // Wallpaper & Theme

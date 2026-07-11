@@ -103,7 +103,7 @@ public:
     }
 
     void take_screenshot_area() {
-        utilities_->take_screenshot_area("/home/zahed/Pictures/Screenshots/area_" + std::to_string(time(nullptr)) + ".png");
+        utilities_->take_screenshot_area_to_clipboard();
     }
 
     void extract_ocr_area() {
