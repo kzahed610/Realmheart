@@ -51,6 +51,10 @@ Native C++ Hyprland shell rewrite for Zahed's desktop. TBATE reference mandatory
 ### Installation
 GTK4 and `gtk4-layer-shell-0` are required through pkg-config.
 
+The optional native wallpaper renderer additionally uses Wayland, EGL, OpenGL ES 2,
+`gdk-pixbuf`, `wayland-scanner`, and the wlr-protocol XML files. Realmheart still builds
+with the GTK wallpaper backend when those optional dependencies are unavailable.
+
 ### Commands
 ```sh
 # Configure and Build
@@ -60,12 +64,27 @@ cmake --build build
 # Diagnostics
 ./build/realmheart --doctor
 
+# Start with either wallpaper backend
+./build/realmheart --shell --wallpaper-backend gtk
+./build/realmheart --shell --wallpaper-backend native
+
+# Switch a running shell without restarting
+./build/realmheart --command set-wallpaper-backend gtk
+./build/realmheart --command set-wallpaper-backend native
+
 # Testing Surfaces
 ./build/realmheart --test-layer        # Test a basic layer-shell surface
 ./build/realmheart --bar --timeout 5   # Test the Vertical Bar
 ./build/realmheart --sidebar --timeout 1 # Test the Right Sidebar
 ./build/realmheart --workspace-status  # Test workspace service
 ```
+
+## 🖼️ Hybrid Wallpaper Architecture
+
+Wallpaper state is independent from rendering. Realmheart can use the existing GTK4
+backend or a separate Wayland/EGL/OpenGL ES renderer, and can switch between them while
+running. The GTK backend remains an automatic fallback when the native renderer is missing
+or fails. See [`docs/wallpaper-backends.md`](docs/wallpaper-backends.md).
 
 ## 📋 Confirmed Scope
 - **Right Sidebar:** WiFi, Bluetooth, Keep Awake, Night Light, Gamemode, power-profile cycle, brightness slider, volume slider, and notification history/list.

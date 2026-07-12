@@ -47,7 +47,6 @@ WallpaperSurface::~WallpaperSurface() {
 
 void WallpaperSurface::set_paintable(GdkPaintable* paintable) {
     if (picture_ == nullptr) return;
-    gtk_picture_set_paintable(picture_, nullptr);
     gtk_picture_set_paintable(picture_, paintable);
 }
 

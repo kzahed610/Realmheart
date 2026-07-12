@@ -20,6 +20,7 @@ enum class ShellCommand {
     ToggleNotes,
     SetWallpaper,
     SetWallpaperPath,
+    SetWallpaperBackend,
     GenerateTheme,
     LaunchLauncher,
     Quit,

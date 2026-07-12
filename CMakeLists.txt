@@ -1,15 +1,17 @@
 cmake_minimum_required(VERSION 3.25)
-project(Realmheart VERSION 0.1.0 LANGUAGES CXX)
+project(Realmheart VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(REALMHEART_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
+option(REALMHEART_ENABLE_NATIVE_WALLPAPER "Build the Wayland/EGL wallpaper renderer when dependencies are available" ON)
+set(REALMHEART_WLR_LAYER_SHELL_XML "" CACHE FILEPATH "Path to wlr-layer-shell-unstable-v1.xml")
+set(REALMHEART_XDG_SHELL_XML "" CACHE FILEPATH "Path to stable xdg-shell.xml")
 
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
-find_package(GTest REQUIRED)
 pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4)
 pkg_check_modules(GTK4_LAYER_SHELL REQUIRED IMPORTED_TARGET gtk4-layer-shell-0)
@@ -49,8 +51,11 @@ add_library(realmheart_ui STATIC
     src/ui/ImageFileFilters.cpp
     src/ui/GtkApp.cpp
     src/ui/LayerSurface.cpp
+    src/ui/wallpaper/WallpaperBackend.cpp
     src/ui/wallpaper/WallpaperSurface.cpp
-    src/ui/wallpaper/WallpaperManager.cpp
+    src/ui/wallpaper/GtkWallpaperBackend.cpp
+    src/ui/wallpaper/NativeWallpaperBackend.cpp
+    src/ui/wallpaper/WallpaperController.cpp
     src/ui/ShellApp.cpp
     src/ui/bar/VerticalBar.cpp
     src/ui/bar/VerticalBarModel.cpp
@@ -73,6 +78,7 @@ target_compile_definitions(realmheart_ui PRIVATE
 )
 
 target_link_libraries(realmheart_ui PRIVATE
+    PkgConfig::GIO
     PkgConfig::GTK4
     PkgConfig::GTK4_LAYER_SHELL
 )
@@ -92,8 +98,175 @@ target_link_libraries(realmheart PRIVATE
     PkgConfig::GIO
 )
 
+# The native renderer is deliberately optional. Realmheart always retains the GTK
+# backend, so a missing Wayland/EGL development package never breaks the shell.
+set(REALMHEART_NATIVE_WALLPAPER_BUILT OFF)
+if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
+    pkg_check_modules(WAYLAND_CLIENT QUIET IMPORTED_TARGET wayland-client)
+    pkg_check_modules(WAYLAND_EGL QUIET IMPORTED_TARGET wayland-egl)
+    pkg_check_modules(EGL QUIET IMPORTED_TARGET egl)
+    pkg_check_modules(GLESV2 QUIET IMPORTED_TARGET glesv2)
+    pkg_check_modules(GDK_PIXBUF QUIET IMPORTED_TARGET gdk-pixbuf-2.0)
+    pkg_check_modules(WLR_PROTOCOLS QUIET wlr-protocols)
+    pkg_check_modules(WAYLAND_PROTOCOLS QUIET wayland-protocols)
+    find_program(WAYLAND_SCANNER_EXECUTABLE wayland-scanner)
+
+    if(NOT REALMHEART_WLR_LAYER_SHELL_XML AND WLR_PROTOCOLS_FOUND)
+        pkg_get_variable(WLR_PROTOCOLS_DATADIR wlr-protocols pkgdatadir)
+        set(_realmheart_wlr_xml
+            "${WLR_PROTOCOLS_DATADIR}/unstable/wlr-layer-shell-unstable-v1.xml"
+        )
+        if(EXISTS "${_realmheart_wlr_xml}")
+            set(REALMHEART_WLR_LAYER_SHELL_XML "${_realmheart_wlr_xml}")
+        endif()
+    endif()
+
+    if(NOT REALMHEART_WLR_LAYER_SHELL_XML)
+        find_file(_REALMHEART_WLR_LAYER_SHELL_XML
+            NAMES wlr-layer-shell-unstable-v1.xml
+            PATHS /usr/share/wlr-protocols /usr/local/share/wlr-protocols
+            PATH_SUFFIXES unstable
+        )
+        if(_REALMHEART_WLR_LAYER_SHELL_XML)
+            set(
+                REALMHEART_WLR_LAYER_SHELL_XML
+                "${_REALMHEART_WLR_LAYER_SHELL_XML}"
+                CACHE FILEPATH "Path to wlr-layer-shell-unstable-v1.xml" FORCE
+            )
+        endif()
+    endif()
+
+    if(NOT REALMHEART_XDG_SHELL_XML AND WAYLAND_PROTOCOLS_FOUND)
+        pkg_get_variable(WAYLAND_PROTOCOLS_DATADIR wayland-protocols pkgdatadir)
+        set(_realmheart_xdg_xml
+            "${WAYLAND_PROTOCOLS_DATADIR}/stable/xdg-shell/xdg-shell.xml"
+        )
+        if(EXISTS "${_realmheart_xdg_xml}")
+            set(REALMHEART_XDG_SHELL_XML "${_realmheart_xdg_xml}")
+        endif()
+    endif()
+
+    if(NOT REALMHEART_XDG_SHELL_XML)
+        find_file(_REALMHEART_XDG_SHELL_XML
+            NAMES xdg-shell.xml
+            PATHS
+                /usr/share/wayland-protocols
+                /usr/local/share/wayland-protocols
+            PATH_SUFFIXES stable/xdg-shell
+        )
+        if(_REALMHEART_XDG_SHELL_XML)
+            set(
+                REALMHEART_XDG_SHELL_XML
+                "${_REALMHEART_XDG_SHELL_XML}"
+                CACHE FILEPATH "Path to stable xdg-shell.xml" FORCE
+            )
+        endif()
+    endif()
+
+    if(WAYLAND_CLIENT_FOUND AND WAYLAND_EGL_FOUND AND EGL_FOUND AND
+       GLESV2_FOUND AND GDK_PIXBUF_FOUND AND WAYLAND_SCANNER_EXECUTABLE AND
+       REALMHEART_WLR_LAYER_SHELL_XML AND REALMHEART_XDG_SHELL_XML)
+        set(REALMHEART_PROTOCOL_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-protocols")
+        file(MAKE_DIRECTORY "${REALMHEART_PROTOCOL_DIR}")
+
+        # wayland-scanner generates a C API. The layer-shell protocol names one
+        # request argument "namespace", which is valid C but a reserved C++
+        # keyword. Generate from a local, wire-compatible copy whose argument
+        # identifier is renamed to "namespace_".
+        set(REALMHEART_LAYER_SHELL_CPP_XML
+            "${REALMHEART_PROTOCOL_DIR}/wlr-layer-shell-unstable-v1-cpp.xml"
+        )
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${REALMHEART_WLR_LAYER_SHELL_XML}"
+        )
+        file(READ
+            "${REALMHEART_WLR_LAYER_SHELL_XML}"
+            _realmheart_layer_shell_xml
+        )
+        string(REPLACE
+            "<arg name=\"namespace\""
+            "<arg name=\"namespace_\""
+            _realmheart_layer_shell_xml
+            "${_realmheart_layer_shell_xml}"
+        )
+        file(WRITE
+            "${REALMHEART_LAYER_SHELL_CPP_XML}"
+            "${_realmheart_layer_shell_xml}"
+        )
+
+        set(REALMHEART_LAYER_SHELL_HEADER
+            "${REALMHEART_PROTOCOL_DIR}/wlr-layer-shell-unstable-v1-client-protocol.h"
+        )
+        set(REALMHEART_LAYER_SHELL_CODE
+            "${REALMHEART_PROTOCOL_DIR}/wlr-layer-shell-unstable-v1-protocol.c"
+        )
+
+        # wlr-layer-shell references the xdg_popup interface. The interface
+        # definition lives in the stable xdg-shell protocol, so its generated
+        # protocol code must be linked into the renderer as well.
+        set(REALMHEART_XDG_SHELL_CODE
+            "${REALMHEART_PROTOCOL_DIR}/xdg-shell-protocol.c"
+        )
+
+        add_custom_command(
+            OUTPUT "${REALMHEART_LAYER_SHELL_HEADER}"
+            COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" client-header
+                    "${REALMHEART_LAYER_SHELL_CPP_XML}"
+                    "${REALMHEART_LAYER_SHELL_HEADER}"
+            DEPENDS "${REALMHEART_LAYER_SHELL_CPP_XML}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${REALMHEART_LAYER_SHELL_CODE}"
+            COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code
+                    "${REALMHEART_LAYER_SHELL_CPP_XML}"
+                    "${REALMHEART_LAYER_SHELL_CODE}"
+            DEPENDS "${REALMHEART_LAYER_SHELL_CPP_XML}"
+            VERBATIM
+        )
+
+        add_custom_command(
+            OUTPUT "${REALMHEART_XDG_SHELL_CODE}"
+            COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code
+                    "${REALMHEART_XDG_SHELL_XML}"
+                    "${REALMHEART_XDG_SHELL_CODE}"
+            DEPENDS "${REALMHEART_XDG_SHELL_XML}"
+            VERBATIM
+        )
+
+        add_executable(realmheart-wallpaper-renderer
+            src/wallpaper-native/main.cpp
+            src/wallpaper-native/NativeWallpaperRenderer.cpp
+            "${REALMHEART_LAYER_SHELL_HEADER}"
+            "${REALMHEART_LAYER_SHELL_CODE}"
+            "${REALMHEART_XDG_SHELL_CODE}"
+        )
+        target_include_directories(realmheart-wallpaper-renderer PRIVATE
+            src
+            "${REALMHEART_PROTOCOL_DIR}"
+        )
+        target_link_libraries(realmheart-wallpaper-renderer PRIVATE
+            PkgConfig::WAYLAND_CLIENT
+            PkgConfig::WAYLAND_EGL
+            PkgConfig::EGL
+            PkgConfig::GLESV2
+            PkgConfig::GDK_PIXBUF
+        )
+        target_compile_options(realmheart-wallpaper-renderer PRIVATE
+            -Wall -Wextra -Wpedantic
+            $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>
+        )
+        set(REALMHEART_NATIVE_WALLPAPER_BUILT ON)
+    else()
+        message(STATUS
+            "Native wallpaper renderer disabled: install wayland-client, wayland-egl, EGL, GLESv2, gdk-pixbuf, wayland-scanner, wlr-protocols and wayland-protocols"
+        )
+    endif()
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
+    find_package(GTest REQUIRED)
     add_executable(realmheart_command_tests
         tests/CommandTests.cpp
         src/core/Command.cpp
@@ -332,6 +505,16 @@ if(BUILD_TESTING)
         $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>
     )
 
+    add_executable(realmheart_wallpaper_backend_tests
+        tests/WallpaperBackendTests.cpp
+        src/ui/wallpaper/WallpaperBackend.cpp
+    )
+    target_include_directories(realmheart_wallpaper_backend_tests PRIVATE src)
+    target_compile_options(realmheart_wallpaper_backend_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+        $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>
+    )
+
     add_executable(realmheart_utility_manager_tests
         tests/UtilityManagerTests.cpp
         src/core/Command.cpp
@@ -368,6 +551,7 @@ if(BUILD_TESTING)
     add_test(NAME realmheart_vertical_bar_model COMMAND realmheart_vertical_bar_model_tests)
     add_test(NAME realmheart_ui_foundation COMMAND realmheart_ui_foundation_tests)
     add_test(NAME realmheart_wallpaper_service COMMAND realmheart_wallpaper_service_tests)
+    add_test(NAME realmheart_wallpaper_backend COMMAND realmheart_wallpaper_backend_tests)
     add_test(NAME realmheart_utility_manager COMMAND realmheart_utility_manager_tests)
     add_test(NAME realmheart_launcher_service COMMAND realmheart_launcher_service_tests)
     add_test(NAME realmheart_shell_command_parser COMMAND realmheart_shell_command_tests)
@@ -391,3 +575,6 @@ if(BUILD_TESTING)
     )
 endif()
 install(TARGETS realmheart RUNTIME DESTINATION bin)
+if(TARGET realmheart-wallpaper-renderer)
+    install(TARGETS realmheart-wallpaper-renderer RUNTIME DESTINATION bin)
+endif()

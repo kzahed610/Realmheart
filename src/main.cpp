@@ -9,6 +9,7 @@
 #include "services/RightSidebarServices.hpp"
 #include "ui/GtkApp.hpp"
 #include "ui/ShellApp.hpp"
+#include "ui/wallpaper/WallpaperBackend.hpp"
 
 #include <charconv>
 #include <iomanip>
@@ -19,7 +20,7 @@
 namespace {
 
 std::string get_supported_commands() {
-    std::string list = "sidebar-right-toggle, bar-toggle, osd-volume, osd-brightness, lock-session, logout-menu, screenshot-full, screenshot-area, extract-ocr, start-recording, stop-recording, toggle-notes, set-wallpaper, set-wallpaper-path, generate-theme, launch-launcher, quit";
+    std::string list = "sidebar-right-toggle, bar-toggle, osd-volume, osd-brightness, lock-session, logout-menu, screenshot-full, screenshot-area, extract-ocr, start-recording, stop-recording, toggle-notes, set-wallpaper, set-wallpaper-path, set-wallpaper-backend, generate-theme, launch-launcher, quit";
     return list;
 }
 
@@ -31,7 +32,8 @@ void print_usage() {
               << "  realmheart --cycle-power-profile Cycle battery-saver/balanced/performance\n"
               << "  realmheart --workspace-status   Print Hyprland workspace snapshot\n"
               << "  realmheart --right-sidebar-status Print right sidebar service report\n"
-              << "  realmheart --shell               Run the persistent Realmheart shell\n"
+              << "  realmheart --shell [--wallpaper-backend gtk|native]\n"
+              << "                                  Run the persistent Realmheart shell\n"
               << "  realmheart --command NAME        Send a command to the running shell\n"
               << "  realmheart --sidebar [--timeout N] Show the right sidebar MVP layer surface\n"
               << "  realmheart --bar [--timeout N]     Show the safe vertical bar MVP layer surface\n"
@@ -115,11 +117,32 @@ int main(int argc, char** argv) {
     if (command == "--doctor") return doctor();
 
     if (command == "--shell") {
-        if (argc != 2) {
-            std::cerr << "--shell does not accept additional arguments\n";
-            return 2;
+        auto wallpaper_backend =
+            realmheart::ui::wallpaper::wallpaper_backend_from_environment();
+
+        for (int index = 2; index < argc; ++index) {
+            const std::string_view argument = argv[index];
+            if (argument != "--wallpaper-backend") {
+                std::cerr << "Unknown --shell argument: " << argument << '\n';
+                return 2;
+            }
+            if (index + 1 >= argc) {
+                std::cerr << "--wallpaper-backend requires gtk or native\n";
+                return 2;
+            }
+
+            const auto parsed = realmheart::ui::wallpaper::parse_wallpaper_backend_type(
+                argv[++index]
+            );
+            if (!parsed) {
+                std::cerr << "Invalid wallpaper backend: " << argv[index]
+                          << " (expected gtk or native)\n";
+                return 2;
+            }
+            wallpaper_backend = *parsed;
         }
-        return realmheart::ui::run_shell();
+
+        return realmheart::ui::run_shell(wallpaper_backend);
     }
 
     if (command == "--command") {
@@ -138,11 +161,14 @@ int main(int argc, char** argv) {
 
         std::string_view shell_argument;
         if (realmheart::core::shell_command_requires_argument(*shell_command)) {
-            if (argc < 4 || std::string_view(argv[3]).empty()) {
-                std::cerr << argv[2] << " requires an argument\n";
+            if (argc != 4 || std::string_view(argv[3]).empty()) {
+                std::cerr << argv[2] << " requires exactly one argument\n";
                 return 2;
             }
             shell_argument = argv[3];
+        } else if (argc != 3) {
+            std::cerr << argv[2] << " does not accept arguments\n";
+            return 2;
         }
 
         const auto result = realmheart::core::send_shell_command(*shell_command, shell_argument);

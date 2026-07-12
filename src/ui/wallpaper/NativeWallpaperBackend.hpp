@@ -1,0 +1,45 @@
+#pragma once
+
+#include "ui/wallpaper/WallpaperBackend.hpp"
+
+#include <gio/gio.h>
+
+#include <filesystem>
+#include <string>
+
+namespace realmheart::ui::wallpaper {
+
+class NativeWallpaperBackend final : public WallpaperBackend {
+public:
+    NativeWallpaperBackend() = default;
+    ~NativeWallpaperBackend() override;
+
+    [[nodiscard]] WallpaperBackendType type() const noexcept override {
+        return WallpaperBackendType::Native;
+    }
+
+    [[nodiscard]] bool initialize(std::string* error_message = nullptr) override;
+    [[nodiscard]] bool set_wallpaper(
+        const std::filesystem::path& path,
+        std::string* error_message = nullptr
+    ) override;
+
+private:
+    [[nodiscard]] std::string find_renderer_executable() const;
+    [[nodiscard]] bool send_line(
+        const std::string& line,
+        std::string* error_message = nullptr
+    );
+    [[nodiscard]] bool read_response(
+        const char* expected_success,
+        std::string* error_message = nullptr
+    );
+    void stop() noexcept;
+
+    GSubprocess* process_ = nullptr;
+    GOutputStream* command_stream_ = nullptr;
+    GDataInputStream* response_stream_ = nullptr;
+    bool initialized_ = false;
+};
+
+} // namespace realmheart::ui::wallpaper

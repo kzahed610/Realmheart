@@ -17,6 +17,7 @@ std::optional<ShellCommand> parse_shell_command(std::string_view name) {
     if (name == "toggle-notes") return ShellCommand::ToggleNotes;
     if (name == "set-wallpaper") return ShellCommand::SetWallpaper;
     if (name == "set-wallpaper-path") return ShellCommand::SetWallpaperPath;
+    if (name == "set-wallpaper-backend") return ShellCommand::SetWallpaperBackend;
     if (name == "generate-theme") return ShellCommand::GenerateTheme;
     if (name == "launch-launcher") return ShellCommand::LaunchLauncher;
     if (name == "quit") return ShellCommand::Quit;
@@ -39,6 +40,7 @@ std::string_view shell_action_name(ShellCommand command) {
     case ShellCommand::ToggleNotes: return "toggle-notes";
     case ShellCommand::SetWallpaper: return "set-wallpaper";
     case ShellCommand::SetWallpaperPath: return "set-wallpaper-path";
+    case ShellCommand::SetWallpaperBackend: return "set-wallpaper-backend";
     case ShellCommand::GenerateTheme: return "generate-theme";
     case ShellCommand::LaunchLauncher: return "launch-launcher";
     case ShellCommand::Quit: return "quit";
@@ -47,7 +49,8 @@ std::string_view shell_action_name(ShellCommand command) {
 }
 
 bool shell_command_requires_argument(ShellCommand command) {
-    return command == ShellCommand::SetWallpaperPath;
+    return command == ShellCommand::SetWallpaperPath ||
+           command == ShellCommand::SetWallpaperBackend;
 }
 
 } // namespace realmheart::core

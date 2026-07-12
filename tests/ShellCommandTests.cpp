@@ -26,6 +26,8 @@ void parses_supported_shell_commands() {
             "toggle-notes should parse");
     require(parse_shell_command("set-wallpaper-path") == ShellCommand::SetWallpaperPath,
             "set-wallpaper-path should parse");
+    require(parse_shell_command("set-wallpaper-backend") == ShellCommand::SetWallpaperBackend,
+            "set-wallpaper-backend should parse");
     require(parse_shell_command("quit") == ShellCommand::Quit,
             "quit should parse");
 }
@@ -46,6 +48,8 @@ void maps_commands_to_stable_action_names() {
             "bar action name should be stable");
     require(shell_action_name(ShellCommand::SetWallpaperPath) == "set-wallpaper-path",
             "direct wallpaper action name should be stable");
+    require(shell_action_name(ShellCommand::SetWallpaperBackend) == "set-wallpaper-backend",
+            "wallpaper backend action name should be stable");
     require(shell_action_name(ShellCommand::Quit) == "quit",
             "quit action name should be stable");
 }
@@ -56,6 +60,8 @@ void identifies_commands_that_require_arguments() {
 
     require(shell_command_requires_argument(ShellCommand::SetWallpaperPath),
             "set-wallpaper-path should require a path argument");
+    require(shell_command_requires_argument(ShellCommand::SetWallpaperBackend),
+            "set-wallpaper-backend should require a backend argument");
     require(!shell_command_requires_argument(ShellCommand::SetWallpaper),
             "interactive set-wallpaper should remain parameterless");
     require(!shell_command_requires_argument(ShellCommand::ToggleBar),

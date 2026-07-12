@@ -20,7 +20,8 @@
 #include "ui/ImageFileFilters.hpp"
 #include "ui/launcher/LauncherOverlay.hpp"
 #include "services/LauncherService.hpp"
-#include "ui/wallpaper/WallpaperManager.hpp"
+#include "ui/wallpaper/WallpaperController.hpp"
+#include "ui/wallpaper/WallpaperBackend.hpp"
 
 #include <gtk/gtk.h>
 #include <iostream>
@@ -31,8 +32,12 @@ namespace realmheart::ui {
 
 class ShellRuntime {
 public:
-    explicit ShellRuntime(GtkApplication* application)
+    ShellRuntime(
+        GtkApplication* application,
+        wallpaper::WallpaperBackendType wallpaper_backend
+    )
         : application_(application),
+          requested_wallpaper_backend_(wallpaper_backend),
           notification_server_(notification_history_),
           notification_daemon_(notification_server_, notification_history_) {
 
@@ -42,7 +47,6 @@ public:
         utilities_ = std::make_unique<services::UtilityManager>();
         session_ = std::make_unique<services::SessionManager>();
         launcher_service_ = std::make_unique<services::LauncherService>();
-        // wallpaper_manager_ initialization moved to ensure_initialized()
 
         notification_server_.set_notification_handler([this](const auto& entry) {
             if (toast_) toast_->show(entry, 5000);
@@ -58,6 +62,7 @@ public:
         notification_server_.set_notification_handler({});
         notification_daemon_.stop();
 
+        wallpaper_controller_.reset();
         launcher_overlay_.reset();
         notes_overlay_.reset();
         toast_.reset();
@@ -86,7 +91,7 @@ public:
 
         std::string current_path = utilities_->load_wallpaper_path();
         if (!current_path.empty()) {
-            (void)wallpaper_manager_->set_wallpaper(current_path);
+            (void)wallpaper_controller_->set_wallpaper(current_path);
         }
     }
 
@@ -134,21 +139,41 @@ public:
     }
 
     void set_wallpaper(const std::string& path = "") {
+        ensure_initialized();
         if (path.empty()) {
             choose_wallpaper_native();
         } else {
             std::string error_message;
-            if (wallpaper_manager_->set_wallpaper(path, &error_message)) {
+            if (wallpaper_controller_->set_wallpaper(path, &error_message)) {
                 // Success: Now update the persistence state
                 services::WallpaperService* service = utilities_->get_wallpaper_service();
                 if (service) {
                     service->update_state(path);
                 }
             } else {
-                // Fallback to legacy if native fails
-                utilities_->set_wallpaper(path);
+                std::cerr << "Unable to set wallpaper: " << error_message << '\n';
             }
         }
+    }
+
+    void switch_wallpaper_backend(const std::string& backend_name) {
+        ensure_initialized();
+        const auto backend = wallpaper::parse_wallpaper_backend_type(backend_name);
+        if (!backend) {
+            std::cerr << "Unknown wallpaper backend: " << backend_name
+                      << " (expected gtk or native)\n";
+            return;
+        }
+
+        std::string error_message;
+        if (!wallpaper_controller_->switch_backend(*backend, &error_message)) {
+            std::cerr << "Unable to switch wallpaper backend to "
+                      << backend_name << ": " << error_message << '\n';
+            return;
+        }
+
+        requested_wallpaper_backend_ = *backend;
+        std::cerr << "Wallpaper backend switched to " << backend_name << '\n';
     }
 
     void choose_wallpaper_native() {
@@ -214,7 +239,11 @@ public:
     void restart() {
         // Kill current instance and launch a new one
         // We use a detached process to ensure the new instance starts after this one exits.
-        std::string cmd = "realmheart --shell";
+        const auto backend = wallpaper_controller_ != nullptr
+            ? wallpaper_controller_->active_backend()
+            : requested_wallpaper_backend_;
+        std::string cmd = "realmheart --shell --wallpaper-backend ";
+        cmd += wallpaper::wallpaper_backend_type_name(backend);
         if (fork() == 0) {
             setsid();
             execlp("sh", "sh", "-c", cmd.c_str(), nullptr);
@@ -260,9 +289,16 @@ private:
         if (!launcher_overlay_) {
             launcher_overlay_ = std::make_unique<ui::LauncherOverlay>(application_, *launcher_service_);
         }
-        // Initialize wallpaper manager AFTER GTK application is fully operational
-        if (!wallpaper_manager_) {
-            wallpaper_manager_ = std::make_unique<wallpaper::WallpaperManager>(application_);
+        if (!wallpaper_controller_) {
+            wallpaper_controller_ = std::make_unique<wallpaper::WallpaperController>(
+                application_,
+                requested_wallpaper_backend_
+            );
+            std::string error_message;
+            if (!wallpaper_controller_->initialize(&error_message)) {
+                std::cerr << "Unable to initialize wallpaper backend: "
+                          << error_message << '\n';
+            }
         }
     }
 
@@ -286,6 +322,7 @@ private:
     }
 
     GtkApplication* application_ = nullptr;
+    wallpaper::WallpaperBackendType requested_wallpaper_backend_ = wallpaper::WallpaperBackendType::Gtk;
     services::NotificationHistory notification_history_;
     services::NotificationServer notification_server_;
     services::NotificationDaemon notification_daemon_;
@@ -302,7 +339,7 @@ private:
     std::unique_ptr<sidebar::RightSidebar> sidebar_;
     std::unique_ptr<ui::LauncherOverlay> launcher_overlay_;
     std::unique_ptr<services::LauncherService> launcher_service_;
-    std::unique_ptr<wallpaper::WallpaperManager> wallpaper_manager_;
+    std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;
     ShellState state_;
 };
 
@@ -349,6 +386,17 @@ void set_wallpaper_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gp
 void set_wallpaper_path_action(GSimpleAction* /*action*/, GVariant* parameter, gpointer user_data) {
     if (parameter == nullptr) return;
     static_cast<ShellRuntime*>(user_data)->set_wallpaper(g_variant_get_string(parameter, nullptr));
+}
+
+void set_wallpaper_backend_action(
+    GSimpleAction* /*action*/,
+    GVariant* parameter,
+    gpointer user_data
+) {
+    if (parameter == nullptr) return;
+    static_cast<ShellRuntime*>(user_data)->switch_wallpaper_backend(
+        g_variant_get_string(parameter, nullptr)
+    );
 }
 
 void generate_theme_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
@@ -399,17 +447,18 @@ constexpr GActionEntry kShellActions[] = {
     {"toggle-notes", toggle_notes_action, nullptr, nullptr, nullptr, {}},
     {"set-wallpaper", set_wallpaper_action, nullptr, nullptr, nullptr, {}},
     {"set-wallpaper-path", set_wallpaper_path_action, "s", nullptr, nullptr, {}},
+    {"set-wallpaper-backend", set_wallpaper_backend_action, "s", nullptr, nullptr, {}},
     {"generate-theme", generate_theme_action, nullptr, nullptr, nullptr, {}},
     {"launch-launcher", launch_launcher_action, nullptr, nullptr, nullptr, {}},
     {"quit", quit_action, nullptr, nullptr, nullptr, {}},
 };
 
-int run_shell() {
+int run_shell(wallpaper::WallpaperBackendType wallpaper_backend) {
     GtkApplication* application = gtk_application_new(
         realmheart::core::shell_application_id().data(),
         G_APPLICATION_DEFAULT_FLAGS
 );
-    auto runtime = std::make_unique<ShellRuntime>(application);
+    auto runtime = std::make_unique<ShellRuntime>(application, wallpaper_backend);
 
     g_action_map_add_action_entries(
         G_ACTION_MAP(application),

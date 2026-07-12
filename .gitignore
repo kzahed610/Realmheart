@@ -1,6 +1,12 @@
-build/
+build-hybrid/
+/build*/
 .hermes/
 *.bak*
 *.o
 *.a
 *.so
+
+# Generated wallpaper profiling output
+tests/results/
+__pycache__/
+*.pyc
