@@ -1,11 +1,16 @@
 #include "services/WallpaperService.hpp"
-
+#include "services/ThemeService.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
+#include <filesystem>
+#include <vector>
+#include <iostream>
 
 #include <unistd.h>
 
@@ -113,7 +118,30 @@ bool WallpaperService::choose_wallpaper() {
 }
 
 bool WallpaperService::generate_colors() {
-    return false;
+    // 1. Get current wallpaper path
+    auto path = load_path();
+    if (!path) return false;
+
+    // 2. Run matugen
+    std::string command = "matugen image \"" + path->string() + "\" --json hex --prefer darkness";
+    
+    // We'll use a simple popen to capture output
+    std::string output;
+    FILE* pipe = popen(command.c_str(), "r");
+    if (!pipe) return false;
+
+    char buffer[128];
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        output += buffer;
+    }
+    int status = pclose(pipe);
+    if (status != 0) return false;
+
+    // 3. Parse and update theme
+    // Note: we'll need a way to access the ThemeService from here.
+    // For now, we'll return true if we got output, and we'll handle the 
+    // ThemeService update in the UtilityManager which coordinates them.
+    return !output.empty();
 }
 
 } // namespace realmheart::services

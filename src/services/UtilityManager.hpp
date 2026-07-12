@@ -2,6 +2,8 @@
 
 #include "core/Command.hpp"
 #include "services/WallpaperService.hpp"
+#include "services/ThemeService.hpp"
+
 
 #include <filesystem>
 #include <memory>
@@ -30,11 +32,14 @@ public:
 class UtilityManager {
 public:
     explicit UtilityManager(
+        std::shared_ptr<services::ThemeService> theme_service,
         std::unique_ptr<IUtilityExecutor> executor = std::make_unique<SystemUtilityExecutor>(),
         std::filesystem::path recorder_pid_path = {},
         std::filesystem::path proc_root = "/proc"
     );
-    ~UtilityManager() = default;
+    ~UtilityManager();
+
+    services::ThemeService& get_theme_service() { return *theme_service_; }
 
     bool take_screenshot_full(const std::string& path);
     bool take_screenshot_area(const std::string& path);
@@ -60,8 +65,8 @@ private:
     std::filesystem::path recorder_pid_path_;
     std::filesystem::path proc_root_;
     std::unique_ptr<realmheart::services::WallpaperService> wallpaper_service_ = std::make_unique<realmheart::services::WallpaperService>();
+    std::shared_ptr<services::ThemeService> theme_service_;
 
     bool recorder_identity_matches(int pid, const std::string& expected_start_time) const;
 };
-
 } // namespace realmheart::services

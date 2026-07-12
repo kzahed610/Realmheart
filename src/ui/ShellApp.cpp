@@ -22,6 +22,7 @@
 #include "services/LauncherService.hpp"
 #include "ui/wallpaper/WallpaperController.hpp"
 #include "ui/wallpaper/WallpaperBackend.hpp"
+#include "services/ThemeService.hpp"
 
 #include <gtk/gtk.h>
 #include <iostream>
@@ -40,11 +41,14 @@ public:
           requested_wallpaper_backend_(wallpaper_backend),
           notification_server_(notification_history_),
           notification_daemon_(notification_server_, notification_history_) {
+        
+        // Create the Single Source of Truth for the theme
+        theme_service_ = std::make_shared<services::ThemeService>();
 
         battery_ = std::make_unique<services::BatteryService>();
         media_ = std::make_unique<services::MediaService>();
         notes_service_ = std::make_unique<services::NotesService>();
-        utilities_ = std::make_unique<services::UtilityManager>();
+        utilities_ = std::make_unique<services::UtilityManager>(theme_service_);
         session_ = std::make_unique<services::SessionManager>();
         launcher_service_ = std::make_unique<services::LauncherService>();
 
@@ -79,7 +83,7 @@ public:
             hotspot_ = nullptr;
         }
         if (bar_ != nullptr) {
-            gtk_window_destroy(bar_);
+            gtk_window_destroy(GTK_WINDOW(bar_));
             bar_ = nullptr;
         }
     }
@@ -92,6 +96,7 @@ public:
         std::string current_path = utilities_->load_wallpaper_path();
         if (!current_path.empty()) {
             (void)wallpaper_controller_->set_wallpaper(current_path);
+            generate_theme();
         }
     }
 
@@ -251,8 +256,6 @@ public:
         }
         g_application_quit(G_APPLICATION(application_));
     }
-
-private:
     void ensure_initialized() {
         if (!toast_) toast_ = std::make_unique<NotificationToast>(application_);
         if (!osd_) osd_ = std::make_unique<OSDOverlay>(application_);
@@ -260,16 +263,15 @@ private:
             notes_overlay_ = std::make_unique<NotesOverlay>(application_, notes_service_.get());
         }
         if (bar_ == nullptr) {
-            bar_ = bar::present_vertical_bar(
-                application_, notification_history_, [this] { toggle_right_sidebar(); }
-            );
+            bar_ = GTK_WINDOW(bar::present_vertical_bar(
+                application_, notification_history_, theme_service_, [this] { toggle_right_sidebar(); }
+            ));
         }
         if (!sidebar_) {
-            sidebar_ = std::make_unique<sidebar::RightSidebar>(application_, notification_history_);
+            sidebar_ = std::make_unique<sidebar::RightSidebar>(application_, notification_history_, theme_service_);
             gtk_widget_set_visible(sidebar_->get_window(), FALSE);
         }
-        if (hotspot_ == nullptr) {
-            hotspot_ = GTK_WINDOW(gtk_application_window_new(application_));
+        if (hotspot_ != nullptr) {
             gtk_window_set_decorated(hotspot_, FALSE);
             gtk_window_set_default_size(hotspot_, 16, 16);
             LayerSurfaceSpec spec;
@@ -282,6 +284,7 @@ private:
             gtk_widget_set_tooltip_text(button, "Open Realmheart controls");
             g_signal_connect(button, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
                 static_cast<ShellRuntime*>(data)->toggle_right_sidebar();
+                return false;
             }), this);
             gtk_window_set_child(hotspot_, button);
             gtk_window_present(hotspot_);
@@ -297,11 +300,10 @@ private:
             std::string error_message;
             if (!wallpaper_controller_->initialize(&error_message)) {
                 std::cerr << "Unable to initialize wallpaper backend: "
-                          << error_message << '\n';
+                              << error_message << '\n';
             }
         }
     }
-
     void apply_right_sidebar_visibility() {
         GtkWidget* window = sidebar_->get_window();
         if (state_.right_sidebar_visible()) {
@@ -309,18 +311,18 @@ private:
             gtk_window_present(GTK_WINDOW(window));
         } else {
             gtk_widget_set_visible(window, FALSE);
+            gtk_window_destroy(GTK_WINDOW(window));
         }
     }
-
     void apply_bar_visibility() {
         GtkWidget* window = GTK_WIDGET(bar_);
         if (state_.bar_visible()) {
             gtk_window_present(bar_);
         } else {
             gtk_widget_set_visible(window, FALSE);
+            gtk_window_destroy(GTK_WINDOW(window));
         }
     }
-
     GtkApplication* application_ = nullptr;
     wallpaper::WallpaperBackendType requested_wallpaper_backend_ = wallpaper::WallpaperBackendType::Gtk;
     services::NotificationHistory notification_history_;
@@ -340,141 +342,35 @@ private:
     std::unique_ptr<ui::LauncherOverlay> launcher_overlay_;
     std::unique_ptr<services::LauncherService> launcher_service_;
     std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;
+    std::shared_ptr<services::ThemeService> theme_service_;
     ShellState state_;
 };
+} // namespace realmheart::ui
 
-void activate_shell(GtkApplication* /*app*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->activate();
-}
+// IMPORTANT: The definition of run_shell MUST be outside the namespace if 
+// it's declared as such in the header, OR it must be inside.
+// Based on ShellApp.hpp, it's inside namespace realmheart::ui.
 
-void toggle_right_sidebar_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->toggle_right_sidebar();
-}
-
-void show_osd_volume_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->show_osd_volume();
-}
-
-void show_osd_brightness_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->show_osd_brightness();
-}
-
-void toggle_bar_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->toggle_bar();
-}
-
-void take_screenshot_full_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->take_screenshot_full();
-}
-
-void take_screenshot_area_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->take_screenshot_area();
-}
-
-void extract_ocr_area_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->extract_ocr_area();
-}
-
-void launch_launcher_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->launch_launcher();
-}
-
-void set_wallpaper_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->set_wallpaper();
-}
-
-void set_wallpaper_path_action(GSimpleAction* /*action*/, GVariant* parameter, gpointer user_data) {
-    if (parameter == nullptr) return;
-    static_cast<ShellRuntime*>(user_data)->set_wallpaper(g_variant_get_string(parameter, nullptr));
-}
-
-void set_wallpaper_backend_action(
-    GSimpleAction* /*action*/,
-    GVariant* parameter,
-    gpointer user_data
-) {
-    if (parameter == nullptr) return;
-    static_cast<ShellRuntime*>(user_data)->switch_wallpaper_backend(
-        g_variant_get_string(parameter, nullptr)
-    );
-}
-
-void generate_theme_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->generate_theme();
-}
-
-void start_recording_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->start_recording();
-}
-
-void stop_recording_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->stop_recording();
-}
-
-void toggle_notes_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->toggle_notes();
-}
-
-void lock_session_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->lock_session();
-}
-
-void open_logout_menu_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->open_logout_menu();
-}
-
-void restart_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->restart();
-}
-
-void quit_action(GSimpleAction* /*action*/, GVariant* /*parameter*/, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->quit();
-}
-
-constexpr GActionEntry kShellActions[] = {
-    {"sidebar-right-toggle", toggle_right_sidebar_action, nullptr, nullptr, nullptr, {}},
-    {"bar-toggle", toggle_bar_action, nullptr, nullptr, nullptr, {}},
-    {"osd-volume", show_osd_volume_action, nullptr, nullptr, nullptr, {}},
-    {"osd-brightness", show_osd_brightness_action, nullptr, nullptr, nullptr, {}},
-    {"lock-session", lock_session_action, nullptr, nullptr, nullptr, {}},
-    {"logout-menu", open_logout_menu_action, nullptr, nullptr, nullptr, {}},
-    {"restart", restart_action, nullptr, nullptr, nullptr, {}},
-    {"screenshot-full", take_screenshot_full_action, nullptr, nullptr, nullptr, {}},
-    {"screenshot-area", take_screenshot_area_action, nullptr, nullptr, nullptr, {}},
-    {"extract-ocr", extract_ocr_area_action, nullptr, nullptr, nullptr, {}},
-    {"start-recording", start_recording_action, nullptr, nullptr, nullptr, {}},
-    {"stop-recording", stop_recording_action, nullptr, nullptr, nullptr, {}},
-    {"toggle-notes", toggle_notes_action, nullptr, nullptr, nullptr, {}},
-    {"set-wallpaper", set_wallpaper_action, nullptr, nullptr, nullptr, {}},
-    {"set-wallpaper-path", set_wallpaper_path_action, "s", nullptr, nullptr, {}},
-    {"set-wallpaper-backend", set_wallpaper_backend_action, "s", nullptr, nullptr, {}},
-    {"generate-theme", generate_theme_action, nullptr, nullptr, nullptr, {}},
-    {"launch-launcher", launch_launcher_action, nullptr, nullptr, nullptr, {}},
-    {"quit", quit_action, nullptr, nullptr, nullptr, {}},
-};
-
+namespace realmheart::ui {
 int run_shell(wallpaper::WallpaperBackendType wallpaper_backend) {
-    GtkApplication* application = gtk_application_new(
-        realmheart::core::shell_application_id().data(),
-        G_APPLICATION_DEFAULT_FLAGS
-);
-    auto runtime = std::make_unique<ShellRuntime>(application, wallpaper_backend);
-
-    g_action_map_add_action_entries(
-        G_ACTION_MAP(application),
-        kShellActions,
-        static_cast<gint>(sizeof(kShellActions) / sizeof(kShellActions[0])),
-        runtime.get()
+    GtkApplication* app = gtk_application_new("dev.realmheart.shell", G_APPLICATION_DEFAULT_FLAGS);
+    
+    auto runtime = std::make_unique<ShellRuntime>(app, wallpaper_backend);
+    
+    g_signal_connect(app, "activate", G_CALLBACK(+[](GtkApplication* app, gpointer data) {
+        auto* runtime = static_cast<ShellRuntime*>(data);
+        runtime->activate();
+    }), runtime.get());
+    
+    g_object_set_data_full(
+        G_OBJECT(app),
+        "realmheart-runtime",
+        runtime.release(),
+        +[](gpointer data) {
+            delete static_cast<ShellRuntime*>(data);
+        }
     );
-    g_signal_connect(application, "activate", G_CALLBACK(activate_shell), runtime.get());
-
-    int status = g_application_run(G_APPLICATION(application), 0, nullptr);
-
-    // ShellRuntime owns GTK windows and callbacks; destroy it while the
-    // GtkApplication is still alive.
-    runtime.reset();
-    g_object_unref(application);
-    return status;
+    
+    return g_application_run(G_APPLICATION(app), 0, nullptr);
 }
-
 } // namespace realmheart::ui

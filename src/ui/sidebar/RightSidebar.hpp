@@ -1,22 +1,21 @@
 #pragma once
 #include <memory>
-#include "services/KeepAwake.hpp"
-#include "services/Notifications.hpp"
-
-#include <gtk/gtk.h>
 #include <vector>
-#include <memory>
 #include <string>
 #include <functional>
+#include <gtk/gtk.h>
+
+#include "ui/components/BaseWidget.hpp"
+#include "services/KeepAwake.hpp"
+#include "services/Notifications.hpp"
+#include "services/ThemeService.hpp"
 
 namespace realmheart::ui::sidebar {
 
-class SidebarModule {
+class SidebarModule : public components::ThemeableWidget {
 public:
     explicit SidebarModule(const std::string& label) : label_(label) {}
     virtual ~SidebarModule() = default;
-    virtual GtkWidget* get_widget() = 0;
-    virtual void refresh() {}
     virtual void init() {}
     const std::string& get_label() const { return label_; }
 protected:
@@ -25,9 +24,10 @@ protected:
 
 class RightSidebar {
 public:
-    RightSidebar(GtkApplication* app, services::NotificationHistory& notification_history);
+    RightSidebar(GtkApplication* app, services::NotificationHistory& notification_history, std::shared_ptr<services::ThemeService> theme_service);
     ~RightSidebar() = default;
-    void add_module(std::shared_ptr<SidebarModule> module);
+    
+    void add_module(std::shared_ptr<components::BaseWidget> module);
     void refresh();
     GtkWidget* get_window() const { return window_; }
 
@@ -41,6 +41,8 @@ private:
     std::vector<std::shared_ptr<SidebarModule>> modules_;
     std::shared_ptr<services::KeepAwake> keep_awake_;
     services::NotificationHistory& notification_history_;
+    
+    std::shared_ptr<services::ThemeService> theme_service_;
 };
 
 } // namespace realmheart::ui::sidebar

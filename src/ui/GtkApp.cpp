@@ -1,5 +1,4 @@
 #include "ui/GtkApp.hpp"
-
 #include "ui/LayerSurface.hpp"
 #include "ui/bar/VerticalBar.hpp"
 #include "ui/sidebar/RightSidebar.hpp"
@@ -104,14 +103,16 @@ void activate_bar(GtkApplication* app, gpointer data) {
     auto* state = static_cast<TimedLayerState*>(data);
     schedule_application_quit(state);
     static services::NotificationHistory notification_history;
-    bar::present_vertical_bar(app, notification_history, [] {});
+    static auto theme_service = std::make_shared<services::ThemeService>();
+    bar::present_vertical_bar(app, notification_history, theme_service, [] {});
 }
 
 void activate_sidebar(GtkApplication* app, gpointer data) {
     auto* state = static_cast<TimedLayerState*>(data);
     schedule_application_quit(state);
     static services::NotificationHistory notification_history;
-    auto* controller = new sidebar::RightSidebar(app, notification_history);
+    static auto theme_service = std::make_shared<services::ThemeService>();
+    auto* controller = new sidebar::RightSidebar(app, notification_history, theme_service);
     GtkWidget* window = controller->get_window();
     g_object_set_data_full(
         G_OBJECT(window),
