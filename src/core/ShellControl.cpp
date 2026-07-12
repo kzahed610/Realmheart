@@ -3,6 +3,7 @@
 #include <gio/gio.h>
 
 #include <iostream>
+#include <string>
 
 namespace realmheart::core {
 namespace {
@@ -15,7 +16,12 @@ std::string_view shell_application_id() {
     return kShellApplicationId;
 }
 
-ShellControlResult send_shell_command(ShellCommand command) {
+ShellControlResult send_shell_command(ShellCommand command, std::string_view argument) {
+    const bool requires_argument = shell_command_requires_argument(command);
+    if (requires_argument && argument.empty()) {
+        return ShellControlResult::InvalidArgument;
+    }
+
     GApplication* application = g_application_new(
         kShellApplicationId.data(),
         G_APPLICATION_DEFAULT_FLAGS
@@ -42,7 +48,16 @@ ShellControlResult send_shell_command(ShellCommand command) {
         return ShellControlResult::ActionUnavailable;
     }
 
-    g_action_group_activate_action(G_ACTION_GROUP(application), action_name.data(), nullptr);
+    if (requires_argument) {
+        const std::string owned_argument(argument);
+        g_action_group_activate_action(
+            G_ACTION_GROUP(application),
+            action_name.data(),
+            g_variant_new_string(owned_argument.c_str())
+        );
+    } else {
+        g_action_group_activate_action(G_ACTION_GROUP(application), action_name.data(), nullptr);
+    }
     if (GDBusConnection* connection = g_application_get_dbus_connection(application)) {
         g_dbus_connection_flush_sync(connection, nullptr, nullptr);
     }

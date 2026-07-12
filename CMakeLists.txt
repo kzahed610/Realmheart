@@ -36,6 +36,7 @@ add_executable(realmheart
     src/services/RightSidebarServices.cpp
     src/services/Wifi.cpp
     src/services/UtilityManager.cpp
+    src/services/WallpaperService.cpp
     src/services/SessionManager.cpp
     src/services/BatteryService.cpp
     src/services/MediaService.cpp
@@ -45,8 +46,11 @@ target_include_directories(realmheart PRIVATE src)
 
 add_library(realmheart_ui STATIC
     src/ui/AssetResolver.cpp
+    src/ui/ImageFileFilters.cpp
     src/ui/GtkApp.cpp
     src/ui/LayerSurface.cpp
+    src/ui/wallpaper/WallpaperSurface.cpp
+    src/ui/wallpaper/WallpaperManager.cpp
     src/ui/ShellApp.cpp
     src/ui/bar/VerticalBar.cpp
     src/ui/bar/VerticalBarModel.cpp
@@ -301,6 +305,7 @@ if(BUILD_TESTING)
     add_executable(realmheart_ui_foundation_tests
         tests/UiFoundationTests.cpp
         src/ui/AssetResolver.cpp
+        src/ui/ImageFileFilters.cpp
         src/ui/LayerSurface.cpp
     )
     target_include_directories(realmheart_ui_foundation_tests PRIVATE src)
@@ -316,10 +321,22 @@ if(BUILD_TESTING)
         PkgConfig::GTK4_LAYER_SHELL
     )
 
+    add_executable(realmheart_wallpaper_service_tests
+        tests/WallpaperServiceTests.cpp
+        src/services/WallpaperService.cpp
+    )
+    target_link_libraries(realmheart_wallpaper_service_tests PRIVATE GTest::gtest_main)
+    target_include_directories(realmheart_wallpaper_service_tests PRIVATE src)
+    target_compile_options(realmheart_wallpaper_service_tests PRIVATE
+        -Wall -Wextra -Wpedantic
+        $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>
+    )
+
     add_executable(realmheart_utility_manager_tests
         tests/UtilityManagerTests.cpp
         src/core/Command.cpp
         src/services/UtilityManager.cpp
+        src/services/WallpaperService.cpp
     )
 
     add_executable(realmheart_launcher_service_tests
@@ -350,6 +367,7 @@ if(BUILD_TESTING)
     add_test(NAME realmheart_notification_server COMMAND realmheart_notification_server_tests)
     add_test(NAME realmheart_vertical_bar_model COMMAND realmheart_vertical_bar_model_tests)
     add_test(NAME realmheart_ui_foundation COMMAND realmheart_ui_foundation_tests)
+    add_test(NAME realmheart_wallpaper_service COMMAND realmheart_wallpaper_service_tests)
     add_test(NAME realmheart_utility_manager COMMAND realmheart_utility_manager_tests)
     add_test(NAME realmheart_launcher_service COMMAND realmheart_launcher_service_tests)
     add_test(NAME realmheart_shell_command_parser COMMAND realmheart_shell_command_tests)

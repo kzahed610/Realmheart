@@ -1,0 +1,592 @@
+{
+  "vulkan": {
+    "status": "ok",
+    "pid": 36778,
+    "report": "tests/results/renderer_matrix/vulkan/wallpaper_direct_20260712_111756.json",
+    "phases": {
+      "huge": {
+        "rss_kib": {
+          "median_delta": -5908.0,
+          "slope_per_sample": -413.3333333333333
+        },
+        "pss_kib": {
+          "median_delta": -5970.0,
+          "slope_per_sample": -422.72727272727275
+        },
+        "private_dirty_kib": {
+          "median_delta": -5972.0,
+          "slope_per_sample": -423.030303030303
+        },
+        "private_kib": {
+          "median_delta": -5972.0,
+          "slope_per_sample": -423.030303030303
+        },
+        "anonymous_kib": {
+          "median_delta": -5972.0,
+          "slope_per_sample": -423.030303030303
+        },
+        "heap_private_kib": {
+          "median_delta": -6044.0,
+          "slope_per_sample": -438.1575757575758
+        },
+        "glycin_frame_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "glycin_frame_private_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_total_bytes": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "drm_resident_system_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.09696969696969697
+        },
+        "fd_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "thread_count": {
+          "median_delta": -1.0,
+          "slope_per_sample": -0.15151515151515152
+        }
+      },
+      "small": {
+        "rss_kib": {
+          "median_delta": 224.0,
+          "slope_per_sample": -44.72727272727273
+        },
+        "pss_kib": {
+          "median_delta": 162.0,
+          "slope_per_sample": -54.121212121212125
+        },
+        "private_dirty_kib": {
+          "median_delta": 160.0,
+          "slope_per_sample": -54.42424242424242
+        },
+        "private_kib": {
+          "median_delta": 160.0,
+          "slope_per_sample": -54.42424242424242
+        },
+        "anonymous_kib": {
+          "median_delta": 160.0,
+          "slope_per_sample": -54.42424242424242
+        },
+        "heap_private_kib": {
+          "median_delta": 24.0,
+          "slope_per_sample": -72.31515151515151
+        },
+        "glycin_frame_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "glycin_frame_private_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_total_bytes": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "drm_resident_system_kib": {
+          "median_delta": 6088.0,
+          "slope_per_sample": 590.3515151515152
+        },
+        "fd_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "thread_count": {
+          "median_delta": -1.0,
+          "slope_per_sample": -0.15151515151515152
+        }
+      }
+    },
+    "final_metrics": {
+      "rss_kib": 94416,
+      "pss_kib": 60860,
+      "private_clean_kib": 19660,
+      "private_dirty_kib": 31656,
+      "private_kib": 51316,
+      "anonymous_kib": 31656,
+      "swap_kib": 0,
+      "fd_count": 62,
+      "thread_count": 21,
+      "dma_buf_count": 12,
+      "dma_buf_total_bytes": 35274752,
+      "dma_buf_sizes": [
+        385024,
+        385024,
+        385024,
+        385024,
+        40960,
+        40960,
+        40960,
+        40960,
+        8392704,
+        8392704,
+        8392704,
+        8392704
+      ],
+      "dma_buf_inodes": [
+        3471,
+        3472,
+        3473,
+        3474,
+        3475,
+        3476,
+        3477,
+        3478,
+        3479,
+        3480,
+        3481,
+        3482
+      ],
+      "drm_total_system_kib": 96112,
+      "drm_resident_system_kib": 96112,
+      "heap_rss_kib": 24848,
+      "heap_private_kib": 24848,
+      "anonymous_rss_kib": 28452,
+      "anonymous_private_kib": 28452,
+      "glycin_frame_count": 0,
+      "glycin_frame_rss_kib": 0,
+      "glycin_frame_private_kib": 0,
+      "graphics_rss_kib": 11400,
+      "graphics_private_kib": 1304
+    }
+  },
+  "ngl": {
+    "status": "ok",
+    "pid": 37048,
+    "report": "tests/results/renderer_matrix/ngl/wallpaper_direct_20260712_111810.json",
+    "phases": {
+      "huge": {
+        "rss_kib": {
+          "median_delta": 92.0,
+          "slope_per_sample": 16.266666666666666
+        },
+        "pss_kib": {
+          "median_delta": 49.0,
+          "slope_per_sample": 10.793939393939393
+        },
+        "private_dirty_kib": {
+          "median_delta": 28.0,
+          "slope_per_sample": 8.121212121212121
+        },
+        "private_kib": {
+          "median_delta": 28.0,
+          "slope_per_sample": 8.121212121212121
+        },
+        "anonymous_kib": {
+          "median_delta": 28.0,
+          "slope_per_sample": 8.121212121212121
+        },
+        "heap_private_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "glycin_frame_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "glycin_frame_private_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_total_bytes": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "drm_resident_system_kib": {
+          "median_delta": 1024.0,
+          "slope_per_sample": 375.46666666666664
+        },
+        "fd_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "thread_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        }
+      },
+      "small": {
+        "rss_kib": {
+          "median_delta": 160.0,
+          "slope_per_sample": 19.345454545454544
+        },
+        "pss_kib": {
+          "median_delta": 117.0,
+          "slope_per_sample": 13.872727272727273
+        },
+        "private_dirty_kib": {
+          "median_delta": 96.0,
+          "slope_per_sample": 11.2
+        },
+        "private_kib": {
+          "median_delta": 96.0,
+          "slope_per_sample": 11.2
+        },
+        "anonymous_kib": {
+          "median_delta": 96.0,
+          "slope_per_sample": 11.2
+        },
+        "heap_private_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "glycin_frame_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "glycin_frame_private_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_total_bytes": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "drm_resident_system_kib": {
+          "median_delta": 896.0,
+          "slope_per_sample": 393.6
+        },
+        "fd_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": -0.04242424242424243
+        },
+        "thread_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        }
+      }
+    },
+    "final_metrics": {
+      "rss_kib": 311296,
+      "pss_kib": 177573,
+      "private_clean_kib": 21232,
+      "private_dirty_kib": 131052,
+      "private_kib": 152284,
+      "anonymous_kib": 131036,
+      "swap_kib": 0,
+      "fd_count": 21,
+      "thread_count": 27,
+      "dma_buf_count": 0,
+      "dma_buf_total_bytes": 0,
+      "dma_buf_sizes": [],
+      "dma_buf_inodes": [],
+      "drm_total_system_kib": 307616,
+      "drm_resident_system_kib": 307616,
+      "heap_rss_kib": 108808,
+      "heap_private_kib": 108808,
+      "anonymous_rss_kib": 124548,
+      "anonymous_private_kib": 124548,
+      "glycin_frame_count": 0,
+      "glycin_frame_rss_kib": 0,
+      "glycin_frame_private_kib": 0,
+      "graphics_rss_kib": 564,
+      "graphics_private_kib": 332
+    }
+  },
+  "gl": {
+    "status": "ok",
+    "pid": 37345,
+    "report": "tests/results/renderer_matrix/gl/wallpaper_direct_20260712_111822.json",
+    "phases": {
+      "huge": {
+        "rss_kib": {
+          "median_delta": 32.0,
+          "slope_per_sample": 5.13939393939394
+        },
+        "pss_kib": {
+          "median_delta": 32.0,
+          "slope_per_sample": 5.13939393939394
+        },
+        "private_dirty_kib": {
+          "median_delta": 32.0,
+          "slope_per_sample": 5.13939393939394
+        },
+        "private_kib": {
+          "median_delta": 32.0,
+          "slope_per_sample": 5.13939393939394
+        },
+        "anonymous_kib": {
+          "median_delta": 32.0,
+          "slope_per_sample": 5.13939393939394
+        },
+        "heap_private_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "glycin_frame_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "glycin_frame_private_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_total_bytes": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "drm_resident_system_kib": {
+          "median_delta": 2096.0,
+          "slope_per_sample": 354.42424242424244
+        },
+        "fd_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "thread_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        }
+      },
+      "small": {
+        "rss_kib": {
+          "median_delta": 32.0,
+          "slope_per_sample": -21.381818181818183
+        },
+        "pss_kib": {
+          "median_delta": 32.0,
+          "slope_per_sample": -21.381818181818183
+        },
+        "private_dirty_kib": {
+          "median_delta": 32.0,
+          "slope_per_sample": -21.381818181818183
+        },
+        "private_kib": {
+          "median_delta": 32.0,
+          "slope_per_sample": -21.381818181818183
+        },
+        "anonymous_kib": {
+          "median_delta": 32.0,
+          "slope_per_sample": -21.381818181818183
+        },
+        "heap_private_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": -27.70909090909091
+        },
+        "glycin_frame_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "glycin_frame_private_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_total_bytes": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "drm_resident_system_kib": {
+          "median_delta": 3856.0,
+          "slope_per_sample": 460.7030303030303
+        },
+        "fd_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "thread_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        }
+      }
+    },
+    "final_metrics": {
+      "rss_kib": 226388,
+      "pss_kib": 92869,
+      "private_clean_kib": 21256,
+      "private_dirty_kib": 46312,
+      "private_kib": 67568,
+      "anonymous_kib": 46296,
+      "swap_kib": 0,
+      "fd_count": 21,
+      "thread_count": 25,
+      "dma_buf_count": 0,
+      "dma_buf_total_bytes": 0,
+      "dma_buf_sizes": [],
+      "dma_buf_inodes": [],
+      "drm_total_system_kib": 306176,
+      "drm_resident_system_kib": 305728,
+      "heap_rss_kib": 32048,
+      "heap_private_kib": 32048,
+      "anonymous_rss_kib": 39808,
+      "anonymous_private_kib": 39808,
+      "glycin_frame_count": 0,
+      "glycin_frame_rss_kib": 0,
+      "glycin_frame_private_kib": 0,
+      "graphics_rss_kib": 568,
+      "graphics_private_kib": 332
+    }
+  },
+  "cairo": {
+    "status": "ok",
+    "pid": 37636,
+    "report": "tests/results/renderer_matrix/cairo/wallpaper_direct_20260712_111835.json",
+    "phases": {
+      "huge": {
+        "rss_kib": {
+          "median_delta": 76.0,
+          "slope_per_sample": 13.139393939393939
+        },
+        "pss_kib": {
+          "median_delta": 76.0,
+          "slope_per_sample": 13.139393939393939
+        },
+        "private_dirty_kib": {
+          "median_delta": 76.0,
+          "slope_per_sample": 13.139393939393939
+        },
+        "private_kib": {
+          "median_delta": 76.0,
+          "slope_per_sample": 13.139393939393939
+        },
+        "anonymous_kib": {
+          "median_delta": 76.0,
+          "slope_per_sample": 13.139393939393939
+        },
+        "heap_private_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "glycin_frame_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "glycin_frame_private_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_total_bytes": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "drm_resident_system_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "fd_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": -0.01818181818181818
+        },
+        "thread_count": {
+          "median_delta": 1.0,
+          "slope_per_sample": 0.09090909090909091
+        }
+      },
+      "small": {
+        "rss_kib": {
+          "median_delta": 128.0,
+          "slope_per_sample": 22.44848484848485
+        },
+        "pss_kib": {
+          "median_delta": 128.0,
+          "slope_per_sample": 19.066666666666666
+        },
+        "private_dirty_kib": {
+          "median_delta": 128.0,
+          "slope_per_sample": 18.957575757575757
+        },
+        "private_kib": {
+          "median_delta": 128.0,
+          "slope_per_sample": 18.957575757575757
+        },
+        "anonymous_kib": {
+          "median_delta": 128.0,
+          "slope_per_sample": 18.957575757575757
+        },
+        "heap_private_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "glycin_frame_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "glycin_frame_private_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "dma_buf_total_bytes": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "drm_resident_system_kib": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "fd_count": {
+          "median_delta": 0.0,
+          "slope_per_sample": 0.0
+        },
+        "thread_count": {
+          "median_delta": 1.0,
+          "slope_per_sample": 0.06666666666666667
+        }
+      }
+    },
+    "final_metrics": {
+      "rss_kib": 87160,
+      "pss_kib": 55594,
+      "private_clean_kib": 16824,
+      "private_dirty_kib": 30400,
+      "private_kib": 47224,
+      "anonymous_kib": 30400,
+      "swap_kib": 0,
+      "fd_count": 17,
+      "thread_count": 24,
+      "dma_buf_count": 0,
+      "dma_buf_total_bytes": 0,
+      "dma_buf_sizes": [],
+      "dma_buf_inodes": [],
+      "drm_total_system_kib": 0,
+      "drm_resident_system_kib": 0,
+      "heap_rss_kib": 25376,
+      "heap_private_kib": 25376,
+      "anonymous_rss_kib": 27768,
+      "anonymous_private_kib": 27768,
+      "glycin_frame_count": 0,
+      "glycin_frame_rss_kib": 0,
+      "glycin_frame_private_kib": 0,
+      "graphics_rss_kib": 404,
+      "graphics_private_kib": 316
+    }
+  }
+}

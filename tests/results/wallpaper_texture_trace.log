@@ -1,0 +1,108 @@
+Jul 12 11:14:30 CachyZahed systemd[648]: Stopping Realmheart desktop shell...
+Jul 12 11:14:30 CachyZahed systemd[648]: Stopped Realmheart desktop shell.
+Jul 12 11:14:30 CachyZahed systemd[648]: realmheart.service: Consumed 6.234s CPU time over 4min 5.676s wall clock time, 115.1M memory peak.
+Jul 12 11:14:30 CachyZahed systemd[648]: Started Realmheart desktop shell.
+Jul 12 11:14:31 CachyZahed realmheart[35668]: Cannot get portal org.freedesktop.host.portal.Registry version: GDBus.Error:org.freedesktop.DBus.Error.NameHasNoOwner: Could not activate remote peer 'org.freedesktop.portal.Desktop': startup job failed
+Jul 12 11:14:31 CachyZahed realmheart[35668]: Cannot get portal org.freedesktop.portal.Settings version: GDBus.Error:org.freedesktop.DBus.Error.NameHasNoOwner: Could not activate remote peer 'org.freedesktop.portal.Desktop': startup job failed
+Jul 12 11:14:31 CachyZahed realmheart[35668]: Cannot get portal org.freedesktop.portal.Inhibit version: GDBus.Error:org.freedesktop.DBus.Error.NameHasNoOwner: Could not activate remote peer 'org.freedesktop.portal.Desktop': startup job failed
+Jul 12 11:14:31 CachyZahed realmheart[35668]: Theme parser error: gtk.css:312:16-28: Unknown name of pseudo-class
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] decode seq=1 source=310x698 rowstride=930
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=final-pixbuf seq=1 ptr=0x560350273fd0
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] final seq=1 size=310x698 rowstride=930
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=texture seq=1 ptr=0x560350d1ade0
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] decode seq=2 source=310x698 rowstride=930
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=final-pixbuf seq=2 ptr=0x560350d01e40
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] final seq=2 size=310x698 rowstride=930
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=texture seq=2 ptr=0x560350d02690
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] unref-previous seq=2 ptr=0x560350d1ade0
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=final-pixbuf seq=1 ptr=0x560350273fd0
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=texture seq=1 ptr=0x560350d1ade0
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] decode seq=3 source=3840x2160 rowstride=11520
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=source-pixbuf seq=3 ptr=0x5603512dad60
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=source-pixbuf seq=3 ptr=0x5603512dad60
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=final-pixbuf seq=3 ptr=0x5603512dc220
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] final seq=3 size=1920x1080 rowstride=5760
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=texture seq=3 ptr=0x5603502e8870
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] unref-previous seq=3 ptr=0x560350d02690
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=final-pixbuf seq=2 ptr=0x560350d01e40
+Jul 12 11:14:33 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=texture seq=2 ptr=0x560350d02690
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] decode seq=4 source=310x698 rowstride=930
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=final-pixbuf seq=4 ptr=0x5603512e5560
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] final seq=4 size=310x698 rowstride=930
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=texture seq=4 ptr=0x5603503186f0
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] unref-previous seq=4 ptr=0x5603502e8870
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=final-pixbuf seq=3 ptr=0x5603512dc220
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=texture seq=3 ptr=0x5603502e8870
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] decode seq=5 source=3840x2160 rowstride=11520
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=source-pixbuf seq=5 ptr=0x56035026e690
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=source-pixbuf seq=5 ptr=0x56035026e690
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=final-pixbuf seq=5 ptr=0x7f45b8005e20
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] final seq=5 size=1920x1080 rowstride=5760
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=texture seq=5 ptr=0x560350d02010
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] unref-previous seq=5 ptr=0x5603503186f0
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=final-pixbuf seq=4 ptr=0x5603512e5560
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=texture seq=4 ptr=0x5603503186f0
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] decode seq=6 source=310x698 rowstride=930
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=final-pixbuf seq=6 ptr=0x560350fbae50
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] final seq=6 size=310x698 rowstride=930
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=texture seq=6 ptr=0x56035011ab40
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] unref-previous seq=6 ptr=0x560350d02010
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=final-pixbuf seq=5 ptr=0x7f45b8005e20
+Jul 12 11:14:34 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=texture seq=5 ptr=0x560350d02010
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] decode seq=7 source=3840x2160 rowstride=11520
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=source-pixbuf seq=7 ptr=0x7f45b00044f0
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=source-pixbuf seq=7 ptr=0x7f45b00044f0
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=final-pixbuf seq=7 ptr=0x5603512e9670
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] final seq=7 size=1920x1080 rowstride=5760
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=texture seq=7 ptr=0x560350d02690
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] unref-previous seq=7 ptr=0x56035011ab40
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=final-pixbuf seq=6 ptr=0x560350fbae50
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=texture seq=6 ptr=0x56035011ab40
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] decode seq=8 source=310x698 rowstride=930
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=final-pixbuf seq=8 ptr=0x7f45b0005ac0
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] final seq=8 size=310x698 rowstride=930
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=texture seq=8 ptr=0x56035025a4f0
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] unref-previous seq=8 ptr=0x560350d02690
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=final-pixbuf seq=7 ptr=0x5603512e9670
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=texture seq=7 ptr=0x560350d02690
+Jul 12 11:14:35 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] decode seq=9 source=3840x2160 rowstride=11520
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=source-pixbuf seq=9 ptr=0x7f45b0005e50
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=source-pixbuf seq=9 ptr=0x7f45b0005e50
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=final-pixbuf seq=9 ptr=0x7f45b0005d70
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] final seq=9 size=1920x1080 rowstride=5760
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=texture seq=9 ptr=0x5603503186f0
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] unref-previous seq=9 ptr=0x56035025a4f0
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=final-pixbuf seq=8 ptr=0x7f45b0005ac0
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=texture seq=8 ptr=0x56035025a4f0
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] decode seq=10 source=310x698 rowstride=930
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=final-pixbuf seq=10 ptr=0x7f45b00060e0
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] final seq=10 size=310x698 rowstride=930
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=texture seq=10 ptr=0x5603501ce5f0
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] unref-previous seq=10 ptr=0x5603503186f0
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=final-pixbuf seq=9 ptr=0x7f45b0005d70
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=texture seq=9 ptr=0x5603503186f0
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] decode seq=11 source=3840x2160 rowstride=11520
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=source-pixbuf seq=11 ptr=0x7f45b00044f0
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=source-pixbuf seq=11 ptr=0x7f45b00044f0
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=final-pixbuf seq=11 ptr=0x5603512e6990
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] final seq=11 size=1920x1080 rowstride=5760
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=texture seq=11 ptr=0x560351044fa0
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] unref-previous seq=11 ptr=0x5603501ce5f0
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=final-pixbuf seq=10 ptr=0x7f45b00060e0
+Jul 12 11:14:36 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=texture seq=10 ptr=0x5603501ce5f0
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] decode seq=12 source=310x698 rowstride=930
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=final-pixbuf seq=12 ptr=0x7f45b0001cd0
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] final seq=12 size=310x698 rowstride=930
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=texture seq=12 ptr=0x560350d02690
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] unref-previous seq=12 ptr=0x560351044fa0
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=final-pixbuf seq=11 ptr=0x5603512e6990
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=texture seq=11 ptr=0x560351044fa0
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] decode seq=13 source=3840x2160 rowstride=11520
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=source-pixbuf seq=13 ptr=0x7f45b0006440
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=source-pixbuf seq=13 ptr=0x7f45b0006440
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=final-pixbuf seq=13 ptr=0x7f45b0006520
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] final seq=13 size=1920x1080 rowstride=5760
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] create kind=texture seq=13 ptr=0x560350fec020
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] unref-previous seq=13 ptr=0x560350d02690
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=final-pixbuf seq=12 ptr=0x7f45b0001cd0
+Jul 12 11:14:37 CachyZahed realmheart[35668]: [RH-WALLPAPER-TRACE] destroy kind=texture seq=12 ptr=0x560350d02690

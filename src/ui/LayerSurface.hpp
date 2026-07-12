@@ -3,6 +3,7 @@
 #include <gtk/gtk.h>
 
 #include <string>
+#include <string_view>
 
 namespace realmheart::ui {
 
@@ -35,6 +36,7 @@ struct LayerSurfaceSpec {
 };
 
 LayerSurfaceSpec make_bar_surface_spec(int width);
+LayerSurfaceSpec make_wallpaper_surface_spec();
 LayerSurfaceSpec make_layer_surface_spec(std::string_view ns, LayerSurfaceLevel level, LayerKeyboardMode keyboard);
 LayerSurfaceSpec make_test_surface_spec();
 void apply_layer_surface(GtkWindow* window, const LayerSurfaceSpec& spec);

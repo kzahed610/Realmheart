@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Command.hpp"
+#include "services/WallpaperService.hpp"
 
 #include <filesystem>
 #include <memory>
@@ -33,6 +34,7 @@ public:
         std::filesystem::path recorder_pid_path = {},
         std::filesystem::path proc_root = "/proc"
     );
+    ~UtilityManager() = default;
 
     bool take_screenshot_full(const std::string& path);
     bool take_screenshot_area(const std::string& path);
@@ -42,6 +44,7 @@ public:
     bool set_wallpaper(const std::string& path);
     bool choose_wallpaper();
     bool generate_colors(const std::string& path);
+    std::string load_wallpaper_path();
 
     bool start_recording(const std::string& path);
     bool stop_recording();
@@ -50,11 +53,13 @@ public:
     std::string paste_from_clipboard();
 
     bool launch_wofi();
+    services::WallpaperService* get_wallpaper_service() { return wallpaper_service_.get(); }
 
 private:
     std::unique_ptr<IUtilityExecutor> executor_;
     std::filesystem::path recorder_pid_path_;
     std::filesystem::path proc_root_;
+    std::unique_ptr<realmheart::services::WallpaperService> wallpaper_service_ = std::make_unique<realmheart::services::WallpaperService>();
 
     bool recorder_identity_matches(int pid, const std::string& expected_start_time) const;
 };

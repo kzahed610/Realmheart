@@ -1,0 +1,123 @@
+{
+  "binary": {
+    "path": "/home/zahed/.local/bin/realmheart",
+    "sha256": "6ca1792ae451db04e71e736be7fa79e387ff7f91f3084c13214c900728d34d17",
+    "inode": 6273018,
+    "size_bytes": 1740640,
+    "build_id": "47f39cdf762398b44542139473c7489ed3241f26"
+  },
+  "pid": 31985,
+  "iterations": 20,
+  "warmup": 4,
+  "sample_count": 20,
+  "phases": {
+    "picker-large": {
+      "rss_kib": {
+        "median_delta": 340.0,
+        "slope_per_sample": 57.86666666666667
+      },
+      "pss_kib": {
+        "median_delta": 532.0,
+        "slope_per_sample": 324.72121212121215
+      },
+      "private_dirty_kib": {
+        "median_delta": 532.0,
+        "slope_per_sample": 591.9030303030303
+      },
+      "private_kib": {
+        "median_delta": 532.0,
+        "slope_per_sample": 591.9030303030303
+      },
+      "anonymous_kib": {
+        "median_delta": 340.0,
+        "slope_per_sample": 57.86666666666667
+      },
+      "heap_private_kib": {
+        "median_delta": 176.0,
+        "slope_per_sample": 27.854545454545455
+      },
+      "glycin_frame_count": {
+        "median_delta": 0.0,
+        "slope_per_sample": 0.0
+      },
+      "glycin_frame_private_kib": {
+        "median_delta": 0.0,
+        "slope_per_sample": 0.0
+      },
+      "dma_buf_count": {
+        "median_delta": 0.0,
+        "slope_per_sample": 0.0
+      },
+      "dma_buf_total_bytes": {
+        "median_delta": 0.0,
+        "slope_per_sample": 0.0
+      },
+      "drm_resident_system_kib": {
+        "median_delta": -2052.0,
+        "slope_per_sample": -286.03636363636366
+      },
+      "fd_count": {
+        "median_delta": 0.0,
+        "slope_per_sample": -0.04242424242424243
+      },
+      "thread_count": {
+        "median_delta": 0.0,
+        "slope_per_sample": -0.006060606060606061
+      }
+    },
+    "picker-small": {
+      "rss_kib": {
+        "median_delta": 464.0,
+        "slope_per_sample": 72.94545454545455
+      },
+      "pss_kib": {
+        "median_delta": 464.0,
+        "slope_per_sample": 72.94545454545455
+      },
+      "private_dirty_kib": {
+        "median_delta": 464.0,
+        "slope_per_sample": 72.94545454545455
+      },
+      "private_kib": {
+        "median_delta": 464.0,
+        "slope_per_sample": 72.94545454545455
+      },
+      "anonymous_kib": {
+        "median_delta": 464.0,
+        "slope_per_sample": 72.94545454545455
+      },
+      "heap_private_kib": {
+        "median_delta": 180.0,
+        "slope_per_sample": 38.23030303030303
+      },
+      "glycin_frame_count": {
+        "median_delta": 0.0,
+        "slope_per_sample": 0.0
+      },
+      "glycin_frame_private_kib": {
+        "median_delta": 0.0,
+        "slope_per_sample": 0.0
+      },
+      "dma_buf_count": {
+        "median_delta": 0.0,
+        "slope_per_sample": 0.0
+      },
+      "dma_buf_total_bytes": {
+        "median_delta": 0.0,
+        "slope_per_sample": 0.0
+      },
+      "drm_resident_system_kib": {
+        "median_delta": -2052.0,
+        "slope_per_sample": -150.88484848484848
+      },
+      "fd_count": {
+        "median_delta": 0.0,
+        "slope_per_sample": 0.0
+      },
+      "thread_count": {
+        "median_delta": 0.0,
+        "slope_per_sample": 0.01818181818181818
+      }
+    }
+  }
+}

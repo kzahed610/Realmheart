@@ -24,6 +24,8 @@ void parses_supported_shell_commands() {
             "stop-recording should parse");
     require(parse_shell_command("toggle-notes") == ShellCommand::ToggleNotes,
             "toggle-notes should parse");
+    require(parse_shell_command("set-wallpaper-path") == ShellCommand::SetWallpaperPath,
+            "set-wallpaper-path should parse");
     require(parse_shell_command("quit") == ShellCommand::Quit,
             "quit should parse");
 }
@@ -42,8 +44,22 @@ void maps_commands_to_stable_action_names() {
             "right sidebar action name should be stable");
     require(shell_action_name(ShellCommand::ToggleBar) == "bar-toggle",
             "bar action name should be stable");
+    require(shell_action_name(ShellCommand::SetWallpaperPath) == "set-wallpaper-path",
+            "direct wallpaper action name should be stable");
     require(shell_action_name(ShellCommand::Quit) == "quit",
             "quit action name should be stable");
+}
+
+void identifies_commands_that_require_arguments() {
+    using realmheart::core::ShellCommand;
+    using realmheart::core::shell_command_requires_argument;
+
+    require(shell_command_requires_argument(ShellCommand::SetWallpaperPath),
+            "set-wallpaper-path should require a path argument");
+    require(!shell_command_requires_argument(ShellCommand::SetWallpaper),
+            "interactive set-wallpaper should remain parameterless");
+    require(!shell_command_requires_argument(ShellCommand::ToggleBar),
+            "ordinary shell commands should remain parameterless");
 }
 
 } // namespace
@@ -53,6 +69,7 @@ int main() {
         parses_supported_shell_commands();
         rejects_unknown_shell_commands();
         maps_commands_to_stable_action_names();
+        identifies_commands_that_require_arguments();
     } catch (const std::exception& error) {
         std::cerr << "ShellCommandTests failed: " << error.what() << '\n';
         return 1;

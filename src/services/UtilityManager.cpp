@@ -63,15 +63,20 @@ bool UtilityManager::extract_text_from_area() {
 }
 
 bool UtilityManager::set_wallpaper(const std::string& path) {
-    return executor_->run_background({"/home/zahed/.config/realmheart/scripts/colors/switchwall.sh", "--image", path});
+    return wallpaper_service_->set_wallpaper(path);
 }
 
 bool UtilityManager::choose_wallpaper() {
-    return executor_->run_background({"/home/zahed/.config/realmheart/scripts/colors/switchwall.sh"});
+    return wallpaper_service_->choose_wallpaper();
 }
 
 bool UtilityManager::generate_colors(const std::string& /*path*/) {
-    return executor_->run_background({"/home/zahed/.config/realmheart/scripts/colors/switchwall.sh", "--noswitch"});
+    return wallpaper_service_->generate_colors();
+}
+
+std::string UtilityManager::load_wallpaper_path() {
+    auto path = wallpaper_service_->load_path();
+    return path ? path->string() : "";
 }
 
 bool UtilityManager::start_recording(const std::string& path) {

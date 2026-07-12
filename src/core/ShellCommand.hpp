@@ -19,6 +19,7 @@ enum class ShellCommand {
     StopRecording,
     ToggleNotes,
     SetWallpaper,
+    SetWallpaperPath,
     GenerateTheme,
     LaunchLauncher,
     Quit,
@@ -26,5 +27,6 @@ enum class ShellCommand {
 
 std::optional<ShellCommand> parse_shell_command(std::string_view name);
 std::string_view shell_action_name(ShellCommand command);
+bool shell_command_requires_argument(ShellCommand command);
 
 } // namespace realmheart::core

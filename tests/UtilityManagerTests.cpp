@@ -86,19 +86,19 @@ void test_launch_wofi() {
     std::cout << "test_launch_wofi PASSED\n";
 }
 
-void test_choose_wallpaper() {
+void test_choose_wallpaper_does_not_launch_legacy_script() {
     auto mock = std::make_unique<MockUtilityExecutor>();
     auto* mock_ptr = mock.get();
     realmheart::services::UtilityManager util(std::move(mock));
-    if (!util.choose_wallpaper()) { std::cerr << "Wallpaper picker failed\n"; exit(1); }
-    const std::vector<std::string> expected{
-        "/home/zahed/.config/realmheart/scripts/colors/switchwall.sh"
-    };
-    if (mock_ptr->background_calls.size() != 1 || mock_ptr->background_calls[0] != expected) {
-        std::cerr << "Wallpaper picker must invoke switchwall without a fake path\n";
+    if (util.choose_wallpaper()) {
+        std::cerr << "Native wallpaper picker is not integrated yet\n";
         exit(1);
     }
-    std::cout << "test_choose_wallpaper PASSED\n";
+    if (!mock_ptr->background_calls.empty() || !mock_ptr->capture_calls.empty()) {
+        std::cerr << "Wallpaper selection must not launch a legacy script\n";
+        exit(1);
+    }
+    std::cout << "test_choose_wallpaper_does_not_launch_legacy_script PASSED\n";
 }
 
 void test_recorder_uses_owned_pid() {
@@ -187,7 +187,7 @@ int main() {
     test_clipboard_copy();
     test_clipboard_paste();
     test_launch_wofi();
-    test_choose_wallpaper();
+    test_choose_wallpaper_does_not_launch_legacy_script();
     test_recorder_uses_owned_pid();
     test_recorder_rejects_stale_pid_file();
     std::cout << "All UtilityManager tests PASSED (MOCKED)\n";

@@ -19,7 +19,7 @@
 namespace {
 
 std::string get_supported_commands() {
-    std::string list = "sidebar-right-toggle, bar-toggle, osd-volume, osd-brightness, lock-session, logout-menu, screenshot-full, screenshot-area, extract-ocr, start-recording, stop-recording, toggle-notes, set-wallpaper, generate-theme, launch-launcher, quit";
+    std::string list = "sidebar-right-toggle, bar-toggle, osd-volume, osd-brightness, lock-session, logout-menu, screenshot-full, screenshot-area, extract-ocr, start-recording, stop-recording, toggle-notes, set-wallpaper, set-wallpaper-path, generate-theme, launch-launcher, quit";
     return list;
 }
 
@@ -123,8 +123,8 @@ int main(int argc, char** argv) {
     }
 
     if (command == "--command") {
-        if (argc != 3) {
-            std::cerr << "--command requires exactly one command name\n"
+        if (argc < 3) {
+            std::cerr << "--command requires at least one command name\n"
                       << "Supported: " << get_supported_commands() << "\n";
             return 2;
         }
@@ -136,7 +136,16 @@ int main(int argc, char** argv) {
             return 2;
         }
 
-        const auto result = realmheart::core::send_shell_command(*shell_command);
+        std::string_view shell_argument;
+        if (realmheart::core::shell_command_requires_argument(*shell_command)) {
+            if (argc < 4 || std::string_view(argv[3]).empty()) {
+                std::cerr << argv[2] << " requires an argument\n";
+                return 2;
+            }
+            shell_argument = argv[3];
+        }
+
+        const auto result = realmheart::core::send_shell_command(*shell_command, shell_argument);
         switch (result) {
         case realmheart::core::ShellControlResult::Delivered:
             return 0;
@@ -148,6 +157,9 @@ int main(int argc, char** argv) {
         case realmheart::core::ShellControlResult::ActionUnavailable:
             std::cerr << "Running Realmheart shell does not expose command: " << argv[2] << '\n';
             return 4;
+        case realmheart::core::ShellControlResult::InvalidArgument:
+            std::cerr << "Invalid or missing argument for command: " << argv[2] << '\n';
+            return 2;
         }
     }
 

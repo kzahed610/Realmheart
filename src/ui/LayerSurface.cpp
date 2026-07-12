@@ -40,6 +40,18 @@ LayerSurfaceSpec make_bar_surface_spec(int width) {
     return spec;
 }
 
+LayerSurfaceSpec make_wallpaper_surface_spec() {
+    LayerSurfaceSpec spec;
+    spec.surface_namespace = "realmheart-wallpaper";
+    spec.layer = LayerSurfaceLevel::Background;
+    spec.keyboard_mode = LayerKeyboardMode::None;
+    spec.anchor_left = true;
+    spec.anchor_right = true;
+    spec.anchor_top = true;
+    spec.anchor_bottom = true;
+    return spec;
+}
+
 LayerSurfaceSpec make_layer_surface_spec(std::string_view ns, LayerSurfaceLevel level, LayerKeyboardMode keyboard) {
     LayerSurfaceSpec spec;
     spec.surface_namespace = std::string(ns);

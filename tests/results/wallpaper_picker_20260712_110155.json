@@ -1,0 +1,69 @@
+{
+  "binary": {
+    "path": "/home/zahed/.local/bin/realmheart",
+    "sha256": "6ca1792ae451db04e71e736be7fa79e387ff7f91f3084c13214c900728d34d17",
+    "inode": 6273018,
+    "size_bytes": 1740640,
+    "build_id": "47f39cdf762398b44542139473c7489ed3241f26"
+  },
+  "pid": 29741,
+  "iterations": 20,
+  "warmup": 3,
+  "sample_count": 20,
+  "phases": {
+    "picker-small": {
+      "rss_kib": {
+        "median_delta": 75180.0,
+        "slope_per_sample": 4489.849624060151
+      },
+      "pss_kib": {
+        "median_delta": 75102.0,
+        "slope_per_sample": 4485.244360902256
+      },
+      "private_dirty_kib": {
+        "median_delta": 75092.0,
+        "slope_per_sample": 4484.562406015038
+      },
+      "private_kib": {
+        "median_delta": 75096.0,
+        "slope_per_sample": 4484.803007518798
+      },
+      "anonymous_kib": {
+        "median_delta": 75088.0,
+        "slope_per_sample": 4484.3518796992485
+      },
+      "heap_private_kib": {
+        "median_delta": 74416.0,
+        "slope_per_sample": 4444.219548872181
+      },
+      "glycin_frame_count": {
+        "median_delta": 0.0,
+        "slope_per_sample": 0.0
+      },
+      "glycin_frame_private_kib": {
+        "median_delta": 0.0,
+        "slope_per_sample": 0.0
+      },
+      "dma_buf_count": {
+        "median_delta": 68.0,
+        "slope_per_sample": 4.0
+      },
+      "dma_buf_total_bytes": {
+        "median_delta": 85770240.0,
+        "slope_per_sample": 5044473.455639098
+      },
+      "drm_resident_system_kib": {
+        "median_delta": 81976.0,
+        "slope_per_sample": 4801.6511278195485
+      },
+      "fd_count": {
+        "median_delta": 201.0,
+        "slope_per_sample": 11.741353383458646
+      },
+      "thread_count": {
+        "median_delta": -1.0,
+        "slope_per_sample": -0.07518796992481203
+      }
+    }
+  }
+}

@@ -1,5 +1,6 @@
 #include "ui/AssetResolver.hpp"
 #include "ui/LayerSurface.hpp"
+#include "ui/ImageFileFilters.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -37,6 +38,21 @@ void test_bar_surface_spec_is_reusable_and_reserves_its_width() {
             "bar keyboard access must remain on-demand");
 }
 
+void test_wallpaper_surface_spec_is_fullscreen_background_and_noninteractive() {
+    const auto spec = realmheart::ui::make_wallpaper_surface_spec();
+    require(spec.surface_namespace == "realmheart-wallpaper", "wallpaper namespace must remain stable");
+    require(spec.layer == realmheart::ui::LayerSurfaceLevel::Background,
+            "wallpaper must render on the background layer");
+    require(spec.keyboard_mode == realmheart::ui::LayerKeyboardMode::None,
+            "wallpaper must never request keyboard input");
+    require(spec.anchor_left && spec.anchor_right && spec.anchor_top && spec.anchor_bottom,
+            "wallpaper must fill the complete monitor");
+    require(spec.exclusive_zone == 0, "wallpaper must not reserve compositor space");
+    require(spec.margin_left == 0 && spec.margin_right == 0 &&
+            spec.margin_top == 0 && spec.margin_bottom == 0,
+            "wallpaper must not leave monitor-edge gaps");
+}
+
 void test_test_surface_spec_is_nonexclusive() {
     const auto spec = realmheart::ui::make_test_surface_spec();
     require(spec.surface_namespace == "realmheart-test-layer", "test namespace must remain stable");
@@ -45,12 +61,35 @@ void test_test_surface_spec_is_nonexclusive() {
     require(spec.exclusive_zone == 0, "test surface must not reserve compositor space");
 }
 
+void mark_destroyed(gpointer data, GObject* /*object*/) {
+    *static_cast<bool*>(data) = true;
+}
+
+void test_image_file_filter_model_owns_exactly_one_valid_filter() {
+    GListModel* filters = realmheart::ui::create_image_file_filters();
+    require(filters != nullptr, "image filter model must be created");
+    require(g_list_model_get_n_items(filters) == 1, "image filter model must contain one filter");
+
+    GObject* filter = G_OBJECT(g_list_model_get_item(filters, 0));
+    require(filter != nullptr && GTK_IS_FILE_FILTER(filter),
+            "image filter model item must be a GtkFileFilter");
+
+    bool destroyed = false;
+    g_object_weak_ref(filter, mark_destroyed, &destroyed);
+    g_object_unref(filter);
+    require(!destroyed, "filter must remain alive while its model owns it");
+    g_object_unref(filters);
+    require(destroyed, "filter must be released when its model is released");
+}
+
 } // namespace
 
 int main() {
     test_asset_resolver_accepts_known_icons_and_rejects_escape_paths();
     test_bar_surface_spec_is_reusable_and_reserves_its_width();
+    test_wallpaper_surface_spec_is_fullscreen_background_and_noninteractive();
     test_test_surface_spec_is_nonexclusive();
+    test_image_file_filter_model_owns_exactly_one_valid_filter();
     std::cout << "UI foundation tests passed\n";
     return 0;
 }

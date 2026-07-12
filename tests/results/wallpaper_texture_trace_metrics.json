@@ -1,0 +1,63 @@
+{
+  "timestamp": "2026-07-12T05:44:37.928180+00:00",
+  "pid": 35668,
+  "binary": {
+    "path": "/home/zahed/.local/bin/realmheart",
+    "sha256": "056002d03235898099e27307a1eb299e5f47e512b1ae811e2edcd20bb5ad8656",
+    "inode": 6274751,
+    "size_bytes": 1745656,
+    "build_id": "8b1b01903fbacb1dca689e388d58f4d6478d5c7e"
+  },
+  "metrics": {
+    "rss_kib": 93252,
+    "pss_kib": 59951,
+    "private_clean_kib": 19628,
+    "private_dirty_kib": 30808,
+    "private_kib": 50436,
+    "anonymous_kib": 30808,
+    "swap_kib": 0,
+    "fd_count": 62,
+    "thread_count": 22,
+    "dma_buf_count": 12,
+    "dma_buf_total_bytes": 35274752,
+    "dma_buf_sizes": [
+      385024,
+      385024,
+      385024,
+      385024,
+      40960,
+      40960,
+      40960,
+      40960,
+      8392704,
+      8392704,
+      8392704,
+      8392704
+    ],
+    "dma_buf_inodes": [
+      3379,
+      3380,
+      3381,
+      3382,
+      3383,
+      3384,
+      3385,
+      3386,
+      3387,
+      3388,
+      3389,
+      3390
+    ],
+    "drm_total_system_kib": 96112,
+    "drm_resident_system_kib": 96112,
+    "heap_rss_kib": 25052,
+    "heap_private_kib": 25052,
+    "anonymous_rss_kib": 27604,
+    "anonymous_private_kib": 27604,
+    "glycin_frame_count": 0,
+    "glycin_frame_rss_kib": 0,
+    "glycin_frame_private_kib": 0,
+    "graphics_rss_kib": 11392,
+    "graphics_private_kib": 1296
+  }
+}

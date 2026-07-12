@@ -1,0 +1,90 @@
+{
+  "creates": {
+    "final-pixbuf": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13
+    ],
+    "texture": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13
+    ],
+    "source-pixbuf": [
+      3,
+      5,
+      7,
+      9,
+      11,
+      13
+    ]
+  },
+  "destroys": {
+    "final-pixbuf": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "texture": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "source-pixbuf": [
+      3,
+      5,
+      7,
+      9,
+      11,
+      13
+    ]
+  },
+  "texture_created": 13,
+  "texture_destroyed_while_live": 12,
+  "current_texture_sequences": [
+    13
+  ],
+  "retained_final_pixbuf_sequences": [
+    13
+  ],
+  "undestroyed_source_pixbuf_sequences": [],
+  "bounded": true
+}
