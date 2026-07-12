@@ -10,6 +10,7 @@ class MockUtilityExecutor : public realmheart::services::IUtilityExecutor {
 public:
     std::vector<std::vector<std::string>> background_calls;
     std::vector<std::vector<std::string>> capture_calls;
+    std::vector<realmheart::core::CommandOptions> capture_options;
     realmheart::core::CommandResult next_capture_result;
     bool next_background_result = true;
 
@@ -17,8 +18,12 @@ public:
         background_calls.push_back(argv);
         return next_background_result;
     }
-    realmheart::core::CommandResult run_capture(const std::vector<std::string>& argv) override {
+    realmheart::core::CommandResult run_capture(
+        const std::vector<std::string>& argv,
+        const realmheart::core::CommandOptions& options = {}
+    ) override {
         capture_calls.push_back(argv);
+        capture_options.push_back(options);
         return next_capture_result;
     }
 };
@@ -180,6 +185,69 @@ void test_recorder_rejects_stale_pid_file() {
     std::cout << "test_recorder_rejects_stale_pid_file PASSED\n";
 }
 
+void test_generate_colors_uses_new_wallpaper_and_updates_theme() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-matugen-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto image = root / "purple wallpaper.png";
+    std::ofstream(image, std::ios::binary) << "fixture";
+
+    auto theme = std::make_shared<realmheart::services::ThemeService>();
+    auto mock = std::make_unique<MockUtilityExecutor>();
+    auto* mock_ptr = mock.get();
+    realmheart::core::CommandResult result;
+    result.status = realmheart::core::CommandStatus::Exited;
+    result.exit_code = 0;
+    result.output = R"json({
+        "colors": {
+            "dark": {
+                "primary": "#aa55ff",
+                "secondary": "#55aaff",
+                "tertiary": "#ff55aa",
+                "background": "#100b18",
+                "surface": "#1b1228",
+                "surface_container": "#2a1d3b",
+                "on_surface": "#f4eaff",
+                "on_surface_variant": "#cfbde0",
+                "outline": "#887799",
+                "error": "#ff6677"
+            }
+        }
+    })json";
+    mock->next_capture_result = result;
+
+    realmheart::services::UtilityManager util(theme, std::move(mock));
+    if (!util.generate_colors(image.string())) {
+        std::cerr << "Matugen palette generation failed\n";
+        exit(1);
+    }
+    if (mock_ptr->capture_calls.size() != 1) {
+        std::cerr << "Matugen should run exactly once\n";
+        exit(1);
+    }
+    const auto& command = mock_ptr->capture_calls.front();
+    const std::vector<std::string> expected{
+        "matugen", "image", image.string(), "--dry-run", "--json", "hex",
+        "--old-json-output", "--source-color-index", "0", "--quiet"
+    };
+    if (command != expected) {
+        std::cerr << "Matugen must be invoked directly with quiet JSON output and argv-safe path transport\n";
+        exit(1);
+    }
+    if (mock_ptr->capture_options.empty() ||
+        mock_ptr->capture_options.front().max_output_bytes < 128 * 1024) {
+        std::cerr << "Matugen capture limits were not configured\n";
+        exit(1);
+    }
+    if (theme->get_palette().get("primary") != "#aa55ff") {
+        std::cerr << "ThemeService did not receive the generated palette\n";
+        exit(1);
+    }
+
+    std::filesystem::remove_all(root);
+    std::cout << "test_generate_colors_uses_new_wallpaper_and_updates_theme PASSED\n";
+}
+
 int main() {
     test_screenshot_full();
     test_screenshot_area();
@@ -188,6 +256,7 @@ int main() {
     test_clipboard_paste();
     test_launch_wofi();
     test_choose_wallpaper_does_not_launch_legacy_script();
+    test_generate_colors_uses_new_wallpaper_and_updates_theme();
     test_recorder_uses_owned_pid();
     test_recorder_rejects_stale_pid_file();
     std::cout << "All UtilityManager tests PASSED (MOCKED)\n";

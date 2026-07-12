@@ -1,24 +1,57 @@
 #pragma once
 
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
-#include <functional>
-#include <vector>
-#include <memory>
+#include <utility>
 
 namespace realmheart::services {
 
 struct Palette {
     std::unordered_map<std::string, std::string> colors;
 
-    std::string get(const std::string& key, const std::string& fallback = "#000000") const {
-        auto it = colors.find(key);
-        return (it != colors.end()) ? it->second : fallback;
+    [[nodiscard]] std::string get(
+        const std::string& key,
+        const std::string& fallback = "#000000"
+    ) const {
+        const auto it = colors.find(key);
+        return it != colors.end() && !it->second.empty() ? it->second : fallback;
     }
 };
 
 class ThemeService {
+private:
+    struct SubscriberRegistry;
+
 public:
+    using ThemeChangedCallback = std::function<void(const Palette&)>;
+
+    class Subscription {
+    public:
+        Subscription() = default;
+        ~Subscription();
+
+        Subscription(const Subscription&) = delete;
+        Subscription& operator=(const Subscription&) = delete;
+
+        Subscription(Subscription&& other) noexcept;
+        Subscription& operator=(Subscription&& other) noexcept;
+
+        void reset();
+        [[nodiscard]] explicit operator bool() const noexcept { return id_ != 0; }
+
+    private:
+        friend class ThemeService;
+        Subscription(std::weak_ptr<SubscriberRegistry> registry, std::size_t id)
+            : registry_(std::move(registry)), id_(id) {}
+
+        std::weak_ptr<SubscriberRegistry> registry_;
+        std::size_t id_ = 0;
+    };
+
     ThemeService();
     ~ThemeService() = default;
 
@@ -26,16 +59,19 @@ public:
     ThemeService& operator=(const ThemeService&) = delete;
 
     void update_palette(Palette new_palette);
-    Palette get_palette() const { return m_palette; }
-    const Palette& active_palette() const { return m_palette; }
-
-    // Callback system for UI components to react to theme changes
-    using ThemeChangedCallback = std::function<void(const Palette&)>;
-    void subscribe(ThemeChangedCallback callback);
+    [[nodiscard]] Palette get_palette() const;
+    [[nodiscard]] Subscription subscribe(ThemeChangedCallback callback);
 
 private:
-    Palette m_palette;
-    std::vector<ThemeChangedCallback> m_subscribers;
+    struct SubscriberRegistry {
+        std::mutex mutex;
+        std::size_t next_id = 1;
+        std::unordered_map<std::size_t, ThemeChangedCallback> callbacks;
+    };
+
+    mutable std::mutex palette_mutex_;
+    Palette palette_;
+    std::shared_ptr<SubscriberRegistry> subscribers_ = std::make_shared<SubscriberRegistry>();
 };
 
 } // namespace realmheart::services

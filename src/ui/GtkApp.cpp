@@ -2,6 +2,11 @@
 #include "ui/LayerSurface.hpp"
 #include "ui/bar/VerticalBar.hpp"
 #include "ui/sidebar/RightSidebar.hpp"
+#include "ui/ThemeStyles.hpp"
+#include "services/BatteryService.hpp"
+#include "services/MediaService.hpp"
+#include "services/ThemeService.hpp"
+#include "services/Notifications.hpp"
 
 #include <gtk/gtk.h>
 
@@ -99,28 +104,79 @@ void activate_test_layer(GtkApplication* app, gpointer data) {
     gtk_window_present(GTK_WINDOW(window));
 }
 
+struct TimedBarController {
+    services::NotificationHistory notification_history;
+    services::BatteryService battery;
+    services::MediaService media;
+    std::shared_ptr<services::ThemeService> theme_service =
+        std::make_shared<services::ThemeService>();
+    std::unique_ptr<ThemeStyles> theme_styles;
+    std::unique_ptr<bar::VerticalBar> bar;
+};
+
+struct TimedSidebarController {
+    services::NotificationHistory notification_history;
+    std::shared_ptr<services::ThemeService> theme_service =
+        std::make_shared<services::ThemeService>();
+    std::unique_ptr<ThemeStyles> theme_styles;
+    std::unique_ptr<sidebar::RightSidebar> sidebar;
+};
+
 void activate_bar(GtkApplication* app, gpointer data) {
     auto* state = static_cast<TimedLayerState*>(data);
     schedule_application_quit(state);
-    static services::NotificationHistory notification_history;
-    static auto theme_service = std::make_shared<services::ThemeService>();
-    bar::present_vertical_bar(app, notification_history, theme_service, [] {});
+
+    auto* controller = static_cast<TimedBarController*>(
+        g_object_get_data(G_OBJECT(app), "realmheart-timed-bar-controller")
+    );
+    if (controller == nullptr) {
+        auto owned = std::make_unique<TimedBarController>();
+        owned->theme_styles = std::make_unique<ThemeStyles>(owned->theme_service);
+        owned->bar = std::make_unique<bar::VerticalBar>(
+            app,
+            owned->notification_history,
+            owned->battery,
+            owned->media,
+            [] {}
+        );
+        controller = owned.release();
+        g_object_set_data_full(
+            G_OBJECT(app),
+            "realmheart-timed-bar-controller",
+            controller,
+            +[](gpointer value) { delete static_cast<TimedBarController*>(value); }
+        );
+    }
+
+    attach_escape_controller(controller->bar->get_window(), app);
+    gtk_window_present(GTK_WINDOW(controller->bar->get_window()));
 }
 
 void activate_sidebar(GtkApplication* app, gpointer data) {
     auto* state = static_cast<TimedLayerState*>(data);
     schedule_application_quit(state);
-    static services::NotificationHistory notification_history;
-    static auto theme_service = std::make_shared<services::ThemeService>();
-    auto* controller = new sidebar::RightSidebar(app, notification_history, theme_service);
-    GtkWidget* window = controller->get_window();
-    g_object_set_data_full(
-        G_OBJECT(window),
-        "realmheart-sidebar-controller",
-        controller,
-        +[](gpointer value) { delete static_cast<sidebar::RightSidebar*>(value); }
+
+    auto* controller = static_cast<TimedSidebarController*>(
+        g_object_get_data(G_OBJECT(app), "realmheart-timed-sidebar-controller")
     );
-    gtk_window_present(GTK_WINDOW(window));
+    if (controller == nullptr) {
+        auto owned = std::make_unique<TimedSidebarController>();
+        owned->theme_styles = std::make_unique<ThemeStyles>(owned->theme_service);
+        owned->sidebar = std::make_unique<sidebar::RightSidebar>(
+            app,
+            owned->notification_history
+        );
+        controller = owned.release();
+        g_object_set_data_full(
+            G_OBJECT(app),
+            "realmheart-timed-sidebar-controller",
+            controller,
+            +[](gpointer value) { delete static_cast<TimedSidebarController*>(value); }
+        );
+    }
+
+    attach_escape_controller(controller->sidebar->get_window(), app);
+    gtk_window_present(GTK_WINDOW(controller->sidebar->get_window()));
 }
 
 // --- Core Runner ---

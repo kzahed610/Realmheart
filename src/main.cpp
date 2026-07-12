@@ -11,16 +11,23 @@
 #include "ui/ShellApp.hpp"
 #include "ui/wallpaper/WallpaperBackend.hpp"
 
+#include <cerrno>
 #include <charconv>
+#include <chrono>
+#include <csignal>
+#include <cstring>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <unistd.h>
 
 namespace {
 
 std::string get_supported_commands() {
-    std::string list = "sidebar-right-toggle, bar-toggle, osd-volume, osd-brightness, lock-session, logout-menu, screenshot-full, screenshot-area, extract-ocr, start-recording, stop-recording, toggle-notes, set-wallpaper, set-wallpaper-path, set-wallpaper-backend, generate-theme, launch-launcher, quit";
+    std::string list = "sidebar-right-toggle, bar-toggle, osd-volume, osd-brightness, lock-session, logout-menu, screenshot-full, screenshot-area, extract-ocr, start-recording, stop-recording, toggle-notes, set-wallpaper, set-wallpaper-path, set-wallpaper-backend, generate-theme, launch-launcher, restart, quit";
     return list;
 }
 
@@ -78,6 +85,62 @@ int parse_timeout_option(int argc, char** argv, int& timeout_seconds, std::strin
     return 0;
 }
 
+std::string current_executable_path() {
+    std::error_code error;
+    const auto path = std::filesystem::read_symlink("/proc/self/exe", error);
+    return error ? std::string{} : path.string();
+}
+
+int run_restart_helper(int argc, char** argv) {
+    if (argc != 4) {
+        std::cerr << "Invalid internal restart-helper invocation\n";
+        return 2;
+    }
+
+    int old_pid_value = 0;
+    if (!parse_positive_int(argv[2], old_pid_value)) {
+        std::cerr << "Invalid restart-helper PID\n";
+        return 2;
+    }
+
+    const auto backend = realmheart::ui::wallpaper::parse_wallpaper_backend_type(argv[3]);
+    if (!backend) {
+        std::cerr << "Invalid restart-helper wallpaper backend\n";
+        return 2;
+    }
+
+    const std::string executable = current_executable_path();
+    if (executable.empty()) {
+        std::cerr << "Unable to resolve Realmheart executable for restart\n";
+        return 1;
+    }
+
+    const pid_t old_pid = static_cast<pid_t>(old_pid_value);
+    constexpr auto timeout = std::chrono::seconds(10);
+    constexpr auto interval = std::chrono::milliseconds(25);
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (::kill(old_pid, 0) != 0 && errno == ESRCH) break;
+        std::this_thread::sleep_for(interval);
+    }
+
+    const std::string backend_name(
+        realmheart::ui::wallpaper::wallpaper_backend_type_name(*backend)
+    );
+    ::execl(
+        executable.c_str(),
+        executable.c_str(),
+        "--shell",
+        "--wallpaper-backend",
+        backend_name.c_str(),
+        static_cast<char*>(nullptr)
+    );
+
+    std::cerr << "Unable to relaunch Realmheart: " << std::strerror(errno) << '\n';
+    return 1;
+}
+
 int doctor() {
     std::cout << realmheart::core::format_dependency_report(realmheart::core::collect_dependency_checks()) << '\n';
 
@@ -108,6 +171,10 @@ int doctor() {
 
 int main(int argc, char** argv) {
     const std::string command = argc > 1 ? argv[1] : "--help";
+
+    if (command == "--restart-helper") {
+        return run_restart_helper(argc, argv);
+    }
 
     if (command == "--help" || command == "-h") {
         print_usage();

@@ -1,51 +1,62 @@
 #include "ui/components/ToggleWidget.hpp"
-#include <gtk/gtk.h>
-#include <thread>
-#include <mutex>
-#include <condition_variable>
-#include <iostream>
+
+#include <exception>
+#include <utility>
 
 namespace realmheart::ui::components {
 
-ToggleWidget::ToggleWidget(const std::string& label, bool initial, std::function<bool(bool)> on_toggle)
-    : worker_state_(std::make_shared<WorkerState>()) {
-    
+ToggleWidget::ToggleWidget(
+    std::string label,
+    bool initial,
+    std::function<bool(bool)> on_toggle
+) : worker_state_(std::make_shared<WorkerState>()) {
     worker_state_->on_toggle = std::move(on_toggle);
 
     box_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_widget_add_css_class(box_, "realmheart-module-row");
     gtk_widget_set_margin_start(box_, 12);
     gtk_widget_set_margin_end(box_, 12);
     gtk_widget_set_margin_top(box_, 6);
     gtk_widget_set_margin_bottom(box_, 6);
 
-    GtkWidget* lbl_name = gtk_label_new(label.c_str());
-    gtk_label_set_xalign(GTK_LABEL(lbl_name), 0.0);
-    gtk_box_append(GTK_BOX(box_), lbl_name);
+    GtkWidget* name = gtk_label_new(label.c_str());
+    gtk_label_set_xalign(GTK_LABEL(name), 0.0F);
+    gtk_widget_set_hexpand(name, TRUE);
+    gtk_box_append(GTK_BOX(box_), name);
 
     switch_ = gtk_switch_new();
+    worker_state_->switch_widget = switch_;
     gtk_switch_set_active(GTK_SWITCH(switch_), initial);
-    g_signal_connect(switch_, "state-set", G_CALLBACK(+[](GtkSwitch*, gboolean state, gpointer data) -> gboolean {
-        auto* self = static_cast<ToggleWidget*>(data);
-        if (self->updating_) return FALSE;
+    worker_state_->signal_handler = g_signal_connect(
+        switch_,
+        "state-set",
+        G_CALLBACK(+[](GtkSwitch*, gboolean state, gpointer data) -> gboolean {
+            auto* self = static_cast<ToggleWidget*>(data);
+            if (self->updating_) return FALSE;
 
-        {
-            std::lock_guard lock(self->worker_state_->mutex);
-            self->worker_state_->target_state = state;
-            self->worker_state_->has_pending = true;
-        }
-        self->worker_state_->cv.notify_one();
-        return FALSE;
-    }), this);
+            {
+                std::lock_guard lock(self->worker_state_->mutex);
+                self->worker_state_->target_state = state;
+                self->worker_state_->has_pending = true;
+            }
+            self->worker_state_->cv.notify_one();
+            return FALSE;
+        }),
+        this
+    );
     gtk_box_append(GTK_BOX(box_), switch_);
 
-    // Initialize provider once
-    provider_ = gtk_css_provider_new();
-    gtk_style_context_add_provider(gtk_widget_get_style_context(box_), 
-                                   GTK_STYLE_PROVIDER(provider_), 
-                                   GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    start_worker();
 }
 
 ToggleWidget::~ToggleWidget() {
+    if (switch_ != nullptr && worker_state_->signal_handler != 0) {
+        g_signal_handler_disconnect(switch_, worker_state_->signal_handler);
+        worker_state_->signal_handler = 0;
+    }
+
+    worker_state_->alive = false;
+    worker_state_->switch_widget = nullptr;
     {
         std::lock_guard lock(worker_state_->mutex);
         worker_state_->shutdown = true;
@@ -64,53 +75,59 @@ void ToggleWidget::set_active(bool active) {
     updating_ = false;
 }
 
-void ToggleWidget::refresh() {
-    if (worker_.joinable()) return;
-
+void ToggleWidget::start_worker() {
     const auto state = worker_state_;
-    worker_ = std::thread([state, this] {
+    worker_ = std::thread([state] {
         while (true) {
-            bool state_to_set = false;
+            bool requested_state = false;
             {
                 std::unique_lock lock(state->mutex);
-                state->cv.wait(lock, [&state] { return state->shutdown || state->has_pending; });
+                state->cv.wait(lock, [&state] {
+                    return state->shutdown || state->has_pending;
+                });
                 if (state->shutdown) return;
-                state_to_set = state->target_state;
+                requested_state = state->target_state;
                 state->has_pending = false;
             }
 
             bool succeeded = false;
             try {
-                succeeded = state->on_toggle(state_to_set);
+                succeeded = state->on_toggle && state->on_toggle(requested_state);
             } catch (const std::exception&) {
                 succeeded = false;
             }
 
-            if (!succeeded) {
-                struct AsyncState {
-                    ToggleWidget* module;
-                    bool requested_state;
-                };
-                g_idle_add(+[](gpointer data) -> gboolean {
-                    std::unique_ptr<AsyncState> result(static_cast<AsyncState*>(data));
-                    if (result->module) {
-                        result->module->set_active(!result->requested_state);
+            if (succeeded) continue;
+
+            struct Result {
+                std::shared_ptr<WorkerState> state;
+                bool requested_state;
+            };
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,
+                +[](gpointer data) -> gboolean {
+                    auto* result = static_cast<Result*>(data);
+                    auto& state = *result->state;
+                    if (!state.alive.load() || state.switch_widget == nullptr) {
+                        return G_SOURCE_REMOVE;
+                    }
+                    if (state.signal_handler != 0) {
+                        g_signal_handler_block(state.switch_widget, state.signal_handler);
+                    }
+                    gtk_switch_set_active(
+                        GTK_SWITCH(state.switch_widget),
+                        !result->requested_state
+                    );
+                    if (state.signal_handler != 0) {
+                        g_signal_handler_unblock(state.switch_widget, state.signal_handler);
                     }
                     return G_SOURCE_REMOVE;
-                }, new AsyncState{this, state_to_set});
-            }
+                },
+                new Result{state, requested_state},
+                +[](gpointer data) { delete static_cast<Result*>(data); }
+            );
         }
     });
-}
-
-void ToggleWidget::apply_theme(const services::Palette& palette) {
-    std::string text_color = palette.get("text", "#cdd6f4");
-    
-    std::string css = ".toggle-widget { color: " + text_color + "; }";
-    
-    gtk_css_provider_load_from_string(provider_, css.c_str());
-    
-    gtk_widget_add_css_class(box_, "toggle-widget");
 }
 
 } // namespace realmheart::ui::components

@@ -16,7 +16,10 @@ class IUtilityExecutor {
 public:
     virtual ~IUtilityExecutor() = default;
     virtual bool run_background(const std::vector<std::string>& argv) = 0;
-    virtual realmheart::core::CommandResult run_capture(const std::vector<std::string>& argv) = 0;
+    virtual realmheart::core::CommandResult run_capture(
+        const std::vector<std::string>& argv,
+        const realmheart::core::CommandOptions& options = {}
+    ) = 0;
 };
 
 class SystemUtilityExecutor : public IUtilityExecutor {
@@ -24,8 +27,11 @@ public:
     bool run_background(const std::vector<std::string>& argv) override {
         return realmheart::core::run_background(argv);
     }
-    realmheart::core::CommandResult run_capture(const std::vector<std::string>& argv) override {
-        return realmheart::core::run_capture(argv);
+    realmheart::core::CommandResult run_capture(
+        const std::vector<std::string>& argv,
+        const realmheart::core::CommandOptions& options = {}
+    ) override {
+        return realmheart::core::run_capture(argv, options);
     }
 };
 
@@ -34,6 +40,11 @@ public:
     explicit UtilityManager(
         std::shared_ptr<services::ThemeService> theme_service,
         std::unique_ptr<IUtilityExecutor> executor = std::make_unique<SystemUtilityExecutor>(),
+        std::filesystem::path recorder_pid_path = {},
+        std::filesystem::path proc_root = "/proc"
+    );
+    explicit UtilityManager(
+        std::unique_ptr<IUtilityExecutor> executor,
         std::filesystem::path recorder_pid_path = {},
         std::filesystem::path proc_root = "/proc"
     );

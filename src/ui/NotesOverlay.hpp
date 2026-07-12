@@ -15,10 +15,10 @@ public:
     void toggle();
 
 private:
-    GtkWidget* window_;
-    GtkWidget* text_view_;
-    GtkTextBuffer* buffer_;
-    services::NotesService* notes_service_;
+    GtkWidget* window_ = nullptr;
+    GtkWidget* text_view_ = nullptr;
+    GtkTextBuffer* buffer_ = nullptr;
+    services::NotesService* notes_service_ = nullptr;
 
     static void on_text_changed_callback(GtkTextBuffer* buf, gpointer data);
 };

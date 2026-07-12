@@ -52,7 +52,6 @@ add_library(realmheart_ui STATIC
     src/ui/AssetResolver.cpp
     src/ui/ImageFileFilters.cpp
     src/ui/GtkApp.cpp
-    src/ui/ThemeStyles.cpp
     src/ui/LayerSurface.cpp
     src/ui/wallpaper/WallpaperBackend.cpp
     src/ui/wallpaper/WallpaperSurface.cpp
@@ -92,7 +91,6 @@ target_link_libraries(realmheart_ui PRIVATE
     PkgConfig::GIO
     PkgConfig::GTK4
     PkgConfig::GTK4_LAYER_SHELL
-    Threads::Threads
 )
 
 target_compile_options(realmheart PRIVATE
@@ -108,7 +106,6 @@ target_compile_options(realmheart_ui PRIVATE
 target_link_libraries(realmheart PRIVATE
     realmheart_ui
     PkgConfig::GIO
-    Threads::Threads
 )
 
 set(REALMHEART_NATIVE_WALLPAPER_BUILT OFF)
@@ -166,7 +163,7 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
         )
         add_custom_command(
             OUTPUT "${REALMHEART_LAYER_SHELL_CODE}"
-            COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${REALMHEART_LAYER_SHELL_CPP_XML}" "${REALMHEART_LAYER_SHELL_CODE}"
+            COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${REALMHEART_LAYER_SHELL_CPP_XML}" "${REALMHEART_LAYER_SHELL_CPP_XML}"
             DEPENDS "${REALMHEART_LAYER_SHELL_CPP_XML}"
             VERBATIM
         )

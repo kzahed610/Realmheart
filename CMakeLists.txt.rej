@@ -1,0 +1,239 @@
+--- CMakeLists.txt
++++ CMakeLists.txt
+@@ -198,92 +201,152 @@ endif()
+ 
+ include(CTest)
+ if(BUILD_TESTING)
+-    find_package(GTest REQUIRED)
+-    add_executable(realmheart_command_tests tests/CommandHest.cpp src/core/Command.cpp)
+-    target_include_directories(realmheart_command_tests PRIVATE src)
+-    target_compile_options(realmheart_command_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_shell_command_tests tests/ShellCommandTests.cpp src/core/ShellCommand.cpp)
+-    target_include_directories(realmheart_shell_command_tests PRIVATE src)
+-    target_compile_options(realmheart_shell_command_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_shell_runtime_tests tests/ShellRuntimeTests.cpp src/core/ShellCommand.cpp src/core/ShellControl.cpp)
+-    target_include_directories(realmheart_shell_runtime_tests PRIVATE src)
+-    target_compile_options(realmheart_shell_runtime_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-    target_link_libraries(realmheart_shell_runtime_tests PRIVATE PkgConfig::GIO)
+-
+-    add_executable(realmheart_audio_tests tests/AudioTests.cpp src/core/Command.cpp src/services/Audio.cpp)
+-    target_include_directories(realmheart_audio_tests PRIVATE src)
+-    target_compile_options(realmheart_audio_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_bluetooth_tests tests/BluetoothTests.cpp src/core/Command.cpp src/services/Bluetooth.cpp)
+-    target_include_directories(realmheart_bluetooth_tests PRIVATE src)
+-    target_compile_options(realmheart_bluetooth_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_brightness_tests tests/BrightnessTests.cpp src/core/Command.cpp src/services/Brightness.cpp)
+-    target_include_directories(realmheart_brightness_tests PRIVATE src)
+-    target_compile_options(realmheart_brightness_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_gamemode_tests tests/GameModeTests.cpp src/core/Command.cpp src/services/GameMode.cpp)
+-    target_include_directories(realmheart_gamemode_tests PRIVATE src)
+-    target_compile_options(realmheart_gamemode_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_keep_awake_tests tests/KeepAwakeTests.cpp src/core/Command.cpp src/services/KeepAwake.cpp)
+-    target_include_directories(realmheart_keep_awake_tests PRIVATE src)
+-    target_compile_options(realmheart_keep_awake_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_night_light_tests tests/NightLightTests.cpp src/core/Command.cpp src/services/NightLight.cpp src/services/SessionManager.cpp)
+-    target_include_directories(realmheart_night_light_tests PRIVATE src)
+-    target_compile_options(realmheart_night_light_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_power_profiles_tests tests/PowerProfilesTests.cpp src/core/Command.cpp src/services/PowerProfiles.cpp)
+-    target_include_directories(realmheart_protocol_dir PRIVATE src)
+-    target_compile_options(realmheart_power_profiles_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_wifi_tests tests/WifiTests.cpp src/core/Command.cpp src/services/Wifi.cpp)
+-    target_include_directories(realmheart_wifi_tests PRIVATE src)
+-    target_compile_options(realmheart_wifi_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_shell_state_tests tests/ShellStateTests.cpp)
+-    target_include_directories(realmheart_shell_state_tests PRIVATE src)
+-    target_compile_options(realmheart_shell_state_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_workspace_tests tests/HyprlandWorkspacesTests.cpp src/core/Command.cpp src/services/HyprlandWorkspaces.cpp)
+-    target_include_directories(realmheart_workspace_tests PRIVATE src)
+-    target_compile_options(realmheart_workspace_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_battery_service_tests tests/BatteryServiceTests.cpp src/services/BatteryService.cpp)
+-    target_include_directories(realmheart_battery_service_tests PRIVATE src)
+-    target_compile_options(realmheart_battery_service_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_notes_tests tests/NotesServiceTests.cpp src/services/NotesService.cpp)
+-    target_include_directories(realmheart_notes_tests PRIVATE src)
+-    target_compile_options(realmheart_notes_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_notification_tests tests/NotificationsTests.cpp src/services/Notifications.cpp)
+-    target_include_directories(realmheart_notification_tests PRIVATE src)
+-    target_compile_options(realmheart_notification_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-
+-    add_executable(realmheart_notification_server_tests tests/NotificationServerTests.cpp src/services/NotificationServer.cpp src/services/Notifications.cpp)
+-    target_include_directories(realmheart_notification_server_tests PRIVATE src)
+-    target_compile_options(realmheart_notification_server_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
++    function(realmheart_add_plain_test target)
++        add_executable(${target} ${ARGN})
++        target_include_directories(${target} PRIVATE src third_party)
++        target_compile_options(${target} PRIVATE
++            -Wall -Wextra -Wpedantic
++            $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>
++        )
++        add_test(NAME ${target} COMMAND ${target})
++    endfunction()
+ 
+-    add_executable(realmheart_notification_daemon_tests tests/NotificationDaemonTests.cpp src/services/NotificationServer.cpp src/services/Notifications.cpp)
+-    target_include_directories(realmheart_notification_daemon_tests PRIVATE src)
+-    target_compile_options(realmheart_notification_daemon_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-    target_link_libraries(realmheart_notification_daemon_tests PRIVATE PkgConfig::GIO Threads::Threads)
++    realmheart_add_plain_test(realmheart_command_tests
++        tests/CommandTests.cpp src/core/Command.cpp)
++    target_link_libraries(realmheart_command_tests PRIVATE Threads::Threads)
+ 
+-    add_executable(realmheart_vertical_bar_model_tests tests/VerticalBarModelTests.cpp src/ui/bar/VerticalBarModel.cpp)
+-    target_include_directories(realmheart_vertical_bar_model_tests PRIVATE src)
+-    target_compile_options(realmheart_vertical_bar_model_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
++    realmheart_add_plain_test(realmheart_shell_command_tests
++        tests/ShellCommandTests.cpp src/core/ShellCommand.cpp)
+ 
+-    add_executable(realmheart_ui_foundation_tests tests/UiFoundationTests.cpp src/ui/AssetResolver.cpp src/ui/ImageFileFilters.cpp src/ui/LayerSurface.cpp)
+-    target_include_directories(realmheart_ui_foundation_tests PRIVATE src)
+-    target_compile_definitions(realmheart_ui_foundation_tests PRIVATE REALMHEART_TEST_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets/icons/fluent")
+-    target_compile_options(realmheart_ui_foundation_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
+-    target_link_libraries(realmheart_ui_foundation_tests PRIVATE PkgConfig::GTK4 PkgConfig::GTK4_LAYER_SHELL)
++    realmheart_add_plain_test(realmheart_shell_runtime_tests
++        tests/ShellRuntimeTests.cpp src/core/ShellCommand.cpp src/core/ShellControl.cpp)
++    target_link_libraries(realmheart_shell_runtime_tests PRIVATE PkgConfig::GIO)
+ 
+-    add_executable(realmheart_wallpaper_service_tests tests/WallpaperServiceTests.cpp src/services/WallpaperService.cpp)
+-    target_include_directories(realmheart_wallpaper_service_tests PRIVATE src)
+-    target_compile_options(realmheart_wallpaper_tests PRIVATE -Wall -Wextra -Wpedantic $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
++    realmheart_add_plain_test(realmheart_audio_tests
++        tests/AudioTests.cpp src/core/Command.cpp src/services/Audio.cpp)
++    target_link_libraries(realmheart_audio_tests PRIVATE Threads::Threads)
++
++    realmheart_add_plain_test(realmheart_bluetooth_tests
++        tests/BluetoothTests.cpp src/core/Command.cpp src/services/Bluetooth.cpp)
++    target_link_libraries(realmheart_bluetooth_tests PRIVATE Threads::Threads)
++
++    realmheart_add_plain_test(realmheart_brightness_tests
++        tests/BrightnessTests.cpp src/core/Command.cpp src/services/Brightness.cpp)
++    target_link_libraries(realmheart_brightness_tests PRIVATE Threads::Threads)
++
++    realmheart_add_plain_test(realmheart_gamemode_tests
++        tests/GameModeTests.cpp src/core/Command.cpp src/services/GameMode.cpp)
++    target_link_libraries(realmheart_gamemode_tests PRIVATE Threads::Threads)
++
++    realmheart_add_plain_test(realmheart_keep_awake_tests
++        tests/KeepAwakeTests.cpp src/core/Command.cpp src/services/KeepAwake.cpp)
++    target_link_libraries(realmheart_keep_awake_tests PRIVATE Threads::Threads)
++
++    realmheart_add_plain_test(realmheart_night_light_tests
++        tests/NightLightTests.cpp src/core/Command.cpp src/services/NightLight.cpp)
++    target_link_libraries(realmheart_night_light_tests PRIVATE Threads::Threads)
++
++    realmheart_add_plain_test(realmheart_power_profiles_tests
++        tests/PowerProfilesTests.cpp src/core/Command.cpp src/services/PowerProfiles.cpp)
++    target_link_libraries(realmheart_power_profiles_tests PRIVATE Threads::Threads)
++
++    realmheart_add_plain_test(realmheart_wifi_tests
++        tests/WifiTests.cpp src/core/Command.cpp src/services/Wifi.cpp)
++    target_link_libraries(realmheart_wifi_tests PRIVATE Threads::Threads)
++
++    realmheart_add_plain_test(realmheart_shell_state_tests tests/ShellStateTests.cpp)
++
++    realmheart_add_plain_test(realmheart_workspace_tests
++        tests/HyprlandWorkspacesTests.cpp src/core/Command.cpp src/services/HyprlandWorkspaces.cpp)
++    target_link_libraries(realmheart_workspace_tests PRIVATE Threads::Threads)
++
++    realmheart_add_plain_test(realmheart_battery_service_tests
++        tests/BatteryServiceTests.cpp src/services/BatteryService.cpp)
++
++    realmheart_add_plain_test(realmheart_bar_services_tests
++        tests/BarServicesTests.cpp src/services/BatteryService.cpp src/services/MediaService.cpp)
++
++    realmheart_add_plain_test(realmheart_notes_tests
++        tests/NotesServiceTests.cpp src/services/NotesService.cpp)
++
++    realmheart_add_plain_test(realmheart_notification_tests
++        tests/NotificationsTests.cpp src/services/Notifications.cpp)
++
++    realmheart_add_plain_test(realmheart_notification_server_tests
++        tests/NotificationServerTests.cpp
++        src/services/NotificationServer.cpp
++        src/services/Notifications.cpp)
++
++    realmheart_add_plain_test(realmheart_notification_daemon_tests
++        tests/NotificationDaemonTests.cpp
++        src/services/NotificationDaemon.cpp
++        src/services/NotificationServer.cpp
++        src/services/Notifications.cpp)
++    target_link_libraries(realmheart_notification_daemon_tests PRIVATE
++        PkgConfig::GIO Threads::Threads)
++
++    realmheart_add_plain_test(realmheart_session_manager_tests
++        tests/SessionManagerTests.cpp src/services/SessionManager.cpp src/core/Command.cpp)
++    target_link_libraries(realmheart_session_manager_tests PRIVATE Threads::Threads)
++
++    realmheart_add_plain_test(realmheart_vertical_bar_model_tests
++        tests/VerticalBarModelTests.cpp src/ui/bar/VerticalBarModel.cpp)
++
++    realmheart_add_plain_test(realmheart_ui_foundation_tests
++        tests/UiFoundationTests.cpp
++        src/ui/AssetResolver.cpp
++        src/ui/ImageFileFilters.cpp
++        src/ui/LayerSurface.cpp)
++    target_compile_definitions(realmheart_ui_foundation_tests PRIVATE
++        REALMHEART_TEST_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets/icons/fluent")
++    target_link_libraries(realmheart_ui_foundation_tests PRIVATE
++        PkgConfig::GTK4 PkgConfig::GTK4_LAYER_SHELL)
++
++    realmheart_add_plain_test(realmheart_wallpaper_backend_tests
++        tests/WallpaperBackendTests.cpp src/ui/wallpaper/WallpaperBackend.cpp)
++
++    realmheart_add_plain_test(realmheart_utility_manager_tests
++        tests/UtilityManagerTests.cpp
++        src/core/Command.cpp
++        src/services/UtilityManager.cpp
++        src/services/WallpaperService.cpp
++        src/services/ThemeService.cpp
++        src/services/MatugenParser.cpp)
++    target_link_libraries(realmheart_utility_manager_tests PRIVATE Threads::Threads)
++
++    realmheart_add_plain_test(realmheart_matugen_parser_tests
++        tests/MatugenParserTests.cpp
++        src/services/MatugenParser.cpp
++        src/services/ThemeService.cpp)
++    target_link_libraries(realmheart_matugen_parser_tests PRIVATE Threads::Threads)
++
++    realmheart_add_plain_test(realmheart_theme_service_tests
++        tests/ThemeServiceTests.cpp src/services/ThemeService.cpp)
++    target_link_libraries(realmheart_theme_service_tests PRIVATE Threads::Threads)
++
++    find_package(GTest QUIET)
++    if(GTest_FOUND)
++        add_executable(realmheart_wallpaper_service_tests
++            tests/WallpaperServiceTests.cpp src/services/WallpaperService.cpp)
++        target_include_directories(realmheart_wallpaper_service_tests PRIVATE src third_party)
++        target_compile_options(realmheart_wallpaper_service_tests PRIVATE
++            -Wall -Wextra -Wpedantic
++            $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
++        target_link_libraries(realmheart_wallpaper_service_tests PRIVATE GTest::gtest_main)
++        add_test(NAME realmheart_wallpaper_service_tests COMMAND realmheart_wallpaper_service_tests)
++
++        add_executable(realmheart_launcher_service_tests
++            tests/LauncherServiceTests.cpp
++            tests/LauncherServiceCommandTests.cpp
++            src/services/LauncherService.cpp)
++        target_include_directories(realmheart_launcher_service_tests PRIVATE src third_party)
++        target_compile_options(realmheart_launcher_service_tests PRIVATE
++            -Wall -Wextra -Wpedantic
++            $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>)
++        target_link_libraries(realmheart_launcher_service_tests PRIVATE
++            GTest::gtest_main PkgConfig::GIO Threads::Threads)
++        add_test(NAME realmheart_launcher_service_tests COMMAND realmheart_launcher_service_tests)
++    else()
++        message(STATUS "GTest not found; skipping GTest-based Realmheart tests")
++    endif()
+ endif()

@@ -1,17 +1,17 @@
 #pragma once
 
 #include "ui/components/BaseWidget.hpp"
-#include <gtk/gtk.h>
-#include <string>
+
 #include <functional>
 #include <optional>
+#include <string>
 
 namespace realmheart::ui::components {
 
-class SliderWidget : public ThemeableWidget {
+class SliderWidget : public BaseWidget {
 public:
     SliderWidget(
-        const std::string& label,
+        std::string label,
         double min,
         double max,
         double initial,
@@ -20,15 +20,13 @@ public:
     ~SliderWidget() override;
 
     GtkWidget* get_widget() override;
-    void refresh() override;
     void set_value(double value);
-    void apply_theme(const services::Palette& palette) override;
 
 private:
     GtkWidget* box_ = nullptr;
     GtkWidget* scale_ = nullptr;
+    gulong value_changed_handler_ = 0;
     std::function<std::optional<double>(double)> on_change_;
-    
     bool updating_ = false;
     double pending_value_ = 0.0;
     double confirmed_value_ = 0.0;

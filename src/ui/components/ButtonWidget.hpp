@@ -1,23 +1,23 @@
 #pragma once
 
 #include "ui/components/BaseWidget.hpp"
-#include <gtk/gtk.h>
-#include <string>
+
 #include <functional>
+#include <string>
 
 namespace realmheart::ui::components {
 
-class ButtonWidget : public ThemeableWidget {
+class ButtonWidget : public BaseWidget {
 public:
-    ButtonWidget(const std::string& label, std::function<void()> on_click);
-    ~ButtonWidget() override = default;
+    ButtonWidget(std::string label, std::function<void()> on_click);
+    ~ButtonWidget() override;
 
     GtkWidget* get_widget() override;
-    void apply_theme(const services::Palette& palette) override;
 
 private:
     GtkWidget* box_ = nullptr;
-    GtkWidget* btn_ = nullptr;
+    GtkWidget* button_ = nullptr;
+    gulong click_handler_ = 0;
     std::function<void()> on_click_;
 };
 

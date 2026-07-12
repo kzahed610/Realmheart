@@ -19,19 +19,11 @@ NotesOverlay::NotesOverlay(GtkApplication* app, services::NotesService* notes_se
     spec.keyboard_mode = LayerKeyboardMode::Exclusive;
     apply_layer_surface(GTK_WINDOW(window_), spec);
 
-    GtkCssProvider* provider = gtk_css_provider_new();
-    gtk_css_provider_load_from_string(provider, 
-        "window { background-color: rgba(30, 30, 46, 0.9); color: #cdd6f4; border: 2px solid #89b4fa; border-radius: 12px; } "
-        "textview { background-color: transparent; color: #cdd6f4; font-family: 'JetBrains Mono'; font-size: 14px; }");
-    
-    gtk_style_context_add_provider_for_display(
-        gdk_display_get_default(),
-        GTK_STYLE_PROVIDER(provider),
-        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
-    );
+    gtk_widget_add_css_class(window_, "realmheart-notes");
 
     buffer_ = gtk_text_buffer_new(nullptr);
     text_view_ = gtk_text_view_new_with_buffer(buffer_);
+    gtk_widget_add_css_class(text_view_, "realmheart-notes-editor");
     gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(text_view_), GTK_WRAP_WORD);
     
     gtk_text_buffer_set_text(buffer_, notes_service_->get_content().c_str(), -1);

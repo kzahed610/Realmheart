@@ -20,6 +20,7 @@ std::optional<ShellCommand> parse_shell_command(std::string_view name) {
     if (name == "set-wallpaper-backend") return ShellCommand::SetWallpaperBackend;
     if (name == "generate-theme") return ShellCommand::GenerateTheme;
     if (name == "launch-launcher") return ShellCommand::LaunchLauncher;
+    if (name == "restart") return ShellCommand::Restart;
     if (name == "quit") return ShellCommand::Quit;
     return std::nullopt;
 }
@@ -43,6 +44,7 @@ std::string_view shell_action_name(ShellCommand command) {
     case ShellCommand::SetWallpaperBackend: return "set-wallpaper-backend";
     case ShellCommand::GenerateTheme: return "generate-theme";
     case ShellCommand::LaunchLauncher: return "launch-launcher";
+    case ShellCommand::Restart: return "restart";
     case ShellCommand::Quit: return "quit";
     }
     return {};

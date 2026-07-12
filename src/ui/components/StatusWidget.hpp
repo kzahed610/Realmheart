@@ -1,15 +1,13 @@
 #pragma once
 
 #include "ui/components/BaseWidget.hpp"
-#include <gtk/gtk.h>
-#include <string>
+
 #include <functional>
-#include <vector>
-#include <memory>
+#include <string>
 
 namespace realmheart::ui::components {
 
-class StatusWidget : public ThemeableWidget {
+class StatusWidget : public BaseWidget {
 public:
     struct Slot {
         std::string name;
@@ -20,19 +18,20 @@ public:
         bool enabled = false;
     };
 
-    StatusWidget(const Slot& slot, std::function<void()> on_click);
-    ~StatusWidget() override = default;
+    StatusWidget(Slot slot, std::function<void()> on_click);
+    ~StatusWidget() override;
 
     GtkWidget* get_widget() override;
-    void refresh() override;
     void set_status(const Slot& new_slot);
-    void apply_theme(const services::Palette& palette) override;
 
 private:
-    GtkWidget* box_ = nullptr;
+    void update_badge();
+
+    GtkWidget* button_ = nullptr;
     GtkWidget* overlay_ = nullptr;
     GtkWidget* image_ = nullptr;
     GtkWidget* badge_ = nullptr;
+    gulong click_handler_ = 0;
     Slot slot_;
     std::function<void()> on_click_;
 };

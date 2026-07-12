@@ -1,30 +1,37 @@
 #pragma once
 
 #include "ui/components/BaseWidget.hpp"
-#include <gtk/gtk.h>
-#include <string>
-#include <functional>
+
 #include <atomic>
+#include <functional>
+#include <memory>
+#include <string>
+#include <thread>
 
 namespace realmheart::ui::components {
 
-class LabelWidget : public ThemeableWidget {
+class LabelWidget : public BaseWidget {
 public:
     using Reader = std::function<std::string()>;
 
-    LabelWidget(const std::string& label, const std::string& initial_value, Reader reader = {});
-    ~LabelWidget() override = default;
+    LabelWidget(std::string label, std::string initial_value, Reader reader = {});
+    ~LabelWidget() override;
 
     GtkWidget* get_widget() override;
     void refresh() override;
     void set_value(const std::string& value);
-    void apply_theme(const services::Palette& palette) override;
 
 private:
+    struct AsyncState {
+        std::atomic<bool> alive{true};
+        std::atomic<bool> refresh_in_flight{false};
+        GtkWidget* value_label = nullptr; // GTK main thread only
+    };
+
     GtkWidget* box_ = nullptr;
-    GtkWidget* val_label_ = nullptr;
     Reader reader_;
-    std::atomic<bool> refresh_in_flight_ = false;
+    std::shared_ptr<AsyncState> state_;
+    std::thread worker_;
 };
 
 } // namespace realmheart::ui::components

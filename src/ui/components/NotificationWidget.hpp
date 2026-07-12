@@ -1,21 +1,17 @@
 #pragma once
 
-#include "ui/components/BaseWidget.hpp"
-#include <gtk/gtk.h>
 #include "services/Notifications.hpp"
-#include <string>
-#include <vector>
+#include "ui/components/BaseWidget.hpp"
 
 namespace realmheart::ui::components {
 
-class NotificationWidget : public ThemeableWidget {
+class NotificationWidget : public BaseWidget {
 public:
-    NotificationWidget(services::NotificationHistory& history);
+    explicit NotificationWidget(services::NotificationHistory& history);
     ~NotificationWidget() override = default;
 
     GtkWidget* get_widget() override;
     void refresh() override;
-    void apply_theme(const services::Palette& palette) override;
 
 private:
     GtkWidget* box_ = nullptr;

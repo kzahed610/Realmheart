@@ -7,38 +7,39 @@ Native C++ Hyprland shell rewrite for Zahed's desktop. TBATE reference mandatory
 - **Focus:** Implement only the features that are actually used.
 - **Architecture:** Maintain a clean, modular codebase that avoids "soup" and allows easy addition of future features/animations.
 
+## 🚀 Current Capabilities
+Realmheart is now a fully functional desktop shell providing the following:
+
+### 🖼️ Display & Visuals
+- **Hybrid Wallpaper Engine:** Supports both a GTK4-based fallback and a high-performance native Wayland/EGL/OpenGL ES renderer.
+- **Dynamic Theming:** Integrated `Matugen` parser for automatic color palette generation based on wallpaper, ensuring systemic visual consistency.
+- **OSD Overlays:** Lean, non-intrusive On-Screen Displays for system adjustments.
+
+### 📊 Interface Components
+- **Vertical Bar:** Asynchronous status probes for system state, live workspace pills, and a bounded notification history model.
+- **Right Sidebar:** A centralized control hub for:
+  - **Connectivity:** WiFi and Bluetooth status/controls.
+  - **System Toggles:** Gamemode, Night Light, and "Keep Awake" (inhibitor).
+  - **Hardware Sliders:** Real-time Brightness and Volume control.
+  - **Power Management:** Power profile cycling.
+  - **Notification Center:** Integrated D-Bus capture with a scrollable history list.
+- **Notes Overlay:** Simple, plaintext-backed persistent notes for quick access.
+- **Launcher:** Dedicated overlay for application launching via `realmheart-cli`.
+
+### 🔒 System Integration
+- **Lock Screen:** A faithful C++ implementation of the  design and behavior.
+- **Core Control:** A robust command-and-capture system allowing the shell to be controlled and updated via CLI without full session restarts.
+- **Diagnostic Suite:** `--doctor` mode for dependency probing and environment validation.
+
 ## 🗺️ Implementation Roadmap
 
-### Phase 1: Core Infrastructure (Complete)
-- [x] Core command execution and capture system.
-- [x] Dependency diagnostics and environment probing (`--doctor`).
-- [x] Layer-shell abstractions for Wayland surfaces.
-- [x] Basic logging and error handling.
-
-### Phase 2: Service Layer (Complete)
-- [x] Service-layer primitives for system probing.
-- [x] Power profile cycling model.
-- [x] Brightness and audio probe helpers.
-- [x] Hyprland workspace snapshot service.
-
-### Phase 3: Vertical Bar (Complete)
-- [x] Modular `VerticalBar` presentation module.
-- [x] Asynchronous, bounded status probes for system states.
-- [x] Bounded in-memory notification history model.
-- [x] Live bar pills for workspace status.
-- [x] Deterministic test suite for bar presentation and state.
-
-### Phase 4: Right Sidebar (Complete)
-- [x] **T4.1: Foundation Layout** - Basic window and layout skeleton.
-- [x] **T4.2: System Service Integration** - Working controls for Brightness, Power Profile, and Status labels.
-- [x] **T4.3: Interactive Control Logic** - Full wiring of toggles, sliders, and cycle buttons.
-- [x] **T4.4: Notification History List** - UI implementation of the history list.
-- [x] **T4.5: D-Bus Notification Capture** - Attaching to the notification daemon.
-
-### Phase 5: Lock Screen & Final Polish (Complete)
-- [x] Lock screen implementation (mirroring  design).
-- [x] Final RAM optimization and performance audit.
-- [ ] Transition to `~/.config` and live deployment.
+### Phase 1-5: Core & UI (Complete)
+- [x] Core command execution, Layer-shell abstractions, and diagnostics.
+- [x] Service layer for Power, Brightness, Audio, and Workspaces.
+- [x] Modular Vertical Bar with asynchronous probing.
+- [x] Full Right Sidebar with D-Bus notification integration.
+- [x] Lock screen mirroring the  design.
+- [x] RAM optimization and performance audit.
 
 ### Phase 6: Future Expansions (Planned)
 - [ ] **Left Sidebar** - Implementation of an empty container for future modular expansion.
@@ -50,10 +51,7 @@ Native C++ Hyprland shell rewrite for Zahed's desktop. TBATE reference mandatory
 
 ### Installation
 GTK4 and `gtk4-layer-shell-0` are required through pkg-config.
-
-The optional native wallpaper renderer additionally uses Wayland, EGL, OpenGL ES 2,
-`gdk-pixbuf`, `wayland-scanner`, and the wlr-protocol XML files. Realmheart still builds
-with the GTK wallpaper backend when those optional dependencies are unavailable.
+The optional native wallpaper renderer additionally uses Wayland, EGL, OpenGL ES 2, `gdk-pixbuf`, `wayland-scanner`, and the wlr-protocol XML files.
 
 ### Commands
 ```sh
@@ -80,15 +78,24 @@ cmake --build build
 ```
 
 ## 🖼️ Hybrid Wallpaper Architecture
-
-Wallpaper state is independent from rendering. Realmheart can use the existing GTK4
-backend or a separate Wayland/EGL/OpenGL ES renderer, and can switch between them while
-running. The GTK backend remains an automatic fallback when the native renderer is missing
-or fails. See [`docs/wallpaper-backends.md`](docs/wallpaper-backends.md).
+Wallpaper state is independent from rendering. Realmheart can use the existing GTK4 backend or a separate Wayland/EGL/OpenGL ES renderer, and can switch between them while running. The GTK backend remains an automatic fallback if the native renderer is missing or fails. See [`docs/wallpaper-backends.md`](docs/wallpaper-backends.md).
 
 ## 📋 Confirmed Scope
 - **Right Sidebar:** WiFi, Bluetooth, Keep Awake, Night Light, Gamemode, power-profile cycle, brightness slider, volume slider, and notification history/list.
 - **Notes:** Plaintext file persistence; no encryption/keyring gates.
 - **Lock Screen:** Exact visual and behavioral match to the current design.
-- **RAM Audit:** Confirmed optimal resource usage across all shell components (bounded buffers, stateless services, lean UI).
+- **RAM Audit:** Confirmed optimal resource usage across all shell components.
 - **Development Root:** `/home/zahed/Realmheart`
+
+## Reloading the development shell
+Realmheart exposes a real restart command that preserves the active wallpaper backend:
+
+```bash
+./build-hybrid/realmheart --command restart
+```
+
+For Hyprland development, bind `SUPER+R` to the absolute build path:
+
+```ini
+bind = SUPER, R, exec, /home/zahed/Realmheart/build-hybrid/realmheart --command restart
+```

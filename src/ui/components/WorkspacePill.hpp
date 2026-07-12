@@ -1,31 +1,24 @@
 #pragma once
 
+#include "services/HyprlandWorkspaces.hpp"
 #include "ui/components/BaseWidget.hpp"
-#include <gtk/gtk.h>
-#include <string>
-#include <vector>
-#include <memory>
 
 namespace realmheart::ui::components {
 
-struct WorkspaceState {
-    int id;
-    std::string name;
-    bool active;
-    int windows;
-};
+using WorkspaceState = services::WorkspaceState;
 
-class WorkspacePill : public ThemeableWidget {
+class WorkspacePill : public BaseWidget {
 public:
-    WorkspacePill(const WorkspaceState& state);
+    explicit WorkspacePill(const WorkspaceState& state);
     ~WorkspacePill() override = default;
 
     GtkWidget* get_widget() override;
     void update(const WorkspaceState& state);
-    void apply_theme(const services::Palette& palette) override;
+    [[nodiscard]] int workspace_id() const noexcept { return workspace_id_; }
 
 private:
-    GtkWidget* label_ = nullptr;
+    GtkWidget* button_ = nullptr;
+    int workspace_id_ = 0;
 };
 
 } // namespace realmheart::ui::components

@@ -1,6 +1,7 @@
 #include "services/UtilityManager.hpp"
 #include "services/ThemeService.hpp"
 #include "services/MatugenParser.hpp"
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -20,6 +21,17 @@ UtilityManager::UtilityManager(
     recorder_pid_path_(std::move(recorder_pid_path)),
     proc_root_(std::move(proc_root)),
     theme_service_(std::move(theme_service)) {}
+
+UtilityManager::UtilityManager(
+    std::unique_ptr<IUtilityExecutor> executor,
+    std::filesystem::path recorder_pid_path,
+    std::filesystem::path proc_root
+) : UtilityManager(
+        std::make_shared<services::ThemeService>(),
+        std::move(executor),
+        std::move(recorder_pid_path),
+        std::move(proc_root)
+    ) {}
 
 UtilityManager::~UtilityManager() = default;
 
@@ -64,31 +76,63 @@ bool UtilityManager::choose_wallpaper() {
     return wallpaper_service_->choose_wallpaper();
 }
 
-bool UtilityManager::generate_colors(const std::string& /*path*/) {
-    // 1. Get current wallpaper path
-    auto path_opt = wallpaper_service_->load_path();
-    if (!path_opt) return false;
-    std::string path = path_opt->string();
-
-    // 2. Run matugen
-    std::string command = "matugen image \"" + path + "\" --json hex --prefer darkness";
-    std::string output;
-    FILE* pipe = popen(command.c_str(), "r");
-    if (!pipe) return false;
-    char buffer[128];
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) output += buffer;
-    pclose(pipe);
-
-    if (output.empty()) return false;
-
-    // 3. Parse using the robust MatugenParser
-    auto palette = MatugenParser::parse(output, ThemeMode::Dark);
-    if (!palette) {
+bool UtilityManager::generate_colors(const std::string& path) {
+    const std::filesystem::path image_path(path);
+    std::error_code error;
+    if (path.empty() || !std::filesystem::is_regular_file(image_path, error) || error) {
+        std::cerr << "[Theme] Refusing to generate colors for an invalid wallpaper path: "
+                  << path << '\n';
         return false;
     }
 
-    // 4. Update the ThemeService
-    theme_service_->update_palette(*palette);
+    // Matugen 4.x changed the default JSON layout. --old-json-output gives us a
+    // stable machine-readable shape, while --source-color-index avoids the new
+    // interactive source-color prompt. Matugen requires --quiet when --json is
+    // used; without it, status/table output is mixed into stdout and JSON parsing
+    // fails. Invoke Matugen directly so paths remain argv-safe and failures remain
+    // visible in the captured diagnostic output.
+    realmheart::core::CommandOptions options;
+    options.deadline = std::chrono::seconds(10);
+    options.max_output_bytes = 512 * 1024;
+
+    const auto result = executor_->run_capture({
+        "matugen",
+        "image",
+        image_path.string(),
+        "--dry-run",
+        "--json",
+        "hex",
+        "--old-json-output",
+        "--source-color-index",
+        "0",
+        "--quiet"
+    }, options);
+
+    if (!result.succeeded()) {
+        std::cerr << "[Theme] Matugen failed: "
+                  << realmheart::core::command_failure_detail(
+                         result,
+                         "matugen color generation failed"
+                     )
+                  << '\n';
+        return false;
+    }
+    if (result.output.empty()) {
+        std::cerr << "[Theme] Matugen produced no JSON output\n";
+        return false;
+    }
+    if (result.truncated) {
+        std::cerr << "[Theme] Matugen JSON output was truncated\n";
+        return false;
+    }
+
+    auto palette = MatugenParser::parse(result.output, ThemeMode::Dark);
+    if (!palette) {
+        std::cerr << "[Theme] Matugen output did not contain a usable dark palette\n";
+        return false;
+    }
+
+    theme_service_->update_palette(std::move(*palette));
     return true;
 }
 

@@ -33,7 +33,7 @@ public:
         std::ofstream bus_script(busctl);
         bus_script << "#!/bin/sh\n"
                    << "case \"$1\" in\n"
-                   << "  get-property) IFS= read -r value < \"$REALMHEART_POWER_TEST_STATE\"; printf 's \\\"%s\\\"\\n' \"$value\" ;;\n"
+                   << "  get-property) IFS= read -r value < \"$REALMHEART_POWER_TEST_STATE\"; printf 's \"%s\"\\n' \"$value\" ;;\n"
                    << "  set-property) if [ \"$REALMHEART_POWER_IGNORE_WRITES\" != 1 ]; then printf '%s' \"$7\" > \"$REALMHEART_POWER_TEST_STATE\"; fi ;;\n"
                    << "  *) exit 64 ;;\n"
                    << "esac\n";

@@ -1,25 +1,24 @@
 #pragma once
 
 #include "ui/components/BaseWidget.hpp"
-#include <gtk/gtk.h>
-#include <string>
-#include <functional>
+
 #include <atomic>
-#include <thread>
-#include <mutex>
 #include <condition_variable>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
 
 namespace realmheart::ui::components {
 
-class ToggleWidget : public ThemeableWidget {
+class ToggleWidget : public BaseWidget {
 public:
-    ToggleWidget(const std::string& label, bool initial, std::function<bool(bool)> on_toggle);
+    ToggleWidget(std::string label, bool initial, std::function<bool(bool)> on_toggle);
     ~ToggleWidget() override;
 
     GtkWidget* get_widget() override;
-    void refresh() override;
     void set_active(bool active);
-    void apply_theme(const services::Palette& palette) override;
 
 private:
     struct WorkerState {
@@ -29,7 +28,12 @@ private:
         bool shutdown = false;
         bool has_pending = false;
         bool target_state = false;
+        std::atomic<bool> alive{true};
+        GtkWidget* switch_widget = nullptr; // GTK main thread only
+        gulong signal_handler = 0;
     };
+
+    void start_worker();
 
     GtkWidget* box_ = nullptr;
     GtkWidget* switch_ = nullptr;
