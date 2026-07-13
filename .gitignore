@@ -12,3 +12,6 @@
 tests/results/
 __pycache__/
 *.pyc
+
+/build/
+/build-*/
