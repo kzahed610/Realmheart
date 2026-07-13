@@ -112,8 +112,9 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
     pkg_check_modules(WAYLAND_EGL QUIET IMPORTED_TARGET wayland-egl)
     pkg_check_modules(EGL QUIET IMPORTED_TARGET egl)
     pkg_check_modules(GLESV2 QUIET IMPORTED_TARGET glesv2)
-    pkg_check_modules(GDK_PIXBUF QUIET IMPORTED_TARGET gdk-pixbuf)
+    pkg_check_modules(GDK_PIXBUF QUIET IMPORTED_TARGET gdk-pixbuf-2.0)
     pkg_check_modules(WLR_PROTOCOLS QUIET wlr-protocols)
+    pkg_check_modules(WAYLAND_PROTOCOLS QUIET wayland-protocols)
     find_program(WAYLAND_SCANNER_EXECUTABLE wayland-scanner)
 
     if(NOT REALMHEART_WLR_LAYER_SHELL_XML AND WLR_PROTOCOLS_FOUND)
@@ -124,9 +125,17 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
         endif()
     endif()
 
+    if(NOT REALMHEART_XDG_SHELL_XML AND WAYLAND_PROTOCOLS_FOUND)
+        pkg_get_variable(WAYLAND_PROTOCOLS_DATADIR wayland-protocols pkgdatadir)
+        set(_realmheart_xdg_xml "${WAYLAND_PROTOCOLS_DATADIR}/stable/xdg-shell/xdg-shell.xml")
+        if(EXISTS "${_realmheart_xdg_xml}")
+            set(REALMHEART_XDG_SHELL_XML "${_realmheart_xdg_xml}")
+        endif()
+    endif()
+
     if(WAYLAND_CLIENT_FOUND AND WAYLAND_EGL_FOUND AND EGL_FOUND AND
        GLESV2_FOUND AND GDK_PIXBUF_FOUND AND WAYLAND_SCANNER_EXECUTABLE AND
-       REALMHEART_WLR_LAYER_SHELL_XML)
+       REALMHEART_WLR_LAYER_SHELL_XML AND REALMHEART_XDG_SHELL_XML)
         set(REALMHEART_PROTOCOL_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-protocols")
         file(MAKE_DIRECTORY "${REALMHEART_PROTOCOL_DIR}")
 
@@ -153,11 +162,20 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
             VERBATIM
         )
 
+        set(REALMHEART_XDG_SHELL_CODE "${REALMHEART_PROTOCOL_DIR}/xdg-shell-protocol.c")
+        add_custom_command(
+            OUTPUT "${REALMHEART_XDG_SHELL_CODE}"
+            COMMAND "${WAYLAND_SCANNER_EXECUTABLE}" private-code "${REALMHEART_XDG_SHELL_XML}" "${REALMHEART_XDG_SHELL_CODE}"
+            DEPENDS "${REALMHEART_XDG_SHELL_XML}"
+            VERBATIM
+        )
+
         add_executable(realmheart-wallpaper-renderer
             src/wallpaper-native/main.cpp
             src/wallpaper-native/NativeWallpaperRenderer.cpp
             "${REALMHEART_LAYER_SHELL_HEADER}"
             "${REALMHEART_LAYER_SHELL_CODE}"
+            "${REALMHEART_XDG_SHELL_CODE}"
         )
         target_include_directories(realmheart-wallpaper-renderer PRIVATE src "${REALMHEART_PROTOCOL_DIR}")
         target_link_libraries(realmheart-wallpaper-renderer PRIVATE
