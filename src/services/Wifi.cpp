@@ -8,6 +8,25 @@
 namespace realmheart::services {
 namespace {
 
+
+std::string unescape_nmcli(std::string_view value) {
+    std::string decoded;
+    decoded.reserve(value.size());
+    bool escaped = false;
+    for (const char character : value) {
+        if (escaped) {
+            decoded.push_back(character);
+            escaped = false;
+        } else if (character == '\\') {
+            escaped = true;
+        } else {
+            decoded.push_back(character);
+        }
+    }
+    if (escaped) decoded.push_back('\\');
+    return decoded;
+}
+
 bool usable_output(const realmheart::core::CommandResult& result) {
     return result.succeeded() && !result.truncated && !result.output.empty();
 }
@@ -24,7 +43,7 @@ std::string active_ssid(const realmheart::core::CommandOptions& options) {
     while (std::getline(lines, line)) {
         constexpr std::string_view prefix = "yes:";
         if (line.starts_with(prefix) && line.size() > prefix.size()) {
-            return realmheart::core::sanitize_command_detail(line.substr(prefix.size()), 96);
+            return realmheart::core::sanitize_command_detail(unescape_nmcli(line.substr(prefix.size())), 96);
         }
     }
     return {};

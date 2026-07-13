@@ -20,6 +20,7 @@ public:
         const std::vector<std::string>& argv,
         const realmheart::core::CommandOptions& options = {}
     ) = 0;
+    virtual bool send_signal(int pid, int signal_number) = 0;
 };
 
 class SystemUtilityExecutor : public IUtilityExecutor {
@@ -33,6 +34,7 @@ public:
     ) override {
         return realmheart::core::run_capture(argv, options);
     }
+    bool send_signal(int pid, int signal_number) override;
 };
 
 class UtilityManager {

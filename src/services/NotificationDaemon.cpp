@@ -83,6 +83,10 @@ bool NotificationDaemon::start() {
 }
 
 void NotificationDaemon::stop() {
+    for (const auto& [_, source] : expiration_sources_) {
+        if (source != 0) g_source_remove(source);
+    }
+    expiration_sources_.clear();
     history_.set_capture_active(false);
     if (owner_id_ != 0) {
         g_bus_unown_name(owner_id_);
@@ -214,11 +218,13 @@ void NotificationDaemon::handle_method_call(
             &expire_timeout
         );
         static_cast<void>(app_icon);
-        static_cast<void>(expire_timeout);
         g_variant_unref(actions);
         g_variant_unref(hints);
 
         const auto id = server_.notify(app_name, replaces_id, summary, body);
+        cancel_expiration(id);
+        const int effective_timeout = expire_timeout < 0 ? 5000 : expire_timeout;
+        if (effective_timeout > 0) schedule_expiration(id, effective_timeout);
         g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", id));
         return;
     }
@@ -226,6 +232,7 @@ void NotificationDaemon::handle_method_call(
     if (method == "CloseNotification") {
         guint32 id = 0;
         g_variant_get(parameters, "(u)", &id);
+        cancel_expiration(id);
         if (server_.close(id)) emit_closed(connection, id, 3);
         g_dbus_method_invocation_return_value(invocation, nullptr);
         return;
@@ -236,6 +243,37 @@ void NotificationDaemon::handle_method_call(
         "org.freedesktop.DBus.Error.UnknownMethod",
         "Unsupported notification method"
     );
+}
+
+void NotificationDaemon::schedule_expiration(std::uint32_t id, int timeout_ms) {
+    if (timeout_ms <= 0) return;
+    struct Expiration {
+        NotificationDaemon* daemon;
+        std::uint32_t id;
+    };
+    const guint source = g_timeout_add_full(
+        G_PRIORITY_DEFAULT,
+        static_cast<guint>(timeout_ms),
+        +[](gpointer raw) -> gboolean {
+            auto* expiration = static_cast<Expiration*>(raw);
+            auto* daemon = expiration->daemon;
+            daemon->expiration_sources_.erase(expiration->id);
+            if (daemon->server_.close(expiration->id) && daemon->connection_ != nullptr) {
+                daemon->emit_closed(daemon->connection_, expiration->id, 1);
+            }
+            return G_SOURCE_REMOVE;
+        },
+        new Expiration{this, id},
+        +[](gpointer raw) { delete static_cast<Expiration*>(raw); }
+    );
+    expiration_sources_[id] = source;
+}
+
+void NotificationDaemon::cancel_expiration(std::uint32_t id) {
+    const auto iterator = expiration_sources_.find(id);
+    if (iterator == expiration_sources_.end()) return;
+    if (iterator->second != 0) g_source_remove(iterator->second);
+    expiration_sources_.erase(iterator);
 }
 
 void NotificationDaemon::emit_closed(

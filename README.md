@@ -43,9 +43,9 @@ Realmheart is now a fully functional desktop shell providing the following:
 
 ### Phase 6: Future Expansions (Planned)
 - [ ] **Left Sidebar** - Implementation of an empty container for future modular expansion.
-- [ ] **Active State Mutation** - Enable Right Sidebar to actively mutate system states (Brightness, Volume, WiFi, Bluetooth, etc.).
-- [ ] **Dynamic Background** - Wallpaper management integrated with Matugen theming.
-- [ ] **Screenshot Pipeline** - Implementation of the region-capture pipeline (porting the  logic to C++).
+- [x] **Active State Mutation** - Right Sidebar controls mutate and confirm Brightness, Volume, Bluetooth, Gamemode, Night Light, Keep Awake, and power profiles asynchronously.
+- [x] **Dynamic Background** - Wallpaper management integrated with Matugen theming and native/GTK fallback backends.
+- [x] **Screenshot Pipeline** - Full-screen, region-to-clipboard, OCR-region, and recording helpers.
 
 ## 🛠️ Build & Run
 
@@ -58,6 +58,12 @@ The optional native wallpaper renderer additionally uses Wayland, EGL, OpenGL ES
 # Configure and Build
 cmake -S . -B build -G Ninja
 cmake --build build
+
+# Run the registered test suite
+ctest --test-dir build --output-on-failure
+
+# Optional system-wide install
+cmake --install build
 
 # Diagnostics
 ./build/realmheart --doctor
@@ -85,7 +91,6 @@ Wallpaper state is independent from rendering. Realmheart can use the existing G
 - **Notes:** Plaintext file persistence; no encryption/keyring gates.
 - **Lock Screen:** Exact visual and behavioral match to the current design.
 - **RAM Audit:** Confirmed optimal resource usage across all shell components.
-- **Development Root:** `/home/zahed/Realmheart`
 
 ## Reloading the development shell
 Realmheart exposes a real restart command that preserves the active wallpaper backend:
@@ -94,8 +99,14 @@ Realmheart exposes a real restart command that preserves the active wallpaper ba
 ./build-hybrid/realmheart --command restart
 ```
 
-For Hyprland development, bind `SUPER+R` to the absolute build path:
+For Hyprland development, bind `SUPER+R` to your own absolute build path. For example, after setting `REALMHEART_ROOT` in your environment:
 
 ```ini
-bind = SUPER, R, exec, /home/zahed/Realmheart/build-hybrid/realmheart --command restart
+bind = SUPER, R, exec, $REALMHEART_ROOT/build/realmheart --command restart
+```
+
+Installed builds can use the executable from `PATH` directly:
+
+```ini
+bind = SUPER, R, exec, realmheart --command restart
 ```

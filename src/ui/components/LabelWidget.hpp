@@ -3,10 +3,10 @@
 #include "ui/components/BaseWidget.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
-#include <thread>
 
 namespace realmheart::ui::components {
 
@@ -25,13 +25,13 @@ private:
     struct AsyncState {
         std::atomic<bool> alive{true};
         std::atomic<bool> refresh_in_flight{false};
+        std::atomic<std::uint64_t> generation{0};
         GtkWidget* value_label = nullptr; // GTK main thread only
     };
 
     GtkWidget* box_ = nullptr;
     Reader reader_;
     std::shared_ptr<AsyncState> state_;
-    std::thread worker_;
 };
 
 } // namespace realmheart::ui::components

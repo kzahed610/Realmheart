@@ -3,12 +3,11 @@
 #include "ui/components/BaseWidget.hpp"
 
 #include <atomic>
-#include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 
 namespace realmheart::ui::components {
 
@@ -21,25 +20,19 @@ public:
     void set_active(bool active);
 
 private:
-    struct WorkerState {
-        std::mutex mutex;
-        std::condition_variable cv;
-        std::function<bool(bool)> on_toggle;
-        bool shutdown = false;
-        bool has_pending = false;
-        bool target_state = false;
+    struct AsyncState {
         std::atomic<bool> alive{true};
+        std::atomic<std::uint64_t> generation{0};
+        std::mutex mutation_mutex;
+        std::function<bool(bool)> on_toggle;
         GtkWidget* switch_widget = nullptr; // GTK main thread only
         gulong signal_handler = 0;
     };
 
-    void start_worker();
-
     GtkWidget* box_ = nullptr;
     GtkWidget* switch_ = nullptr;
     bool updating_ = false;
-    std::shared_ptr<WorkerState> worker_state_;
-    std::thread worker_;
+    std::shared_ptr<AsyncState> state_;
 };
 
 } // namespace realmheart::ui::components

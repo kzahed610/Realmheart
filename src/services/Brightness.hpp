@@ -3,6 +3,7 @@
 #include "core/Command.hpp"
 
 #include <optional>
+#include <string>
 
 namespace realmheart::services {
 
@@ -12,9 +13,19 @@ struct BrightnessState {
     double percent = 0.0;
 };
 
+struct BrightnessMutationResult {
+    bool success = false;
+    BrightnessState state;
+    std::string error;
+};
+
 class Brightness {
 public:
     static std::optional<BrightnessState> read(const realmheart::core::CommandOptions& options = {});
+    static BrightnessMutationResult set_percent(
+        int value,
+        const realmheart::core::CommandOptions& options = {}
+    );
     static bool set(int value, const realmheart::core::CommandOptions& options = {});
 };
 

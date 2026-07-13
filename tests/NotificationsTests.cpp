@@ -60,6 +60,28 @@ void test_read_dismiss_and_clear_keep_count_consistent() {
     require(history.snapshot().entries.empty(), "clear must remove every entry");
 }
 
+
+void test_subscribers_receive_changes_and_can_unsubscribe() {
+    realmheart::services::NotificationHistory history;
+    int calls = 0;
+    std::size_t last_unread = 0;
+    auto subscription = history.subscribe([&](const auto& snapshot) {
+        ++calls;
+        last_unread = snapshot.unread_count;
+    });
+
+    history.upsert(notification(11, "live"));
+    require(calls == 1 && last_unread == 1,
+            "subscribers must receive live history updates");
+    history.mark_all_read();
+    require(calls == 2 && last_unread == 0,
+            "read-state changes must be published");
+
+    subscription.reset();
+    history.clear();
+    require(calls == 2, "reset subscriptions must stop receiving callbacks");
+}
+
 void test_capture_state_is_exposed_to_observers() {
     realmheart::services::NotificationHistory history;
     require(!history.snapshot().capture_active, "capture must start inactive during shell coexistence");
@@ -73,6 +95,7 @@ int main() {
     test_history_is_bounded_and_evicts_oldest_entries();
     test_replacement_updates_existing_entry_without_growing_history();
     test_read_dismiss_and_clear_keep_count_consistent();
+    test_subscribers_receive_changes_and_can_unsubscribe();
     test_capture_state_is_exposed_to_observers();
     std::cout << "Notification history tests passed\n";
     return 0;

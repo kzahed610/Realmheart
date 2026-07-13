@@ -1,5 +1,7 @@
 #include "LauncherService.hpp"
+#include "core/Command.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <cctype>
 #include <gio/gio.h>
@@ -11,6 +13,25 @@
 namespace realmheart::services {
 
 namespace fs = std::filesystem;
+
+namespace {
+
+fs::path actions_directory() {
+    if (const char* config = std::getenv("XDG_CONFIG_HOME");
+        config != nullptr && *config != '\0') {
+        return fs::path(config) / "realmheart/actions";
+    }
+    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+        return fs::path(home) / ".config/realmheart/actions";
+    }
+    return fs::temp_directory_path() / "realmheart/actions";
+}
+
+char ascii_lower(char value) {
+    return static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
+}
+
+} // namespace
 
 std::vector<std::string> launcher_command_argv(std::string_view command) {
     const auto first = command.find_first_not_of(" \t\n\r");
@@ -89,22 +110,24 @@ void LauncherService::refresh_index() {
         g_list_free_full(apps, g_object_unref);
     }
 
-    // 2. Index Custom Actions
-    std::string actions_path = "/home/zahed/.config/realmheart/actions/";
-    if (fs::exists(actions_path) && fs::is_directory(actions_path)) {
-        for (const auto& entry : fs::directory_iterator(actions_path)) {
-            if (entry.is_regular_file()) {
-                std::string filename = entry.path().filename().string();
-                std::string action_name = filename.substr(0, filename.find_last_of('.'));
-                
-                LauncherResult res;
-                res.kind = LauncherResultKind::Action;
-                res.id = entry.path().string();
-                res.title = action_name;
-                res.subtitle = "Custom Action";
-                res.icon_name = "system-run";
-                index_.push_back(res);
-            }
+    // 2. Index Custom Actions from the user's XDG config directory.
+    const fs::path actions_path = actions_directory();
+    std::error_code filesystem_error;
+    if (fs::is_directory(actions_path, filesystem_error) && !filesystem_error) {
+        fs::directory_iterator iterator(actions_path, filesystem_error);
+        const fs::directory_iterator end;
+        for (; !filesystem_error && iterator != end; iterator.increment(filesystem_error)) {
+            const auto& entry = *iterator;
+            if (!entry.is_regular_file(filesystem_error) || filesystem_error) continue;
+            const std::string action_name = entry.path().stem().string();
+
+            LauncherResult res;
+            res.kind = LauncherResultKind::Action;
+            res.id = entry.path().string();
+            res.title = action_name;
+            res.subtitle = "Custom Action";
+            res.icon_name = "system-run";
+            index_.push_back(std::move(res));
         }
     }
 
@@ -135,9 +158,9 @@ int LauncherService::calculate_score(const LauncherResult& res, std::string_view
     if (query.empty()) return 0;
 
     std::string title_lower = res.title;
-    std::transform(title_lower.begin(), title_lower.end(), title_lower.begin(), ::tolower);
+    std::transform(title_lower.begin(), title_lower.end(), title_lower.begin(), ascii_lower);
     std::string query_lower = std::string(query);
-    std::transform(query_lower.begin(), query_lower.end(), query_lower.begin(), ::tolower);
+    std::transform(query_lower.begin(), query_lower.end(), query_lower.begin(), ascii_lower);
 
     if (title_lower == query_lower) return 1000;
     if (title_lower.find(query_lower) == 0) return 500;
@@ -167,6 +190,9 @@ std::vector<LauncherResult> LauncherService::search(std::string_view query, std:
     std::sort(scored.begin(), scored.end(), std::greater<>());
 
     std::vector<LauncherResult> results;
+    if (limit == 0) return results;
+    results.reserve(limit);
+
     std::string command(query);
     if (has_shell_prefix) {
         command.erase(command.begin());
@@ -180,18 +206,14 @@ std::vector<LauncherResult> LauncherService::search(std::string_view query, std:
     command_result.subtitle = command;
     command_result.icon_name = "utilities-terminal";
 
-    if (is_explicit_command) {
-        results.push_back(command_result);
+    if (is_explicit_command) results.push_back(command_result);
+
+    for (const auto& item : scored) {
+        if (results.size() >= limit) break;
+        results.push_back(index_[item.index]);
     }
 
-    for (std::size_t i = 0; i < std::min(scored.size(), limit); ++i) {
-        results.push_back(index_[scored[i].index]);
-    }
-
-    if (!is_explicit_command) {
-        results.push_back(command_result);
-    }
-
+    if (!is_explicit_command && results.size() < limit) results.push_back(command_result);
     return results;
 }
 
@@ -239,11 +261,10 @@ bool LauncherService::activate(const LauncherResult& result) {
         }
         return success;
     } else if (result.kind == LauncherResultKind::Clipboard) {
-        // This is an activate call for a clipboard entry.
-        // We use cliphist print to get the content and copy it back to the clipboard.
-        // For now, we assume the ID is the index in the lauchner service's current search results
-        // We'll implement the search for cliphist later in search()
-        return true;
+        if (result.id.empty()) return false;
+        return realmheart::core::run_background({
+            "sh", "-c", "cliphist decode \"$1\" | wl-copy", "realmheart-clipboard", result.id
+        });
     }
     return false;
 }

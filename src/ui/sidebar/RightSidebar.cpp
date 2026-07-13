@@ -1,7 +1,6 @@
 #include "ui/sidebar/RightSidebar.hpp"
 
-#include "core/ShellCommand.hpp"
-#include "core/ShellControl.hpp"
+#include "core/TaskExecutor.hpp"
 #include "services/Audio.hpp"
 #include "services/Bluetooth.hpp"
 #include "services/Brightness.hpp"
@@ -19,17 +18,20 @@
 #include <cmath>
 #include <iostream>
 #include <optional>
-#include <thread>
 #include <utility>
 
 namespace realmheart::ui::sidebar {
 
 RightSidebar::RightSidebar(
     GtkApplication* app,
-    services::NotificationHistory& notification_history
+    services::NotificationHistory& notification_history,
+    std::function<void(double)> show_volume_osd,
+    std::function<void(double)> show_brightness_osd
 ) : app_(app),
     keep_awake_(std::make_shared<services::KeepAwake>()),
-    notification_history_(notification_history) {
+    notification_history_(notification_history),
+    show_volume_osd_(std::move(show_volume_osd)),
+    show_brightness_osd_(std::move(show_brightness_osd)) {
     window_ = gtk_application_window_new(app_);
     gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Right Sidebar");
     gtk_window_set_default_size(GTK_WINDOW(window_), 300, 800);
@@ -50,6 +52,8 @@ RightSidebar::RightSidebar(
 }
 
 RightSidebar::~RightSidebar() {
+    async_ui_state_->alive = false;
+    async_ui_state_->power_profile_label = nullptr;
     modules_.clear();
     if (window_ != nullptr) {
         gtk_window_destroy(GTK_WINDOW(window_));
@@ -160,17 +164,46 @@ void RightSidebar::populate_modules() {
         add_module(std::make_unique<components::LabelWidget>("Gamemode", "Unavailable"));
     }
 
-    add_module(std::make_unique<components::LabelWidget>(
+    auto power_profile_label = std::make_unique<components::LabelWidget>(
         "Power Profile",
         services::PowerProfiles::current().value_or("Unavailable"),
         [] { return services::PowerProfiles::current().value_or("Unavailable"); }
-    ));
-    add_module(std::make_unique<components::ButtonWidget>("Power Profile", [] {
-        std::thread([] {
-            if (const auto next = services::PowerProfiles::cycle()) {
-                std::cout << "Power profile cycled to: " << *next << '\n';
+    );
+    async_ui_state_->power_profile_label = power_profile_label.get();
+    add_module(std::move(power_profile_label));
+
+    const auto async_ui_state = async_ui_state_;
+    add_module(std::make_unique<components::ButtonWidget>("Power Profile", [async_ui_state] {
+        const auto generation = async_ui_state->power_profile_generation.fetch_add(1) + 1;
+        realmheart::core::shared_task_executor().post([async_ui_state, generation] {
+            std::optional<std::string> next;
+            {
+                std::lock_guard mutation_lock(async_ui_state->power_profile_mutex);
+                if (!async_ui_state->alive.load() ||
+                    async_ui_state->power_profile_generation.load() != generation) {
+                    return;
+                }
+                next = services::PowerProfiles::cycle();
             }
-        }).detach();
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,
+                +[](gpointer raw) -> gboolean {
+                    auto* payload = static_cast<std::pair<std::shared_ptr<AsyncUiState>, std::optional<std::string>>*>(raw);
+                    if (payload->first->alive.load() && payload->first->power_profile_label != nullptr) {
+                        if (payload->second) {
+                            payload->first->power_profile_label->set_value(*payload->second);
+                        } else {
+                            payload->first->power_profile_label->refresh();
+                        }
+                    }
+                    return G_SOURCE_REMOVE;
+                },
+                new std::pair<std::shared_ptr<AsyncUiState>, std::optional<std::string>>{async_ui_state, std::move(next)},
+                +[](gpointer raw) {
+                    delete static_cast<std::pair<std::shared_ptr<AsyncUiState>, std::optional<std::string>>*>(raw);
+                }
+            );
+        });
     }));
 
     if (const auto brightness = services::Brightness::read()) {
@@ -180,16 +213,13 @@ void RightSidebar::populate_modules() {
             100,
             brightness->percent,
             [](double value) {
-                static_cast<void>(
-                    services::Brightness::set(static_cast<int>(std::lround(value)))
+                const auto mutation = services::Brightness::set_percent(
+                    static_cast<int>(std::lround(value))
                 );
-                realmheart::core::send_shell_command(
-                    realmheart::core::ShellCommand::ShowOSDBrightness
-                );
-                const auto readback = services::Brightness::read();
-                if (!readback) return std::optional<double>{};
-                return std::optional<double>{readback->percent};
-            }
+                if (!mutation.success) return std::optional<double>{};
+                return std::optional<double>{mutation.state.percent};
+            },
+            show_brightness_osd_
         ));
     }
 
@@ -200,16 +230,11 @@ void RightSidebar::populate_modules() {
             150,
             audio->volume * 100.0,
             [](double value) {
-                static_cast<void>(
-                    services::Audio::set_default_sink_volume(value / 100.0)
-                );
-                realmheart::core::send_shell_command(
-                    realmheart::core::ShellCommand::ShowOSDVolume
-                );
-                const auto readback = services::Audio::read_default_sink();
-                if (!readback) return std::optional<double>{};
-                return std::optional<double>{readback->volume * 100.0};
-            }
+                const auto mutation = services::Audio::set_default_sink_volume(value / 100.0);
+                if (!mutation.success) return std::optional<double>{};
+                return std::optional<double>{mutation.state.volume * 100.0};
+            },
+            show_volume_osd_
         ));
     }
 

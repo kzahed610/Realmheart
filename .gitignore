@@ -1,7 +1,9 @@
-build-hybrid/
 /build*/
 .hermes/
+.hermes.md
 *.bak*
+*.orig
+*.rej
 *.o
 *.a
 *.so

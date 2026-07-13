@@ -14,6 +14,7 @@ public:
 
 private:
     void update_time();
+    void schedule_next_tick();
 
     GtkWidget* label_ = nullptr;
     guint timer_id_ = 0;

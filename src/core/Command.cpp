@@ -217,14 +217,21 @@ bool CommandResult::succeeded() const noexcept {
 }
 
 bool run_background(const std::vector<std::string>& argv) {
-    if (argv.empty()) return false;
+    if (argv.empty() || argv.front().empty()) return false;
+
+    // Build argv before fork. The child of a multithreaded process must not
+    // allocate memory or take libc/C++ locks before exec.
+    std::vector<char*> exec_argv;
+    exec_argv.reserve(argv.size() + 1);
+    for (const auto& argument : argv) {
+        exec_argv.push_back(const_cast<char*>(argument.c_str()));
+    }
+    exec_argv.push_back(nullptr);
 
     int status_pipe[2] = {-1, -1};
-    if (::pipe2(status_pipe, O_CLOEXEC) != 0) {
-        return false;
-    }
+    if (::pipe2(status_pipe, O_CLOEXEC | O_NONBLOCK) != 0) return false;
 
-    pid_t pid = ::fork();
+    const pid_t pid = ::fork();
     if (pid < 0) {
         ::close(status_pipe[0]);
         ::close(status_pipe[1]);
@@ -234,52 +241,50 @@ bool run_background(const std::vector<std::string>& argv) {
     if (pid == 0) {
         ::close(status_pipe[0]);
         if (::setsid() < 0) {
-            int err = errno;
-            ::write(status_pipe[1], &err, sizeof(err));
-            ::close(status_pipe[1]);
-            _exit(1);
+            const int child_errno = errno;
+            static_cast<void>(::write(status_pipe[1], &child_errno, sizeof(child_errno)));
+            _exit(127);
         }
 
-        // To prevent the child from becoming a zombie when it exits, 
-        // we double-fork. The first child forks a second child and exits immediately.
-        // The second child is then adopted by init (PID 1) or a subreaper.
-        pid_t grandchild = ::fork();
+        const pid_t grandchild = ::fork();
         if (grandchild < 0) {
-            int err = errno;
-            ::write(status_pipe[1], &err, sizeof(err));
-            ::close(status_pipe[1]);
-            _exit(1);
+            const int child_errno = errno;
+            static_cast<void>(::write(status_pipe[1], &child_errno, sizeof(child_errno)));
+            _exit(127);
         }
-        if (grandchild > 0) {
-            // First child: reap the grandchild (just in case) and exit.
-            // Actually, since we want the grandchild to be orphaned, 
-            // the first child should just exit.
-            ::close(status_pipe[1]);
-            _exit(0);
-        }
-
-        // Grandchild: execute the command
-        std::vector<char*> exec_argv;
-        for (const auto& arg : argv) exec_argv.push_back(const_cast<char*>(arg.c_str()));
-        exec_argv.push_back(nullptr);
+        if (grandchild > 0) _exit(0);
 
         ::execvp(exec_argv[0], exec_argv.data());
-        
-        int err = errno;
-        ::write(status_pipe[1], &err, sizeof(err));
-        ::close(status_pipe[1]);
+        const int child_errno = errno;
+        static_cast<void>(::write(status_pipe[1], &child_errno, sizeof(child_errno)));
         _exit(127);
     }
 
     ::close(status_pipe[1]);
+
+    // Never let a child wedged before exec block the caller indefinitely.
+    pollfd descriptor{status_pipe[0], static_cast<short>(POLLIN | POLLHUP), 0};
+    int poll_result = -1;
+    do {
+        poll_result = ::poll(&descriptor, 1, 1000);
+    } while (poll_result < 0 && errno == EINTR);
+
     int child_errno = 0;
-    ssize_t read_bytes = ::read(status_pipe[0], &child_errno, sizeof(child_errno));
+    ssize_t read_bytes = -1;
+    if (poll_result > 0) {
+        do {
+            read_bytes = ::read(status_pipe[0], &child_errno, sizeof(child_errno));
+        } while (read_bytes < 0 && errno == EINTR);
+    }
     ::close(status_pipe[0]);
 
-    // The first child exits quickly. We must reap it to avoid a zombie.
-    static_cast<void>(::waitpid(pid, nullptr, 0));
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
 
-    return read_bytes == 0;
+    // EOF means the grandchild successfully crossed exec and O_CLOEXEC closed
+    // the status pipe. Any errno payload or timeout is a spawn failure.
+    return poll_result > 0 && read_bytes == 0;
 }
 
 CommandResult run_capture(const std::vector<std::string>& argv, const CommandOptions& options) {

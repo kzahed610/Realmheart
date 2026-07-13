@@ -24,10 +24,21 @@ public:
         const auto executable = directory_ / "brightnessctl";
         std::ofstream script(executable);
         script << "#!/bin/sh\n"
+               << "if [ \"$1\" = -m ] && [ \"$2\" = info ]; then\n"
+               << "  IFS= read -r value < \"$REALMHEART_BRIGHTNESS_TEST_STATE\"\n"
+               << "  printf 'intel_backlight,backlight,%s,%s%%,1000\\n' \"$value\" \"$((value / 10))\"\n"
+               << "  exit 0\n"
+               << "fi\n"
+               << "if [ \"$1\" = -m ] && [ \"$2\" = set ]; then\n"
+               << "  percent=${3%\\%}\n"
+               << "  if [ \"$REALMHEART_BRIGHTNESS_IGNORE_WRITES\" != 1 ]; then printf '%s' \"$((percent * 10))\" > \"$REALMHEART_BRIGHTNESS_TEST_STATE\"; fi\n"
+               << "  IFS= read -r value < \"$REALMHEART_BRIGHTNESS_TEST_STATE\"\n"
+               << "  printf 'intel_backlight,backlight,%s,%s%%,1000\\n' \"$value\" \"$((value / 10))\"\n"
+               << "  exit 0\n"
+               << "fi\n"
                << "case \"$1\" in\n"
                << "  g) IFS= read -r value < \"$REALMHEART_BRIGHTNESS_TEST_STATE\"; printf '%s\\n' \"$value\" ;;\n"
                << "  m) printf '1000\\n' ;;\n"
-               << "  set) if [ \"$REALMHEART_BRIGHTNESS_IGNORE_WRITES\" != 1 ]; then percent=${2%\\%}; printf '%s' \"$((percent * 10))\" > \"$REALMHEART_BRIGHTNESS_TEST_STATE\"; fi ;;\n"
                << "  *) exit 64 ;;\n"
                << "esac\n";
         script.close();

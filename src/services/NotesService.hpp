@@ -37,6 +37,7 @@ private:
     std::string cached_content_;
     std::chrono::milliseconds debounce_;
     std::mutex mutex_;
+    std::mutex io_mutex_;
     std::condition_variable cv_;
     std::thread worker_;
     bool dirty_ = false;
@@ -45,7 +46,7 @@ private:
 
     void load_from_disk();
     void worker_loop();
-    bool write_atomically_locked();
+    bool write_atomically(const std::string& content);
 };
 
 } // namespace realmheart::services

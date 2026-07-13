@@ -62,3 +62,22 @@ TEST_F(LauncherServiceTest, RankingOrderExactOverSubstring) {
     ASSERT_GE(results.size(), 1);
     EXPECT_EQ(results[0].id, "a");
 }
+
+TEST_F(LauncherServiceTest, ResultCountNeverExceedsLimit) {
+    service.set_mock_index({
+        {LauncherResultKind::Application, "a", "Alpha", "", "", {}},
+        {LauncherResultKind::Application, "b", "Alphabet", "", "", {}},
+        {LauncherResultKind::Application, "c", "Alphanumeric", "", "", {}}
+    });
+    const auto results = service.search("Al", 2);
+    EXPECT_EQ(results.size(), 2U);
+}
+
+TEST_F(LauncherServiceTest, ExplicitCommandConsumesOneResultSlot) {
+    service.set_mock_index({
+        {LauncherResultKind::Application, "a", "Kitty Command", "", "", {}}
+    });
+    const auto results = service.search("kitty --single-instance", 1);
+    ASSERT_EQ(results.size(), 1U);
+    EXPECT_EQ(results.front().kind, LauncherResultKind::Command);
+}

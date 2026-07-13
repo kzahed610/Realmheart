@@ -32,6 +32,7 @@
 #include <cerrno>
 #include <ctime>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -46,6 +47,17 @@ std::string current_executable_path() {
     const ssize_t length = ::readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
     if (length <= 0) return {};
     return std::string(buffer.data(), static_cast<std::size_t>(length));
+}
+
+std::filesystem::path user_media_directory(GUserDirectory directory, const char* fallback_name) {
+    if (const char* configured = g_get_user_special_dir(directory);
+        configured != nullptr && *configured != '\0') {
+        return configured;
+    }
+    if (const char* home = g_get_home_dir(); home != nullptr && *home != '\0') {
+        return std::filesystem::path(home) / fallback_name;
+    }
+    return std::filesystem::temp_directory_path() / "realmheart" / fallback_name;
 }
 
 } // namespace
@@ -121,17 +133,27 @@ public:
         apply_right_sidebar_visibility();
     }
 
+    void show_osd_volume_value(double value) {
+        ensure_initialized();
+        osd_->show_volume(value);
+    }
+
+    void show_osd_brightness_value(double value) {
+        ensure_initialized();
+        osd_->show_brightness(value);
+    }
+
     void show_osd_volume() {
         ensure_initialized();
         if (const auto audio = services::Audio::read_default_sink()) {
-            osd_->show_volume(audio->volume * 100.0);
+            show_osd_volume_value(audio->volume * 100.0);
         }
     }
 
     void show_osd_brightness() {
         ensure_initialized();
         if (const auto brightness = services::Brightness::read()) {
-            osd_->show_brightness(brightness->percent);
+            show_osd_brightness_value(brightness->percent);
         }
     }
 
@@ -142,10 +164,10 @@ public:
     }
 
     void take_screenshot_full() {
-        utilities_->take_screenshot_full(
-            "/home/zahed/Pictures/Screenshots/full_" +
-            std::to_string(std::time(nullptr)) + ".png"
-        );
+        const auto path = user_media_directory(G_USER_DIRECTORY_PICTURES, "Pictures") /
+            "Screenshots" /
+            ("full_" + std::to_string(std::time(nullptr)) + ".png");
+        utilities_->take_screenshot_full(path.string());
     }
 
     void take_screenshot_area() {
@@ -250,9 +272,10 @@ public:
     }
 
     void start_recording() {
-        const std::string path = "/home/zahed/Videos/Recordings/rec_" +
-            std::to_string(std::time(nullptr)) + ".mp4";
-        utilities_->start_recording(path);
+        const auto path = user_media_directory(G_USER_DIRECTORY_VIDEOS, "Videos") /
+            "Recordings" /
+            ("rec_" + std::to_string(std::time(nullptr)) + ".mp4");
+        utilities_->start_recording(path.string());
     }
 
     void stop_recording() {
@@ -343,7 +366,9 @@ private:
         if (!sidebar_) {
             sidebar_ = std::make_unique<sidebar::RightSidebar>(
                 application_,
-                notification_history_
+                notification_history_,
+                [this](double value) { show_osd_volume_value(value); },
+                [this](double value) { show_osd_brightness_value(value); }
             );
             gtk_widget_set_visible(sidebar_->get_window(), FALSE);
         }

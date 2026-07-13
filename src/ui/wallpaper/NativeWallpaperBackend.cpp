@@ -2,7 +2,11 @@
 
 #include <glib.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
+#include <mutex>
+#include <thread>
 #include <string>
 #include <string_view>
 
@@ -25,6 +29,37 @@ std::string decode_error(std::string_view encoded) {
     g_free(decoded);
     return result;
 }
+
+class CancellationDeadline {
+public:
+    CancellationDeadline(GCancellable* cancellable, std::chrono::milliseconds timeout)
+        : cancellable_(cancellable), worker_([this, timeout] {
+            std::unique_lock lock(mutex_);
+            if (!cv_.wait_for(lock, timeout, [this] { return completed_; })) {
+                g_cancellable_cancel(cancellable_);
+            }
+        }) {}
+
+    ~CancellationDeadline() {
+        {
+            std::lock_guard lock(mutex_);
+            completed_ = true;
+        }
+        cv_.notify_one();
+        if (worker_.joinable()) worker_.join();
+    }
+
+private:
+    GCancellable* cancellable_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool completed_ = false;
+    std::thread worker_;
+};
+
+constexpr auto kStartupTimeout = std::chrono::seconds(2);
+constexpr auto kCommandTimeout = std::chrono::seconds(5);
+constexpr auto kShutdownTimeout = std::chrono::milliseconds(250);
 
 } // namespace
 
@@ -159,34 +194,34 @@ bool NativeWallpaperBackend::send_line(
 
     gsize written = 0;
     GError* error = nullptr;
-    const gboolean ok = g_output_stream_write_all(
-        command_stream_,
-        line.data(),
-        line.size(),
-        &written,
-        nullptr,
-        &error
-    );
+    GCancellable* cancellable = g_cancellable_new();
+    gboolean write_ok = FALSE;
+    gboolean flush_ok = FALSE;
+    {
+        CancellationDeadline deadline(
+            cancellable,
+            initialized_ ? kCommandTimeout : kStartupTimeout
+        );
+        write_ok = g_output_stream_write_all(
+            command_stream_, line.data(), line.size(), &written, cancellable, &error
+        );
+        if (write_ok && written == line.size()) {
+            flush_ok = g_output_stream_flush(command_stream_, cancellable, &error);
+        }
+    }
 
-    if (!ok || written != line.size()) {
+    if (!write_ok || written != line.size() || !flush_ok) {
         set_error(
             error_message,
             error != nullptr ? error->message : "unable to send command to native wallpaper renderer"
         );
-        if (error != nullptr) g_error_free(error);
+        g_clear_error(&error);
+        g_object_unref(cancellable);
         return false;
     }
-    if (error != nullptr) g_error_free(error);
 
-    if (!g_output_stream_flush(command_stream_, nullptr, &error)) {
-        set_error(
-            error_message,
-            error != nullptr ? error->message : "unable to flush native wallpaper command"
-        );
-        if (error != nullptr) g_error_free(error);
-        return false;
-    }
-    if (error != nullptr) g_error_free(error);
+    g_clear_error(&error);
+    g_object_unref(cancellable);
     return true;
 }
 
@@ -201,25 +236,31 @@ bool NativeWallpaperBackend::read_response(
 
     gsize length = 0;
     GError* error = nullptr;
-    gchar* line = g_data_input_stream_read_line(
-        response_stream_,
-        &length,
-        nullptr,
-        &error
-    );
+    GCancellable* cancellable = g_cancellable_new();
+    gchar* line = nullptr;
+    {
+        CancellationDeadline deadline(
+            cancellable,
+            initialized_ ? kCommandTimeout : kStartupTimeout
+        );
+        line = g_data_input_stream_read_line(
+            response_stream_, &length, cancellable, &error
+        );
+    }
+    g_object_unref(cancellable);
+
     if (line == nullptr) {
         set_error(
             error_message,
             error != nullptr ? error->message : "native wallpaper renderer closed its response stream"
         );
-        if (error != nullptr) g_error_free(error);
+        g_clear_error(&error);
         return false;
     }
-    if (error != nullptr) g_error_free(error);
+    g_clear_error(&error);
 
     const std::string response(line, length);
     g_free(line);
-
     if (response == expected_success) return true;
 
     constexpr std::string_view error_prefix = "ERROR ";
@@ -232,11 +273,9 @@ bool NativeWallpaperBackend::read_response(
 }
 
 void NativeWallpaperBackend::stop() noexcept {
-    if (initialized_ && command_stream_ != nullptr) {
-        std::string ignored_error;
-        (void)send_line("QUIT\n", &ignored_error);
-    }
-
+    // Closing stdin is a graceful protocol shutdown: the renderer treats EOF
+    // exactly like QUIT. Avoid a final synchronous write that could otherwise
+    // spend the normal command deadline waiting on an already-wedged helper.
     if (command_stream_ != nullptr) {
         g_output_stream_close(command_stream_, nullptr, nullptr);
         g_object_unref(command_stream_);
@@ -248,9 +287,16 @@ void NativeWallpaperBackend::stop() noexcept {
     }
 
     if (process_ != nullptr) {
-        // Never allow renderer shutdown to block the GTK shell. The renderer is
-        // deliberately isolated, and the OS releases its Wayland/EGL resources.
-        g_subprocess_force_exit(process_);
+        GCancellable* cancellable = g_cancellable_new();
+        {
+            CancellationDeadline deadline(cancellable, kShutdownTimeout);
+            GError* error = nullptr;
+            if (!g_subprocess_wait(process_, cancellable, &error)) {
+                g_clear_error(&error);
+                g_subprocess_force_exit(process_);
+            }
+        }
+        g_object_unref(cancellable);
         g_object_unref(process_);
         process_ = nullptr;
     }

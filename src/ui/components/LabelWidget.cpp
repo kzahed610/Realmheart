@@ -1,5 +1,7 @@
 #include "ui/components/LabelWidget.hpp"
 
+#include "core/TaskExecutor.hpp"
+
 #include <exception>
 #include <utility>
 
@@ -28,7 +30,6 @@ LabelWidget::LabelWidget(std::string label, std::string initial_value, Reader re
 LabelWidget::~LabelWidget() {
     state_->alive = false;
     state_->value_label = nullptr;
-    if (worker_.joinable()) worker_.join();
 }
 
 GtkWidget* LabelWidget::get_widget() {
@@ -42,18 +43,12 @@ void LabelWidget::set_value(const std::string& value) {
 }
 
 void LabelWidget::refresh() {
-    if (!reader_) return;
+    if (!reader_ || state_->refresh_in_flight.exchange(true)) return;
 
-    if (worker_.joinable()) {
-        if (state_->refresh_in_flight.load()) return;
-        worker_.join();
-    }
-
-    if (state_->refresh_in_flight.exchange(true)) return;
     const Reader reader = reader_;
     const auto state = state_;
-
-    worker_ = std::thread([state, reader] {
+    const std::uint64_t generation = state->generation.fetch_add(1) + 1;
+    if (!realmheart::core::shared_task_executor().post([state, reader, generation] {
         std::string value;
         try {
             value = reader();
@@ -63,26 +58,27 @@ void LabelWidget::refresh() {
 
         struct Result {
             std::shared_ptr<AsyncState> state;
+            std::uint64_t generation;
             std::string value;
         };
-
         g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,
-            +[](gpointer data) -> gboolean {
-                auto* result = static_cast<Result*>(data);
-                if (result->state->alive.load() && result->state->value_label != nullptr) {
-                    gtk_label_set_text(
-                        GTK_LABEL(result->state->value_label),
-                        result->value.c_str()
-                    );
+            +[](gpointer raw) -> gboolean {
+                auto* result = static_cast<Result*>(raw);
+                auto& state = *result->state;
+                if (state.alive.load() && state.value_label != nullptr &&
+                    state.generation.load() == result->generation) {
+                    gtk_label_set_text(GTK_LABEL(state.value_label), result->value.c_str());
                 }
-                result->state->refresh_in_flight = false;
+                state.refresh_in_flight = false;
                 return G_SOURCE_REMOVE;
             },
-            new Result{state, std::move(value)},
-            +[](gpointer data) { delete static_cast<Result*>(data); }
+            new Result{state, generation, std::move(value)},
+            +[](gpointer raw) { delete static_cast<Result*>(raw); }
         );
-    });
+    })) {
+        state_->refresh_in_flight = false;
+    }
 }
 
 } // namespace realmheart::ui::components

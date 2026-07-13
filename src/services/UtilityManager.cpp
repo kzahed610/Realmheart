@@ -1,7 +1,9 @@
 #include "services/UtilityManager.hpp"
 #include "services/ThemeService.hpp"
 #include "services/MatugenParser.hpp"
+#include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -11,6 +13,32 @@
 #include <unistd.h>
 
 namespace realmheart::services {
+namespace {
+
+std::filesystem::path default_recorder_pid_path() {
+    if (const char* runtime_dir = std::getenv("XDG_RUNTIME_DIR");
+        runtime_dir != nullptr && *runtime_dir != '\0') {
+        return std::filesystem::path(runtime_dir) / "realmheart/wf-recorder.pid";
+    }
+    return std::filesystem::temp_directory_path() /
+        ("realmheart-" + std::to_string(static_cast<unsigned long>(geteuid())) + "-wf-recorder.pid");
+}
+
+bool ensure_parent_directory(const std::filesystem::path& path) {
+    const auto parent = path.parent_path();
+    if (parent.empty()) return true;
+    std::error_code error;
+    std::filesystem::create_directories(parent, error);
+    return !error;
+}
+
+} // namespace
+
+
+bool SystemUtilityExecutor::send_signal(int pid, int signal_number) {
+    errno = 0;
+    return ::kill(pid, signal_number) == 0;
+}
 
 UtilityManager::UtilityManager(
     std::shared_ptr<services::ThemeService> theme_service,
@@ -18,7 +46,9 @@ UtilityManager::UtilityManager(
     std::filesystem::path recorder_pid_path,
     std::filesystem::path proc_root
 ) : executor_(std::move(executor)),
-    recorder_pid_path_(std::move(recorder_pid_path)),
+    recorder_pid_path_(recorder_pid_path.empty()
+        ? default_recorder_pid_path()
+        : std::move(recorder_pid_path)),
     proc_root_(std::move(proc_root)),
     theme_service_(std::move(theme_service)) {}
 
@@ -36,16 +66,12 @@ UtilityManager::UtilityManager(
 UtilityManager::~UtilityManager() = default;
 
 bool UtilityManager::take_screenshot_full(const std::string& path) {
-    if (const auto parent = std::filesystem::path(path).parent_path(); !parent.empty()) {
-        std::filesystem::create_directories(parent);
-    }
+    if (!ensure_parent_directory(path)) return false;
     return executor_->run_background({"grim", path});
 }
 
 bool UtilityManager::take_screenshot_area(const std::string& path) {
-    if (const auto parent = std::filesystem::path(path).parent_path(); !parent.empty()) {
-        std::filesystem::create_directories(parent);
-    }
+    if (!ensure_parent_directory(path)) return false;
     return executor_->run_background({
         "sh", "-c", "geometry=$(slurp) || exit $?; grim -g \"$geometry\" \"$1\"", "realmheart-screenshot", path
     });
@@ -142,13 +168,8 @@ std::string UtilityManager::load_wallpaper_path() {
 }
 
 bool UtilityManager::start_recording(const std::string& path) {
-    if (const auto parent = std::filesystem::path(path).parent_path(); !parent.empty()) {
-        std::filesystem::create_directories(parent);
-    }
-    if (const auto parent = recorder_pid_path_.parent_path(); !parent.empty()) {
-        std::error_code error;
-        std::filesystem::create_directories(parent, error);
-        if (error) return false;
+    if (!ensure_parent_directory(path) || !ensure_parent_directory(recorder_pid_path_)) {
+        return false;
     }
 
     return executor_->run_background({
@@ -180,7 +201,7 @@ bool UtilityManager::stop_recording() {
         return false;
     }
 
-    const bool signalled = executor_->run_background({"kill", "-INT", std::to_string(pid)});
+    const bool signalled = executor_->send_signal(pid, SIGINT);
     if (signalled) {
         std::error_code error;
         std::filesystem::remove(recorder_pid_path_, error);

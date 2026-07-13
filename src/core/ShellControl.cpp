@@ -2,13 +2,42 @@
 
 #include <gio/gio.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <iostream>
+#include <mutex>
+#include <thread>
 #include <string>
 
 namespace realmheart::core {
 namespace {
 
 constexpr std::string_view kShellApplicationId = "dev.realmheart.shell";
+
+class FlushDeadline {
+public:
+    explicit FlushDeadline(GCancellable* cancellable)
+        : cancellable_(cancellable), thread_([this] {
+            std::unique_lock lock(mutex_);
+            if (!cv_.wait_for(lock, std::chrono::seconds(1), [this] { return done_; })) {
+                g_cancellable_cancel(cancellable_);
+            }
+        }) {}
+    ~FlushDeadline() {
+        {
+            std::lock_guard lock(mutex_);
+            done_ = true;
+        }
+        cv_.notify_one();
+        if (thread_.joinable()) thread_.join();
+    }
+private:
+    GCancellable* cancellable_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool done_ = false;
+    std::thread thread_;
+};
 
 } // namespace
 
@@ -59,7 +88,14 @@ ShellControlResult send_shell_command(ShellCommand command, std::string_view arg
         g_action_group_activate_action(G_ACTION_GROUP(application), action_name.data(), nullptr);
     }
     if (GDBusConnection* connection = g_application_get_dbus_connection(application)) {
-        g_dbus_connection_flush_sync(connection, nullptr, nullptr);
+        GCancellable* cancellable = g_cancellable_new();
+        {
+            FlushDeadline deadline(cancellable);
+            GError* flush_error = nullptr;
+            static_cast<void>(g_dbus_connection_flush_sync(connection, cancellable, &flush_error));
+            g_clear_error(&flush_error);
+        }
+        g_object_unref(cancellable);
     }
     g_object_unref(application);
     return ShellControlResult::Delivered;

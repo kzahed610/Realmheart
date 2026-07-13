@@ -1,9 +1,9 @@
 #pragma once
 
-#include <gtk/gtk.h>
-#include <string>
-#include <memory>
 #include "services/Notifications.hpp"
+
+#include <deque>
+#include <gtk/gtk.h>
 
 namespace realmheart::ui {
 
@@ -18,13 +18,22 @@ public:
     GtkWidget* get_window() const { return window_; }
 
 private:
-    void on_timeout() { dismiss(); }
+    struct QueuedToast {
+        services::NotificationEntry entry;
+        int timeout_ms = 5000;
+    };
+
+    void show_next();
+    void hide_current();
 
     GtkApplication* app_;
     GtkWidget* window_ = nullptr;
     GtkWidget* label_summary_ = nullptr;
     GtkWidget* label_body_ = nullptr;
     guint timeout_id_ = 0;
+    std::deque<QueuedToast> queue_;
+    bool visible_ = false;
+    bool destroying_ = false;
 };
 
 } // namespace realmheart::ui

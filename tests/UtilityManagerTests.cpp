@@ -5,6 +5,8 @@
 #include <vector>
 #include <string>
 #include <memory>
+#include <csignal>
+#include <utility>
 
 class MockUtilityExecutor : public realmheart::services::IUtilityExecutor {
 public:
@@ -13,6 +15,8 @@ public:
     std::vector<realmheart::core::CommandOptions> capture_options;
     realmheart::core::CommandResult next_capture_result;
     bool next_background_result = true;
+    bool next_signal_result = true;
+    std::vector<std::pair<int, int>> signal_calls;
 
     bool run_background(const std::vector<std::string>& argv) override {
         background_calls.push_back(argv);
@@ -25,6 +29,10 @@ public:
         capture_calls.push_back(argv);
         capture_options.push_back(options);
         return next_capture_result;
+    }
+    bool send_signal(int pid, int signal_number) override {
+        signal_calls.emplace_back(pid, signal_number);
+        return next_signal_result;
     }
 };
 
@@ -140,8 +148,7 @@ void test_recorder_uses_owned_pid() {
         std::cerr << "Owned recorder stop failed\n";
         exit(1);
     }
-    const std::vector<std::string> expected{"kill", "-INT", "4242"};
-    if (mock_ptr->background_calls.back() != expected) {
+    if (mock_ptr->signal_calls != std::vector<std::pair<int, int>>{{4242, SIGINT}}) {
         std::cerr << "Recorder stop must signal only the owned PID\n";
         exit(1);
     }
@@ -177,7 +184,7 @@ void test_recorder_rejects_stale_pid_file() {
         std::cerr << "Stale recorder PID must be rejected\n";
         exit(1);
     }
-    if (!mock_ptr->background_calls.empty()) {
+    if (!mock_ptr->signal_calls.empty()) {
         std::cerr << "Stale PID must not signal any process\n";
         exit(1);
     }

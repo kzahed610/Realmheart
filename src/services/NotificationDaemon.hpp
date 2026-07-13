@@ -5,6 +5,9 @@
 
 #include <gio/gio.h>
 
+#include <cstdint>
+#include <unordered_map>
+
 namespace realmheart::services {
 
 class NotificationDaemon {
@@ -53,6 +56,8 @@ private:
         GDBusMethodInvocation* invocation
     );
     void emit_closed(GDBusConnection* connection, std::uint32_t id, std::uint32_t reason);
+    void schedule_expiration(std::uint32_t id, int timeout_ms);
+    void cancel_expiration(std::uint32_t id);
 
     NotificationServer& server_;
     NotificationHistory& history_;
@@ -60,6 +65,7 @@ private:
     guint registration_id_ = 0;
     GDBusConnection* connection_ = nullptr;
     GDBusNodeInfo* node_info_ = nullptr;
+    std::unordered_map<std::uint32_t, guint> expiration_sources_;
 };
 
 } // namespace realmheart::services

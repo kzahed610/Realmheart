@@ -21,7 +21,7 @@ private:
     bool start_inhibitor();
     void stop_inhibitor();
 
-    pid_t child_pid_ = -1;
+    mutable pid_t child_pid_ = -1;
 };
 
 } // namespace realmheart::services

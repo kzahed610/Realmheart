@@ -10,6 +10,9 @@ namespace realmheart::services {
 namespace {
 
 std::filesystem::path default_notes_path() {
+    if (const char* config = std::getenv("XDG_CONFIG_HOME"); config != nullptr && *config != '\0') {
+        return std::filesystem::path(config) / "realmheart/notes.txt";
+    }
     if (const char* home = std::getenv("HOME")) {
         return std::filesystem::path(home) / ".config/realmheart/notes.txt";
     }
@@ -25,10 +28,12 @@ NotesService::NotesService(
     std::filesystem::path notes_path,
     std::chrono::milliseconds debounce
 ) : notes_path_(std::move(notes_path)), debounce_(debounce) {
-    std::error_code ec;
-    std::filesystem::create_directories(notes_path_.parent_path(), ec);
-    if (ec) {
-        std::cerr << "NotesService: failed to create notes directory: " << ec.message() << '\n';
+    if (const auto parent = notes_path_.parent_path(); !parent.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            std::cerr << "NotesService: failed to create notes directory: " << ec.message() << '\n';
+        }
     }
 
     load_from_disk();
@@ -41,23 +46,20 @@ NotesService::~NotesService() {
         stopping_ = true;
     }
     cv_.notify_one();
-    if (worker_.joinable()) {
-        worker_.join();
-    }
+    if (worker_.joinable()) worker_.join();
 }
 
 void NotesService::load_from_disk() {
-    std::lock_guard lock(mutex_);
-
     std::ifstream file(notes_path_, std::ios::binary);
-    if (!file.is_open()) {
-        cached_content_.clear();
-        return;
+    std::string content;
+    if (file.is_open()) {
+        std::ostringstream buffer;
+        buffer << file.rdbuf();
+        content = buffer.str();
     }
 
-    std::ostringstream buffer;
-    buffer << file.rdbuf();
-    cached_content_ = buffer.str();
+    std::lock_guard lock(mutex_);
+    cached_content_ = std::move(content);
 }
 
 std::string NotesService::get_content() {
@@ -76,9 +78,18 @@ void NotesService::set_content(const std::string& content) {
 }
 
 void NotesService::save() {
-    std::lock_guard lock(mutex_);
-    if (write_atomically_locked()) {
-        dirty_ = false;
+    std::string content;
+    std::size_t generation = 0;
+    {
+        std::lock_guard lock(mutex_);
+        content = cached_content_;
+        generation = edit_generation_;
+    }
+
+    const bool written = write_atomically(content);
+    if (written) {
+        std::lock_guard lock(mutex_);
+        if (edit_generation_ == generation) dirty_ = false;
     }
 }
 
@@ -88,39 +99,32 @@ void NotesService::worker_loop() {
     while (true) {
         cv_.wait(lock, [this] { return stopping_ || dirty_; });
 
-        if (stopping_) {
-            if (dirty_) {
-                static_cast<void>(write_atomically_locked());
-                dirty_ = false;
+        if (!stopping_) {
+            const auto observed_generation = edit_generation_;
+            const auto deadline = std::chrono::steady_clock::now() + debounce_;
+            if (cv_.wait_until(lock, deadline, [this, observed_generation] {
+                    return stopping_ || edit_generation_ != observed_generation;
+                }) && !stopping_) {
+                continue;
             }
-            return;
         }
 
-        const auto observed_generation = edit_generation_;
-        const auto deadline = std::chrono::steady_clock::now() + debounce_;
-        const bool interrupted = cv_.wait_until(lock, deadline, [this, observed_generation] {
-            return stopping_ || edit_generation_ != observed_generation;
-        });
+        if (!dirty_ && stopping_) return;
+        const std::string content = cached_content_;
+        const std::size_t generation = edit_generation_;
+        lock.unlock();
+        const bool written = write_atomically(content);
+        lock.lock();
 
-        if (stopping_) {
-            if (dirty_) {
-                static_cast<void>(write_atomically_locked());
-                dirty_ = false;
-            }
-            return;
-        }
-
-        if (interrupted) {
-            continue;
-        }
-
-        if (dirty_ && write_atomically_locked()) {
-            dirty_ = false;
-        }
+        if (written && edit_generation_ == generation) dirty_ = false;
+        if (stopping_) return;
     }
 }
 
-bool NotesService::write_atomically_locked() {
+bool NotesService::write_atomically(const std::string& content) {
+    // save() and the debounce worker may overlap. Serialize only disk I/O—not
+    // access to the in-memory note—so both paths can safely share atomic replace.
+    std::lock_guard io_lock(io_mutex_);
     const auto temporary_path = std::filesystem::path(notes_path_.string() + ".tmp");
 
     {
@@ -130,7 +134,7 @@ bool NotesService::write_atomically_locked() {
             return false;
         }
 
-        file.write(cached_content_.data(), static_cast<std::streamsize>(cached_content_.size()));
+        file.write(content.data(), static_cast<std::streamsize>(content.size()));
         file.flush();
         if (!file.good()) {
             std::cerr << "NotesService: failed to write temporary notes file\n";
