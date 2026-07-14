@@ -29,7 +29,7 @@ window.realmheart-vertical-bar-window,
  * curve wedges are intentionally left transparent by the C++ geometry.
  */
 .realmheart-bar-backdrop-fill {
-  color: alpha(@rh_background, 0.88);
+  color: alpha(@rh_background, 0.94);
 }
 
 .realmheart-bar-backdrop-contour {

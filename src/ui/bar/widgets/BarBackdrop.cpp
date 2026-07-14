@@ -48,10 +48,7 @@ Geometry geometry_for(const BackdropState& state, int width, int height) {
     };
 }
 
-void append_rail_path(cairo_t* cr, const Geometry& geometry, int height) {
-    // The opaque taskbar body is deliberately only the straight rail.
-    // The outward top/bottom wedges stay unpainted so the application window
-    // remains visible beneath the gold contour, creating the "hug" effect.
+void append_straight_rail_path(cairo_t* cr, const Geometry& geometry, int height) {
     cairo_rectangle(
         cr,
         0.0,
@@ -59,6 +56,50 @@ void append_rail_path(cairo_t* cr, const Geometry& geometry, int height) {
         geometry.rail,
         static_cast<double>(height)
     );
+}
+
+void append_top_cap_path(cairo_t* cr, const Geometry& geometry) {
+    if (geometry.cap <= 0.0 || geometry.curve <= 0.0) return;
+
+    cairo_move_to(cr, geometry.rail, 0.0);
+    cairo_line_to(cr, geometry.visual, 0.0);
+    cairo_curve_to(
+        cr,
+        geometry.visual - (kQuarterEllipseKappa * geometry.cap),
+        0.0,
+        geometry.rail,
+        geometry.curve - (kQuarterEllipseKappa * geometry.curve),
+        geometry.rail,
+        geometry.curve
+    );
+    cairo_close_path(cr);
+}
+
+void append_bottom_cap_path(cairo_t* cr, const Geometry& geometry, int height) {
+    if (geometry.cap <= 0.0 || geometry.curve <= 0.0) return;
+
+    const double bottom = static_cast<double>(height);
+    cairo_move_to(cr, geometry.rail, bottom - geometry.curve);
+    cairo_curve_to(
+        cr,
+        geometry.rail,
+        bottom - geometry.curve + (kQuarterEllipseKappa * geometry.curve),
+        geometry.visual - (kQuarterEllipseKappa * geometry.cap),
+        bottom,
+        geometry.visual,
+        bottom
+    );
+    cairo_line_to(cr, geometry.rail, bottom);
+    cairo_close_path(cr);
+}
+
+void append_fill_path(cairo_t* cr, const Geometry& geometry, int height) {
+    // Paint the full-height straight rail plus only the top and bottom curved
+    // caps. The rectangular extension between both caps remains untouched and
+    // therefore transparent, so the bar visually hugs the adjacent window.
+    append_straight_rail_path(cr, geometry, height);
+    append_top_cap_path(cr, geometry);
+    append_bottom_cap_path(cr, geometry, height);
 }
 
 void append_contour_path(cairo_t* cr, const Geometry& geometry, int height) {
@@ -99,7 +140,7 @@ void draw_fill(
     GdkRGBA fill{};
     gtk_widget_get_color(GTK_WIDGET(area), &fill);
     cairo_set_source_rgba(cr, fill.red, fill.green, fill.blue, fill.alpha);
-    append_rail_path(cr, geometry, height);
+    append_fill_path(cr, geometry, height);
     cairo_fill(cr);
 }
 
