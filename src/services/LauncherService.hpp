@@ -35,13 +35,28 @@ public:
     bool run_command(std::string_view command) override;
 };
 
+class ILauncherProcessExecutor {
+public:
+    virtual ~ILauncherProcessExecutor() = default;
+    virtual bool run(const std::vector<std::string>& argv) = 0;
+};
+
+class SystemLauncherProcessExecutor final : public ILauncherProcessExecutor {
+public:
+    bool run(const std::vector<std::string>& argv) override;
+};
+
 std::vector<std::string> launcher_command_argv(std::string_view command);
+std::vector<std::string> launcher_application_argv(std::string_view desktop_id);
+std::vector<std::string> launcher_scoped_argv(const std::vector<std::string>& argv);
 
 class LauncherService {
 public:
     explicit LauncherService(
         std::unique_ptr<ILauncherCommandExecutor> command_executor =
-            std::make_unique<SystemLauncherCommandExecutor>()
+            std::make_unique<SystemLauncherCommandExecutor>(),
+        std::unique_ptr<ILauncherProcessExecutor> process_executor =
+            std::make_unique<SystemLauncherProcessExecutor>()
     );
     ~LauncherService() = default;
 
@@ -62,6 +77,7 @@ private:
     int calculate_score(const LauncherResult& res, std::string_view query) const;
     std::vector<LauncherResult> index_;
     std::unique_ptr<ILauncherCommandExecutor> command_executor_;
+    std::unique_ptr<ILauncherProcessExecutor> process_executor_;
 };
 
 } // namespace realmheart::services

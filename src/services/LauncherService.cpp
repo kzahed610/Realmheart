@@ -31,6 +31,11 @@ char ascii_lower(char value) {
     return static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
 }
 
+bool running_inside_systemd_unit() {
+    const char* invocation_id = std::getenv("INVOCATION_ID");
+    return invocation_id != nullptr && *invocation_id != '\0';
+}
+
 } // namespace
 
 std::vector<std::string> launcher_command_argv(std::string_view command) {
@@ -47,33 +52,54 @@ std::vector<std::string> launcher_command_argv(std::string_view command) {
     return argv;
 }
 
-bool SystemLauncherCommandExecutor::run_command(std::string_view command) {
-    auto arguments = launcher_command_argv(command);
-    std::vector<gchar*> argv;
-    argv.reserve(arguments.size() + 1);
-    for (auto& argument : arguments) argv.push_back(argument.data());
-    argv.push_back(nullptr);
-
-    GError* error = nullptr;
-    const gboolean spawned = g_spawn_async(
-        nullptr,
-        argv.data(),
-        nullptr,
-        G_SPAWN_SEARCH_PATH,
-        nullptr,
-        nullptr,
-        nullptr,
-        &error
-    );
-    if (error != nullptr) {
-        std::cerr << "Failed to launch terminal command: " << error->message << "\n";
-        g_error_free(error);
-    }
-    return spawned == TRUE;
+std::vector<std::string> launcher_application_argv(std::string_view desktop_id) {
+    if (desktop_id.empty()) return {};
+    return {"gtk4-launch", std::string(desktop_id)};
 }
 
-LauncherService::LauncherService(std::unique_ptr<ILauncherCommandExecutor> command_executor)
-    : command_executor_(std::move(command_executor)) {
+std::vector<std::string> launcher_scoped_argv(const std::vector<std::string>& argv) {
+    if (argv.empty() || argv.front().empty()) return {};
+
+    std::vector<std::string> scoped{
+        "systemd-run",
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        "--slice=app.slice",
+        "--",
+    };
+    scoped.insert(scoped.end(), argv.begin(), argv.end());
+    return scoped;
+}
+
+bool SystemLauncherProcessExecutor::run(const std::vector<std::string>& argv) {
+    if (argv.empty() || argv.front().empty()) return false;
+
+    // Applications launched by a shell service must not remain in that
+    // service's cgroup. Otherwise systemd's default KillMode=control-group
+    // terminates them whenever Realmheart stops or restarts. A transient user
+    // scope gives each launch an independent lifetime while preserving argv.
+    if (running_inside_systemd_unit() && realmheart::core::command_exists("systemd-run")) {
+        return realmheart::core::run_background(launcher_scoped_argv(argv));
+    }
+
+    // Manually launched Realmheart instances and non-systemd systems do not
+    // have a shell service cgroup whose shutdown can take the application down.
+    return realmheart::core::run_background(argv);
+}
+
+bool SystemLauncherCommandExecutor::run_command(std::string_view command) {
+    const auto arguments = launcher_command_argv(command);
+    SystemLauncherProcessExecutor executor;
+    return executor.run(arguments);
+}
+
+LauncherService::LauncherService(
+    std::unique_ptr<ILauncherCommandExecutor> command_executor,
+    std::unique_ptr<ILauncherProcessExecutor> process_executor
+) : command_executor_(std::move(command_executor)),
+    process_executor_(std::move(process_executor)) {
     refresh_index();
 }
 
@@ -219,53 +245,32 @@ std::vector<LauncherResult> LauncherService::search(std::string_view query, std:
 
 bool LauncherService::activate(const LauncherResult& result) {
     if (result.kind == LauncherResultKind::Application) {
-        GList* apps = g_app_info_get_all();
-        if (apps) {
-            for (GList* iter = apps; iter != nullptr; iter = g_list_next(iter)) {
-                GAppInfo* app = static_cast<GAppInfo*>(iter->data);
-                if (result.id == g_app_info_get_id(app)) {
-                    GError* error = nullptr;
-                    bool success = g_app_info_launch(app, nullptr, nullptr, &error);
-                    if (error) {
-                        std::cerr << "Failed to launch app " << result.id << ": " << error->message << "\n";
-                        g_error_free(error);
-                    }
-                    g_list_free_full(apps, g_object_unref);
-                    return success;
-                }
-            }
-            g_list_free_full(apps, g_object_unref);
-        }
-    } else if (result.kind == LauncherResultKind::Command) {
-        if (result.id.find_first_not_of(" \t\n\r") == std::string::npos) {
-            return false;
-        }
-        return command_executor_->run_command(result.id);
-    } else if (result.kind == LauncherResultKind::Action) {
-        gchar* argv[] = { (gchar*)"/bin/bash", (gchar*)result.id.c_str(), nullptr };
-        GError* error = nullptr;
-        bool success = g_spawn_async(nullptr, argv, nullptr, G_SPAWN_SEARCH_PATH, nullptr, nullptr, nullptr, &error);
-        if (error) {
-            std::cerr << "Failed to launch action " << result.id << ": " << error->message << "\n";
-            g_error_free(error);
-        }
-        return success;
-    } else if (result.kind == LauncherResultKind::Emoji) {
-        // Copy the emoji to clipboard
-        gchar* argv[] = { (gchar*)"wl-copy", (gchar*)result.id.c_str(), nullptr };
-        GError* error = nullptr;
-        bool success = g_spawn_async(nullptr, argv, nullptr, G_SPAWN_SEARCH_PATH, nullptr, nullptr, nullptr, &error);
-        if (error) {
-            std::cerr << "Failed to copy emoji " << result.id << ": " << error->message << "\n";
-            g_error_free(error);
-        }
-        return success;
-    } else if (result.kind == LauncherResultKind::Clipboard) {
         if (result.id.empty()) return false;
-        return realmheart::core::run_background({
+        return process_executor_->run(launcher_application_argv(result.id));
+    }
+
+    if (result.kind == LauncherResultKind::Command) {
+        if (result.id.find_first_not_of(" \t\n\r") == std::string::npos) return false;
+        return command_executor_->run_command(result.id);
+    }
+
+    if (result.kind == LauncherResultKind::Action) {
+        if (result.id.empty()) return false;
+        return process_executor_->run({"/bin/bash", result.id});
+    }
+
+    if (result.kind == LauncherResultKind::Emoji) {
+        if (result.id.empty()) return false;
+        return process_executor_->run({"wl-copy", result.id});
+    }
+
+    if (result.kind == LauncherResultKind::Clipboard) {
+        if (result.id.empty()) return false;
+        return process_executor_->run({
             "sh", "-c", "cliphist decode \"$1\" | wl-copy", "realmheart-clipboard", result.id
         });
     }
+
     return false;
 }
 

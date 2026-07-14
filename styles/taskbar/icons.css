@@ -6,9 +6,9 @@
  */
 
 .realmheart-bar-icon-button {
-  min-width: 44px;
-  min-height: 44px;
-  padding: 5px;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 2px;
   margin: 0;
   color: @rh_text;
   background-color: alpha(@rh_surface, 0.24);

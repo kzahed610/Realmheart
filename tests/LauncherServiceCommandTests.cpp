@@ -16,6 +16,18 @@ public:
     bool next_result = true;
 };
 
+
+class RecordingProcessExecutor : public ILauncherProcessExecutor {
+public:
+    bool run(const std::vector<std::string>& argv) override {
+        commands.push_back(argv);
+        return next_result;
+    }
+
+    std::vector<std::vector<std::string>> commands;
+    bool next_result = true;
+};
+
 class LauncherServiceCommandTest : public ::testing::Test {
 protected:
     LauncherService service;
@@ -110,4 +122,60 @@ TEST(LauncherServiceCommandLiveTest, HiddenCommandActuallyRuns) {
     }
     EXPECT_TRUE(found);
     std::filesystem::remove("/tmp/realmheart-live-ok");
+}
+
+TEST(LauncherServiceScopeTest, WrapsArgvInIndependentUserScope) {
+    EXPECT_EQ(
+        launcher_scoped_argv({"code", "--new-window"}),
+        (std::vector<std::string>{
+            "systemd-run", "--user", "--scope", "--quiet", "--collect",
+            "--slice=app.slice", "--", "code", "--new-window"
+        })
+    );
+}
+
+TEST(LauncherServiceScopeTest, ApplicationUsesGtk4LaunchInsideProcessExecutor) {
+    auto command_executor = std::make_unique<RecordingCommandExecutor>();
+    auto process_executor = std::make_unique<RecordingProcessExecutor>();
+    auto* recorder = process_executor.get();
+    LauncherService service(std::move(command_executor), std::move(process_executor));
+
+    LauncherResult application{
+        LauncherResultKind::Application,
+        "antigravity.desktop",
+        "Antigravity",
+        "",
+        "",
+        {}
+    };
+
+    ASSERT_TRUE(service.activate(application));
+    ASSERT_EQ(recorder->commands.size(), 1U);
+    EXPECT_EQ(
+        recorder->commands.front(),
+        (std::vector<std::string>{"gtk4-launch", "antigravity.desktop"})
+    );
+}
+
+TEST(LauncherServiceScopeTest, ActionUsesIndependentProcessExecutor) {
+    auto command_executor = std::make_unique<RecordingCommandExecutor>();
+    auto process_executor = std::make_unique<RecordingProcessExecutor>();
+    auto* recorder = process_executor.get();
+    LauncherService service(std::move(command_executor), std::move(process_executor));
+
+    LauncherResult action{
+        LauncherResultKind::Action,
+        "/home/test/.config/realmheart/actions/build.sh",
+        "Build",
+        "",
+        "",
+        {}
+    };
+
+    ASSERT_TRUE(service.activate(action));
+    ASSERT_EQ(recorder->commands.size(), 1U);
+    EXPECT_EQ(
+        recorder->commands.front(),
+        (std::vector<std::string>{"/bin/bash", action.id})
+    );
 }

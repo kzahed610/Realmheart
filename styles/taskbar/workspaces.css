@@ -1,17 +1,17 @@
 /* Workspace rune dimensions, breathing room, and state colours. */
 
 .realmheart-workspace-stack {
-  border-spacing: 11px;
-  margin: 18px 0;
-  padding: 8px 4px;
+  border-spacing: 5px;
+  margin: 18px 0 0 0;
+  padding: 12px 2px;
   background-color: alpha(@rh_surface, 0.18);
   border: 1px solid alpha(@rh_outline, 0.20);
-  border-radius: 17px;
+  border-radius: 25px;
 }
 
 .realmheart-workspace-rune {
-  min-width: 34px;
-  min-height: 38px;
+  min-width: 30px;
+  min-height: 34px;
   padding: 3px;
   margin: 0;
   background-color: transparent;
