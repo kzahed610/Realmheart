@@ -14,8 +14,9 @@ set(REALMHEART_WLR_LAYER_SHELL_XML "" CACHE FILEPATH "Path to wlr-layer-shell-un
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
-pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4)
+pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4>=4.12)
 pkg_check_modules(GTK4_LAYER_SHELL REQUIRED IMPORTED_TARGET gtk4-layer-shell-0)
+pkg_check_modules(GDK_PIXBUF REQUIRED IMPORTED_TARGET gdk-pixbuf-2.0)
 
 set(REALMHEART_WARNING_FLAGS
     -Wall -Wextra -Wpedantic
@@ -61,6 +62,7 @@ add_library(realmheart_ui STATIC
     src/ui/ImageFileFilters.cpp
     src/ui/GtkApp.cpp
     src/ui/ThemeStyles.cpp
+    src/ui/styles/CssModuleLoader.cpp
     src/ui/LayerSurface.cpp
     src/ui/wallpaper/WallpaperBackend.cpp
     src/ui/wallpaper/WallpaperSurface.cpp
@@ -70,6 +72,16 @@ add_library(realmheart_ui STATIC
     src/ui/ShellApp.cpp
     src/ui/bar/VerticalBar.cpp
     src/ui/bar/VerticalBarModel.cpp
+    src/ui/bar/MediaArtLoader.cpp
+    src/ui/bar/WorkspaceWindowTracker.cpp
+    src/ui/bar/widgets/BarBackdrop.cpp
+    src/ui/bar/widgets/BarIconButton.cpp
+    src/ui/bar/widgets/ClockWidget.cpp
+    src/ui/bar/widgets/WorkspaceRune.cpp
+    src/ui/bar/widgets/MediaWidget.cpp
+    src/ui/bar/widgets/SystemMonitorWidget.cpp
+    src/ui/bar/widgets/BatteryWidget.cpp
+    src/services/SystemMonitorService.cpp
     src/ui/sidebar/RightSidebar.cpp
     src/ui/NotificationToast.cpp
     src/ui/OSDOverlay.cpp
@@ -83,20 +95,20 @@ add_library(realmheart_ui STATIC
     src/ui/components/SliderWidget.cpp
     src/ui/components/ButtonWidget.cpp
     src/ui/components/NotificationWidget.cpp
-    src/ui/components/ClockWidget.cpp
-    src/ui/components/WorkspacePill.cpp
-    src/ui/components/StatusWidget.cpp
 )
 target_include_directories(realmheart_ui PRIVATE src third_party)
 target_compile_definitions(realmheart_ui PRIVATE
     REALMHEART_INSTALL_ASSET_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/assets"
     REALMHEART_SOURCE_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
+    REALMHEART_INSTALL_STYLE_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/styles"
+    REALMHEART_SOURCE_STYLE_DIR="${CMAKE_SOURCE_DIR}/styles"
 )
 target_compile_options(realmheart_ui PRIVATE ${REALMHEART_WARNING_FLAGS})
 target_link_libraries(realmheart_ui PRIVATE
     PkgConfig::GIO
     PkgConfig::GTK4
     PkgConfig::GTK4_LAYER_SHELL
+    PkgConfig::GDK_PIXBUF
     Threads::Threads
 )
 
@@ -112,7 +124,6 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
     pkg_check_modules(WAYLAND_EGL QUIET IMPORTED_TARGET wayland-egl)
     pkg_check_modules(EGL QUIET IMPORTED_TARGET egl)
     pkg_check_modules(GLESV2 QUIET IMPORTED_TARGET glesv2)
-    pkg_check_modules(GDK_PIXBUF QUIET IMPORTED_TARGET gdk-pixbuf-2.0)
     pkg_check_modules(WLR_PROTOCOLS QUIET wlr-protocols)
     pkg_check_modules(WAYLAND_PROTOCOLS QUIET wayland-protocols)
     find_program(WAYLAND_SCANNER_EXECUTABLE wayland-scanner)
@@ -197,6 +208,7 @@ if(REALMHEART_NATIVE_WALLPAPER_BUILT)
     install(TARGETS realmheart-wallpaper-renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 install(DIRECTORY assets/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/assets)
+install(DIRECTORY styles/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/styles)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -302,11 +314,19 @@ if(BUILD_TESTING)
     add_executable(realmheart_theme_service_tests tests/ThemeServiceTests.cpp src/services/ThemeService.cpp)
     realmheart_register_test(realmheart_theme_service_tests)
 
-    add_executable(realmheart_ui_foundation_tests tests/UiFoundationTests.cpp src/ui/AssetResolver.cpp src/ui/ImageFileFilters.cpp src/ui/LayerSurface.cpp)
+    add_executable(realmheart_ui_foundation_tests
+        tests/UiFoundationTests.cpp
+        src/ui/AssetResolver.cpp
+        src/ui/ImageFileFilters.cpp
+        src/ui/LayerSurface.cpp
+        src/ui/styles/CssModuleLoader.cpp
+    )
     target_compile_definitions(realmheart_ui_foundation_tests PRIVATE
         REALMHEART_TEST_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets/icons/fluent"
         REALMHEART_INSTALL_ASSET_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/assets"
         REALMHEART_SOURCE_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
+        REALMHEART_INSTALL_STYLE_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/styles"
+        REALMHEART_SOURCE_STYLE_DIR="${CMAKE_SOURCE_DIR}/styles"
     )
     target_link_libraries(realmheart_ui_foundation_tests PRIVATE PkgConfig::GTK4 PkgConfig::GTK4_LAYER_SHELL)
     realmheart_register_test(realmheart_ui_foundation_tests)
@@ -323,6 +343,25 @@ if(BUILD_TESTING)
 
     add_executable(realmheart_vertical_bar_model_tests tests/VerticalBarModelTests.cpp src/ui/bar/VerticalBarModel.cpp)
     realmheart_register_test(realmheart_vertical_bar_model_tests)
+
+    add_executable(realmheart_workspace_window_tracker_tests
+        tests/WorkspaceWindowTrackerTests.cpp
+        src/ui/bar/WorkspaceWindowTracker.cpp
+    )
+    realmheart_register_test(realmheart_workspace_window_tracker_tests)
+
+    add_executable(realmheart_system_monitor_service_tests
+        tests/SystemMonitorServiceTests.cpp
+        src/services/SystemMonitorService.cpp
+    )
+    realmheart_register_test(realmheart_system_monitor_service_tests)
+
+    add_executable(realmheart_media_art_loader_tests
+        tests/MediaArtLoaderTests.cpp
+        src/core/Command.cpp
+        src/ui/bar/MediaArtLoader.cpp
+    )
+    realmheart_register_test(realmheart_media_art_loader_tests)
 
     add_executable(realmheart_wallpaper_backend_tests tests/WallpaperBackendTests.cpp src/ui/wallpaper/WallpaperBackend.cpp)
     realmheart_register_test(realmheart_wallpaper_backend_tests)

@@ -1,8 +1,11 @@
 #include "services/HyprlandWorkspaces.hpp"
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
+#include <unistd.h>
 
 namespace {
 
@@ -11,6 +14,51 @@ void require(bool condition, const std::string& message) {
         std::cerr << "FAIL: " << message << '\n';
         std::exit(1);
     }
+}
+
+
+void test_switch_to_dispatches_requested_workspace() {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("realmheart-workspace-switch-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    const auto executable = root / "hyprctl";
+    const auto output = root / "arguments.txt";
+    {
+        std::ofstream script(executable);
+        script << "#!/bin/sh\n"
+               << "printf '%s\\n' \"$*\" > \"$REALMHEART_HYPRCTL_TEST_OUTPUT\"\n";
+    }
+    std::filesystem::permissions(
+        executable,
+        std::filesystem::perms::owner_read |
+            std::filesystem::perms::owner_write |
+            std::filesystem::perms::owner_exec,
+        std::filesystem::perm_options::replace
+    );
+
+    const char* old_path_value = std::getenv("PATH");
+    const std::string old_path = old_path_value == nullptr ? std::string{} : old_path_value;
+    const std::string test_path = root.string() + (old_path.empty() ? "" : ":" + old_path);
+    ::setenv("PATH", test_path.c_str(), 1);
+    ::setenv("REALMHEART_HYPRCTL_TEST_OUTPUT", output.string().c_str(), 1);
+
+    const bool switched = realmheart::services::HyprlandWorkspaces::switch_to(4);
+
+    ::setenv("PATH", old_path.c_str(), 1);
+    ::unsetenv("REALMHEART_HYPRCTL_TEST_OUTPUT");
+
+    require(switched, "workspace dispatch command must report success");
+    std::ifstream recorded(output);
+    std::string arguments;
+    std::getline(recorded, arguments);
+    require(arguments == "dispatch workspace 4",
+            "workspace dispatch must pass the exact requested workspace id");
+    require(!realmheart::services::HyprlandWorkspaces::switch_to(0),
+            "invalid workspace ids must be rejected before spawning hyprctl");
+
+    std::filesystem::remove_all(root);
 }
 
 void test_fixture_parses_sorted_deduplicated_state() {
@@ -68,13 +116,61 @@ void test_malformed_workspace_fixture_is_unavailable() {
     require(!snapshot.available, "malformed workspace input must not masquerade as live state");
 }
 
+void test_clients_are_attached_to_their_workspaces() {
+    constexpr auto clients = R"([
+        {
+            "address":"0xaaa",
+            "class":"org.mozilla.firefox",
+            "title":"Realmheart – Mozilla Firefox",
+            "workspace":{"id":1}
+        },
+        {
+            "address":"0xbbb",
+            "initialClass":"org.kde.dolphin",
+            "initialTitle":"Home — Dolphin",
+            "workspace":{"id":3}
+        },
+        {"address":"0xignored","class":"special","workspace":{"id":-99}}
+    ])";
+
+    const auto snapshot = realmheart::services::HyprlandWorkspaces::parse(
+        R"({"id":1})",
+        R"([{"id":1,"name":"one","windows":0},{"id":3,"name":"three","windows":0}])",
+        clients
+    );
+
+    require(snapshot.available, "valid client metadata must keep workspace state available");
+    require(snapshot.workspaces[0].window_details.size() == 1,
+            "workspace one must receive its browser window");
+    require(snapshot.workspaces[0].window_details[0].app_id == "org.mozilla.firefox",
+            "window application id must come from the current class");
+    require(snapshot.workspaces[0].window_details[0].title == "Realmheart – Mozilla Firefox",
+            "window title must be preserved");
+    require(snapshot.workspaces[0].windows == 1,
+            "client metadata must prevent an occupied workspace from appearing empty");
+    require(snapshot.workspaces[1].window_details[0].app_id == "org.kde.dolphin",
+            "initial class must be used when the current class is absent");
+}
+
+void test_malformed_clients_fixture_is_unavailable() {
+    const auto snapshot = realmheart::services::HyprlandWorkspaces::parse(
+        R"({"id":1})",
+        R"([{"id":1,"windows":0}])",
+        "not-json"
+    );
+    require(!snapshot.available, "malformed client data must fail deterministically");
+}
+
 } // namespace
 
 int main() {
+    test_switch_to_dispatches_requested_workspace();
     test_fixture_parses_sorted_deduplicated_state();
     test_active_workspace_is_synthesized_when_list_omits_it();
     test_malformed_active_fixture_is_unavailable();
     test_malformed_workspace_fixture_is_unavailable();
+    test_clients_are_attached_to_their_workspaces();
+    test_malformed_clients_fixture_is_unavailable();
     std::cout << "Workspace parser tests passed\n";
     return 0;
 }

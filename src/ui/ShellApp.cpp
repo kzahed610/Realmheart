@@ -360,7 +360,8 @@ private:
                 notification_history_,
                 *battery_,
                 *media_,
-                [this] { toggle_right_sidebar(); }
+                [this] { toggle_right_sidebar(); },
+                [this] { launch_launcher(); }
             );
         }
         if (!sidebar_) {

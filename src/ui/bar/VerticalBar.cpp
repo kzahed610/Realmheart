@@ -12,6 +12,13 @@
 namespace realmheart::ui::bar {
 namespace {
 
+// The compositor reserves only the straight rail. The extra surface width is
+// transparent through the middle and exists solely for the two outward caps.
+constexpr int kRailWidth = 56;
+constexpr int kCapExtension = 20;
+constexpr int kVisualWidth = kRailWidth + kCapExtension;
+constexpr int kCurveHeight = 35;
+
 int monitor_height_or_fallback() {
     constexpr int fallback_height = 1080;
     GdkDisplay* display = gdk_display_get_default();
@@ -42,19 +49,26 @@ VerticalBar::VerticalBar(
     services::NotificationHistory& notification_history,
     services::BatteryService& battery_service,
     services::MediaService& media_service,
-    std::function<void()> toggle_sidebar
+    std::function<void()> toggle_sidebar,
+    std::function<void()> launch_launcher
 ) : app_(app),
     notification_history_(notification_history),
     battery_service_(battery_service),
     media_service_(media_service),
-    toggle_sidebar_(std::move(toggle_sidebar)) {
+    toggle_sidebar_(std::move(toggle_sidebar)),
+    launch_launcher_(std::move(launch_launcher)) {
+    g_weak_ref_init(&active_popover_ref_, nullptr);
     window_ = gtk_application_window_new(app_);
-    gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Vertical Bar");
-    gtk_window_set_default_size(GTK_WINDOW(window_), 50, monitor_height_or_fallback());
+    gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Aether Spine");
+    gtk_window_set_default_size(GTK_WINDOW(window_), kVisualWidth, monitor_height_or_fallback());
     gtk_window_set_resizable(GTK_WINDOW(window_), FALSE);
     gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
     gtk_widget_add_css_class(window_, "realmheart-vertical-bar-window");
-    apply_layer_surface(GTK_WINDOW(window_), make_bar_surface_spec(50));
+    gtk_widget_remove_css_class(window_, "background");
+
+    // Windows begin at the straight 56 px rail. The curved caps deliberately
+    // extend over their rounded top-left and bottom-left corner area.
+    apply_layer_surface(GTK_WINDOW(window_), make_bar_surface_spec(kRailWidth));
 
     async_state_->owner = this;
     setup_layout();
@@ -99,8 +113,6 @@ VerticalBar::VerticalBar(
 
     workspace_monitor_ = std::make_unique<services::HyprlandEventMonitor>([state] {
         if (!state->alive.load()) return;
-        // request_workspace_refresh() is thread-safe, but routing through GTK's
-        // context keeps all scheduling/lifetime decisions on the UI thread.
         g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,
             +[](gpointer raw) -> gboolean {
@@ -116,14 +128,16 @@ VerticalBar::VerticalBar(
     });
     workspace_monitor_->start();
 
-    // Workspaces and media are event-driven. These slow recovery polls cover
-    // compositor/session-bus reconnects; battery reads remain cheap sysfs I/O.
+    // Event-driven where possible. The only periodic I/O is a slow recovery
+    // poll and cheap sysfs/nmcli state refresh; system usage is sampled only
+    // while the user is physically holding its icon.
     refresh_timer_id_ = g_timeout_add_seconds(5, +[](gpointer data) -> gboolean {
         auto* self = static_cast<VerticalBar*>(data);
         ++self->refresh_tick_;
         if (self->refresh_tick_ % 6 == 0) {
             self->request_media_refresh();
             self->request_battery_refresh();
+            self->request_wifi_refresh();
         }
         if (self->refresh_tick_ % 12 == 0) self->request_workspace_refresh();
         return G_SOURCE_CONTINUE;
@@ -141,11 +155,19 @@ VerticalBar::~VerticalBar() {
     async_state_->alive = false;
     workspace_monitor_.reset();
     async_state_->owner = nullptr;
-    notification_status_.reset();
-    media_status_.reset();
-    battery_status_.reset();
-    workspace_pills_.clear();
+    g_weak_ref_clear(&active_popover_ref_);
+
+    notification_button_.reset();
+    wifi_button_.reset();
+    battery_widget_.reset();
     clock_.reset();
+    workspace_runes_.clear();
+    clear_box(workspace_box_);
+    system_monitor_widget_.reset();
+    media_widget_.reset();
+    launcher_button_.reset();
+    backdrop_.reset();
+
     if (window_ != nullptr) {
         gtk_window_destroy(GTK_WINDOW(window_));
         window_ = nullptr;
@@ -153,43 +175,128 @@ VerticalBar::~VerticalBar() {
 }
 
 void VerticalBar::setup_layout() {
-    root_container_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_add_css_class(root_container_, "realmheart-vertical-bar");
-    gtk_widget_set_vexpand(root_container_, TRUE);
-    gtk_widget_set_valign(root_container_, GTK_ALIGN_FILL);
-    gtk_widget_set_halign(root_container_, GTK_ALIGN_FILL);
-    gtk_widget_set_size_request(root_container_, 50, -1);
+    root_overlay_ = gtk_overlay_new();
+    gtk_widget_add_css_class(root_overlay_, "realmheart-bar-root");
+    gtk_widget_set_hexpand(root_overlay_, TRUE);
+    gtk_widget_set_vexpand(root_overlay_, TRUE);
+
+    backdrop_ = std::make_unique<widgets::BarBackdrop>(
+        GTK_WINDOW(window_),
+        kRailWidth,
+        kVisualWidth,
+        kCurveHeight
+    );
+    gtk_overlay_set_child(GTK_OVERLAY(root_overlay_), backdrop_->widget());
+
+    content_container_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(content_container_, "realmheart-vertical-bar");
+    gtk_widget_set_size_request(content_container_, kRailWidth, -1);
+    gtk_widget_set_halign(content_container_, GTK_ALIGN_START);
+    gtk_widget_set_valign(content_container_, GTK_ALIGN_FILL);
+    gtk_widget_set_vexpand(content_container_, TRUE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(root_overlay_), content_container_);
 
     workspace_box_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_vexpand(workspace_box_, TRUE);
-    gtk_widget_set_valign(workspace_box_, GTK_ALIGN_START);
-    status_box_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_valign(status_box_, GTK_ALIGN_END);
-    gtk_window_set_child(GTK_WINDOW(window_), root_container_);
+    gtk_widget_add_css_class(workspace_box_, "realmheart-workspace-stack");
+    gtk_widget_set_halign(workspace_box_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(workspace_box_, GTK_ALIGN_CENTER);
+
+    workspace_region_ = gtk_center_box_new();
+    gtk_orientable_set_orientation(GTK_ORIENTABLE(workspace_region_), GTK_ORIENTATION_VERTICAL);
+    gtk_widget_set_vexpand(workspace_region_, TRUE);
+    gtk_center_box_set_center_widget(GTK_CENTER_BOX(workspace_region_), workspace_box_);
+
+    gtk_window_set_child(GTK_WINDOW(window_), root_overlay_);
 }
 
 void VerticalBar::populate_widgets() {
-    clock_ = std::make_unique<components::ClockWidget>();
-    gtk_box_append(GTK_BOX(root_container_), clock_->get_widget());
-    gtk_box_append(GTK_BOX(root_container_), workspace_box_);
-    gtk_box_append(GTK_BOX(root_container_), status_box_);
+    auto exclusive_open = [this](GtkPopover* popover) { open_exclusive_popover(popover); };
 
-    battery_status_ = std::make_unique<components::StatusWidget>(
-        components::StatusWidget::Slot{"Battery", "battery-charging.svg", "Bt", "Battery pending", {}, false},
+    launcher_button_ = std::make_unique<widgets::BarIconButton>(
+        "Realmheart-Icons/system/realmheart-launcher.svg",
+        "RH",
+        "Open Realmheart launcher",
+        launch_launcher_
+    );
+    launcher_button_->add_css_class("realmheart-launcher-button");
+    launcher_button_->set_icon_size(34);
+
+    media_widget_ = std::make_unique<widgets::MediaWidget>(media_service_, exclusive_open);
+    system_monitor_widget_ = std::make_unique<widgets::SystemMonitorWidget>(exclusive_open);
+    clock_ = std::make_unique<widgets::ClockWidget>();
+    battery_widget_ = std::make_unique<widgets::BatteryWidget>(exclusive_open);
+
+    wifi_button_ = std::make_unique<widgets::BarIconButton>(
+        "Realmheart-Icons/wifi/aetherlink-no-signal.svg",
+        "Wi",
+        "Wi-Fi status",
         toggle_sidebar_
     );
-    media_status_ = std::make_unique<components::StatusWidget>(
-        components::StatusWidget::Slot{"Media", "music-note.svg", "Md", "Media pending", {}, false},
+    wifi_button_->add_css_class("realmheart-wifi-button");
+
+    notification_button_ = std::make_unique<widgets::BarIconButton>(
+        "Realmheart-Icons/notifications/herald-disabled.svg",
+        "Nt",
+        "Notifications",
         toggle_sidebar_
     );
-    notification_status_ = std::make_unique<components::StatusWidget>(
-        components::StatusWidget::Slot{"Notifications", "alert.svg", "Nt", "Notifications pending", {}, false},
-        toggle_sidebar_
-    );
-    gtk_box_append(GTK_BOX(status_box_), battery_status_->get_widget());
-    gtk_box_append(GTK_BOX(status_box_), media_status_->get_widget());
-    gtk_box_append(GTK_BOX(status_box_), notification_status_->get_widget());
+    notification_button_->add_css_class("realmheart-notification-button");
+
+    GtkWidget* top_cluster = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(top_cluster, "realmheart-bar-top-cluster");
+    gtk_widget_set_halign(top_cluster, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(top_cluster), launcher_button_->widget());
+    gtk_box_append(GTK_BOX(top_cluster), media_widget_->widget());
+    gtk_box_append(GTK_BOX(top_cluster), system_monitor_widget_->widget());
+
+    GtkWidget* bottom_cluster = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(bottom_cluster, "realmheart-bar-bottom-cluster");
+    gtk_widget_set_halign(bottom_cluster, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(bottom_cluster), clock_->widget());
+    gtk_box_append(GTK_BOX(bottom_cluster), battery_widget_->widget());
+    gtk_box_append(GTK_BOX(bottom_cluster), wifi_button_->widget());
+    gtk_box_append(GTK_BOX(bottom_cluster), notification_button_->widget());
+
+    gtk_box_append(GTK_BOX(content_container_), top_cluster);
+    gtk_box_append(GTK_BOX(content_container_), workspace_region_);
+    gtk_box_append(GTK_BOX(content_container_), bottom_cluster);
+
     apply_notifications(notification_history_.snapshot());
+}
+
+void VerticalBar::open_exclusive_popover(GtkPopover* popover) {
+    GObject* current = static_cast<GObject*>(g_weak_ref_get(&active_popover_ref_));
+    if (current != nullptr && current != G_OBJECT(popover)) {
+        gtk_popover_popdown(GTK_POPOVER(current));
+    }
+    g_clear_object(&current);
+    g_weak_ref_set(&active_popover_ref_, G_OBJECT(popover));
+}
+
+
+void VerticalBar::activate_workspace(int workspace_id) {
+    constexpr int kMinimumWorkspaceId = 1;
+    constexpr int kMaximumWorkspaceId = 5;
+    if (workspace_id < kMinimumWorkspaceId || workspace_id > kMaximumWorkspaceId) return;
+
+    // Dispatch outside GTK's main loop. hyprctl normally returns quickly, but
+    // a compositor IPC hiccup must never stall pointer handling or animation.
+    const auto state = async_state_;
+    static_cast<void>(realmheart::core::shared_task_executor().post([state, workspace_id] {
+        if (!services::HyprlandWorkspaces::switch_to(workspace_id)) return;
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            +[](gpointer raw) -> gboolean {
+                auto* shared = static_cast<std::shared_ptr<AsyncState>*>(raw);
+                if ((*shared)->alive.load() && (*shared)->owner != nullptr) {
+                    (*shared)->owner->request_workspace_refresh();
+                }
+                return G_SOURCE_REMOVE;
+            },
+            new std::shared_ptr<AsyncState>(state),
+            +[](gpointer raw) { delete static_cast<std::shared_ptr<AsyncState>*>(raw); }
+        );
+    }));
 }
 
 void VerticalBar::request_workspace_refresh() {
@@ -200,18 +307,26 @@ void VerticalBar::request_workspace_refresh() {
     const auto state = async_state_;
     if (!realmheart::core::shared_task_executor().post([state] {
         auto snapshot = services::HyprlandWorkspaces::read();
-        struct Payload { std::shared_ptr<AsyncState> state; services::WorkspaceSnapshot snapshot; };
-        g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, +[](gpointer raw) -> gboolean {
-            auto* payload = static_cast<Payload*>(raw);
-            payload->state->workspace_in_flight = false;
-            if (payload->state->alive.load() && payload->state->owner != nullptr) {
-                payload->state->owner->apply_workspaces(payload->snapshot);
-                if (payload->state->workspace_refresh_pending.exchange(false)) {
-                    payload->state->owner->request_workspace_refresh();
+        struct Payload {
+            std::shared_ptr<AsyncState> state;
+            services::WorkspaceSnapshot snapshot;
+        };
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            +[](gpointer raw) -> gboolean {
+                auto* payload = static_cast<Payload*>(raw);
+                payload->state->workspace_in_flight = false;
+                if (payload->state->alive.load() && payload->state->owner != nullptr) {
+                    payload->state->owner->apply_workspaces(std::move(payload->snapshot));
+                    if (payload->state->workspace_refresh_pending.exchange(false)) {
+                        payload->state->owner->request_workspace_refresh();
+                    }
                 }
-            }
-            return G_SOURCE_REMOVE;
-        }, new Payload{state, std::move(snapshot)}, +[](gpointer raw) { delete static_cast<Payload*>(raw); });
+                return G_SOURCE_REMOVE;
+            },
+            new Payload{state, std::move(snapshot)},
+            +[](gpointer raw) { delete static_cast<Payload*>(raw); }
+        );
     })) {
         state->workspace_in_flight = false;
     }
@@ -221,92 +336,170 @@ void VerticalBar::request_media_refresh() {
     if (async_state_->media_in_flight.exchange(true)) return;
     const auto state = async_state_;
     auto* service = &media_service_;
-    realmheart::core::shared_task_executor().post([state, service] {
+    if (!realmheart::core::shared_task_executor().post([state, service] {
         auto info = service->get_current_media();
-        struct Payload { std::shared_ptr<AsyncState> state; std::optional<services::MediaInfo> info; };
-        g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, +[](gpointer raw) -> gboolean {
-            auto* payload = static_cast<Payload*>(raw);
-            payload->state->media_in_flight = false;
-            if (payload->state->alive.load() && payload->state->owner != nullptr) {
-                payload->state->owner->apply_media(payload->info);
-            }
-            return G_SOURCE_REMOVE;
-        }, new Payload{state, std::move(info)}, +[](gpointer raw) { delete static_cast<Payload*>(raw); });
-    });
+        struct Payload {
+            std::shared_ptr<AsyncState> state;
+            std::optional<services::MediaInfo> info;
+        };
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            +[](gpointer raw) -> gboolean {
+                auto* payload = static_cast<Payload*>(raw);
+                payload->state->media_in_flight = false;
+                if (payload->state->alive.load() && payload->state->owner != nullptr) {
+                    payload->state->owner->apply_media(payload->info);
+                }
+                return G_SOURCE_REMOVE;
+            },
+            new Payload{state, std::move(info)},
+            +[](gpointer raw) { delete static_cast<Payload*>(raw); }
+        );
+    })) {
+        state->media_in_flight = false;
+    }
 }
 
 void VerticalBar::request_battery_refresh() {
     if (async_state_->battery_in_flight.exchange(true)) return;
     const auto state = async_state_;
     auto* service = &battery_service_;
-    realmheart::core::shared_task_executor().post([state, service] {
+    if (!realmheart::core::shared_task_executor().post([state, service] {
         auto status = service->read();
-        struct Payload { std::shared_ptr<AsyncState> state; std::optional<services::BatteryStatus> status; };
-        g_idle_add_full(G_PRIORITY_DEFAULT_IDLE, +[](gpointer raw) -> gboolean {
-            auto* payload = static_cast<Payload*>(raw);
-            payload->state->battery_in_flight = false;
-            if (payload->state->alive.load() && payload->state->owner != nullptr) {
-                payload->state->owner->apply_battery(payload->status);
-            }
-            return G_SOURCE_REMOVE;
-        }, new Payload{state, std::move(status)}, +[](gpointer raw) { delete static_cast<Payload*>(raw); });
-    });
+        struct Payload {
+            std::shared_ptr<AsyncState> state;
+            std::optional<services::BatteryStatus> status;
+        };
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            +[](gpointer raw) -> gboolean {
+                auto* payload = static_cast<Payload*>(raw);
+                payload->state->battery_in_flight = false;
+                if (payload->state->alive.load() && payload->state->owner != nullptr) {
+                    payload->state->owner->apply_battery(payload->status);
+                }
+                return G_SOURCE_REMOVE;
+            },
+            new Payload{state, std::move(status)},
+            +[](gpointer raw) { delete static_cast<Payload*>(raw); }
+        );
+    })) {
+        state->battery_in_flight = false;
+    }
 }
 
-void VerticalBar::apply_workspaces(const services::WorkspaceSnapshot& snapshot) {
+void VerticalBar::request_wifi_refresh() {
+    if (async_state_->wifi_in_flight.exchange(true)) return;
+    const auto state = async_state_;
+    if (!realmheart::core::shared_task_executor().post([state] {
+        auto wifi = services::Wifi::read();
+        struct Payload {
+            std::shared_ptr<AsyncState> state;
+            std::optional<services::WifiState> wifi;
+        };
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            +[](gpointer raw) -> gboolean {
+                auto* payload = static_cast<Payload*>(raw);
+                payload->state->wifi_in_flight = false;
+                if (payload->state->alive.load() && payload->state->owner != nullptr) {
+                    payload->state->owner->apply_wifi(payload->wifi);
+                }
+                return G_SOURCE_REMOVE;
+            },
+            new Payload{state, std::move(wifi)},
+            +[](gpointer raw) { delete static_cast<Payload*>(raw); }
+        );
+    })) {
+        state->wifi_in_flight = false;
+    }
+}
+
+void VerticalBar::apply_workspaces(services::WorkspaceSnapshot snapshot) {
+    workspace_window_tracker_.apply(snapshot);
     const auto states = build_workspace_pills(snapshot);
-    const bool same_topology = states.size() == workspace_pills_.size() &&
-        std::equal(states.begin(), states.end(), workspace_pills_.begin(), [](const auto& state, const auto& pill) {
-            return state.id == pill->workspace_id();
+    const bool same_topology = states.size() == workspace_runes_.size() &&
+        std::equal(states.begin(), states.end(), workspace_runes_.begin(), [](const auto& state, const auto& rune) {
+            return state.id == rune->workspace_id();
         });
 
     if (same_topology) {
         for (std::size_t index = 0; index < states.size(); ++index) {
-            workspace_pills_[index]->update(states[index]);
+            workspace_runes_[index]->update(states[index]);
         }
         return;
     }
 
-    workspace_pills_.clear();
+    workspace_runes_.clear();
     clear_box(workspace_box_);
-    workspace_pills_.reserve(states.size());
+    workspace_runes_.reserve(states.size());
     for (const auto& state : states) {
-        auto pill = std::make_unique<components::WorkspacePill>(state);
-        gtk_box_append(GTK_BOX(workspace_box_), pill->get_widget());
-        workspace_pills_.push_back(std::move(pill));
+        auto rune = std::make_unique<widgets::WorkspaceRune>(
+            state,
+            [this](int workspace_id) { activate_workspace(workspace_id); },
+            toggle_sidebar_,
+            [this](GtkPopover* popover) { open_exclusive_popover(popover); }
+        );
+        gtk_box_append(GTK_BOX(workspace_box_), rune->widget());
+        workspace_runes_.push_back(std::move(rune));
     }
 }
 
 void VerticalBar::apply_battery(const std::optional<services::BatteryStatus>& status) {
-    components::StatusWidget::Slot slot{"Battery", "battery-charging.svg", "Bt", "Battery unavailable", {}, false};
-    if (status) {
-        slot.enabled = true;
-        slot.badge_text = std::to_string(status->percentage) + "%";
-        slot.tooltip = "Battery: " + slot.badge_text + " (" + status->status + ")";
-    }
-    battery_status_->set_status(slot);
+    battery_widget_->update(status);
 }
 
 void VerticalBar::apply_media(const std::optional<services::MediaInfo>& info) {
-    components::StatusWidget::Slot slot{"Media", "music-note.svg", "Md", "No active media player", {}, false};
-    if (info) {
-        slot.enabled = info->playback_status != 0;
-        slot.tooltip = "Media: " + info->artist + " — " + info->title;
-        slot.badge_text = info->playback_status == 1 ? "▶" : "Ⅱ";
+    media_widget_->update(info);
+}
+
+void VerticalBar::apply_wifi(const std::optional<services::WifiState>& state) {
+    if (!state) {
+        wifi_button_->set_enabled(false);
+        wifi_button_->set_icon("Realmheart-Icons/wifi/aetherlink-warning.svg", "Wi");
+        wifi_button_->set_tooltip("Wi-Fi state unavailable");
+        return;
     }
-    media_status_->set_status(slot);
+
+    wifi_button_->set_enabled(state->enabled && !state->ssid.empty());
+    if (!state->enabled) {
+        wifi_button_->set_icon("Realmheart-Icons/wifi/aetherlink-disabled.svg", "Wi");
+        wifi_button_->set_tooltip("Wi-Fi disabled");
+    } else if (state->ssid.empty()) {
+        wifi_button_->set_icon("Realmheart-Icons/wifi/aetherlink-no-signal.svg", "Wi");
+        wifi_button_->set_tooltip("Wi-Fi enabled — not connected");
+    } else {
+        const int strength = state->signal_percent.value_or(100);
+        const char* icon = strength < 35
+            ? "Realmheart-Icons/wifi/aetherlink-signal-weak.svg"
+            : (strength < 70
+                ? "Realmheart-Icons/wifi/aetherlink-signal-medium.svg"
+                : "Realmheart-Icons/wifi/aetherlink-signal-strong.svg");
+        wifi_button_->set_icon(icon, "Wi");
+        wifi_button_->set_tooltip(
+            "Wi-Fi: " + state->ssid +
+            (state->signal_percent ? " (" + std::to_string(*state->signal_percent) + "%)" : "")
+        );
+    }
 }
 
 void VerticalBar::apply_notifications(const services::NotificationSnapshot& notifications) {
-    components::StatusWidget::Slot slot{
-        "Notifications", "alert.svg", "Nt",
+    const bool unread = notifications.capture_active && notifications.unread_count > 0;
+    notification_button_->set_enabled(unread);
+    notification_button_->set_icon(
+        unread
+            ? "Realmheart-Icons/notifications/herald-enabled.svg"
+            : "Realmheart-Icons/notifications/herald-disabled.svg",
+        "Nt"
+    );
+    notification_button_->set_badge(
+        unread ? std::to_string(notifications.unread_count) : std::string{}
+    );
+    notification_button_->set_tooltip(
         notifications.capture_active
             ? "Notifications: " + std::to_string(notifications.unread_count) + " unread"
-            : "Notifications: capture unavailable",
-        notifications.unread_count > 0 ? std::to_string(notifications.unread_count) : std::string{},
-        notifications.unread_count > 0
-    };
-    notification_status_->set_status(slot);
+            : "Notification capture unavailable"
+    );
 }
 
 void VerticalBar::refresh() {
@@ -314,6 +507,7 @@ void VerticalBar::refresh() {
     request_workspace_refresh();
     request_media_refresh();
     request_battery_refresh();
+    request_wifi_refresh();
     apply_notifications(notification_history_.snapshot());
 }
 

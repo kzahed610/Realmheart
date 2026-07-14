@@ -137,6 +137,7 @@ void activate_bar(GtkApplication* app, gpointer data) {
             owned->notification_history,
             owned->battery,
             owned->media,
+            [] {},
             [] {}
         );
         controller = owned.release();

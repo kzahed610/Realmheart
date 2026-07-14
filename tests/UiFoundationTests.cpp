@@ -1,6 +1,7 @@
 #include "ui/AssetResolver.hpp"
 #include "ui/LayerSurface.hpp"
 #include "ui/ImageFileFilters.hpp"
+#include "ui/styles/CssModuleLoader.hpp"
 
 #include <cstdlib>
 #include <filesystem>
@@ -25,6 +26,38 @@ void test_asset_resolver_accepts_known_icons_and_rejects_escape_paths() {
     require(!realmheart::ui::resolve_icon(root, "../wifi-4.svg"), "parent traversal must be rejected");
     require(!realmheart::ui::resolve_icon(root, "/tmp/wifi-4.svg"), "absolute icon paths must be rejected");
     require(!realmheart::ui::resolve_icon(root, "nested/wifi-4.svg"), "logical icon names must not smuggle directories");
+}
+
+void test_project_asset_resolver_allows_safe_nested_realmheart_assets() {
+    const auto icon = realmheart::ui::resolve_project_asset(
+        "Realmheart-Icons/battery/heartcore-full.svg"
+    );
+    require(icon.has_value(), "nested Realmheart icon paths must resolve from project assets");
+    require(icon->filename() == "heartcore-full.svg",
+            "nested resolver must retain the requested asset filename");
+    require(!realmheart::ui::resolve_project_asset("../CMakeLists.txt"),
+            "nested resolver must reject direct parent traversal");
+    require(!realmheart::ui::resolve_project_asset(
+        "Realmheart-Icons/battery/../../../CMakeLists.txt"
+    ), "nested resolver must reject traversal after a valid prefix");
+    require(!realmheart::ui::resolve_project_asset("/tmp/heartcore-full.svg"),
+            "nested resolver must reject absolute paths");
+}
+
+void test_style_resolver_uses_dedicated_roots_and_rejects_escape_paths() {
+    const auto taskbar_css = realmheart::ui::styles::resolve_style_module(
+        "taskbar/bar.css"
+    );
+    require(taskbar_css.has_value(), "modular taskbar CSS must resolve from style roots");
+    require(taskbar_css->filename() == "bar.css",
+            "resolved taskbar style must retain its filename");
+    require(!realmheart::ui::styles::resolve_style_module("../CMakeLists.txt"),
+            "style resolver must reject direct parent traversal");
+    require(!realmheart::ui::styles::resolve_style_module(
+        "taskbar/../../CMakeLists.txt"
+    ), "style resolver must reject traversal after a valid prefix");
+    require(!realmheart::ui::styles::resolve_style_module("/tmp/bar.css"),
+            "style resolver must reject absolute paths");
 }
 
 void test_bar_surface_spec_is_reusable_and_reserves_its_width() {
@@ -86,6 +119,8 @@ void test_image_file_filter_model_owns_exactly_one_valid_filter() {
 
 int main() {
     test_asset_resolver_accepts_known_icons_and_rejects_escape_paths();
+    test_project_asset_resolver_allows_safe_nested_realmheart_assets();
+    test_style_resolver_uses_dedicated_roots_and_rejects_escape_paths();
     test_bar_surface_spec_is_reusable_and_reserves_its_width();
     test_wallpaper_surface_spec_is_fullscreen_background_and_noninteractive();
     test_test_surface_spec_is_nonexclusive();

@@ -2,38 +2,57 @@
 
 #include "core/Command.hpp"
 
+#include <algorithm>
+#include <charconv>
 #include <sstream>
 #include <string_view>
+#include <vector>
 
 namespace realmheart::services {
 namespace {
 
 
-std::string unescape_nmcli(std::string_view value) {
-    std::string decoded;
-    decoded.reserve(value.size());
+std::vector<std::string> split_nmcli_fields(std::string_view line) {
+    std::vector<std::string> fields;
+    std::string current;
     bool escaped = false;
-    for (const char character : value) {
+    for (const char character : line) {
         if (escaped) {
-            decoded.push_back(character);
+            current.push_back(character);
             escaped = false;
         } else if (character == '\\') {
             escaped = true;
+        } else if (character == ':') {
+            fields.push_back(std::move(current));
+            current.clear();
         } else {
-            decoded.push_back(character);
+            current.push_back(character);
         }
     }
-    if (escaped) decoded.push_back('\\');
-    return decoded;
+    if (escaped) current.push_back('\\');
+    fields.push_back(std::move(current));
+    return fields;
+}
+
+std::optional<int> parse_signal(std::string_view value) {
+    int signal = 0;
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), signal);
+    if (error != std::errc{} || end != value.data() + value.size()) return std::nullopt;
+    return std::clamp(signal, 0, 100);
 }
 
 bool usable_output(const realmheart::core::CommandResult& result) {
     return result.succeeded() && !result.truncated && !result.output.empty();
 }
 
-std::string active_ssid(const realmheart::core::CommandOptions& options) {
+struct ActiveNetwork {
+    std::string ssid;
+    std::optional<int> signal_percent;
+};
+
+ActiveNetwork active_network(const realmheart::core::CommandOptions& options) {
     const auto scan = realmheart::core::run_capture(
-        {"nmcli", "-t", "-f", "ACTIVE,SSID", "dev", "wifi"},
+        {"nmcli", "-t", "-f", "ACTIVE,SSID,SIGNAL", "dev", "wifi"},
         options
     );
     if (!usable_output(scan)) return {};
@@ -41,10 +60,13 @@ std::string active_ssid(const realmheart::core::CommandOptions& options) {
     std::stringstream lines(scan.output);
     std::string line;
     while (std::getline(lines, line)) {
-        constexpr std::string_view prefix = "yes:";
-        if (line.starts_with(prefix) && line.size() > prefix.size()) {
-            return realmheart::core::sanitize_command_detail(unescape_nmcli(line.substr(prefix.size())), 96);
-        }
+        const auto fields = split_nmcli_fields(line);
+        if (fields.size() < 2 || fields[0] != "yes") continue;
+
+        ActiveNetwork network;
+        network.ssid = realmheart::core::sanitize_command_detail(fields[1], 96);
+        if (fields.size() >= 3) network.signal_percent = parse_signal(fields[2]);
+        return network;
     }
     return {};
 }
@@ -60,7 +82,9 @@ std::optional<WifiState> Wifi::read(const realmheart::core::CommandOptions& opti
     WifiState state;
     if (radio.output == "enabled") {
         state.enabled = true;
-        state.ssid = active_ssid(options);
+        const auto active = active_network(options);
+        state.ssid = active.ssid;
+        state.signal_percent = active.signal_percent;
     } else if (radio.output != "disabled") {
         return std::nullopt;
     }

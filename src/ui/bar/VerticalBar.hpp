@@ -1,12 +1,18 @@
 #pragma once
 
 #include "services/BatteryService.hpp"
-#include "services/MediaService.hpp"
 #include "services/HyprlandEventMonitor.hpp"
+#include "services/MediaService.hpp"
 #include "services/Notifications.hpp"
-#include "ui/components/ClockWidget.hpp"
-#include "ui/components/StatusWidget.hpp"
-#include "ui/components/WorkspacePill.hpp"
+#include "services/Wifi.hpp"
+#include "ui/bar/WorkspaceWindowTracker.hpp"
+#include "ui/bar/widgets/BarBackdrop.hpp"
+#include "ui/bar/widgets/BarIconButton.hpp"
+#include "ui/bar/widgets/BatteryWidget.hpp"
+#include "ui/bar/widgets/ClockWidget.hpp"
+#include "ui/bar/widgets/MediaWidget.hpp"
+#include "ui/bar/widgets/SystemMonitorWidget.hpp"
+#include "ui/bar/widgets/WorkspaceRune.hpp"
 
 #include <atomic>
 #include <functional>
@@ -24,7 +30,8 @@ public:
         services::NotificationHistory& notification_history,
         services::BatteryService& battery_service,
         services::MediaService& media_service,
-        std::function<void()> toggle_sidebar
+        std::function<void()> toggle_sidebar,
+        std::function<void()> launch_launcher
     );
     ~VerticalBar();
 
@@ -41,6 +48,7 @@ private:
         std::atomic<bool> workspace_refresh_pending{false};
         std::atomic<bool> media_in_flight{false};
         std::atomic<bool> battery_in_flight{false};
+        std::atomic<bool> wifi_in_flight{false};
         VerticalBar* owner = nullptr; // GTK main thread only
     };
 
@@ -49,31 +57,43 @@ private:
     void request_workspace_refresh();
     void request_media_refresh();
     void request_battery_refresh();
-    void apply_workspaces(const services::WorkspaceSnapshot& snapshot);
+    void request_wifi_refresh();
+    void apply_workspaces(services::WorkspaceSnapshot snapshot);
     void apply_media(const std::optional<services::MediaInfo>& info);
     void apply_battery(const std::optional<services::BatteryStatus>& status);
+    void apply_wifi(const std::optional<services::WifiState>& state);
     void apply_notifications(const services::NotificationSnapshot& notifications);
+    void open_exclusive_popover(GtkPopover* popover);
+    void activate_workspace(int workspace_id);
 
     GtkApplication* app_ = nullptr;
     GtkWidget* window_ = nullptr;
-    GtkWidget* root_container_ = nullptr;
+    GtkWidget* root_overlay_ = nullptr;
+    GtkWidget* content_container_ = nullptr;
     GtkWidget* workspace_box_ = nullptr;
-    GtkWidget* status_box_ = nullptr;
+    GtkWidget* workspace_region_ = nullptr;
 
-    std::unique_ptr<components::ClockWidget> clock_;
-    std::vector<std::unique_ptr<components::WorkspacePill>> workspace_pills_;
-    std::unique_ptr<components::StatusWidget> battery_status_;
-    std::unique_ptr<components::StatusWidget> media_status_;
-    std::unique_ptr<components::StatusWidget> notification_status_;
+    std::unique_ptr<widgets::BarBackdrop> backdrop_;
+    std::unique_ptr<widgets::BarIconButton> launcher_button_;
+    std::unique_ptr<widgets::MediaWidget> media_widget_;
+    std::unique_ptr<widgets::SystemMonitorWidget> system_monitor_widget_;
+    std::vector<std::unique_ptr<widgets::WorkspaceRune>> workspace_runes_;
+    std::unique_ptr<widgets::ClockWidget> clock_;
+    std::unique_ptr<widgets::BatteryWidget> battery_widget_;
+    std::unique_ptr<widgets::BarIconButton> wifi_button_;
+    std::unique_ptr<widgets::BarIconButton> notification_button_;
 
     services::NotificationHistory& notification_history_;
     services::BatteryService& battery_service_;
     services::MediaService& media_service_;
     std::function<void()> toggle_sidebar_;
+    std::function<void()> launch_launcher_;
     std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
     services::NotificationHistory::Subscription notification_subscription_;
     services::MediaService::Subscription media_subscription_;
     std::unique_ptr<services::HyprlandEventMonitor> workspace_monitor_;
+    WorkspaceWindowTracker workspace_window_tracker_;
+    GWeakRef active_popover_ref_{};
     guint refresh_timer_id_ = 0;
     unsigned refresh_tick_ = 0;
 };

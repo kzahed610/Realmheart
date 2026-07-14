@@ -1,6 +1,10 @@
 #include "ui/ThemeStyles.hpp"
 
+#include "ui/styles/CssModuleLoader.hpp"
+
+#include <array>
 #include <stdexcept>
+#include <string_view>
 
 namespace realmheart::ui {
 
@@ -17,6 +21,14 @@ ThemeStyles::ThemeStyles(std::shared_ptr<services::ThemeService> theme_service)
             GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
         );
     }
+
+    constexpr std::array<std::string_view, 4> taskbar_modules{
+        "taskbar/bar.css",
+        "taskbar/icons.css",
+        "taskbar/workspaces.css",
+        "taskbar/popovers.css",
+    };
+    component_css_ = styles::load_css_modules(taskbar_modules);
 
     subscription_ = theme_service_->subscribe([this](const services::Palette& palette) {
         apply(palette);
@@ -39,7 +51,8 @@ ThemeStyles::~ThemeStyles() {
 }
 
 void ThemeStyles::apply(const services::Palette& palette) {
-    const std::string css = build_css(palette);
+    std::string css = build_css(palette);
+    css += component_css_;
     gtk_css_provider_load_from_string(provider_, css.c_str());
 }
 
@@ -99,50 +112,6 @@ std::string ThemeStyles::build_css(const services::Palette& palette) {
         "}\n"
         ".realmheart-notification-body { color: @rh_text_muted; }\n"
         "\n"
-        ".realmheart-vertical-bar-window {\n"
-        "  background-color: alpha(@rh_background, 0.92);\n"
-        "  border-right: 1px solid alpha(@rh_outline, 0.55);\n"
-        "}\n"
-        ".realmheart-vertical-bar {\n"
-        "  background-color: transparent;\n"
-        "  color: @rh_text;\n"
-        "  padding: 4px;\n"
-        "}\n"
-        ".realmheart-bar-clock { color: @rh_text; font-weight: 700; }\n"
-        ".realmheart-bar-pill {\n"
-        "  min-width: 30px;\n"
-        "  min-height: 30px;\n"
-        "  padding: 2px;\n"
-        "  color: @rh_text_muted;\n"
-        "  background-color: alpha(@rh_surface, 0.78);\n"
-        "  border: 1px solid alpha(@rh_outline, 0.35);\n"
-        "  border-radius: 999px;\n"
-        "}\n"
-        ".realmheart-bar-pill-active {\n"
-        "  color: @rh_text;\n"
-        "  background-color: alpha(@rh_primary, 0.30);\n"
-        "  border-color: @rh_primary;\n"
-        "}\n"
-        ".realmheart-bar-pill-occupied { color: @rh_secondary; }\n"
-        ".realmheart-bar-status {\n"
-        "  min-width: 34px;\n"
-        "  min-height: 34px;\n"
-        "  padding: 4px;\n"
-        "  color: @rh_text;\n"
-        "  background-color: alpha(@rh_surface, 0.78);\n"
-        "  border: 1px solid alpha(@rh_outline, 0.35);\n"
-        "  border-radius: 12px;\n"
-        "}\n"
-        ".realmheart-bar-status-enabled { border-color: alpha(@rh_primary, 0.88); }\n"
-        ".realmheart-bar-status-disabled { color: @rh_text_muted; opacity: 0.75; }\n"
-        ".realmheart-bar-badge {\n"
-        "  color: @rh_background;\n"
-        "  background-color: @rh_error;\n"
-        "  border-radius: 999px;\n"
-        "  padding: 1px 4px;\n"
-        "  font-size: 0.72em;\n"
-        "  font-weight: 700;\n"
-        "}\n"
         "\n"
         ".realmheart-notes {\n"
         "  background-color: alpha(@rh_background, 0.94);\n"

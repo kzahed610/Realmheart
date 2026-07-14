@@ -1,0 +1,108 @@
+/* Shared taskbar popovers and their component-specific contents. */
+
+.realmheart-bar-popover > contents,
+.realmheart-workspace-preview > contents {
+  color: @rh_text;
+  background-color: alpha(@rh_background, 0.97);
+  border: 1px solid alpha(@rh_primary, 0.52);
+  border-radius: 13px;
+  padding: 10px;
+  box-shadow: 0 8px 24px alpha(@rh_background, 0.62);
+}
+
+.realmheart-bar-popover > arrow,
+.realmheart-workspace-preview > arrow {
+  color: alpha(@rh_background, 0.97);
+  border-color: alpha(@rh_primary, 0.52);
+}
+
+.realmheart-popover-title,
+.realmheart-workspace-preview-title {
+  color: @rh_primary;
+  font-weight: 800;
+  font-size: 0.96em;
+  margin-bottom: 4px;
+}
+
+.realmheart-popover-muted,
+.realmheart-workspace-preview-empty {
+  color: @rh_text_muted;
+  font-size: 0.82em;
+}
+
+.realmheart-workspace-preview-row {
+  padding: 5px 2px;
+  border-top: 1px solid alpha(@rh_outline, 0.26);
+}
+
+.realmheart-workspace-preview-app {
+  color: @rh_text;
+  font-weight: 700;
+}
+
+.realmheart-workspace-preview-window-title {
+  color: @rh_text_muted;
+  font-size: 0.80em;
+}
+
+.realmheart-media-art {
+  background-color: alpha(@rh_surface, 0.88);
+  border: 1px solid alpha(@rh_outline, 0.38);
+  border-radius: 9px;
+}
+
+.realmheart-media-art-fallback {
+  color: @rh_text_muted;
+}
+
+.realmheart-media-title {
+  color: @rh_text;
+  font-weight: 700;
+}
+
+.realmheart-media-artist {
+  color: @rh_text_muted;
+  font-size: 0.84em;
+}
+
+.realmheart-media-control {
+  min-width: 34px;
+  min-height: 30px;
+  padding: 3px 8px;
+  color: @rh_text;
+  background-color: alpha(@rh_surface_variant, 0.72);
+  border: 1px solid alpha(@rh_outline, 0.34);
+  border-radius: 9px;
+}
+
+.realmheart-media-control:hover {
+  border-color: alpha(@rh_primary, 0.72);
+}
+
+.realmheart-system-usage-value {
+  color: @rh_primary;
+  font-weight: 700;
+}
+
+.realmheart-system-usage-bar trough {
+  min-height: 5px;
+  background-color: alpha(@rh_surface_variant, 0.68);
+  border-radius: 999px;
+}
+
+.realmheart-system-usage-bar progress {
+  min-height: 5px;
+  background-color: @rh_primary;
+  border-radius: 999px;
+}
+
+.realmheart-battery-percentage {
+  color: @rh_primary;
+  font-size: 1.20em;
+  font-weight: 800;
+}
+
+.realmheart-battery-rate {
+  color: @rh_text;
+  font-size: 0.82em;
+}

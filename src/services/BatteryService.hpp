@@ -11,6 +11,7 @@ struct BatteryStatus {
     int percentage;
     bool charging;
     std::string status;
+    std::optional<double> rate_watts;
 };
 
 class BatteryService {

@@ -22,6 +22,18 @@ WorkspaceSnapshot unavailable(std::string reason) {
 
 } // namespace
 
+bool HyprlandWorkspaces::switch_to(
+    int workspace_id,
+    const realmheart::core::CommandOptions& options
+) {
+    if (workspace_id <= 0 || !realmheart::core::command_exists("hyprctl")) return false;
+    const auto result = realmheart::core::run_capture(
+        {"hyprctl", "dispatch", "workspace", std::to_string(workspace_id)},
+        options
+    );
+    return result.succeeded();
+}
+
 WorkspaceSnapshot HyprlandWorkspaces::read(const realmheart::core::CommandOptions& options) {
     if (!realmheart::core::command_exists("hyprctl")) {
         return unavailable("hyprctl not found");
@@ -37,12 +49,19 @@ WorkspaceSnapshot HyprlandWorkspaces::read(const realmheart::core::CommandOption
         return unavailable(realmheart::core::command_failure_detail(workspace_result, "hyprctl workspaces failed"));
     }
 
-    return parse(active.output, workspace_result.output);
+    const auto clients_result = realmheart::core::run_capture({"hyprctl", "clients", "-j"}, options);
+    const std::string_view clients_json =
+        clients_result.succeeded() && !clients_result.output.empty() && !clients_result.truncated
+            ? std::string_view(clients_result.output)
+            : std::string_view("[]");
+
+    return parse(active.output, workspace_result.output, clients_json);
 }
 
 WorkspaceSnapshot HyprlandWorkspaces::parse(
     std::string_view active_json,
-    std::string_view workspaces_json
+    std::string_view workspaces_json,
+    std::string_view clients_json
 ) {
     try {
         const auto active_document = json::parse(active_json);
@@ -53,6 +72,10 @@ WorkspaceSnapshot HyprlandWorkspaces::parse(
         }
         if (!workspace_document.is_array()) {
             return unavailable("unable to parse workspace list");
+        }
+        const auto clients_document = json::parse(clients_json);
+        if (!clients_document.is_array()) {
+            return unavailable("unable to parse Hyprland client list");
         }
 
         const int active_id = active_document["id"].get<int>();
@@ -80,8 +103,37 @@ WorkspaceSnapshot HyprlandWorkspaces::parse(
         }
 
         if (!seen.contains(active_id)) {
-            snapshot.workspaces.push_back({active_id, std::to_string(active_id), 0, true});
+            snapshot.workspaces.push_back({active_id, std::to_string(active_id), 0, true, {}});
         }
+
+        for (const auto& client : clients_document) {
+            if (!client.is_object() || !client.contains("workspace") || !client["workspace"].is_object()) continue;
+            const auto& workspace = client["workspace"];
+            if (!workspace.contains("id") || !workspace["id"].is_number_integer()) continue;
+            const int workspace_id = workspace["id"].get<int>();
+            if (workspace_id <= 0) continue;
+
+            auto target = std::find_if(snapshot.workspaces.begin(), snapshot.workspaces.end(), [workspace_id](const auto& item) {
+                return item.id == workspace_id;
+            });
+            if (target == snapshot.workspaces.end()) continue;
+
+            WorkspaceWindow window;
+            window.address = client.value("address", std::string{});
+            window.app_id = client.value("class", std::string{});
+            if (window.app_id.empty()) window.app_id = client.value("initialClass", std::string{});
+            if (window.app_id.empty()) window.app_id = client.value("initialTitle", std::string{});
+            if (window.app_id.empty()) window.app_id = "Unknown application";
+            window.title = client.value("title", std::string{});
+            if (window.title.empty()) window.title = client.value("initialTitle", std::string{});
+            if (window.title.empty()) window.title = "Untitled window";
+            target->window_details.push_back(std::move(window));
+            target->windows = std::max(
+                target->windows,
+                static_cast<int>(target->window_details.size())
+            );
+        }
+
         std::sort(snapshot.workspaces.begin(), snapshot.workspaces.end(), [](const auto& left, const auto& right) {
             return left.id < right.id;
         });

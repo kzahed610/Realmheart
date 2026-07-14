@@ -1,0 +1,62 @@
+/*
+ * Realmheart taskbar shell and vertical rhythm.
+ *
+ * The non-rectangular silhouette is drawn by BarBackdrop because CSS
+ * border-radius can only carve inward inside a rectangle. Colours remain here
+ * so the shell still follows Matugen without hardcoding palette values in C++.
+ */
+
+/* The taskbar contour is the only deliberately non-Matugen colour. */
+@define-color rh_taskbar_gold #ffd66b;
+
+/*
+ * Every rectangular GTK layer must stay genuinely transparent. The only
+ * visible shell fill is painted by BarBackdrop's custom path below.
+ */
+window.realmheart-vertical-bar-window,
+.realmheart-bar-root,
+.realmheart-bar-backdrop,
+.realmheart-bar-backdrop-fill,
+.realmheart-bar-backdrop-contour {
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+}
+
+/*
+ * BarBackdrop paints this colour only inside the straight rail. The outward
+ * curve wedges are intentionally left transparent by the C++ geometry.
+ */
+.realmheart-bar-backdrop-fill {
+  color: alpha(@rh_background, 0.88);
+}
+
+.realmheart-bar-backdrop-contour {
+  color: @rh_taskbar_gold;
+}
+
+.realmheart-vertical-bar {
+  background-color: transparent;
+  color: @rh_text;
+  padding: 13px 5px 14px 5px;
+}
+
+.realmheart-bar-top-cluster {
+  border-spacing: 18px;
+  margin-top: 7px;
+  margin-bottom: 16px;
+}
+
+.realmheart-bar-bottom-cluster {
+  border-spacing: 15px;
+  margin-top: 16px;
+  margin-bottom: 7px;
+}
+
+.realmheart-bar-clock {
+  color: @rh_text;
+  font-weight: 750;
+  font-size: 0.84em;
+  margin: 5px 0 4px 0;
+}

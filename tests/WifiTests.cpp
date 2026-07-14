@@ -28,7 +28,7 @@ public:
                << "  'radio wifi') IFS= read -r state < \"$REALMHEART_WIFI_TEST_STATE\"; printf '%s\\n' \"$state\" ;;\n"
                << "  'radio wifi on') if [ \"$REALMHEART_WIFI_IGNORE_WRITES\" != 1 ]; then printf enabled > \"$REALMHEART_WIFI_TEST_STATE\"; fi ;;\n"
                << "  'radio wifi off') if [ \"$REALMHEART_WIFI_IGNORE_WRITES\" != 1 ]; then printf disabled > \"$REALMHEART_WIFI_TEST_STATE\"; fi ;;\n"
-               << "  '-t -f ACTIVE,SSID dev wifi') printf 'yes:Realm\\:Net\\n' ;;\n"
+               << "  '-t -f ACTIVE,SSID,SIGNAL dev wifi') printf 'yes:Realm\\:Net:67\\n' ;;\n"
                << "  *) printf 'unexpected arguments: %s\\n' \"$*\"; exit 64 ;;\n"
                << "esac\n";
         script.close();
@@ -79,6 +79,7 @@ int main() {
         require(initial.has_value(), "WiFi state should be readable");
         require(initial->enabled, "WiFi should start enabled");
         require(initial->ssid == "Realm:Net", "nmcli-escaped SSID should be decoded");
+        require(initial->signal_percent == 67, "active WiFi signal should be parsed");
 
         const auto disabled = realmheart::services::Wifi::set_enabled(false);
         require(disabled.success, "disabling WiFi should succeed after matching readback");

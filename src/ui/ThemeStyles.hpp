@@ -27,6 +27,7 @@ private:
     services::ThemeService::Subscription subscription_;
     GdkDisplay* display_ = nullptr;
     GtkCssProvider* provider_ = nullptr;
+    std::string component_css_;
 };
 
 } // namespace realmheart::ui

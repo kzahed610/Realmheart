@@ -16,7 +16,10 @@ Realmheart is now a fully functional desktop shell providing the following:
 - **OSD Overlays:** Lean, non-intrusive On-Screen Displays for system adjustments.
 
 ### 📊 Interface Components
-- **Vertical Bar:** Asynchronous status probes for system state, live workspace pills, and a bounded notification history model.
+- **Aether Spine taskbar:** A slim Matugen-themed left rail with a hard-gold
+  outward contour, rune workspaces, hover window previews, on-demand system and
+  battery details, dynamic Wi-Fi/notification state, and a compact MPRIS media
+  popup.
 - **Right Sidebar:** A centralized control hub for:
   - **Connectivity:** WiFi and Bluetooth status/controls.
   - **System Toggles:** Gamemode, Night Light, and "Keep Awake" (inhibitor).
@@ -50,8 +53,9 @@ Realmheart is now a fully functional desktop shell providing the following:
 ## 🛠️ Build & Run
 
 ### Installation
-GTK4 and `gtk4-layer-shell-0` are required through pkg-config.
-The optional native wallpaper renderer additionally uses Wayland, EGL, OpenGL ES 2, `gdk-pixbuf`, `wayland-scanner`, and the wlr-protocol XML files.
+GTK 4.12+, `gtk4-layer-shell-0`, and `gdk-pixbuf-2.0` are required through pkg-config.
+The optional native wallpaper renderer additionally uses Wayland, EGL, OpenGL ES 2, `wayland-scanner`, and the wlr-protocol XML files.
+`curl` is optional and is used only to cache remote MPRIS album art.
 
 ### Commands
 ```sh

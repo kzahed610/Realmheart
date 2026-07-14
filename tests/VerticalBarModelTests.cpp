@@ -3,7 +3,6 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
-#include <vector>
 
 namespace {
 
@@ -14,66 +13,60 @@ void require(bool condition, const std::string& message) {
     }
 }
 
-void test_workspace_pills_keep_defaults_and_merge_live_state() {
+void test_workspace_pills_show_four_and_merge_live_state() {
     realmheart::services::WorkspaceSnapshot snapshot;
     snapshot.available = true;
     snapshot.active_id = 3;
     snapshot.workspaces = {
-        {3, "dev", 2, true},
-        {7, "seven", 1, false},
+        {3, "dev", 2, true, {}},
+        {5, "five", 1, false, {}},
+        {7, "seven", 1, false, {}},
     };
 
     const auto pills = realmheart::ui::bar::build_workspace_pills(snapshot);
-    require(pills.size() == 6, "bar must retain workspaces 1-5 and append valid live workspaces");
+    require(pills.size() == 4, "bar must show exactly four workspace runes");
+    require(pills.front().id == 1 && pills.back().id == 4,
+            "workspaces 1-4 must be visible while the active workspace is below 5");
     require(pills[2].id == 3 && pills[2].active && pills[2].windows == 2,
-            "live workspace state must replace its default pill");
-    require(pills.back().id == 7 && pills.back().name == "seven",
-            "additional live workspaces must be appended in sorted order");
+            "live workspace state must replace its default rune");
 }
 
-void test_status_slots_only_keep_compact_bar_information() {
-    const std::vector<realmheart::services::ServiceStatus> report{
-        {"WiFi", "Enabled (home)", true},
-        {"Battery", "84% (Discharging)", true},
-        {"Media", "Song - Artist", true},
-    };
-    realmheart::services::NotificationSnapshot notifications;
+void test_workspace_window_slides_only_for_workspace_five() {
+    realmheart::services::WorkspaceSnapshot snapshot;
+    snapshot.available = true;
+    snapshot.active_id = 5;
+    snapshot.workspaces = {{5, "five", 1, true, {}}};
 
-    const auto slots = realmheart::ui::bar::build_status_slots(report, notifications);
-    require(slots.size() == 3, "bar must contain only battery, media, and notifications");
-    require(slots[0].name == "Battery" && slots[0].tooltip == "Battery: 84% (Discharging)",
-            "battery must remain visible on the compact bar");
-    require(slots[1].name == "Media" && slots[1].tooltip == "Media: Song - Artist",
-            "media must remain visible on the compact bar");
-    require(slots[2].name == "Notifications", "notifications must remain visible on the compact bar");
+    const auto pills = realmheart::ui::bar::build_workspace_pills(snapshot);
+    require(pills.size() == 4, "sliding range must still contain four runes");
+    require(pills.front().id == 2 && pills.back().id == 5,
+            "workspace five must slide the visible range to 2-5");
+    require(pills.back().active, "workspace five must remain the bottom active rune");
+
+    snapshot.active_id = 3;
+    const auto reset = realmheart::ui::bar::build_workspace_pills(snapshot);
+    require(reset.front().id == 1 && reset.back().id == 4,
+            "returning below workspace five must restore 1-4");
 }
 
-void test_notification_slot_reports_capture_and_unread_state() {
-    realmheart::services::NotificationSnapshot notifications;
-    notifications.capture_active = true;
-    notifications.unread_count = 12;
-
-    const auto slots = realmheart::ui::bar::build_status_slots({}, notifications);
-    const auto& notification_slot = slots.back();
-    require(notification_slot.name == "Notifications", "notification slot must be last in the status cluster");
-    require(notification_slot.enabled, "nonzero unread count must emphasize notifications");
-    require(notification_slot.badge_text == "12", "notification badge must expose unread count");
-    require(notification_slot.tooltip == "Notifications: 12 unread", "notification tooltip must expose unread count");
-
-    notifications.capture_active = false;
-    const auto inactive_slots = realmheart::ui::bar::build_status_slots({}, notifications);
-    require(!inactive_slots.back().enabled, "inactive capture must not pretend notification state is live");
-    require(inactive_slots.back().badge_text.empty(), "inactive capture must not show a misleading zero badge");
-    require(inactive_slots.back().tooltip == "Notifications: capture pending",
-            "coexistence state must be explicit until Phase 4.5 owns notification capture");
+void test_unavailable_state_still_has_stable_targets() {
+    const realmheart::services::WorkspaceSnapshot snapshot;
+    const auto pills = realmheart::ui::bar::build_workspace_pills(snapshot);
+    require(pills.size() == 4, "unavailable Hyprland state must retain four click targets");
+    require(pills.front().id == 1 && pills.back().id == 4,
+            "fallback click targets must remain workspaces 1-4");
+    for (const auto& pill : pills) {
+        require(!pill.active && pill.windows == 0,
+                "unavailable workspace state must not invent activity");
+    }
 }
 
 } // namespace
 
 int main() {
-    test_workspace_pills_keep_defaults_and_merge_live_state();
-    test_status_slots_only_keep_compact_bar_information();
-    test_notification_slot_reports_capture_and_unread_state();
+    test_workspace_pills_show_four_and_merge_live_state();
+    test_workspace_window_slides_only_for_workspace_five();
+    test_unavailable_state_still_has_stable_targets();
     std::cout << "Vertical bar model tests passed\n";
     return 0;
 }

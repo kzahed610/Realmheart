@@ -104,11 +104,15 @@ std::optional<PlayerState> read_player(GDBusConnection* connection, const std::s
     if (metadata != nullptr) {
         const gchar* title = nullptr;
         const gchar* album = nullptr;
+        const gchar* art_url = nullptr;
         if (g_variant_lookup(metadata, "xesam:title", "&s", &title) && title != nullptr) {
             state.info.title = title;
         }
         if (g_variant_lookup(metadata, "xesam:album", "&s", &album) && album != nullptr) {
             state.info.album = album;
+        }
+        if (g_variant_lookup(metadata, "mpris:artUrl", "&s", &art_url) && art_url != nullptr) {
+            state.info.art_url = art_url;
         }
         state.info.artist = first_artist(metadata);
         g_variant_unref(metadata);

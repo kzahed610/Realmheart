@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <optional>
 #include <system_error>
 
 namespace realmheart::services {
@@ -45,7 +46,30 @@ std::optional<BatteryStatus> BatteryService::read() {
         const std::string status = read_sysfs_file(battery_dir / "status");
         if (status.empty()) return std::nullopt;
 
-        return BatteryStatus{percentage, status == "Charging", status};
+        std::optional<double> rate_watts;
+        const std::string power_now = read_sysfs_file(battery_dir / "power_now");
+        if (!power_now.empty()) {
+            std::size_t consumed = 0;
+            const double microwatts = std::stod(power_now, &consumed);
+            if (consumed == power_now.size() && microwatts >= 0.0) {
+                rate_watts = microwatts / 1'000'000.0;
+            }
+        } else {
+            const std::string current_now = read_sysfs_file(battery_dir / "current_now");
+            const std::string voltage_now = read_sysfs_file(battery_dir / "voltage_now");
+            if (!current_now.empty() && !voltage_now.empty()) {
+                std::size_t current_consumed = 0;
+                std::size_t voltage_consumed = 0;
+                const double microamps = std::stod(current_now, &current_consumed);
+                const double microvolts = std::stod(voltage_now, &voltage_consumed);
+                if (current_consumed == current_now.size() && voltage_consumed == voltage_now.size() &&
+                    microamps >= 0.0 && microvolts >= 0.0) {
+                    rate_watts = microamps * microvolts / 1'000'000'000'000.0;
+                }
+            }
+        }
+
+        return BatteryStatus{percentage, status == "Charging", status, rate_watts};
     } catch (const std::exception&) {
         return std::nullopt;
     }

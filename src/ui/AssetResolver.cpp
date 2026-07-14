@@ -1,5 +1,6 @@
 #include "ui/AssetResolver.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <system_error>
@@ -65,11 +66,38 @@ std::optional<std::filesystem::path> resolve_icon(
     return candidate;
 }
 
-std::optional<std::filesystem::path> resolve_project_icon(std::string_view logical_name) {
+std::optional<std::filesystem::path> resolve_project_asset(std::string_view relative_path) {
+    if (relative_path.empty()) return std::nullopt;
+
+    const std::filesystem::path relative(relative_path);
+    if (relative.is_absolute()) return std::nullopt;
+
     for (const auto& root : asset_roots()) {
-        if (const auto icon = resolve_icon(root / "icons" / "fluent", logical_name)) return icon;
+        std::error_code error;
+        const auto canonical_root = std::filesystem::weakly_canonical(root, error);
+        if (error) continue;
+
+        const auto candidate = std::filesystem::weakly_canonical(canonical_root / relative, error);
+        if (error) continue;
+
+        const auto mismatch = std::mismatch(
+            canonical_root.begin(), canonical_root.end(), candidate.begin(), candidate.end()
+        );
+        if (mismatch.first != canonical_root.end()) continue;
+        if (!std::filesystem::is_regular_file(candidate, error) || error) continue;
+        return candidate;
     }
     return std::nullopt;
+}
+
+std::optional<std::filesystem::path> resolve_project_icon(std::string_view logical_name) {
+    if (logical_name.empty()) return std::nullopt;
+    const std::filesystem::path relative(logical_name);
+    if (relative.is_absolute() || relative.has_parent_path() || relative.filename() != relative) {
+        return std::nullopt;
+    }
+    const std::string nested = (std::filesystem::path("icons") / "fluent" / relative).generic_string();
+    return resolve_project_asset(nested);
 }
 
 } // namespace realmheart::ui

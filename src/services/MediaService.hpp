@@ -17,6 +17,7 @@ struct MediaInfo {
     std::string title;
     std::string artist;
     std::string album;
+    std::string art_url;
     // Playback status: 0 = stopped, 1 = playing, 2 = paused
     int playback_status = 0;
 };

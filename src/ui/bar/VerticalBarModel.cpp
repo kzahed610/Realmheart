@@ -1,96 +1,36 @@
 #include "ui/bar/VerticalBarModel.hpp"
 
 #include <algorithm>
-#include <array>
-#include <set>
-#include <string_view>
+#include <string>
 
 namespace realmheart::ui::bar {
-namespace {
-
-struct SlotSpec {
-    std::string_view name;
-    std::string_view icon_name;
-    std::string_view fallback_text;
-};
-
-constexpr std::array<SlotSpec, 2> kServiceSlots{{
-    {"Battery", "battery-charging.svg", "Bt"},
-    {"Media", "music-note.svg", "Md"},
-}};
-
-} // namespace
 
 std::vector<realmheart::services::WorkspaceState> build_workspace_pills(
     const realmheart::services::WorkspaceSnapshot& snapshot
 ) {
+    constexpr int kVisibleWorkspaceCount = 4;
+    constexpr int kMaximumWorkspaceId = 5;
+
+    const int active_id = snapshot.available ? snapshot.active_id : 1;
+    const int first_visible = active_id >= kMaximumWorkspaceId ? 2 : 1;
+
     std::vector<realmheart::services::WorkspaceState> workspaces;
-    std::set<int> included;
+    workspaces.reserve(kVisibleWorkspaceCount);
+    for (int id = first_visible; id < first_visible + kVisibleWorkspaceCount; ++id) {
+        realmheart::services::WorkspaceState state;
+        state.id = id;
+        state.name = std::to_string(id);
+        state.active = snapshot.available && id == active_id;
 
-    for (int id = 1; id <= 5; ++id) {
-        workspaces.push_back({id, std::to_string(id), 0, snapshot.available && id == snapshot.active_id});
-        included.insert(id);
+        const auto live = std::find_if(
+            snapshot.workspaces.begin(), snapshot.workspaces.end(),
+            [id](const auto& item) { return item.id == id; }
+        );
+        if (live != snapshot.workspaces.end()) state = *live;
+        state.active = snapshot.available && id == active_id;
+        workspaces.push_back(std::move(state));
     }
-
-    if (!snapshot.available) return workspaces;
-
-    for (const auto& workspace : snapshot.workspaces) {
-        if (workspace.id <= 0 || workspace.id > 10) continue;
-
-        auto existing = std::find_if(workspaces.begin(), workspaces.end(), [&workspace](const auto& item) {
-            return item.id == workspace.id;
-        });
-        if (existing != workspaces.end()) {
-            *existing = workspace;
-        } else if (!included.contains(workspace.id)) {
-            workspaces.push_back(workspace);
-            included.insert(workspace.id);
-        }
-    }
-
-    std::sort(workspaces.begin(), workspaces.end(), [](const auto& left, const auto& right) {
-        return left.id < right.id;
-    });
     return workspaces;
-}
-
-std::vector<BarStatusSlot> build_status_slots(
-    const std::vector<realmheart::services::ServiceStatus>& report,
-    const realmheart::services::NotificationSnapshot& notifications
-) {
-    std::vector<BarStatusSlot> slots;
-    slots.reserve(kServiceSlots.size() + 1);
-
-    for (const auto& spec : kServiceSlots) {
-        const auto status = std::find_if(report.begin(), report.end(), [&spec](const auto& candidate) {
-            return candidate.name == spec.name;
-        });
-
-        BarStatusSlot slot;
-        slot.name = spec.name;
-        slot.icon_name = spec.icon_name;
-        slot.fallback_text = spec.fallback_text;
-        slot.enabled = status != report.end() && status->enabled;
-        slot.tooltip = slot.name + ": " + (status == report.end() ? "status pending" : status->status);
-        slots.push_back(std::move(slot));
-    }
-
-    BarStatusSlot notifications_slot;
-    notifications_slot.name = "Notifications";
-    notifications_slot.icon_name = "alert.svg";
-    notifications_slot.fallback_text = "Nt";
-    if (notifications.capture_active) {
-        notifications_slot.enabled = notifications.unread_count > 0;
-        notifications_slot.tooltip = "Notifications: " + std::to_string(notifications.unread_count) + " unread";
-        if (notifications.unread_count > 0) {
-            notifications_slot.badge_text = std::to_string(notifications.unread_count);
-        }
-    } else {
-        notifications_slot.tooltip = "Notifications: capture pending";
-    }
-    slots.push_back(std::move(notifications_slot));
-
-    return slots;
 }
 
 } // namespace realmheart::ui::bar

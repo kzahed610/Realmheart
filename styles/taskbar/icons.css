@@ -1,0 +1,59 @@
+/*
+ * Taskbar icon buttons.
+ *
+ * The thin Matugen-green contour belongs to the button surface rather than
+ * the SVG paths. This keeps detailed multicolour Realmheart artwork crisp.
+ */
+
+.realmheart-bar-icon-button {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 5px;
+  margin: 0;
+  color: @rh_text;
+  background-color: alpha(@rh_surface, 0.24);
+  border: 1px solid alpha(@rh_primary, 0.90);
+  border-radius: 13px;
+  box-shadow: none;
+}
+
+.realmheart-bar-icon-button:hover {
+  background-color: alpha(@rh_surface_variant, 0.52);
+  border-color: @rh_primary;
+}
+
+.realmheart-bar-icon-button:active,
+.realmheart-bar-icon-button:checked {
+  background-color: alpha(@rh_primary, 0.20);
+  border-color: @rh_primary;
+}
+
+.realmheart-bar-svg-icon {
+  opacity: 1;
+}
+
+.realmheart-bar-icon-disabled {
+  color: @rh_text_muted;
+  border-color: alpha(@rh_outline, 0.60);
+  opacity: 0.60;
+}
+
+.realmheart-launcher-button {
+  min-width: 46px;
+  min-height: 46px;
+}
+
+.realmheart-bar-fallback-icon {
+  color: @rh_text_muted;
+  font-size: 0.78em;
+  font-weight: 700;
+}
+
+.realmheart-bar-badge {
+  color: @rh_background;
+  background-color: @rh_error;
+  border-radius: 999px;
+  padding: 0 3px;
+  font-size: 0.62em;
+  font-weight: 800;
+}

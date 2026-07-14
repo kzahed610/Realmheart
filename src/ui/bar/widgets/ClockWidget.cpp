@@ -1,15 +1,14 @@
-#include "ui/components/ClockWidget.hpp"
+#include "ui/bar/widgets/ClockWidget.hpp"
 
 #include <chrono>
 #include <ctime>
+#include <string>
 
-namespace realmheart::ui::components {
+namespace realmheart::ui::bar::widgets {
 
 ClockWidget::ClockWidget() {
     label_ = gtk_label_new(nullptr);
     gtk_widget_add_css_class(label_, "realmheart-bar-clock");
-    gtk_widget_set_margin_top(label_, 8);
-    gtk_widget_set_margin_bottom(label_, 8);
     refresh();
 }
 
@@ -20,15 +19,15 @@ ClockWidget::~ClockWidget() {
     }
 }
 
-GtkWidget* ClockWidget::get_widget() { return label_; }
-
 void ClockWidget::update_time() {
     const std::time_t now = std::time(nullptr);
     std::tm local_time{};
     localtime_r(&now, &local_time);
     char buffer[16]{};
-    std::strftime(buffer, sizeof(buffer), "%H\n%M", &local_time);
-    gtk_label_set_text(GTK_LABEL(label_), buffer);
+    std::strftime(buffer, sizeof(buffer), "%I:%M\n%p", &local_time);
+    std::string formatted(buffer);
+    if (formatted.starts_with('0')) formatted.erase(formatted.begin());
+    gtk_label_set_text(GTK_LABEL(label_), formatted.c_str());
 }
 
 void ClockWidget::schedule_next_tick() {
@@ -56,4 +55,4 @@ void ClockWidget::refresh() {
     schedule_next_tick();
 }
 
-} // namespace realmheart::ui::components
+} // namespace realmheart::ui::bar::widgets
