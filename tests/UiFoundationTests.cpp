@@ -19,28 +19,28 @@ void require(bool condition, const std::string& message) {
 
 void test_asset_resolver_accepts_known_icons_and_rejects_escape_paths() {
     const auto root = std::filesystem::path(REALMHEART_TEST_ASSET_DIR);
-    const auto icon = realmheart::ui::resolve_icon(root, "wifi-4.svg");
+    const auto icon = realmheart::ui::resolve_icon(root, "wifi.svg");
     require(icon.has_value(), "known project icon must resolve");
-    require(icon->filename() == "wifi-4.svg", "resolved icon must retain its logical filename");
+    require(icon->filename() == "wifi.svg", "resolved icon must retain its logical filename");
     require(!realmheart::ui::resolve_icon(root, "missing.svg"), "missing icon must not resolve");
-    require(!realmheart::ui::resolve_icon(root, "../wifi-4.svg"), "parent traversal must be rejected");
-    require(!realmheart::ui::resolve_icon(root, "/tmp/wifi-4.svg"), "absolute icon paths must be rejected");
-    require(!realmheart::ui::resolve_icon(root, "nested/wifi-4.svg"), "logical icon names must not smuggle directories");
+    require(!realmheart::ui::resolve_icon(root, "../wifi.svg"), "parent traversal must be rejected");
+    require(!realmheart::ui::resolve_icon(root, "/tmp/wifi.svg"), "absolute icon paths must be rejected");
+    require(!realmheart::ui::resolve_icon(root, "nested/wifi.svg"), "logical icon names must not smuggle directories");
 }
 
 void test_project_asset_resolver_allows_safe_nested_realmheart_assets() {
     const auto icon = realmheart::ui::resolve_project_asset(
-        "Realmheart-Icons/battery/heartcore-full.svg"
+        "Realmheart-Icons/battery-charging-50.svg"
     );
     require(icon.has_value(), "nested Realmheart icon paths must resolve from project assets");
-    require(icon->filename() == "heartcore-full.svg",
+    require(icon->filename() == "battery-charging-50.svg",
             "nested resolver must retain the requested asset filename");
     require(!realmheart::ui::resolve_project_asset("../CMakeLists.txt"),
             "nested resolver must reject direct parent traversal");
     require(!realmheart::ui::resolve_project_asset(
-        "Realmheart-Icons/battery/../../../CMakeLists.txt"
+        "Realmheart-Icons/../../CMakeLists.txt"
     ), "nested resolver must reject traversal after a valid prefix");
-    require(!realmheart::ui::resolve_project_asset("/tmp/heartcore-full.svg"),
+    require(!realmheart::ui::resolve_project_asset("/tmp/battery-charging-50.svg"),
             "nested resolver must reject absolute paths");
 }
 

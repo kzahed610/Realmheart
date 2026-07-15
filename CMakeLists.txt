@@ -76,6 +76,7 @@ add_library(realmheart_ui STATIC
     src/ui/bar/WorkspaceWindowTracker.cpp
     src/ui/bar/widgets/BarBackdrop.cpp
     src/ui/bar/widgets/BarIconButton.cpp
+    src/ui/bar/widgets/ThemedSvgIcon.cpp
     src/ui/bar/widgets/ClockWidget.cpp
     src/ui/bar/widgets/WorkspaceRune.cpp
     src/ui/bar/widgets/MediaWidget.cpp
@@ -322,7 +323,7 @@ if(BUILD_TESTING)
         src/ui/styles/CssModuleLoader.cpp
     )
     target_compile_definitions(realmheart_ui_foundation_tests PRIVATE
-        REALMHEART_TEST_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets/icons/fluent"
+        REALMHEART_TEST_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets/Realmheart-Icons"
         REALMHEART_INSTALL_ASSET_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/assets"
         REALMHEART_SOURCE_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
         REALMHEART_INSTALL_STYLE_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/styles"

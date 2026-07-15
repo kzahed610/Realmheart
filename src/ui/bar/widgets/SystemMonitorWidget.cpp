@@ -3,6 +3,7 @@
 #include "core/TaskExecutor.hpp"
 
 #include <algorithm>
+#include <array>
 #include <iomanip>
 #include <optional>
 #include <sstream>
@@ -58,28 +59,45 @@ std::string processor_text(double percent, const std::optional<double>& frequenc
 }
 
 
-
 } // namespace
 
 SystemMonitorWidget::SystemMonitorWidget(
     std::function<void(GtkPopover*)> request_exclusive_open
-) : request_exclusive_open_(std::move(request_exclusive_open)),
-    button_(
-        "Realmheart-Icons/system/realmforge-settings.svg",
-        "Sy",
-        "Hold for system usage"
-    ) {
-    button_.add_css_class("realmheart-system-monitor-button");
+) : request_exclusive_open_(std::move(request_exclusive_open)) {
     async_state_->owner = this;
+
+    button_ = gtk_button_new();
+    gtk_widget_add_css_class(button_, "realmheart-system-monitor-pill");
+    gtk_widget_set_tooltip_text(button_, "System usage: CPU, RAM, GPU");
+
+    GtkWidget* metrics = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+    gtk_widget_add_css_class(metrics, "realmheart-system-monitor-metrics");
+    gtk_widget_set_halign(metrics, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(metrics, GTK_ALIGN_CENTER);
+
+    const std::array metric_specs{
+        std::pair{"Realmheart-Icons/cpu.svg", "realmheart-system-monitor-cpu"},
+        std::pair{"Realmheart-Icons/ram.svg", "realmheart-system-monitor-ram"},
+        std::pair{"Realmheart-Icons/gpu.svg", "realmheart-system-monitor-gpu"},
+    };
+    metric_icons_.reserve(metric_specs.size());
+    for (const auto& [path, css_class] : metric_specs) {
+        auto icon = std::make_unique<ThemedSvgIcon>(path, 22);
+        icon->add_css_class("realmheart-system-monitor-metric");
+        icon->add_css_class(css_class);
+        gtk_box_append(GTK_BOX(metrics), icon->widget());
+        metric_icons_.push_back(std::move(icon));
+    }
+    gtk_button_set_child(GTK_BUTTON(button_), metrics);
 
     popover_ = gtk_popover_new();
     gtk_widget_add_css_class(popover_, "realmheart-bar-popover");
     gtk_widget_add_css_class(popover_, "realmheart-system-monitor-popover");
     gtk_popover_set_position(GTK_POPOVER(popover_), GTK_POS_RIGHT);
     gtk_popover_set_has_arrow(GTK_POPOVER(popover_), TRUE);
-    gtk_popover_set_autohide(GTK_POPOVER(popover_), FALSE);
+    gtk_popover_set_autohide(GTK_POPOVER(popover_), TRUE);
     gtk_popover_set_offset(GTK_POPOVER(popover_), 9, -6);
-    gtk_widget_set_parent(popover_, button_.button());
+    gtk_widget_set_parent(popover_, button_);
 
     GtkWidget* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 7);
     gtk_widget_set_size_request(root, 255, -1);
@@ -88,7 +106,7 @@ SystemMonitorWidget::SystemMonitorWidget(
     gtk_label_set_xalign(GTK_LABEL(title), 0.0F);
     gtk_box_append(GTK_BOX(root), title);
 
-    state_label_ = gtk_label_new("Hold to sample");
+    state_label_ = gtk_label_new("Live while open");
     gtk_widget_add_css_class(state_label_, "realmheart-popover-muted");
     gtk_label_set_xalign(GTK_LABEL(state_label_), 0.0F);
     gtk_box_append(GTK_BOX(root), state_label_);
@@ -99,32 +117,16 @@ SystemMonitorWidget::SystemMonitorWidget(
     gpu_ = add_row(root, "GPU / iGPU");
     gtk_popover_set_child(GTK_POPOVER(popover_), root);
 
-    GtkGesture* hold = gtk_gesture_click_new();
-    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(hold), GDK_BUTTON_PRIMARY);
-    gtk_event_controller_set_propagation_phase(
-        GTK_EVENT_CONTROLLER(hold), GTK_PHASE_CAPTURE
-    );
-    g_signal_connect(hold, "pressed", G_CALLBACK(+[](
-        GtkGestureClick*, int, double, double, gpointer data
-    ) {
-        static_cast<SystemMonitorWidget*>(data)->show_held();
+    g_signal_connect(button_, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
+        static_cast<SystemMonitorWidget*>(data)->toggle();
     }), this);
-    g_signal_connect(hold, "released", G_CALLBACK(+[](
-        GtkGestureClick*, int, double, double, gpointer data
-    ) {
-        static_cast<SystemMonitorWidget*>(data)->hide_held();
+    g_signal_connect(popover_, "closed", G_CALLBACK(+[](GtkPopover*, gpointer data) {
+        static_cast<SystemMonitorWidget*>(data)->handle_closed();
     }), this);
-    g_signal_connect(hold, "cancel", G_CALLBACK(+[](GtkGesture*, GdkEventSequence*, gpointer data) {
-        static_cast<SystemMonitorWidget*>(data)->hide_held();
-    }), this);
-    gtk_widget_add_controller(button_.button(), GTK_EVENT_CONTROLLER(hold));
 }
 
 SystemMonitorWidget::~SystemMonitorWidget() {
-    if (refresh_timer_id_ != 0) {
-        g_source_remove(refresh_timer_id_);
-        refresh_timer_id_ = 0;
-    }
+    stop_live_refresh();
     async_state_->alive = false;
     async_state_->owner = nullptr;
     if (popover_ != nullptr && gtk_widget_get_parent(popover_) != nullptr) {
@@ -153,8 +155,16 @@ SystemMonitorWidget::UsageRow SystemMonitorWidget::add_row(GtkWidget* parent, co
     return {value, progress};
 }
 
-void SystemMonitorWidget::show_held() {
-    held_ = true;
+void SystemMonitorWidget::toggle() {
+    if (open_) {
+        close();
+        return;
+    }
+    open();
+}
+
+void SystemMonitorWidget::open() {
+    open_ = true;
     if (request_exclusive_open_) request_exclusive_open_(GTK_POPOVER(popover_));
     gtk_label_set_text(GTK_LABEL(state_label_), "Measuring…");
     gtk_popover_popup(GTK_POPOVER(popover_));
@@ -163,7 +173,7 @@ void SystemMonitorWidget::show_held() {
     if (refresh_timer_id_ == 0) {
         refresh_timer_id_ = g_timeout_add(750, +[](gpointer data) -> gboolean {
             auto* self = static_cast<SystemMonitorWidget*>(data);
-            if (!self->held_) {
+            if (!self->open_) {
                 self->refresh_timer_id_ = 0;
                 return G_SOURCE_REMOVE;
             }
@@ -173,17 +183,22 @@ void SystemMonitorWidget::show_held() {
     }
 }
 
-void SystemMonitorWidget::hide_held() {
-    held_ = false;
+void SystemMonitorWidget::handle_closed() {
+    open_ = false;
+    stop_live_refresh();
+}
+
+void SystemMonitorWidget::stop_live_refresh() {
     if (refresh_timer_id_ != 0) {
         g_source_remove(refresh_timer_id_);
         refresh_timer_id_ = 0;
     }
-    gtk_popover_popdown(GTK_POPOVER(popover_));
 }
 
 void SystemMonitorWidget::close() {
-    hide_held();
+    open_ = false;
+    stop_live_refresh();
+    if (popover_ != nullptr) gtk_popover_popdown(GTK_POPOVER(popover_));
 }
 
 void SystemMonitorWidget::request_sample() {
@@ -218,7 +233,7 @@ void SystemMonitorWidget::apply(const std::optional<services::SystemUsageSnapsho
         gtk_label_set_text(GTK_LABEL(state_label_), "Usage unavailable");
         return;
     }
-    gtk_label_set_text(GTK_LABEL(state_label_), held_ ? "Live while held" : "Last sample");
+    gtk_label_set_text(GTK_LABEL(state_label_), open_ ? "Live while open" : "Last sample");
 
     const auto set_row = [](const UsageRow& row, const std::string& text, double percent) {
         gtk_label_set_text(GTK_LABEL(row.value), text.c_str());

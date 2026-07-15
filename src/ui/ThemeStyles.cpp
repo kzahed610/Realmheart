@@ -3,10 +3,44 @@
 #include "ui/styles/CssModuleLoader.hpp"
 
 #include <array>
+#include <cmath>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 
 namespace realmheart::ui {
+namespace {
+
+std::optional<double> hex_luminance(std::string_view color) {
+    if (color.size() != 7 || color.front() != '#') return std::nullopt;
+    const auto hex = [](char value) -> int {
+        if (value >= '0' && value <= '9') return value - '0';
+        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+        return -1;
+    };
+    const auto channel = [&](std::size_t index) -> std::optional<double> {
+        const int high = hex(color[index]);
+        const int low = hex(color[index + 1]);
+        if (high < 0 || low < 0) return std::nullopt;
+        const double srgb = static_cast<double>((high << 4) | low) / 255.0;
+        return srgb <= 0.04045
+            ? srgb / 12.92
+            : std::pow((srgb + 0.055) / 1.055, 2.4);
+    };
+
+    const auto red = channel(1);
+    const auto green = channel(3);
+    const auto blue = channel(5);
+    if (!red || !green || !blue) return std::nullopt;
+    return (0.2126 * *red) + (0.7152 * *green) + (0.0722 * *blue);
+}
+
+bool palette_is_dark(std::string_view background) {
+    return hex_luminance(background).value_or(0.0) < 0.42;
+}
+
+} // namespace
 
 ThemeStyles::ThemeStyles(std::shared_ptr<services::ThemeService> theme_service)
     : theme_service_(std::move(theme_service)),
@@ -66,6 +100,10 @@ std::string ThemeStyles::build_css(const services::Palette& palette) {
     const auto text_muted = palette.get("text_muted", "#a6adc8");
     const auto outline = palette.get("outline", "#45475a");
     const auto error = palette.get("error", "#f38ba8");
+    const bool dark = palette_is_dark(background);
+    const std::string icon_primary = dark ? "#F5F2EA" : "#17141D";
+    const std::string icon_accent = dark ? "#FFD66B" : "#6D42D8";
+    const std::string icon_on_accent = dark ? "#18151F" : "#FFFFFF";
 
     return
         "@define-color rh_primary " + primary + ";\n"
@@ -77,6 +115,9 @@ std::string ThemeStyles::build_css(const services::Palette& palette) {
         "@define-color rh_text_muted " + text_muted + ";\n"
         "@define-color rh_outline " + outline + ";\n"
         "@define-color rh_error " + error + ";\n"
+        "@define-color rh_icon_primary " + icon_primary + ";\n"
+        "@define-color rh_icon_accent " + icon_accent + ";\n"
+        "@define-color rh_icon_on_accent " + icon_on_accent + ";\n"
         "\n"
         ".realmheart-right-sidebar {\n"
         "  background-color: alpha(@rh_background, 0.94);\n"

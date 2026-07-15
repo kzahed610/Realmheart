@@ -1,14 +1,9 @@
-/*
- * Taskbar icon buttons.
- *
- * The thin Matugen-green contour belongs to the button surface rather than
- * the SVG paths. This keeps detailed multicolour Realmheart artwork crisp.
- */
+/* Theme-token SVG taskbar icons and their button surfaces. */
 
 .realmheart-bar-icon-button {
-  min-width: 16px;
-  min-height: 16px;
-  padding: 2px;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 3px;
   margin: 0;
   color: @rh_text;
   background-color: alpha(@rh_surface, 0.24);
@@ -29,18 +24,25 @@
 }
 
 .realmheart-bar-svg-icon {
+  color: @rh_icon_primary;
   opacity: 1;
 }
 
-.realmheart-bar-icon-disabled {
-  color: @rh_text_muted;
-  border-color: alpha(@rh_outline, 0.60);
-  opacity: 0.60;
+.realmheart-icon-accent-probe {
+  color: @rh_icon_accent;
 }
 
-.realmheart-launcher-button {
-  min-width: 46px;
-  min-height: 46px;
+.realmheart-icon-on-accent-probe {
+  color: @rh_icon_on_accent;
+}
+
+.realmheart-bar-icon-disabled {
+  border-color: alpha(@rh_outline, 0.60);
+  opacity: 0.66;
+}
+
+.realmheart-bar-icon-disabled .realmheart-bar-svg-icon {
+  color: @rh_text_muted;
 }
 
 .realmheart-bar-fallback-icon {
@@ -56,4 +58,86 @@
   padding: 0 3px;
   font-size: 0.62em;
   font-weight: 800;
+}
+
+/* Upper-zone placement, matching the deliberately spacious layout sketch. */
+.realmheart-bar-icon-button.realmheart-media-button {
+  margin-top: 108px;
+}
+
+.realmheart-system-monitor-pill {
+  min-width: 40px;
+  min-height: 118px;
+  padding: 7px 4px;
+  margin-top: 66px;
+  color: @rh_text;
+  background-color: alpha(@rh_surface, 0.24);
+  border: 1px solid alpha(@rh_primary, 0.90);
+  border-radius: 19px;
+  box-shadow: none;
+}
+
+.realmheart-system-monitor-pill:hover {
+  background-color: alpha(@rh_surface_variant, 0.52);
+  border-color: @rh_primary;
+}
+
+.realmheart-system-monitor-pill:active,
+.realmheart-system-monitor-pill:checked {
+  background-color: alpha(@rh_primary, 0.20);
+  border-color: @rh_primary;
+}
+
+.realmheart-system-monitor-metrics {
+  border-spacing: 11px;
+}
+
+.realmheart-system-monitor-metric {
+  color: @rh_text_muted;
+  font-size: 0.54em;
+  font-weight: 800;
+}
+
+.realmheart-system-monitor-cpu .realmheart-bar-svg-icon {
+  color: @rh_primary;
+}
+
+.realmheart-system-monitor-ram .realmheart-bar-svg-icon {
+  color: @rh_secondary;
+}
+
+.realmheart-system-monitor-gpu .realmheart-bar-svg-icon {
+  color: @rh_icon_primary;
+}
+
+/* Lower-zone placement. These margins are intentionally asymmetric: the
+ * status controls step downward, while the final action remains isolated. */
+.realmheart-bar-icon-button.realmheart-battery-button {
+  margin-bottom: 29px;
+}
+
+.realmheart-bar-icon-button.realmheart-wifi-button {
+  margin-bottom: 23px;
+}
+
+.realmheart-bar-icon-button.realmheart-notification-button {
+  margin-bottom: 75px;
+}
+
+.realmheart-bar-icon-button.realmheart-bottom-action-button {
+  margin-bottom: 7px;
+}
+
+/* The SVG family now carries most state through geometry. Only states that
+ * need extra urgency override the primary semantic foreground. */
+.realmheart-battery-critical .realmheart-bar-svg-icon {
+  color: @rh_error;
+}
+
+.realmheart-battery-low .realmheart-bar-svg-icon {
+  color: @rh_icon_accent;
+}
+
+.realmheart-notification-unread .realmheart-bar-svg-icon {
+  color: @rh_icon_primary;
 }

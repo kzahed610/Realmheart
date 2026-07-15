@@ -2,16 +2,34 @@
 
 #include <iomanip>
 #include <sstream>
+#include <initializer_list>
 #include <string>
 #include <utility>
 
 namespace realmheart::ui::bar::widgets {
+namespace {
+
+std::string battery_icon_path(const services::BatteryStatus& status) {
+    int level = 100;
+    if (status.percentage <= 5) level = 0;
+    else if (status.percentage <= 25) level = 25;
+    else if (status.percentage <= 50) level = 50;
+    else if (status.percentage <= 75) level = 75;
+
+    if (status.charging) {
+        if (level == 0) level = 25;
+        return "Realmheart-Icons/battery-charging-" + std::to_string(level) + ".svg";
+    }
+    return "Realmheart-Icons/battery-" + std::to_string(level) + ".svg";
+}
+
+} // namespace
 
 BatteryWidget::BatteryWidget(
     std::function<void(GtkPopover*)> request_exclusive_open
 ) : request_exclusive_open_(std::move(request_exclusive_open)),
     button_(
-        "Realmheart-Icons/battery/heartcore-medium.svg",
+        "Realmheart-Icons/battery.svg",
         "Bt",
         "Hold for battery details"
     ) {
@@ -71,28 +89,36 @@ BatteryWidget::~BatteryWidget() {
     }
 }
 
-const char* BatteryWidget::icon_for(const services::BatteryStatus& status) {
-    if (status.charging) return "Realmheart-Icons/battery/heartcore-charging.svg";
-    if (status.percentage <= 8) return "Realmheart-Icons/battery/heartcore-empty.svg";
-    if (status.percentage <= 18) return "Realmheart-Icons/battery/heartcore-warning.svg";
-    if (status.percentage <= 35) return "Realmheart-Icons/battery/heartcore-low.svg";
-    if (status.percentage <= 62) return "Realmheart-Icons/battery/heartcore-medium.svg";
-    if (status.percentage <= 88) return "Realmheart-Icons/battery/heartcore-high.svg";
-    return "Realmheart-Icons/battery/heartcore-full.svg";
-}
-
 void BatteryWidget::update(const std::optional<services::BatteryStatus>& status) {
     status_ = status;
+    for (const char* css_class : {
+        "realmheart-battery-charging",
+        "realmheart-battery-critical",
+        "realmheart-battery-low",
+        "realmheart-battery-normal",
+    }) {
+        button_.remove_css_class(css_class);
+    }
+
     if (!status_) {
+        button_.set_icon("Realmheart-Icons/battery.svg", "Bt");
         button_.set_enabled(false);
-        button_.set_icon("Realmheart-Icons/battery/heartcore-empty.svg", "Bt");
         button_.set_tooltip("Battery unavailable");
         update_popup();
         return;
     }
 
+    button_.set_icon(battery_icon_path(*status_), "Bt");
     button_.set_enabled(true);
-    button_.set_icon(icon_for(*status_), "Bt");
+    if (status_->charging) {
+        button_.add_css_class("realmheart-battery-charging");
+    } else if (status_->percentage <= 15) {
+        button_.add_css_class("realmheart-battery-critical");
+    } else if (status_->percentage <= 35) {
+        button_.add_css_class("realmheart-battery-low");
+    } else {
+        button_.add_css_class("realmheart-battery-normal");
+    }
     button_.set_tooltip(
         "Battery: " + std::to_string(status_->percentage) + "% (" + status_->status + ")"
     );

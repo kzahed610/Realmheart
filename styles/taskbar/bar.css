@@ -1,18 +1,8 @@
-/*
- * Realmheart taskbar shell and vertical rhythm.
- *
- * The non-rectangular silhouette is drawn by BarBackdrop because CSS
- * border-radius can only carve inward inside a rectangle. Colours remain here
- * so the shell still follows Matugen without hardcoding palette values in C++.
- */
+/* Realmheart taskbar shell and deliberate vertical rhythm. */
 
 /* The taskbar contour is the only deliberately non-Matugen colour. */
 @define-color rh_taskbar_gold #ffd66b;
 
-/*
- * Every rectangular GTK layer must stay genuinely transparent. The only
- * visible shell fill is painted by BarBackdrop's custom path below.
- */
 window.realmheart-vertical-bar-window,
 .realmheart-bar-root,
 .realmheart-bar-backdrop,
@@ -24,10 +14,6 @@ window.realmheart-vertical-bar-window,
   box-shadow: none;
 }
 
-/*
- * BarBackdrop paints this colour only inside the straight rail. The outward
- * curve wedges are intentionally left transparent by the C++ geometry.
- */
 .realmheart-bar-backdrop-fill {
   color: alpha(@rh_background, 0.94);
 }
@@ -42,21 +28,42 @@ window.realmheart-vertical-bar-window,
   padding: 13px 5px 14px 5px;
 }
 
+/* Top zone: the three controls are intentionally spread across the upper rail. */
 .realmheart-bar-top-cluster {
-  border-spacing: 18px;
+  border-spacing: 0;
   margin-top: 7px;
-  margin-bottom: 16px;
 }
 
+/* Workspace zone remains the visual centre of the rail. */
+.realmheart-workspace-section {
+  border-spacing: 9px;
+}
+
+.realmheart-bar-separator {
+  min-width: 28px;
+  min-height: 1px;
+  color: alpha(@rh_outline, 0.58);
+  background-color: alpha(@rh_outline, 0.58);
+}
+
+.realmheart-workspace-separator {
+  margin: 0;
+}
+
+/* Bottom zone uses per-control margins from icons.css for an intentional
+ * descending rhythm while keeping the power action anchored to the bottom. */
 .realmheart-bar-bottom-cluster {
-  border-spacing: 15px;
-  margin-top: 16px;
-  margin-bottom: 7px;
+  border-spacing: 0;
+  margin-bottom: 0;
 }
 
 .realmheart-bar-clock {
   color: @rh_text;
   font-weight: 750;
   font-size: 0.84em;
-  margin: 5px 0 4px 0;
+  margin: 0 0 22px 0;
+}
+
+.realmheart-status-separator {
+  margin: 0 0 43px 0;
 }

@@ -1,7 +1,6 @@
 #include "ui/bar/widgets/MediaWidget.hpp"
 
 #include "core/TaskExecutor.hpp"
-#include "ui/AssetResolver.hpp"
 #include "ui/bar/MediaArtLoader.hpp"
 
 #include <gdk-pixbuf/gdk-pixbuf.h>
@@ -14,28 +13,14 @@
 namespace realmheart::ui::bar::widgets {
 namespace {
 
-GtkWidget* image_button(const char* asset, const char* fallback) {
+GtkWidget* image_button(GtkWidget* icon, const char* fallback) {
     GtkWidget* button = gtk_button_new();
     gtk_widget_add_css_class(button, "realmheart-media-control");
-    GtkWidget* child = nullptr;
-    if (const auto path = resolve_project_asset(asset)) {
-        child = gtk_image_new_from_file(path->string().c_str());
-        gtk_image_set_pixel_size(GTK_IMAGE(child), 18);
-    } else {
-        child = gtk_label_new(fallback);
-    }
-    gtk_button_set_child(GTK_BUTTON(button), child);
+    gtk_button_set_child(
+        GTK_BUTTON(button),
+        icon != nullptr ? icon : gtk_label_new(fallback)
+    );
     return button;
-}
-
-void set_button_image(GtkWidget* image, const char* asset, const char* fallback_icon) {
-    if (const auto path = resolve_project_asset(asset)) {
-        gtk_image_set_from_file(GTK_IMAGE(image), path->string().c_str());
-        gtk_image_set_pixel_size(GTK_IMAGE(image), 18);
-    } else {
-        gtk_image_set_from_icon_name(GTK_IMAGE(image), fallback_icon);
-        gtk_image_set_pixel_size(GTK_IMAGE(image), 18);
-    }
 }
 
 } // namespace
@@ -46,7 +31,7 @@ MediaWidget::MediaWidget(
 ) : media_service_(media_service),
     request_exclusive_open_(std::move(request_exclusive_open)),
     button_(
-        "Realmheart-Icons/media-controls/chronicle-play.svg",
+        "Realmheart-Icons/media.svg",
         "Md",
         "Media",
         [this] { toggle(); }
@@ -92,21 +77,20 @@ MediaWidget::MediaWidget(
 
     GtkWidget* controls = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     gtk_widget_set_halign(controls, GTK_ALIGN_CENTER);
-    previous_button_ = image_button(
-        "Realmheart-Icons/media-controls/chronicle-previous.svg", "⏮"
+    previous_icon_ = std::make_unique<ThemedSvgIcon>(
+        "Realmheart-Icons/previous.svg", 18
     );
-    play_pause_button_ = gtk_button_new();
-    gtk_widget_add_css_class(play_pause_button_, "realmheart-media-control");
-    play_pause_image_ = gtk_image_new();
-    set_button_image(
-        play_pause_image_,
-        "Realmheart-Icons/media-controls/chronicle-play.svg",
-        "media-playback-start-symbolic"
+    previous_button_ = image_button(previous_icon_->widget(), "⏮");
+
+    play_pause_icon_ = std::make_unique<ThemedSvgIcon>(
+        "Realmheart-Icons/play.svg", 18
     );
-    gtk_button_set_child(GTK_BUTTON(play_pause_button_), play_pause_image_);
-    next_button_ = image_button(
-        "Realmheart-Icons/media-controls/chronicle-next.svg", "⏭"
+    play_pause_button_ = image_button(play_pause_icon_->widget(), "▶");
+
+    next_icon_ = std::make_unique<ThemedSvgIcon>(
+        "Realmheart-Icons/next.svg", 18
     );
+    next_button_ = image_button(next_icon_->widget(), "⏭");
 
     g_signal_connect(previous_button_, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
         static_cast<MediaWidget*>(data)->invoke_control("previous");
@@ -280,12 +264,6 @@ void MediaWidget::update(const std::optional<services::MediaInfo>& info) {
     const bool playing = available && info_->playback_status == 1;
 
     button_.set_enabled(available);
-    button_.set_icon(
-        playing
-            ? "Realmheart-Icons/media-controls/chronicle-pause.svg"
-            : "Realmheart-Icons/media-controls/chronicle-play.svg",
-        "Md"
-    );
 
     if (!available) {
         button_.set_tooltip("No active media player");
@@ -304,13 +282,9 @@ void MediaWidget::update(const std::optional<services::MediaInfo>& info) {
     gtk_widget_set_sensitive(previous_button_, available);
     gtk_widget_set_sensitive(play_pause_button_, available);
     gtk_widget_set_sensitive(next_button_, available);
-    set_button_image(
-        play_pause_image_,
-        playing
-            ? "Realmheart-Icons/media-controls/chronicle-pause.svg"
-            : "Realmheart-Icons/media-controls/chronicle-play.svg",
-        playing ? "media-playback-pause-symbolic" : "media-playback-start-symbolic"
-    );
+    static_cast<void>(play_pause_icon_->set_icon(
+        playing ? "Realmheart-Icons/pause.svg" : "Realmheart-Icons/play.svg"
+    ));
 }
 
 } // namespace realmheart::ui::bar::widgets

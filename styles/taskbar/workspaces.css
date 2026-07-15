@@ -2,7 +2,7 @@
 
 .realmheart-workspace-stack {
   border-spacing: 5px;
-  margin: 18px 0 0 0;
+  margin: 0;
   padding: 12px 2px;
   background-color: alpha(@rh_surface, 0.18);
   border: 1px solid alpha(@rh_outline, 0.20);

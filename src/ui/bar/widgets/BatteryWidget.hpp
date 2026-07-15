@@ -25,7 +25,6 @@ private:
     void show_held();
     void hide_held();
     void update_popup();
-    static const char* icon_for(const services::BatteryStatus& status);
 
     std::function<void(GtkPopover*)> request_exclusive_open_;
     BarIconButton button_;

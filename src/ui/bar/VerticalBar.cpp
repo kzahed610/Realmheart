@@ -6,6 +6,7 @@
 #include "ui/bar/VerticalBarModel.hpp"
 
 #include <algorithm>
+#include <initializer_list>
 #include <string>
 #include <utility>
 
@@ -40,6 +41,17 @@ void clear_box(GtkWidget* box) {
         gtk_box_remove(GTK_BOX(box), child);
         child = next;
     }
+}
+
+GtkWidget* create_section_separator(const char* role_class) {
+    GtkWidget* separator = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_widget_add_css_class(separator, "realmheart-bar-separator");
+    if (role_class != nullptr && *role_class != '\0') {
+        gtk_widget_add_css_class(separator, role_class);
+    }
+    gtk_widget_set_halign(separator, GTK_ALIGN_CENTER);
+    gtk_widget_set_size_request(separator, 28, 1);
+    return separator;
 }
 
 } // namespace
@@ -130,7 +142,7 @@ VerticalBar::VerticalBar(
 
     // Event-driven where possible. The only periodic I/O is a slow recovery
     // poll and cheap sysfs/nmcli state refresh; system usage is sampled only
-    // while the user is physically holding its icon.
+    // while its popover is open.
     refresh_timer_id_ = g_timeout_add_seconds(5, +[](gpointer data) -> gboolean {
         auto* self = static_cast<VerticalBar*>(data);
         ++self->refresh_tick_;
@@ -157,6 +169,7 @@ VerticalBar::~VerticalBar() {
     async_state_->owner = nullptr;
     g_weak_ref_clear(&active_popover_ref_);
 
+    bottom_action_button_.reset();
     notification_button_.reset();
     wifi_button_.reset();
     battery_widget_.reset();
@@ -188,7 +201,15 @@ void VerticalBar::setup_layout() {
     );
     gtk_overlay_set_child(GTK_OVERLAY(root_overlay_), backdrop_->widget());
 
-    content_container_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    // A vertical GtkCenterBox gives the rail three deliberate zones:
+    // identity/system controls at the top, workspaces in the visual center,
+    // and clock/status/actions at the bottom. Each zone keeps compact internal
+    // spacing without collapsing the entire UI into either edge.
+    content_container_ = gtk_center_box_new();
+    gtk_orientable_set_orientation(
+        GTK_ORIENTABLE(content_container_),
+        GTK_ORIENTATION_VERTICAL
+    );
     gtk_widget_add_css_class(content_container_, "realmheart-vertical-bar");
     gtk_widget_set_size_request(content_container_, kRailWidth, -1);
     gtk_widget_set_halign(content_container_, GTK_ALIGN_START);
@@ -201,10 +222,23 @@ void VerticalBar::setup_layout() {
     gtk_widget_set_halign(workspace_box_, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(workspace_box_, GTK_ALIGN_CENTER);
 
-    workspace_region_ = gtk_center_box_new();
-    gtk_orientable_set_orientation(GTK_ORIENTABLE(workspace_region_), GTK_ORIENTATION_VERTICAL);
-    gtk_widget_set_vexpand(workspace_region_, TRUE);
-    gtk_center_box_set_center_widget(GTK_CENTER_BOX(workspace_region_), workspace_box_);
+    GtkWidget* workspace_section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(workspace_section, "realmheart-workspace-section");
+    gtk_widget_set_halign(workspace_section, GTK_ALIGN_CENTER);
+    gtk_box_append(
+        GTK_BOX(workspace_section),
+        create_section_separator("realmheart-workspace-separator")
+    );
+    gtk_box_append(GTK_BOX(workspace_section), workspace_box_);
+    gtk_box_append(
+        GTK_BOX(workspace_section),
+        create_section_separator("realmheart-workspace-separator")
+    );
+
+    // Keep the workspace section in normal document flow. The previous
+    // expanding GtkCenterBox consumed every spare pixel and created the huge
+    // gaps above and below the runes.
+    workspace_region_ = workspace_section;
 
     gtk_window_set_child(GTK_WINDOW(window_), root_overlay_);
 }
@@ -213,13 +247,12 @@ void VerticalBar::populate_widgets() {
     auto exclusive_open = [this](GtkPopover* popover) { open_exclusive_popover(popover); };
 
     launcher_button_ = std::make_unique<widgets::BarIconButton>(
-        "Realmheart-Icons/system/realmheart-launcher.svg",
+        "Realmheart-Icons/launcher.svg",
         "RH",
         "Open Realmheart launcher",
         launch_launcher_
     );
     launcher_button_->add_css_class("realmheart-launcher-button");
-    launcher_button_->set_icon_size(34);
 
     media_widget_ = std::make_unique<widgets::MediaWidget>(media_service_, exclusive_open);
     system_monitor_widget_ = std::make_unique<widgets::SystemMonitorWidget>(exclusive_open);
@@ -227,7 +260,7 @@ void VerticalBar::populate_widgets() {
     battery_widget_ = std::make_unique<widgets::BatteryWidget>(exclusive_open);
 
     wifi_button_ = std::make_unique<widgets::BarIconButton>(
-        "Realmheart-Icons/wifi/aetherlink-no-signal.svg",
+        "Realmheart-Icons/wifi.svg",
         "Wi",
         "Wi-Fi status",
         toggle_sidebar_
@@ -235,12 +268,20 @@ void VerticalBar::populate_widgets() {
     wifi_button_->add_css_class("realmheart-wifi-button");
 
     notification_button_ = std::make_unique<widgets::BarIconButton>(
-        "Realmheart-Icons/notifications/herald-disabled.svg",
+        "Realmheart-Icons/notifications.svg",
         "Nt",
         "Notifications",
         toggle_sidebar_
     );
     notification_button_->add_css_class("realmheart-notification-button");
+
+    bottom_action_button_ = std::make_unique<widgets::BarIconButton>(
+        "Realmheart-Icons/power.svg",
+        "Ac",
+        "Open right sidebar",
+        toggle_sidebar_
+    );
+    bottom_action_button_->add_css_class("realmheart-bottom-action-button");
 
     GtkWidget* top_cluster = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(top_cluster, "realmheart-bar-top-cluster");
@@ -253,13 +294,25 @@ void VerticalBar::populate_widgets() {
     gtk_widget_add_css_class(bottom_cluster, "realmheart-bar-bottom-cluster");
     gtk_widget_set_halign(bottom_cluster, GTK_ALIGN_CENTER);
     gtk_box_append(GTK_BOX(bottom_cluster), clock_->widget());
+    gtk_box_append(
+        GTK_BOX(bottom_cluster),
+        create_section_separator("realmheart-status-separator")
+    );
     gtk_box_append(GTK_BOX(bottom_cluster), battery_widget_->widget());
     gtk_box_append(GTK_BOX(bottom_cluster), wifi_button_->widget());
     gtk_box_append(GTK_BOX(bottom_cluster), notification_button_->widget());
 
-    gtk_box_append(GTK_BOX(content_container_), top_cluster);
-    gtk_box_append(GTK_BOX(content_container_), workspace_region_);
-    gtk_box_append(GTK_BOX(content_container_), bottom_cluster);
+    // The final action belongs to the bottom module rather than living alone
+    // in a distant corner. The whole module is pinned to the rail's bottom.
+    gtk_widget_set_halign(bottom_action_button_->widget(), GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(bottom_cluster), bottom_action_button_->widget());
+
+    gtk_center_box_set_start_widget(GTK_CENTER_BOX(content_container_), top_cluster);
+    gtk_center_box_set_center_widget(
+        GTK_CENTER_BOX(content_container_),
+        workspace_region_
+    );
+    gtk_center_box_set_end_widget(GTK_CENTER_BOX(content_container_), bottom_cluster);
 
     apply_notifications(notification_history_.snapshot());
 }
@@ -454,44 +507,65 @@ void VerticalBar::apply_media(const std::optional<services::MediaInfo>& info) {
 }
 
 void VerticalBar::apply_wifi(const std::optional<services::WifiState>& state) {
+    for (const char* css_class : {
+        "realmheart-wifi-disconnected",
+        "realmheart-wifi-weak",
+        "realmheart-wifi-medium",
+        "realmheart-wifi-strong",
+    }) {
+        wifi_button_->remove_css_class(css_class);
+    }
+
     if (!state) {
-        wifi_button_->set_enabled(false);
-        wifi_button_->set_icon("Realmheart-Icons/wifi/aetherlink-warning.svg", "Wi");
+        wifi_button_->set_icon("Realmheart-Icons/wifi-warning.svg", "Wi");
+        wifi_button_->set_enabled(true);
+        wifi_button_->add_css_class("realmheart-wifi-disconnected");
         wifi_button_->set_tooltip("Wi-Fi state unavailable");
         return;
     }
 
-    wifi_button_->set_enabled(state->enabled && !state->ssid.empty());
     if (!state->enabled) {
-        wifi_button_->set_icon("Realmheart-Icons/wifi/aetherlink-disabled.svg", "Wi");
+        wifi_button_->set_icon("Realmheart-Icons/wifi-off.svg", "Wi");
+        wifi_button_->set_enabled(false);
+        wifi_button_->add_css_class("realmheart-wifi-disconnected");
         wifi_button_->set_tooltip("Wi-Fi disabled");
-    } else if (state->ssid.empty()) {
-        wifi_button_->set_icon("Realmheart-Icons/wifi/aetherlink-no-signal.svg", "Wi");
-        wifi_button_->set_tooltip("Wi-Fi enabled — not connected");
-    } else {
-        const int strength = state->signal_percent.value_or(100);
-        const char* icon = strength < 35
-            ? "Realmheart-Icons/wifi/aetherlink-signal-weak.svg"
-            : (strength < 70
-                ? "Realmheart-Icons/wifi/aetherlink-signal-medium.svg"
-                : "Realmheart-Icons/wifi/aetherlink-signal-strong.svg");
-        wifi_button_->set_icon(icon, "Wi");
-        wifi_button_->set_tooltip(
-            "Wi-Fi: " + state->ssid +
-            (state->signal_percent ? " (" + std::to_string(*state->signal_percent) + "%)" : "")
-        );
+        return;
     }
+
+    if (state->ssid.empty()) {
+        wifi_button_->set_icon("Realmheart-Icons/wifi-warning.svg", "Wi");
+        wifi_button_->set_enabled(true);
+        wifi_button_->add_css_class("realmheart-wifi-disconnected");
+        wifi_button_->set_tooltip("Wi-Fi enabled — not connected");
+        return;
+    }
+
+    const int strength = state->signal_percent.value_or(100);
+    const char* icon = strength < 25
+        ? "Realmheart-Icons/wifi-1.svg"
+        : (strength < 50
+            ? "Realmheart-Icons/wifi-2.svg"
+            : (strength < 75
+                ? "Realmheart-Icons/wifi-3.svg"
+                : "Realmheart-Icons/wifi-4.svg"));
+    wifi_button_->set_icon(icon, "Wi");
+    wifi_button_->set_enabled(true);
+    wifi_button_->add_css_class(
+        strength < 35
+            ? "realmheart-wifi-weak"
+            : (strength < 70 ? "realmheart-wifi-medium" : "realmheart-wifi-strong")
+    );
+    wifi_button_->set_tooltip(
+        "Wi-Fi: " + state->ssid +
+        (state->signal_percent ? " (" + std::to_string(*state->signal_percent) + "%)" : "")
+    );
 }
 
 void VerticalBar::apply_notifications(const services::NotificationSnapshot& notifications) {
     const bool unread = notifications.capture_active && notifications.unread_count > 0;
     notification_button_->set_enabled(unread);
-    notification_button_->set_icon(
-        unread
-            ? "Realmheart-Icons/notifications/herald-enabled.svg"
-            : "Realmheart-Icons/notifications/herald-disabled.svg",
-        "Nt"
-    );
+    notification_button_->remove_css_class("realmheart-notification-unread");
+    if (unread) notification_button_->add_css_class("realmheart-notification-unread");
     notification_button_->set_badge(
         unread ? std::to_string(notifications.unread_count) : std::string{}
     );

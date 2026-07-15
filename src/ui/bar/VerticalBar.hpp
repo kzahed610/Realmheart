@@ -82,6 +82,7 @@ private:
     std::unique_ptr<widgets::BatteryWidget> battery_widget_;
     std::unique_ptr<widgets::BarIconButton> wifi_button_;
     std::unique_ptr<widgets::BarIconButton> notification_button_;
+    std::unique_ptr<widgets::BarIconButton> bottom_action_button_;
 
     services::NotificationHistory& notification_history_;
     services::BatteryService& battery_service_;

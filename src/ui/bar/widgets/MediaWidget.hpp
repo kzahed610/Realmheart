@@ -2,6 +2,7 @@
 
 #include "services/MediaService.hpp"
 #include "ui/bar/widgets/BarIconButton.hpp"
+#include "ui/bar/widgets/ThemedSvgIcon.hpp"
 
 #include <atomic>
 #include <cstdint>
@@ -53,9 +54,11 @@ private:
     GtkWidget* title_label_ = nullptr;
     GtkWidget* artist_label_ = nullptr;
     GtkWidget* previous_button_ = nullptr;
+    std::unique_ptr<ThemedSvgIcon> previous_icon_;
     GtkWidget* play_pause_button_ = nullptr;
-    GtkWidget* play_pause_image_ = nullptr;
+    std::unique_ptr<ThemedSvgIcon> play_pause_icon_;
     GtkWidget* next_button_ = nullptr;
+    std::unique_ptr<ThemedSvgIcon> next_icon_;
     std::optional<services::MediaInfo> info_;
     std::string requested_art_url_;
     bool art_request_complete_ = false;
