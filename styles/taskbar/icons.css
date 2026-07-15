@@ -58,8 +58,7 @@
   font-weight: 800;
 }
 
-/* Upper-zone placement: explicit color roles, spacing owned by the cluster. */
-.realmheart-launcher-button .realmheart-bar-svg-icon,
+/* Launcher artwork carries fixed brand colours; the refresh/action control stays theme-driven. */
 .realmheart-bottom-action-button .realmheart-bar-svg-icon {
   color: @rh_primary;
 }

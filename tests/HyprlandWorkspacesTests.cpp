@@ -53,11 +53,45 @@ void test_switch_to_dispatches_requested_workspace() {
     std::ifstream recorded(output);
     std::string arguments;
     std::getline(recorded, arguments);
-    require(arguments == "dispatch workspace 4",
-            "workspace dispatch must pass the exact requested workspace id");
+    require(arguments == "dispatch hl.dsp.focus({ workspace = 4 })",
+            "workspace dispatch must use Hyprland Lua focus syntax with the exact requested workspace id");
     require(!realmheart::services::HyprlandWorkspaces::switch_to(0),
             "invalid workspace ids must be rejected before spawning hyprctl");
 
+    std::filesystem::remove_all(root);
+}
+
+void test_switch_to_rejects_lua_dispatch_errors() {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("realmheart-workspace-switch-error-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    const auto executable = root / "hyprctl";
+    {
+        std::ofstream script(executable);
+        script << "#!/bin/sh\n"
+               << "printf '%s\\n' 'error: simulated Lua dispatch parser failure'\n"
+               << "exit 0\n";
+    }
+    std::filesystem::permissions(
+        executable,
+        std::filesystem::perms::owner_read |
+            std::filesystem::perms::owner_write |
+            std::filesystem::perms::owner_exec,
+        std::filesystem::perm_options::replace
+    );
+
+    const char* old_path_value = std::getenv("PATH");
+    const std::string old_path = old_path_value == nullptr ? std::string{} : old_path_value;
+    const std::string test_path = root.string() + (old_path.empty() ? "" : ":" + old_path);
+    ::setenv("PATH", test_path.c_str(), 1);
+
+    const bool switched = realmheart::services::HyprlandWorkspaces::switch_to(4);
+
+    ::setenv("PATH", old_path.c_str(), 1);
+    require(!switched,
+            "Hyprland Lua dispatch parser errors must not be treated as successful workspace switches");
     std::filesystem::remove_all(root);
 }
 
@@ -165,6 +199,7 @@ void test_malformed_clients_fixture_is_unavailable() {
 
 int main() {
     test_switch_to_dispatches_requested_workspace();
+    test_switch_to_rejects_lua_dispatch_errors();
     test_fixture_parses_sorted_deduplicated_state();
     test_active_workspace_is_synthesized_when_list_omits_it();
     test_malformed_active_fixture_is_unavailable();

@@ -27,11 +27,13 @@ bool HyprlandWorkspaces::switch_to(
     const realmheart::core::CommandOptions& options
 ) {
     if (workspace_id <= 0 || !realmheart::core::command_exists("hyprctl")) return false;
+    const std::string dispatcher =
+        "hl.dsp.focus({ workspace = " + std::to_string(workspace_id) + " })";
     const auto result = realmheart::core::run_capture(
-        {"hyprctl", "dispatch", "workspace", std::to_string(workspace_id)},
+        {"hyprctl", "dispatch", dispatcher},
         options
     );
-    return result.succeeded();
+    return result.succeeded() && result.output.find("error:") == std::string::npos;
 }
 
 WorkspaceSnapshot HyprlandWorkspaces::read(const realmheart::core::CommandOptions& options) {

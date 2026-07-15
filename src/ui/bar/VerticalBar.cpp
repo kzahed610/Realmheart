@@ -247,12 +247,13 @@ void VerticalBar::populate_widgets() {
     auto exclusive_open = [this](GtkPopover* popover) { open_exclusive_popover(popover); };
 
     launcher_button_ = std::make_unique<widgets::BarIconButton>(
-        "Realmheart-Icons/launcher.svg",
+        "Realmheart-Icons/realmheart-launcher.svg",
         "RH",
         "Open Realmheart launcher",
         launch_launcher_
     );
     launcher_button_->add_css_class("realmheart-launcher-button");
+    launcher_button_->set_icon_size(32);
 
     media_widget_ = std::make_unique<widgets::MediaWidget>(media_service_, exclusive_open);
     system_monitor_widget_ = std::make_unique<widgets::SystemMonitorWidget>(exclusive_open);
@@ -276,7 +277,7 @@ void VerticalBar::populate_widgets() {
     notification_button_->add_css_class("realmheart-notification-button");
 
     bottom_action_button_ = std::make_unique<widgets::BarIconButton>(
-        "Realmheart-Icons/power.svg",
+        "Realmheart-Icons/arrow-clockwise.svg",
         "Ac",
         "Open right sidebar",
         toggle_sidebar_
