@@ -51,11 +51,14 @@ WorkspaceRune::WorkspaceRune(
     button_ = gtk_button_new();
     gtk_widget_add_css_class(button_, "realmheart-workspace-rune");
     gtk_widget_set_halign(button_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(button_, GTK_ALIGN_CENTER);
     gtk_widget_set_size_request(button_, 34, 38);
     gtk_widget_set_focusable(button_, FALSE);
 
     drawing_area_ = gtk_drawing_area_new();
     gtk_widget_add_css_class(drawing_area_, "realmheart-workspace-rune-art");
+    gtk_widget_set_halign(drawing_area_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(drawing_area_, GTK_ALIGN_CENTER);
     gtk_widget_set_size_request(drawing_area_, 25, 31);
     gtk_widget_set_can_target(drawing_area_, FALSE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(drawing_area_), &WorkspaceRune::draw, this, nullptr);

@@ -13,14 +13,21 @@ BarIconButton::BarIconButton(
     button_ = gtk_button_new();
     gtk_widget_add_css_class(button_, "realmheart-bar-icon-button");
     gtk_widget_set_halign(button_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(button_, GTK_ALIGN_CENTER);
 
     overlay_ = gtk_overlay_new();
+    gtk_widget_set_halign(overlay_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(overlay_, GTK_ALIGN_CENTER);
     stack_ = gtk_stack_new();
+    gtk_widget_set_halign(stack_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(stack_, GTK_ALIGN_CENTER);
     icon_ = std::make_unique<ThemedSvgIcon>();
     icon_->set_size(24);
 
     fallback_ = gtk_label_new(nullptr);
     gtk_widget_add_css_class(fallback_, "realmheart-bar-fallback-icon");
+    gtk_widget_set_halign(fallback_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(fallback_, GTK_ALIGN_CENTER);
     gtk_stack_add_named(GTK_STACK(stack_), icon_->widget(), "image");
     gtk_stack_add_named(GTK_STACK(stack_), fallback_, "fallback");
     gtk_overlay_set_child(GTK_OVERLAY(overlay_), stack_);

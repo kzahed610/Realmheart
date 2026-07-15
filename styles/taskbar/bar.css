@@ -25,20 +25,18 @@ window.realmheart-vertical-bar-window,
 .realmheart-vertical-bar {
   background-color: transparent;
   color: @rh_text;
-  padding: 13px 4px 14px 6px;
+  padding: 13px 9px 13px 5px;
 }
 
-/* Top zone: the three controls are intentionally spread across the upper rail. */
+/* Top zone: compact, centered icon rhythm instead of giant hand-spaced gaps. */
 .realmheart-bar-top-cluster {
-  border-spacing: 0;
+  border-spacing: 12px;
   margin-top: 7px;
-  margin-left: 2px;
 }
 
 /* Workspace zone remains the visual centre of the rail. */
 .realmheart-workspace-section {
-  border-spacing: 9px;
-  margin-left: 2px;
+  border-spacing: 18px;
 }
 
 .realmheart-bar-separator {
@@ -52,21 +50,19 @@ window.realmheart-vertical-bar-window,
   margin: 0;
 }
 
-/* Bottom zone uses per-control margins from icons.css for an intentional
- * descending rhythm while keeping the power action anchored to the bottom. */
+/* Bottom zone mirrors the compact top rhythm while staying bottom-pinned. */
 .realmheart-bar-bottom-cluster {
-  border-spacing: 0;
-  margin-bottom: 0;
-  margin-left: 2px;
+  border-spacing: 14px;
+  margin-bottom: 10px;
 }
 
 .realmheart-bar-clock {
   color: @rh_text;
   font-weight: 750;
   font-size: 0.84em;
-  margin: 0 0 22px 0;
+  margin: 0 0 2px 0;
 }
 
 .realmheart-status-separator {
-  margin: 0 0 43px 0;
+  margin: 0 0 40px 0;
 }

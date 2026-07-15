@@ -1,10 +1,10 @@
 /* Theme-token SVG taskbar icons and their button surfaces. */
 
 .realmheart-bar-icon-button {
-  min-width: 34px;
-  min-height: 34px;
+  min-width: 36px;
+  min-height: 36px;
   padding: 2px;
-  margin: 0;
+  margin: 0 0 46px 0;
   color: @rh_text;
   background-color: transparent;
   border: none;
@@ -13,12 +13,12 @@
 }
 
 .realmheart-bar-icon-button:hover {
-  background-color: alpha(@rh_surface_variant, 0.20);
+  background-color: alpha(@rh_surface_variant, 0.80);
 }
 
 .realmheart-bar-icon-button:active,
 .realmheart-bar-icon-button:checked {
-  background-color: alpha(@rh_primary, 0.16);
+  background-color: alpha(@rh_primary, 0.6);
 }
 
 .realmheart-bar-svg-icon {
@@ -58,19 +58,22 @@
   font-weight: 800;
 }
 
-/* Upper-zone placement, matching the deliberately spacious layout sketch. */
-.realmheart-bar-icon-button.realmheart-media-button {
-  margin-top: 96px;
+/* Upper-zone placement: explicit color roles, spacing owned by the cluster. */
+.realmheart-launcher-button .realmheart-bar-svg-icon,
+.realmheart-bottom-action-button .realmheart-bar-svg-icon {
+  color: @rh_primary;
 }
 
+.realmheart-bar-icon-button.realmheart-media-button { margin-top: 0; }
+
 .realmheart-system-monitor-pill {
-  min-width: 40px;
-  min-height: 118px;
-  padding: 7px 4px;
-  margin-top: 54px;
+  min-width: 36px;
+  min-height: 104px;
+  padding: 7px 3px;
+  margin-top: 0;
   color: @rh_text;
   background-color: alpha(@rh_surface, 0.14);
-  border: 1px solid alpha(@rh_primary, 0.42);
+  border: 1px solid alpha(@rh_primary, 0.2);
   border-radius: 19px;
   box-shadow: none;
 }
@@ -87,7 +90,7 @@
 }
 
 .realmheart-system-monitor-metrics {
-  border-spacing: 11px;
+  border-spacing: 8px;
 }
 
 .realmheart-system-monitor-metric {
@@ -105,25 +108,24 @@
 }
 
 .realmheart-system-monitor-gpu .realmheart-bar-svg-icon {
-  color: @rh_icon_primary;
+  color: @rh_primary;
 }
 
-/* Lower-zone placement. These margins are intentionally asymmetric: the
- * status controls step downward, while the final action remains isolated. */
+/* Lower-zone placement: the parent cluster owns rhythm; controls stay centered. */
 .realmheart-bar-icon-button.realmheart-battery-button {
-  margin-bottom: 29px;
+  margin: 0;
 }
 
 .realmheart-bar-icon-button.realmheart-wifi-button {
-  margin-bottom: 23px;
+  margin-bottom: 0;
 }
 
 .realmheart-bar-icon-button.realmheart-notification-button {
-  margin-bottom: 75px;
+  margin: 0 0 80px 0;
 }
 
 .realmheart-bar-icon-button.realmheart-bottom-action-button {
-  margin-bottom: 7px;
+  margin-bottom: 6px;
 }
 
 /* The SVG family now carries most state through geometry. Only states that
@@ -133,7 +135,15 @@
 }
 
 .realmheart-battery-low .realmheart-bar-svg-icon {
-  color: @rh_icon_accent;
+  color: @rh_primary;
+}
+
+.realmheart-battery-normal .realmheart-bar-svg-icon {
+  color: @rh_secondary;
+}
+
+.realmheart-battery-charging .realmheart-bar-svg-icon {
+  color: @rh_primary;
 }
 
 .realmheart-notification-unread .realmheart-bar-svg-icon {

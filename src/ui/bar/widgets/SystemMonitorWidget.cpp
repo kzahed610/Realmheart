@@ -68,6 +68,8 @@ SystemMonitorWidget::SystemMonitorWidget(
 
     button_ = gtk_button_new();
     gtk_widget_add_css_class(button_, "realmheart-system-monitor-pill");
+    gtk_widget_set_halign(button_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(button_, GTK_ALIGN_CENTER);
     gtk_widget_set_tooltip_text(button_, "System usage: CPU, RAM, GPU");
 
     GtkWidget* metrics = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);

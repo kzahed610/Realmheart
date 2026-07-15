@@ -2,17 +2,18 @@
 
 .realmheart-workspace-stack {
   border-spacing: 5px;
+  min-width: 36px;
   margin: 0;
-  padding: 12px 0;
+  padding: 11px 0;
   background-color: alpha(@rh_surface, 0.18);
   border: 1px solid alpha(@rh_outline, 0.20);
   border-radius: 25px;
 }
 
 .realmheart-workspace-rune {
-  min-width: 30px;
+  min-width: 32px;
   min-height: 34px;
-  padding: 3px;
+  padding: 2px;
   margin: 0;
   background-color: transparent;
   border: none;
