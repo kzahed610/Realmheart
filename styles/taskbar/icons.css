@@ -1,26 +1,24 @@
 /* Theme-token SVG taskbar icons and their button surfaces. */
 
 .realmheart-bar-icon-button {
-  min-width: 40px;
-  min-height: 40px;
-  padding: 3px;
+  min-width: 34px;
+  min-height: 34px;
+  padding: 2px;
   margin: 0;
   color: @rh_text;
-  background-color: alpha(@rh_surface, 0.24);
-  border: 1px solid alpha(@rh_primary, 0.90);
+  background-color: transparent;
+  border: none;
   border-radius: 13px;
   box-shadow: none;
 }
 
 .realmheart-bar-icon-button:hover {
-  background-color: alpha(@rh_surface_variant, 0.52);
-  border-color: @rh_primary;
+  background-color: alpha(@rh_surface_variant, 0.20);
 }
 
 .realmheart-bar-icon-button:active,
 .realmheart-bar-icon-button:checked {
-  background-color: alpha(@rh_primary, 0.20);
-  border-color: @rh_primary;
+  background-color: alpha(@rh_primary, 0.16);
 }
 
 .realmheart-bar-svg-icon {
@@ -62,30 +60,30 @@
 
 /* Upper-zone placement, matching the deliberately spacious layout sketch. */
 .realmheart-bar-icon-button.realmheart-media-button {
-  margin-top: 108px;
+  margin-top: 96px;
 }
 
 .realmheart-system-monitor-pill {
   min-width: 40px;
   min-height: 118px;
   padding: 7px 4px;
-  margin-top: 66px;
+  margin-top: 54px;
   color: @rh_text;
-  background-color: alpha(@rh_surface, 0.24);
-  border: 1px solid alpha(@rh_primary, 0.90);
+  background-color: alpha(@rh_surface, 0.14);
+  border: 1px solid alpha(@rh_primary, 0.42);
   border-radius: 19px;
   box-shadow: none;
 }
 
 .realmheart-system-monitor-pill:hover {
-  background-color: alpha(@rh_surface_variant, 0.52);
-  border-color: @rh_primary;
+  background-color: alpha(@rh_surface_variant, 0.24);
+  border-color: alpha(@rh_primary, 0.58);
 }
 
 .realmheart-system-monitor-pill:active,
 .realmheart-system-monitor-pill:checked {
-  background-color: alpha(@rh_primary, 0.20);
-  border-color: @rh_primary;
+  background-color: alpha(@rh_primary, 0.12);
+  border-color: alpha(@rh_primary, 0.66);
 }
 
 .realmheart-system-monitor-metrics {

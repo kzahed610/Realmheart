@@ -82,7 +82,7 @@ SystemMonitorWidget::SystemMonitorWidget(
     };
     metric_icons_.reserve(metric_specs.size());
     for (const auto& [path, css_class] : metric_specs) {
-        auto icon = std::make_unique<ThemedSvgIcon>(path, 22);
+        auto icon = std::make_unique<ThemedSvgIcon>(path, 20);
         icon->add_css_class("realmheart-system-monitor-metric");
         icon->add_css_class(css_class);
         gtk_box_append(GTK_BOX(metrics), icon->widget());

@@ -25,18 +25,20 @@ window.realmheart-vertical-bar-window,
 .realmheart-vertical-bar {
   background-color: transparent;
   color: @rh_text;
-  padding: 13px 5px 14px 5px;
+  padding: 13px 4px 14px 6px;
 }
 
 /* Top zone: the three controls are intentionally spread across the upper rail. */
 .realmheart-bar-top-cluster {
   border-spacing: 0;
   margin-top: 7px;
+  margin-left: 2px;
 }
 
 /* Workspace zone remains the visual centre of the rail. */
 .realmheart-workspace-section {
   border-spacing: 9px;
+  margin-left: 2px;
 }
 
 .realmheart-bar-separator {
@@ -55,6 +57,7 @@ window.realmheart-vertical-bar-window,
 .realmheart-bar-bottom-cluster {
   border-spacing: 0;
   margin-bottom: 0;
+  margin-left: 2px;
 }
 
 .realmheart-bar-clock {

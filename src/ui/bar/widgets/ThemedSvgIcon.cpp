@@ -62,6 +62,17 @@ std::string resolve_tokens(std::string source, const ColorKey& colors) {
     replace_all(source, "var(--rh-icon-primary, currentColor)", primary);
     replace_all(source, "var(--rh-icon-accent, #ffd66b)", accent);
     replace_all(source, "var(--rh-icon-on-accent, #18151f)", on_accent);
+    replace_all(source, "var(--rh-icon-primary)", primary);
+    replace_all(source, "var(--rh-icon-accent)", accent);
+    replace_all(source, "var(--rh-icon-on-accent)", on_accent);
+
+    const std::string injected_style =
+        "<style>:root{--rh-icon-primary:" + primary +
+        ";--rh-icon-accent:" + accent +
+        ";--rh-icon-on-accent:" + on_accent + ";}</style>";
+    const std::size_t svg_open = source.find('>');
+    if (svg_open != std::string::npos) source.insert(svg_open + 1, injected_style);
+
     replace_all(source, "currentColor", primary);
     return source;
 }

@@ -17,7 +17,7 @@ BarIconButton::BarIconButton(
     overlay_ = gtk_overlay_new();
     stack_ = gtk_stack_new();
     icon_ = std::make_unique<ThemedSvgIcon>();
-    icon_->set_size(26);
+    icon_->set_size(24);
 
     fallback_ = gtk_label_new(nullptr);
     gtk_widget_add_css_class(fallback_, "realmheart-bar-fallback-icon");
