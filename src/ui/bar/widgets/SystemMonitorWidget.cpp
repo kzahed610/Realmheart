@@ -2,10 +2,14 @@
 
 #include "ui/bar/widgets/AttachedPopover.hpp"
 #include "core/TaskExecutor.hpp"
+#include "ui/LayerSurface.hpp"
 #include "ui/bar/widgets/PopoverReveal.hpp"
+
+#include <gtk4-layer-shell/gtk4-layer-shell.h>
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <iomanip>
 #include <optional>
 #include <sstream>
@@ -60,13 +64,18 @@ std::string processor_text(double percent, const std::optional<double>& frequenc
     return text;
 }
 
-constexpr int kPopoverOffsetX = kExpandingPopoverOffsetX;
-constexpr int kPopoverOffsetY = 0;
+// Preserve the exact native-popover alignment: its right-side offset was five
+// pixels from the system pill, and its vertical centre followed the pill.
+constexpr int kSystemLayerExtraOffsetX = kExpandingPopoverOffsetX;
+constexpr int kSystemLayerFallbackLeft = 56;
+constexpr int kSystemLayerFallbackTop = 92;
+constexpr double kSystemRevealDurationUs = 210000.0;
 
 } // namespace
 
 SystemMonitorWidget::SystemMonitorWidget(
-    std::function<void(GtkPopover*)> request_exclusive_open
+    GtkApplication* app,
+    std::function<void()> request_exclusive_open
 ) : request_exclusive_open_(std::move(request_exclusive_open)) {
     async_state_->owner = this;
 
@@ -96,14 +105,31 @@ SystemMonitorWidget::SystemMonitorWidget(
     }
     gtk_button_set_child(GTK_BUTTON(button_), metrics);
 
-    popover_ = gtk_popover_new();
-    gtk_widget_add_css_class(popover_, "realmheart-bar-popover");
-    gtk_widget_add_css_class(popover_, "realmheart-system-monitor-popover");
-    gtk_popover_set_position(GTK_POPOVER(popover_), GTK_POS_RIGHT);
-    gtk_popover_set_has_arrow(GTK_POPOVER(popover_), FALSE);
-    gtk_popover_set_autohide(GTK_POPOVER(popover_), TRUE);
-    gtk_popover_set_offset(GTK_POPOVER(popover_), kPopoverOffsetX, kPopoverOffsetY);
-    gtk_widget_set_parent(popover_, button_);
+    // Match the media panel's successful architecture: a transparent overlay
+    // layer surface whose custom Cairo shell is the only painted background.
+    // The position is derived from the system pill's actual allocation so the
+    // existing final geometry is preserved rather than retuned by hand.
+    layer_window_ = app != nullptr
+        ? gtk_application_window_new(app)
+        : gtk_window_new();
+    gtk_window_set_title(GTK_WINDOW(layer_window_), "Realmheart System Usage");
+    gtk_window_set_decorated(GTK_WINDOW(layer_window_), FALSE);
+    gtk_window_set_resizable(GTK_WINDOW(layer_window_), FALSE);
+    gtk_widget_add_css_class(layer_window_, "realmheart-system-monitor-layer-window");
+    gtk_widget_remove_css_class(layer_window_, "background");
+
+    realmheart::ui::LayerSurfaceSpec system_surface;
+    system_surface.surface_namespace = "realmheart-system-monitor";
+    system_surface.layer = realmheart::ui::LayerSurfaceLevel::Overlay;
+    system_surface.keyboard_mode = realmheart::ui::LayerKeyboardMode::None;
+    system_surface.anchor_left = true;
+    system_surface.anchor_top = true;
+    system_surface.exclusive_zone = 0;
+    realmheart::ui::apply_layer_surface(GTK_WINDOW(layer_window_), system_surface);
+
+    // Align from the physical monitor origin, not from the usable area already
+    // shifted by the vertical bar's exclusive zone.
+    gtk_layer_set_exclusive_zone(GTK_WINDOW(layer_window_), -1);
 
     GtkWidget* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 7);
     gtk_widget_set_size_request(root, 255, -1);
@@ -121,28 +147,30 @@ SystemMonitorWidget::SystemMonitorWidget(
     memory_ = add_row(root, "RAM");
     swap_ = add_row(root, "SWAP");
     gpu_ = add_row(root, "GPU / iGPU");
-    set_expanding_popover_child(GTK_POPOVER(popover_), root);
+
+    // Standard expanding geometry: no media-only top flush or screen hug.
+    layer_shell_ = create_expanding_popover_shell(root);
+    gtk_window_set_child(GTK_WINDOW(layer_window_), layer_shell_);
 
     g_signal_connect(button_, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
         auto* self = static_cast<SystemMonitorWidget*>(data);
         self->trigger_click_feedback();
         self->toggle();
     }), this);
-    g_signal_connect(popover_, "closed", G_CALLBACK(+[](GtkPopover*, gpointer data) {
-        static_cast<SystemMonitorWidget*>(data)->handle_closed();
-    }), this);
 }
 
 SystemMonitorWidget::~SystemMonitorWidget() {
-    stop_live_refresh();
+    hide_layer_window();
     if (click_feedback_timer_id_ != 0) {
         g_source_remove(click_feedback_timer_id_);
         click_feedback_timer_id_ = 0;
     }
     async_state_->alive = false;
     async_state_->owner = nullptr;
-    if (popover_ != nullptr && gtk_widget_get_parent(popover_) != nullptr) {
-        gtk_widget_unparent(popover_);
+    if (layer_window_ != nullptr) {
+        gtk_window_destroy(GTK_WINDOW(layer_window_));
+        layer_window_ = nullptr;
+        layer_shell_ = nullptr;
     }
 }
 
@@ -181,6 +209,165 @@ SystemMonitorWidget::UsageRow SystemMonitorWidget::add_row(GtkWidget* parent, co
     return {value, progress};
 }
 
+int SystemMonitorWidget::layer_left_margin() const {
+    GtkWidget* bar_window = button_ != nullptr
+        ? gtk_widget_get_ancestor(button_, GTK_TYPE_WINDOW)
+        : nullptr;
+    if (button_ == nullptr || bar_window == nullptr) return kSystemLayerFallbackLeft;
+
+    graphene_rect_t bounds{};
+    if (!gtk_widget_compute_bounds(button_, bar_window, &bounds)) {
+        return kSystemLayerFallbackLeft;
+    }
+
+    return std::max(
+        0,
+        static_cast<int>(std::lround(bounds.origin.x + bounds.size.width))
+            + kSystemLayerExtraOffsetX
+    );
+}
+
+int SystemMonitorWidget::layer_top_margin() const {
+    GtkWidget* bar_window = button_ != nullptr
+        ? gtk_widget_get_ancestor(button_, GTK_TYPE_WINDOW)
+        : nullptr;
+    if (button_ == nullptr || bar_window == nullptr || layer_shell_ == nullptr) {
+        return kSystemLayerFallbackTop;
+    }
+
+    graphene_rect_t bounds{};
+    if (!gtk_widget_compute_bounds(button_, bar_window, &bounds)) {
+        return kSystemLayerFallbackTop;
+    }
+
+    int minimum_width = 0;
+    int natural_width = 0;
+    gtk_widget_measure(
+        layer_shell_,
+        GTK_ORIENTATION_HORIZONTAL,
+        -1,
+        &minimum_width,
+        &natural_width,
+        nullptr,
+        nullptr
+    );
+
+    int minimum_height = 0;
+    int natural_height = 0;
+    gtk_widget_measure(
+        layer_shell_,
+        GTK_ORIENTATION_VERTICAL,
+        std::max(minimum_width, natural_width),
+        &minimum_height,
+        &natural_height,
+        nullptr,
+        nullptr
+    );
+
+    const int shell_height = std::max(minimum_height, natural_height);
+    if (shell_height <= 0) return kSystemLayerFallbackTop;
+
+    const double anchor_center_y = bounds.origin.y + (bounds.size.height / 2.0);
+    return std::max(
+        0,
+        static_cast<int>(std::lround(anchor_center_y - (shell_height / 2.0)))
+    );
+}
+
+void SystemMonitorWidget::show_layer_window() {
+    if (layer_window_ == nullptr) return;
+
+    if (reveal_tick_id_ != 0) {
+        gtk_widget_remove_tick_callback(layer_window_, reveal_tick_id_);
+        reveal_tick_id_ = 0;
+    }
+
+    reveal_target_x_ = layer_left_margin();
+    reveal_target_y_ = layer_top_margin();
+    reveal_start_x_ = std::max(0, reveal_target_x_ - kExpandingPopoverRevealPixels);
+    reveal_started_us_ = 0;
+
+    gtk_widget_set_opacity(layer_window_, 0.0);
+    gtk_layer_set_margin(
+        GTK_WINDOW(layer_window_),
+        GTK_LAYER_SHELL_EDGE_LEFT,
+        reveal_start_x_
+    );
+    gtk_layer_set_margin(
+        GTK_WINDOW(layer_window_),
+        GTK_LAYER_SHELL_EDGE_TOP,
+        reveal_target_y_
+    );
+    gtk_window_present(GTK_WINDOW(layer_window_));
+
+    reveal_tick_id_ = gtk_widget_add_tick_callback(
+        layer_window_,
+        +[](GtkWidget* widget, GdkFrameClock* frame_clock, gpointer data) -> gboolean {
+            auto* self = static_cast<SystemMonitorWidget*>(data);
+            if (!gtk_widget_get_visible(widget)) {
+                self->reveal_tick_id_ = 0;
+                return G_SOURCE_REMOVE;
+            }
+
+            const gint64 now = gdk_frame_clock_get_frame_time(frame_clock);
+            if (self->reveal_started_us_ == 0) self->reveal_started_us_ = now;
+
+            const double linear = std::clamp(
+                static_cast<double>(now - self->reveal_started_us_) /
+                    kSystemRevealDurationUs,
+                0.0,
+                1.0
+            );
+            const double eased = 1.0 - std::pow(1.0 - linear, 3.0);
+            const int left = self->reveal_start_x_ + static_cast<int>(std::lround(
+                static_cast<double>(self->reveal_target_x_ - self->reveal_start_x_) * eased
+            ));
+
+            const double fade_delay = popover_fade_delay_after_travel(
+                kExpandingPopoverRevealPixels,
+                kExpandingPopoverHiddenTravelPixels
+            );
+            const double opacity_linear = std::clamp(
+                (linear - fade_delay) / std::max(0.001, 1.0 - fade_delay),
+                0.0,
+                1.0
+            );
+            const double opacity = 1.0 - std::pow(1.0 - opacity_linear, 3.0);
+
+            gtk_layer_set_margin(GTK_WINDOW(widget), GTK_LAYER_SHELL_EDGE_LEFT, left);
+            gtk_widget_set_opacity(widget, opacity);
+
+            if (linear >= 1.0) {
+                self->reveal_tick_id_ = 0;
+                gtk_layer_set_margin(
+                    GTK_WINDOW(widget),
+                    GTK_LAYER_SHELL_EDGE_LEFT,
+                    self->reveal_target_x_
+                );
+                gtk_widget_set_opacity(widget, 1.0);
+                return G_SOURCE_REMOVE;
+            }
+            return G_SOURCE_CONTINUE;
+        },
+        this,
+        nullptr
+    );
+}
+
+void SystemMonitorWidget::hide_layer_window() {
+    if (reveal_tick_id_ != 0 && layer_window_ != nullptr) {
+        gtk_widget_remove_tick_callback(layer_window_, reveal_tick_id_);
+        reveal_tick_id_ = 0;
+    }
+    reveal_started_us_ = 0;
+    if (layer_window_ != nullptr) {
+        gtk_widget_set_opacity(layer_window_, 1.0);
+        gtk_widget_set_visible(layer_window_, FALSE);
+    }
+    open_ = false;
+    stop_live_refresh();
+}
+
 void SystemMonitorWidget::toggle() {
     if (open_) {
         close();
@@ -191,18 +378,9 @@ void SystemMonitorWidget::toggle() {
 
 void SystemMonitorWidget::open() {
     open_ = true;
-    if (request_exclusive_open_) request_exclusive_open_(GTK_POPOVER(popover_));
+    if (request_exclusive_open_) request_exclusive_open_();
     gtk_label_set_text(GTK_LABEL(state_label_), "Measuring…");
-    reveal_popover(
-        GTK_POPOVER(popover_),
-        kPopoverOffsetX,
-        kPopoverOffsetY,
-        kExpandingPopoverRevealPixels,
-        popover_fade_delay_after_travel(
-            kExpandingPopoverRevealPixels,
-            kExpandingPopoverHiddenTravelPixels
-        )
-    );
+    show_layer_window();
     request_sample();
 
     if (refresh_timer_id_ == 0) {
@@ -218,11 +396,6 @@ void SystemMonitorWidget::open() {
     }
 }
 
-void SystemMonitorWidget::handle_closed() {
-    open_ = false;
-    stop_live_refresh();
-}
-
 void SystemMonitorWidget::stop_live_refresh() {
     if (refresh_timer_id_ != 0) {
         g_source_remove(refresh_timer_id_);
@@ -231,9 +404,7 @@ void SystemMonitorWidget::stop_live_refresh() {
 }
 
 void SystemMonitorWidget::close() {
-    open_ = false;
-    stop_live_refresh();
-    if (popover_ != nullptr) gtk_popover_popdown(GTK_POPOVER(popover_));
+    hide_layer_window();
 }
 
 void SystemMonitorWidget::request_sample() {

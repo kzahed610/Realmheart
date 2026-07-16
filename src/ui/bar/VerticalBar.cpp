@@ -245,6 +245,8 @@ void VerticalBar::setup_layout() {
 
 void VerticalBar::populate_widgets() {
     auto exclusive_open = [this](GtkPopover* popover) { open_exclusive_popover(popover); };
+    auto media_exclusive_open = [this] { open_exclusive_media(); };
+    auto system_exclusive_open = [this] { open_exclusive_system(); };
 
     launcher_button_ = std::make_unique<widgets::BarIconButton>(
         "Realmheart-Icons/realmheart-launcher.svg",
@@ -255,8 +257,12 @@ void VerticalBar::populate_widgets() {
     launcher_button_->add_css_class("realmheart-launcher-button");
     launcher_button_->set_icon_size(32);
 
-    media_widget_ = std::make_unique<widgets::MediaWidget>(media_service_, exclusive_open);
-    system_monitor_widget_ = std::make_unique<widgets::SystemMonitorWidget>(exclusive_open);
+    media_widget_ = std::make_unique<widgets::MediaWidget>(
+        app_, media_service_, media_exclusive_open
+    );
+    system_monitor_widget_ = std::make_unique<widgets::SystemMonitorWidget>(
+        app_, system_exclusive_open
+    );
     clock_ = std::make_unique<widgets::ClockWidget>();
     battery_widget_ = std::make_unique<widgets::BatteryWidget>(exclusive_open);
 
@@ -319,12 +325,37 @@ void VerticalBar::populate_widgets() {
 }
 
 void VerticalBar::open_exclusive_popover(GtkPopover* popover) {
+    if (media_widget_ != nullptr) media_widget_->close();
+    if (system_monitor_widget_ != nullptr) system_monitor_widget_->close();
+
     GObject* current = static_cast<GObject*>(g_weak_ref_get(&active_popover_ref_));
     if (current != nullptr && current != G_OBJECT(popover)) {
         gtk_popover_popdown(GTK_POPOVER(current));
     }
     g_clear_object(&current);
     g_weak_ref_set(&active_popover_ref_, G_OBJECT(popover));
+}
+
+void VerticalBar::open_exclusive_media() {
+    if (system_monitor_widget_ != nullptr) system_monitor_widget_->close();
+
+    GObject* current = static_cast<GObject*>(g_weak_ref_get(&active_popover_ref_));
+    if (current != nullptr) {
+        gtk_popover_popdown(GTK_POPOVER(current));
+    }
+    g_clear_object(&current);
+    g_weak_ref_set(&active_popover_ref_, nullptr);
+}
+
+void VerticalBar::open_exclusive_system() {
+    if (media_widget_ != nullptr) media_widget_->close();
+
+    GObject* current = static_cast<GObject*>(g_weak_ref_get(&active_popover_ref_));
+    if (current != nullptr) {
+        gtk_popover_popdown(GTK_POPOVER(current));
+    }
+    g_clear_object(&current);
+    g_weak_ref_set(&active_popover_ref_, nullptr);
 }
 
 

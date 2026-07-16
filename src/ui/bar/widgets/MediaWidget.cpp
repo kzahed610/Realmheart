@@ -1,15 +1,18 @@
 #include "ui/bar/widgets/MediaWidget.hpp"
 
 #include "ui/bar/widgets/AttachedPopover.hpp"
+#include "ui/LayerSurface.hpp"
 #include "core/TaskExecutor.hpp"
 #include "ui/bar/MediaArtLoader.hpp"
 #include "ui/bar/widgets/PopoverReveal.hpp"
 
 #include <gdk-pixbuf/gdk-pixbuf.h>
+#include <gtk4-layer-shell/gtk4-layer-shell.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <utility>
@@ -27,11 +30,45 @@ GtkWidget* image_button(GtkWidget* icon, const char* fallback) {
     return button;
 }
 
-constexpr int kPopoverOffsetX = kExpandingPopoverOffsetX;
-constexpr int kPopoverOffsetY = 0;
+// Preserve the final two-pixel horizontal tune from the popover version. The
+// layer surface computes its base position from the media button's real bounds.
+constexpr int kMediaLayerExtraOffsetX = kExpandingPopoverOffsetX + 2;
+constexpr int kMediaLayerFallbackLeft = 56;
+// The media surface now owns the physical top edge, so the complete screen-hug
+// shoulder can use the same depth as the lower taskbar shoulder.
+constexpr int kMediaTopCurveHeight = 22;
+constexpr double kMediaRevealDurationUs = 210000.0;
 constexpr int kAlbumArtWidth = 204;
 constexpr int kAlbumArtHeight = 92;
 constexpr int kAlbumArtLoadSize = 512;
+constexpr int kMediaTopSpacerHeight = 14;
+constexpr int kMediaBottomSpacerHeight = 8;
+constexpr guint kSeekCommitDelayMs = 180;
+constexpr guint kPositionRefreshIntervalMs = 500;
+
+std::string media_time_text(std::int64_t microseconds) {
+    const std::int64_t total_seconds = std::max<std::int64_t>(0, microseconds / 1'000'000);
+    const std::int64_t hours = total_seconds / 3600;
+    const std::int64_t minutes = (total_seconds % 3600) / 60;
+    const std::int64_t seconds = total_seconds % 60;
+
+    char buffer[32]{};
+    if (hours > 0) {
+        std::snprintf(
+            buffer, sizeof(buffer), "%lld:%02lld:%02lld",
+            static_cast<long long>(hours),
+            static_cast<long long>(minutes),
+            static_cast<long long>(seconds)
+        );
+    } else {
+        std::snprintf(
+            buffer, sizeof(buffer), "%lld:%02lld",
+            static_cast<long long>(minutes),
+            static_cast<long long>(seconds)
+        );
+    }
+    return buffer;
+}
 
 void rounded_rectangle(cairo_t* cr, double x, double y, double width, double height, double radius) {
     const double right = x + width;
@@ -138,8 +175,9 @@ void draw_album_art_shadow(
 } // namespace
 
 MediaWidget::MediaWidget(
+    GtkApplication* app,
     services::MediaService& media_service,
-    std::function<void(GtkPopover*)> request_exclusive_open
+    std::function<void()> request_exclusive_open
 ) : media_service_(media_service),
     request_exclusive_open_(std::move(request_exclusive_open)),
     button_(
@@ -151,17 +189,49 @@ MediaWidget::MediaWidget(
     async_state_->owner = this;
     button_.add_css_class("realmheart-media-button");
 
-    popover_ = gtk_popover_new();
-    gtk_widget_add_css_class(popover_, "realmheart-bar-popover");
-    gtk_widget_add_css_class(popover_, "realmheart-media-popover");
-    gtk_popover_set_position(GTK_POPOVER(popover_), GTK_POS_RIGHT);
-    gtk_popover_set_has_arrow(GTK_POPOVER(popover_), FALSE);
-    gtk_popover_set_autohide(GTK_POPOVER(popover_), TRUE);
-    gtk_popover_set_offset(GTK_POPOVER(popover_), kPopoverOffsetX, kPopoverOffsetY);
-    gtk_widget_set_parent(popover_, button_.button());
+    // The visible media panel is a real layer surface anchored to the physical
+    // monitor edge. Hyprland's tiled-window gaps and GDK popup constraints no
+    // longer participate in its vertical placement.
+    layer_window_ = app != nullptr
+        ? gtk_application_window_new(app)
+        : gtk_window_new();
+    gtk_window_set_title(GTK_WINDOW(layer_window_), "Realmheart Media");
+    gtk_window_set_decorated(GTK_WINDOW(layer_window_), FALSE);
+    gtk_window_set_resizable(GTK_WINDOW(layer_window_), FALSE);
+    gtk_widget_add_css_class(layer_window_, "realmheart-media-layer-window");
+    gtk_widget_remove_css_class(layer_window_, "background");
 
-    GtkWidget* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    realmheart::ui::LayerSurfaceSpec media_surface;
+    media_surface.surface_namespace = "realmheart-media";
+    media_surface.layer = realmheart::ui::LayerSurfaceLevel::Overlay;
+    media_surface.keyboard_mode = realmheart::ui::LayerKeyboardMode::None;
+    media_surface.anchor_left = true;
+    media_surface.anchor_top = true;
+    media_surface.exclusive_zone = 0;
+    realmheart::ui::apply_layer_surface(GTK_WINDOW(layer_window_), media_surface);
+
+    // The vertical bar already reserves a left-side exclusive zone. A normal
+    // zero-zone layer surface is positioned inside that usable area, so adding
+    // the media button's physical X coordinate would count the bar width twice.
+    // -1 deliberately ignores existing exclusive zones; our explicit left
+    // margin can then align the media shell against the real monitor origin.
+    gtk_layer_set_exclusive_zone(GTK_WINDOW(layer_window_), -1);
+
+    GtkWidget* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
+    gtk_widget_add_css_class(root, "realmheart-media-content");
     gtk_widget_set_size_request(root, 220, -1);
+
+    // Real measured children are used instead of margins here. GtkOverlay does
+    // not reliably include overlay-child margins in its requested size, which
+    // is why the previous media-only padding changed source code but not the
+    // visible shell height.
+    GtkWidget* top_spacer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_size_request(top_spacer, -1, kMediaTopSpacerHeight);
+    gtk_widget_set_can_target(top_spacer, FALSE);
+
+    GtkWidget* bottom_spacer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_size_request(bottom_spacer, -1, kMediaBottomSpacerHeight);
+    gtk_widget_set_can_target(bottom_spacer, FALSE);
 
     GtkWidget* album_frame = gtk_overlay_new();
     gtk_widget_add_css_class(album_frame, "realmheart-media-art-frame");
@@ -216,7 +286,76 @@ MediaWidget::MediaWidget(
     gtk_label_set_ellipsize(GTK_LABEL(artist_label_), PANGO_ELLIPSIZE_END);
     gtk_label_set_max_width_chars(GTK_LABEL(artist_label_), 30);
 
-    GtkWidget* controls = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget* seek_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 7);
+    gtk_widget_add_css_class(seek_row, "realmheart-media-seek-row");
+    gtk_widget_set_hexpand(seek_row, TRUE);
+
+    position_label_ = gtk_label_new("0:00");
+    gtk_widget_add_css_class(position_label_, "realmheart-media-time");
+    gtk_label_set_xalign(GTK_LABEL(position_label_), 0.0F);
+
+    seek_scale_ = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, 0.0, 1.0, 1.0);
+    gtk_widget_add_css_class(seek_scale_, "realmheart-media-seek");
+    gtk_widget_set_hexpand(seek_scale_, TRUE);
+    gtk_scale_set_draw_value(GTK_SCALE(seek_scale_), FALSE);
+    gtk_range_set_increments(GTK_RANGE(seek_scale_), 5.0, 15.0);
+    gtk_widget_set_sensitive(seek_scale_, FALSE);
+
+    duration_label_ = gtk_label_new("0:00");
+    gtk_widget_add_css_class(duration_label_, "realmheart-media-time");
+    gtk_label_set_xalign(GTK_LABEL(duration_label_), 1.0F);
+
+    gtk_box_append(GTK_BOX(seek_row), position_label_);
+    gtk_box_append(GTK_BOX(seek_row), seek_scale_);
+    gtk_box_append(GTK_BOX(seek_row), duration_label_);
+
+    // value-changed works for trough clicks, keyboard input, and dragging.
+    // A guard prevents programmatic position refreshes from scheduling seeks.
+    g_signal_connect(
+        seek_scale_,
+        "value-changed",
+        G_CALLBACK(+[](GtkRange* range, gpointer data) {
+            auto* self = static_cast<MediaWidget*>(data);
+            if (self->updating_seek_ui_) return;
+            self->schedule_seek(gtk_range_get_value(range));
+        }),
+        this
+    );
+
+
+    // GtkScale normally handles both trough clicks and handle dragging, but
+    // some GTK themes/controllers only page by the adjustment increment. This
+    // controller guarantees that a direct click maps to the exact song fraction.
+    GtkGesture* seek_click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(seek_click), GDK_BUTTON_PRIMARY);
+    gtk_event_controller_set_propagation_phase(
+        GTK_EVENT_CONTROLLER(seek_click), GTK_PHASE_CAPTURE
+    );
+    g_signal_connect(
+        seek_click,
+        "pressed",
+        G_CALLBACK(+[](GtkGestureClick*, int, double x, double, gpointer data) {
+            auto* self = static_cast<MediaWidget*>(data);
+            if (self->seek_scale_ == nullptr ||
+                !gtk_widget_get_sensitive(self->seek_scale_)) return;
+
+            const int width = gtk_widget_get_width(self->seek_scale_);
+            if (width <= 1) return;
+            GtkAdjustment* adjustment = gtk_range_get_adjustment(GTK_RANGE(self->seek_scale_));
+            const double lower = gtk_adjustment_get_lower(adjustment);
+            const double upper = gtk_adjustment_get_upper(adjustment);
+            const double fraction = std::clamp(x / static_cast<double>(width), 0.0, 1.0);
+            gtk_range_set_value(
+                GTK_RANGE(self->seek_scale_),
+                lower + ((upper - lower) * fraction)
+            );
+        }),
+        this
+    );
+    gtk_widget_add_controller(seek_scale_, GTK_EVENT_CONTROLLER(seek_click));
+
+    GtkWidget* controls = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_add_css_class(controls, "realmheart-media-controls");
     gtk_widget_set_halign(controls, GTK_ALIGN_CENTER);
     previous_icon_ = std::make_unique<ThemedSvgIcon>(
         "Realmheart-Icons/previous.svg", 18
@@ -246,44 +385,166 @@ MediaWidget::MediaWidget(
     gtk_box_append(GTK_BOX(controls), previous_button_);
     gtk_box_append(GTK_BOX(controls), play_pause_button_);
     gtk_box_append(GTK_BOX(controls), next_button_);
+    gtk_box_append(GTK_BOX(root), top_spacer);
     gtk_box_append(GTK_BOX(root), album_frame);
     gtk_box_append(GTK_BOX(root), title_label_);
     gtk_box_append(GTK_BOX(root), artist_label_);
+    gtk_box_append(GTK_BOX(root), seek_row);
     gtk_box_append(GTK_BOX(root), controls);
-    set_expanding_popover_child(GTK_POPOVER(popover_), root);
+    gtk_box_append(GTK_BOX(root), bottom_spacer);
+    GtkWidget* media_shell = create_expanding_popover_shell(
+        root,
+        kMediaTopCurveHeight,
+        true,
+        true
+    );
+    gtk_window_set_child(GTK_WINDOW(layer_window_), media_shell);
 
     update(std::nullopt);
 }
 
 MediaWidget::~MediaWidget() {
+    hide_layer_window();
+    if (seek_commit_timer_id_ != 0) {
+        g_source_remove(seek_commit_timer_id_);
+        seek_commit_timer_id_ = 0;
+    }
     async_state_->alive = false;
     ++async_state_->art_generation;
     async_state_->owner = nullptr;
-    if (popover_ != nullptr && gtk_widget_get_parent(popover_) != nullptr) {
-        gtk_widget_unparent(popover_);
+    if (layer_window_ != nullptr) {
+        gtk_window_destroy(GTK_WINDOW(layer_window_));
+        layer_window_ = nullptr;
     }
 }
 
-void MediaWidget::toggle() {
-    if (gtk_widget_get_visible(popover_)) {
-        gtk_popover_popdown(GTK_POPOVER(popover_));
-        return;
+int MediaWidget::layer_left_margin() const {
+    GtkWidget* button = button_.button();
+    GtkWidget* bar_window = button != nullptr
+        ? gtk_widget_get_ancestor(button, GTK_TYPE_WINDOW)
+        : nullptr;
+    if (button == nullptr || bar_window == nullptr) return kMediaLayerFallbackLeft;
+
+    graphene_rect_t bounds{};
+    if (!gtk_widget_compute_bounds(button, bar_window, &bounds)) {
+        return kMediaLayerFallbackLeft;
     }
-    if (request_exclusive_open_) request_exclusive_open_(GTK_POPOVER(popover_));
-    reveal_popover(
-        GTK_POPOVER(popover_),
-        kPopoverOffsetX,
-        kPopoverOffsetY,
-        kExpandingPopoverRevealPixels,
-        popover_fade_delay_after_travel(
-            kExpandingPopoverRevealPixels,
-            kExpandingPopoverHiddenTravelPixels
-        )
+
+    return std::max(
+        0,
+        static_cast<int>(std::lround(bounds.origin.x + bounds.size.width))
+            + kMediaLayerExtraOffsetX
     );
 }
 
+void MediaWidget::show_layer_window() {
+    if (layer_window_ == nullptr) return;
+
+    if (reveal_tick_id_ != 0) {
+        gtk_widget_remove_tick_callback(layer_window_, reveal_tick_id_);
+        reveal_tick_id_ = 0;
+    }
+
+    reveal_target_x_ = layer_left_margin();
+    reveal_start_x_ = std::max(0, reveal_target_x_ - kExpandingPopoverRevealPixels);
+    reveal_started_us_ = 0;
+
+    gtk_widget_set_opacity(layer_window_, 0.0);
+    gtk_layer_set_margin(
+        GTK_WINDOW(layer_window_),
+        GTK_LAYER_SHELL_EDGE_LEFT,
+        reveal_start_x_
+    );
+    gtk_layer_set_margin(
+        GTK_WINDOW(layer_window_),
+        GTK_LAYER_SHELL_EDGE_TOP,
+        0
+    );
+    gtk_window_present(GTK_WINDOW(layer_window_));
+
+    reveal_tick_id_ = gtk_widget_add_tick_callback(
+        layer_window_,
+        +[](GtkWidget* widget, GdkFrameClock* frame_clock, gpointer data) -> gboolean {
+            auto* self = static_cast<MediaWidget*>(data);
+            if (!gtk_widget_get_visible(widget)) {
+                self->reveal_tick_id_ = 0;
+                return G_SOURCE_REMOVE;
+            }
+
+            const gint64 now = gdk_frame_clock_get_frame_time(frame_clock);
+            if (self->reveal_started_us_ == 0) self->reveal_started_us_ = now;
+
+            const double linear = std::clamp(
+                static_cast<double>(now - self->reveal_started_us_) /
+                    kMediaRevealDurationUs,
+                0.0,
+                1.0
+            );
+            const double eased = 1.0 - std::pow(1.0 - linear, 3.0);
+            const int left = self->reveal_start_x_ + static_cast<int>(std::lround(
+                static_cast<double>(self->reveal_target_x_ - self->reveal_start_x_) * eased
+            ));
+
+            const double fade_delay = popover_fade_delay_after_travel(
+                kExpandingPopoverRevealPixels,
+                kExpandingPopoverHiddenTravelPixels
+            );
+            const double opacity_linear = std::clamp(
+                (linear - fade_delay) / std::max(0.001, 1.0 - fade_delay),
+                0.0,
+                1.0
+            );
+            const double opacity = 1.0 - std::pow(1.0 - opacity_linear, 3.0);
+
+            gtk_layer_set_margin(
+                GTK_WINDOW(widget),
+                GTK_LAYER_SHELL_EDGE_LEFT,
+                left
+            );
+            gtk_widget_set_opacity(widget, opacity);
+
+            if (linear >= 1.0) {
+                self->reveal_tick_id_ = 0;
+                gtk_layer_set_margin(
+                    GTK_WINDOW(widget),
+                    GTK_LAYER_SHELL_EDGE_LEFT,
+                    self->reveal_target_x_
+                );
+                gtk_widget_set_opacity(widget, 1.0);
+                return G_SOURCE_REMOVE;
+            }
+            return G_SOURCE_CONTINUE;
+        },
+        this,
+        nullptr
+    );
+}
+
+void MediaWidget::hide_layer_window() {
+    if (reveal_tick_id_ != 0 && layer_window_ != nullptr) {
+        gtk_widget_remove_tick_callback(layer_window_, reveal_tick_id_);
+        reveal_tick_id_ = 0;
+    }
+    reveal_started_us_ = 0;
+    if (layer_window_ != nullptr) {
+        gtk_widget_set_opacity(layer_window_, 1.0);
+        gtk_widget_set_visible(layer_window_, FALSE);
+    }
+    stop_position_refresh();
+}
+
+void MediaWidget::toggle() {
+    if (layer_window_ != nullptr && gtk_widget_get_visible(layer_window_)) {
+        close();
+        return;
+    }
+    if (request_exclusive_open_) request_exclusive_open_();
+    show_layer_window();
+    start_position_refresh();
+}
+
 void MediaWidget::close() {
-    if (popover_ != nullptr) gtk_popover_popdown(GTK_POPOVER(popover_));
+    hide_layer_window();
 }
 
 void MediaWidget::invoke_control(const char* method) {
@@ -294,7 +555,139 @@ void MediaWidget::invoke_control(const char* method) {
         else if (action == "next") static_cast<void>(service->next());
         else static_cast<void>(service->play_pause());
     }));
-    gtk_popover_popdown(GTK_POPOVER(popover_));
+    close();
+}
+
+void MediaWidget::start_position_refresh() {
+    refresh_seek_ui();
+    if (position_refresh_timer_id_ != 0) return;
+
+    position_refresh_timer_id_ = g_timeout_add(
+        kPositionRefreshIntervalMs,
+        +[](gpointer data) -> gboolean {
+            auto* self = static_cast<MediaWidget*>(data);
+            if (self->layer_window_ == nullptr ||
+                !gtk_widget_get_visible(self->layer_window_)) {
+                self->position_refresh_timer_id_ = 0;
+                return G_SOURCE_REMOVE;
+            }
+            self->refresh_seek_ui();
+            return G_SOURCE_CONTINUE;
+        },
+        this
+    );
+}
+
+void MediaWidget::stop_position_refresh() {
+    if (position_refresh_timer_id_ != 0) {
+        g_source_remove(position_refresh_timer_id_);
+        position_refresh_timer_id_ = 0;
+    }
+}
+
+std::int64_t MediaWidget::estimated_position_us() const {
+    if (!info_) return 0;
+
+    std::int64_t position = std::max<std::int64_t>(0, position_anchor_us_);
+    if (info_->playback_status == 1 && position_anchor_monotonic_us_ > 0) {
+        position += std::max<gint64>(0, g_get_monotonic_time() - position_anchor_monotonic_us_);
+    }
+    if (info_->length_us > 0) position = std::min(position, info_->length_us);
+    return position;
+}
+
+void MediaWidget::refresh_seek_ui() {
+    const bool seekable = info_.has_value() && info_->length_us > 0;
+    const std::int64_t duration_us = info_ ? std::max<std::int64_t>(0, info_->length_us) : 0;
+    const std::int64_t position_us = has_pending_seek_
+        ? static_cast<std::int64_t>(pending_seek_seconds_ * 1'000'000.0)
+        : estimated_position_us();
+
+    updating_seek_ui_ = true;
+    gtk_widget_set_sensitive(seek_scale_, seekable);
+    gtk_widget_set_tooltip_text(
+        seek_scale_,
+        seekable
+            ? "Click or drag to seek"
+            : "This player did not report the track duration"
+    );
+    gtk_range_set_range(
+        GTK_RANGE(seek_scale_),
+        0.0,
+        std::max(1.0, static_cast<double>(duration_us) / 1'000'000.0)
+    );
+    if (!has_pending_seek_) {
+        gtk_range_set_value(
+            GTK_RANGE(seek_scale_),
+            static_cast<double>(position_us) / 1'000'000.0
+        );
+    }
+    updating_seek_ui_ = false;
+
+    const std::string position_text = media_time_text(position_us);
+    const std::string duration_text = media_time_text(duration_us);
+    gtk_label_set_text(GTK_LABEL(position_label_), position_text.c_str());
+    gtk_label_set_text(GTK_LABEL(duration_label_), duration_text.c_str());
+}
+
+void MediaWidget::schedule_seek(double seconds) {
+    if (!info_ || info_->length_us <= 0) return;
+
+    const double duration_seconds = static_cast<double>(info_->length_us) / 1'000'000.0;
+    pending_seek_seconds_ = std::clamp(seconds, 0.0, duration_seconds);
+    has_pending_seek_ = true;
+
+    const std::string preview = media_time_text(
+        static_cast<std::int64_t>(pending_seek_seconds_ * 1'000'000.0)
+    );
+    gtk_label_set_text(GTK_LABEL(position_label_), preview.c_str());
+
+    if (seek_commit_timer_id_ != 0) g_source_remove(seek_commit_timer_id_);
+    seek_commit_timer_id_ = g_timeout_add(
+        kSeekCommitDelayMs,
+        +[](gpointer data) -> gboolean {
+            auto* self = static_cast<MediaWidget*>(data);
+            self->seek_commit_timer_id_ = 0;
+            self->commit_pending_seek();
+            return G_SOURCE_REMOVE;
+        },
+        this
+    );
+}
+
+void MediaWidget::commit_pending_seek() {
+    if (!has_pending_seek_ || !info_ || info_->length_us <= 0) {
+        has_pending_seek_ = false;
+        return;
+    }
+
+    if (seek_commit_timer_id_ != 0) {
+        g_source_remove(seek_commit_timer_id_);
+        seek_commit_timer_id_ = 0;
+    }
+
+    const std::int64_t current_us = estimated_position_us();
+    const std::int64_t target_us = std::clamp<std::int64_t>(
+        static_cast<std::int64_t>(pending_seek_seconds_ * 1'000'000.0),
+        0,
+        info_->length_us
+    );
+    const std::string player_bus_name = info_->player_bus_name;
+    const std::string track_id = info_->track_id;
+    has_pending_seek_ = false;
+    position_anchor_us_ = target_us;
+    position_anchor_monotonic_us_ = g_get_monotonic_time();
+    info_->position_us = target_us;
+    refresh_seek_ui();
+
+    auto* service = &media_service_;
+    static_cast<void>(realmheart::core::shared_task_executor().post(
+        [service, player_bus_name, track_id, current_us, target_us] {
+            static_cast<void>(service->seek_to(
+                player_bus_name, track_id, current_us, target_us
+            ));
+        }
+    ));
 }
 
 void MediaWidget::update_art(const std::string& art_url) {
@@ -419,6 +812,10 @@ void MediaWidget::apply_art(
 
 void MediaWidget::update(const std::optional<services::MediaInfo>& info) {
     info_ = info;
+    if (!has_pending_seek_) {
+        position_anchor_us_ = info_ ? std::max<std::int64_t>(0, info_->position_us) : 0;
+        position_anchor_monotonic_us_ = g_get_monotonic_time();
+    }
     const bool available = info_.has_value();
     const bool playing = available && info_->playback_status == 1;
 
@@ -444,6 +841,7 @@ void MediaWidget::update(const std::optional<services::MediaInfo>& info) {
     static_cast<void>(play_pause_icon_->set_icon(
         playing ? "Realmheart-Icons/pause.svg" : "Realmheart-Icons/play.svg"
     ));
+    refresh_seek_ui();
 }
 
 } // namespace realmheart::ui::bar::widgets

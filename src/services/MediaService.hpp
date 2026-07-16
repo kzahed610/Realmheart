@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,11 @@ struct MediaInfo {
     std::string artist;
     std::string album;
     std::string art_url;
+    std::string player_bus_name;
+    std::string track_id;
+    std::int64_t position_us = 0;
+    std::int64_t length_us = 0;
+    bool can_seek = false;
     // Playback status: 0 = stopped, 1 = playing, 2 = paused
     int playback_status = 0;
 };
@@ -60,6 +66,12 @@ public:
     bool play_pause();
     bool next();
     bool previous();
+    bool seek_to(
+        std::string player_bus_name,
+        std::string track_id,
+        std::int64_t current_position_us,
+        std::int64_t target_position_us
+    );
 
     // PropertiesChanged and NameOwnerChanged wake subscribers immediately.
     // A caller may still keep a slow fallback poll for bus reconnect edge cases.

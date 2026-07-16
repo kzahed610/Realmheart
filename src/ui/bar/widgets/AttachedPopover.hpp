@@ -26,6 +26,32 @@ constexpr int kExpandingBodyInset = 0;
 constexpr int kExpandingRailMaskWidth = 2;
 constexpr int kExpandingContentPadding = 12;
 constexpr int kExpandingCurveHeight = 22;
+constexpr const char* kExpandingTopCurveHeightKey =
+    "realmheart-expanding-top-curve-height";
+constexpr const char* kExpandingFlushTopKey =
+    "realmheart-expanding-flush-top";
+constexpr const char* kExpandingScreenHugTopKey =
+    "realmheart-expanding-screen-hug-top";
+constexpr int kExpandingTopCurveHeightStorageBias = 1024;
+constexpr int kExpandingScreenHugReach = 20;
+
+inline int expanding_top_curve_height(GtkWidget* area) {
+    const gpointer stored = g_object_get_data(
+        G_OBJECT(area), kExpandingTopCurveHeightKey
+    );
+    if (stored == nullptr) return kExpandingCurveHeight;
+    return GPOINTER_TO_INT(stored) - kExpandingTopCurveHeightStorageBias;
+}
+
+inline double expanding_top_inset(GtkWidget* area) {
+    return g_object_get_data(G_OBJECT(area), kExpandingFlushTopKey) != nullptr
+        ? 0.0
+        : 1.5;
+}
+
+inline bool expanding_screen_hug_top(GtkWidget* area) {
+    return g_object_get_data(G_OBJECT(area), kExpandingScreenHugTopKey) != nullptr;
+}
 
 inline double attachment_half_height(GtkWidget* area, double shell_height) {
     GtkWidget* popover = gtk_widget_get_ancestor(area, GTK_TYPE_POPOVER);
@@ -140,18 +166,28 @@ inline void expanding_shell_path(
     double width,
     double height,
     double /*attachment_half*/,
+    int top_curve_height,
+    double top_inset,
+    bool screen_hug_top,
     bool close_left_edge
 ) {
     constexpr double kInset = 1.5;
     constexpr double kRailJoinX = static_cast<double>(kExpandingRailMaskWidth);
     constexpr double kCurveReach = 18.0 + static_cast<double>(kExpandingRailMaskWidth);
 
-    const double right = std::max(kCurveReach + 2.0, width - kInset);
-    const double rail_top = kInset;
+    const double screen_hug_reach = screen_hug_top
+        ? static_cast<double>(kExpandingScreenHugReach)
+        : 0.0;
+    const double right = std::max(
+        kCurveReach + 2.0,
+        width - kInset - screen_hug_reach
+    );
+    const double screen_tip_x = std::min(width - kInset, right + screen_hug_reach);
+    const double rail_top = top_inset;
     const double rail_bottom = std::max(kInset + 2.0, height - kInset);
     const double body_top = std::min(
         rail_bottom / 2.0,
-        rail_top + static_cast<double>(kExpandingCurveHeight)
+        rail_top + static_cast<double>(top_curve_height)
     );
     const double body_bottom = std::max(
         rail_bottom / 2.0,
@@ -162,29 +198,50 @@ inline void expanding_shell_path(
 
     cairo_new_path(cr);
 
-    // The shoulder needs real vertical room outside the panel body. Starting
-    // below body_top creates an inward hook; starting above it lets the rail
-    // bend down and outward into the panel as one continuous outer contour.
-    cairo_move_to(cr, kRailJoinX, rail_top);
-    cairo_curve_to(
-        cr,
-        kRailJoinX,
-        rail_top + (static_cast<double>(kExpandingCurveHeight) * 0.56),
-        curve_start_x * 0.42,
-        body_top,
-        curve_start_x,
-        body_top
-    );
-    cairo_line_to(cr, right - radius, body_top);
-    cairo_curve_to(
-        cr,
-        right,
-        body_top,
-        right,
-        body_top + radius,
-        right,
-        body_top + radius
-    );
+    if (screen_hug_top) {
+        // The media layer surface touches the physical screen edge. Its fill
+        // continues invisibly along that edge, while the visible gold contour
+        // starts at the far-right tip and bends down/inward into the panel.
+        // This creates the same outward-hugging language as the lower taskbar
+        // shoulder, but against the screen rather than against the rail.
+        if (close_left_edge) {
+            cairo_move_to(cr, kRailJoinX, rail_top);
+            cairo_line_to(cr, screen_tip_x, rail_top);
+        } else {
+            cairo_move_to(cr, screen_tip_x, rail_top);
+        }
+        cairo_curve_to(
+            cr,
+            screen_tip_x - (screen_hug_reach * 0.42),
+            rail_top,
+            right,
+            rail_top + (static_cast<double>(top_curve_height) * 0.56),
+            right,
+            body_top
+        );
+    } else {
+        // The shoulder needs real vertical room outside the panel body.
+        cairo_move_to(cr, kRailJoinX, rail_top);
+        cairo_curve_to(
+            cr,
+            kRailJoinX,
+            rail_top + (static_cast<double>(top_curve_height) * 0.56),
+            curve_start_x * 0.42,
+            body_top,
+            curve_start_x,
+            body_top
+        );
+        cairo_line_to(cr, right - radius, body_top);
+        cairo_curve_to(
+            cr,
+            right,
+            body_top,
+            right,
+            body_top + radius,
+            right,
+            body_top + radius
+        );
+    }
     cairo_line_to(cr, right, body_bottom - radius);
     cairo_curve_to(
         cr,
@@ -256,13 +313,29 @@ inline void draw_expanding_fill(
 ) {
     const GdkRGBA fill = widget_color(GTK_WIDGET(area));
     const double attachment_half = attachment_half_height(GTK_WIDGET(area), height);
-    expanding_shell_path(cr, width, height, attachment_half, true);
+    expanding_shell_path(
+        cr,
+        width,
+        height,
+        attachment_half,
+        expanding_top_curve_height(GTK_WIDGET(area)),
+        expanding_top_inset(GTK_WIDGET(area)),
+        expanding_screen_hug_top(GTK_WIDGET(area)),
+        true
+    );
     gdk_cairo_set_source_rgba(cr, &fill);
     cairo_fill(cr);
 
     // Paint only the hidden overlap gutter over the taskbar rail. The visible
     // shell starts two pixels later, so its contour/content retain their exact
     // pre-mask alignment while this strip removes the internal gold divider.
+    // Replace the overlap-gutter pixels instead of compositing the same
+    // translucent fill over them a second time. With normal OVER blending,
+    // alpha(@rh_background, 0.94) becomes almost fully opaque in this narrow
+    // strip, producing the one-pixel vertical seam beside the taskbar.
+    cairo_save(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+    gdk_cairo_set_source_rgba(cr, &fill);
     cairo_rectangle(
         cr,
         0.0,
@@ -271,6 +344,7 @@ inline void draw_expanding_fill(
         static_cast<double>(height)
     );
     cairo_fill(cr);
+    cairo_restore(cr);
 }
 
 inline void draw_expanding_border(
@@ -282,7 +356,16 @@ inline void draw_expanding_border(
 ) {
     const GdkRGBA gold = widget_color(GTK_WIDGET(area));
     const double attachment_half = attachment_half_height(GTK_WIDGET(area), height);
-    expanding_shell_path(cr, width, height, attachment_half, false);
+    expanding_shell_path(
+        cr,
+        width,
+        height,
+        attachment_half,
+        expanding_top_curve_height(GTK_WIDGET(area)),
+        expanding_top_inset(GTK_WIDGET(area)),
+        expanding_screen_hug_top(GTK_WIDGET(area)),
+        false
+    );
     gdk_cairo_set_source_rgba(cr, &gold);
     cairo_set_line_width(cr, 3.0);
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
@@ -345,13 +428,13 @@ inline void set_attached_popover_child(GtkPopover* popover, GtkWidget* content) 
     gtk_popover_set_child(popover, shell);
 }
 
-inline void set_expanding_popover_child(GtkPopover* popover, GtkWidget* content) {
-    if (popover == nullptr || content == nullptr) return;
-
-    gtk_popover_set_has_arrow(popover, FALSE);
-    gtk_widget_remove_css_class(GTK_WIDGET(popover), "background");
-    gtk_widget_add_css_class(GTK_WIDGET(popover), "realmheart-attached-popover");
-    gtk_widget_add_css_class(GTK_WIDGET(popover), "realmheart-expanding-popover");
+inline GtkWidget* create_expanding_popover_shell(
+    GtkWidget* content,
+    int top_curve_height = detail::kExpandingCurveHeight,
+    bool flush_top = false,
+    bool screen_hug_top = false
+) {
+    if (content == nullptr) return nullptr;
 
     GtkWidget* shell = gtk_overlay_new();
     gtk_widget_add_css_class(shell, "realmheart-attached-popover-shell");
@@ -362,6 +445,25 @@ inline void set_expanding_popover_child(GtkPopover* popover, GtkWidget* content)
     gtk_widget_set_can_target(fill_layer, FALSE);
     gtk_widget_set_hexpand(fill_layer, TRUE);
     gtk_widget_set_vexpand(fill_layer, TRUE);
+    g_object_set_data(
+        G_OBJECT(fill_layer),
+        detail::kExpandingTopCurveHeightKey,
+        GINT_TO_POINTER(top_curve_height + detail::kExpandingTopCurveHeightStorageBias)
+    );
+    if (flush_top) {
+        g_object_set_data(
+            G_OBJECT(fill_layer),
+            detail::kExpandingFlushTopKey,
+            GINT_TO_POINTER(1)
+        );
+    }
+    if (screen_hug_top) {
+        g_object_set_data(
+            G_OBJECT(fill_layer),
+            detail::kExpandingScreenHugTopKey,
+            GINT_TO_POINTER(1)
+        );
+    }
     gtk_drawing_area_set_draw_func(
         GTK_DRAWING_AREA(fill_layer),
         detail::draw_expanding_fill,
@@ -375,6 +477,25 @@ inline void set_expanding_popover_child(GtkPopover* popover, GtkWidget* content)
     gtk_widget_set_can_target(border_layer, FALSE);
     gtk_widget_set_hexpand(border_layer, TRUE);
     gtk_widget_set_vexpand(border_layer, TRUE);
+    g_object_set_data(
+        G_OBJECT(border_layer),
+        detail::kExpandingTopCurveHeightKey,
+        GINT_TO_POINTER(top_curve_height + detail::kExpandingTopCurveHeightStorageBias)
+    );
+    if (flush_top) {
+        g_object_set_data(
+            G_OBJECT(border_layer),
+            detail::kExpandingFlushTopKey,
+            GINT_TO_POINTER(1)
+        );
+    }
+    if (screen_hug_top) {
+        g_object_set_data(
+            G_OBJECT(border_layer),
+            detail::kExpandingScreenHugTopKey,
+            GINT_TO_POINTER(1)
+        );
+    }
     gtk_drawing_area_set_draw_func(
         GTK_DRAWING_AREA(border_layer),
         detail::draw_expanding_border,
@@ -394,7 +515,11 @@ inline void set_expanding_popover_child(GtkPopover* popover, GtkWidget* content)
             + detail::kExpandingBodyInset
             + detail::kExpandingContentPadding
     );
-    gtk_widget_set_margin_end(content_host, detail::kExpandingContentPadding);
+    gtk_widget_set_margin_end(
+        content_host,
+        detail::kExpandingContentPadding
+            + (screen_hug_top ? detail::kExpandingScreenHugReach : 0)
+    );
     gtk_widget_set_margin_top(
         content_host,
         detail::kExpandingCurveHeight + detail::kExpandingContentPadding
@@ -407,7 +532,25 @@ inline void set_expanding_popover_child(GtkPopover* popover, GtkWidget* content)
 
     gtk_overlay_add_overlay(GTK_OVERLAY(shell), content_host);
     gtk_overlay_set_measure_overlay(GTK_OVERLAY(shell), content_host, TRUE);
-    gtk_popover_set_child(popover, shell);
+    return shell;
+}
+
+inline void set_expanding_popover_child(
+    GtkPopover* popover,
+    GtkWidget* content,
+    int top_curve_height = detail::kExpandingCurveHeight,
+    bool flush_top = false
+) {
+    if (popover == nullptr || content == nullptr) return;
+
+    gtk_popover_set_has_arrow(popover, FALSE);
+    gtk_widget_remove_css_class(GTK_WIDGET(popover), "background");
+    gtk_widget_add_css_class(GTK_WIDGET(popover), "realmheart-attached-popover");
+    gtk_widget_add_css_class(GTK_WIDGET(popover), "realmheart-expanding-popover");
+    gtk_popover_set_child(
+        popover,
+        create_expanding_popover_shell(content, top_curve_height, flush_top)
+    );
 }
 
 } // namespace realmheart::ui::bar::widgets

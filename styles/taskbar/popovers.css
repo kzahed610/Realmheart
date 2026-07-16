@@ -1,6 +1,6 @@
 /* Shared taskbar extensions and their component-specific contents. */
 
-/* Media and system usage are true rail extensions with custom Cairo shells. */
+/* Compact GTK popovers that still use the custom attached shell. */
 popover.realmheart-expanding-popover,
 popover.realmheart-expanding-popover > contents,
 .realmheart-attached-popover > contents {
@@ -11,6 +11,25 @@ popover.realmheart-expanding-popover > contents,
   border-radius: 0;
   padding: 0;
   box-shadow: none;
+}
+
+
+/* Media and system stats are dedicated layer surfaces. Their native window
+ * nodes remain structurally transparent; the custom Cairo shell paints the
+ * entire visible body with the same taskbar colour and opacity. */
+window.realmheart-media-layer-window,
+window.realmheart-system-monitor-layer-window {
+  color: @rh_text;
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+window.realmheart-media-layer-window .realmheart-attached-popover-fill,
+window.realmheart-system-monitor-layer-window .realmheart-attached-popover-fill {
+  color: alpha(@rh_background, 0.94);
 }
 
 /* Workspace and battery deliberately remain compact informational popovers. */
@@ -42,7 +61,7 @@ popover.realmheart-expanding-popover > contents,
 }
 
 .realmheart-expanding-popover .realmheart-attached-popover-fill {
-  color: @rh_background;
+  color: alpha(@rh_background, 0.94);
 }
 
 .realmheart-attached-popover-border {
@@ -108,20 +127,76 @@ popover.realmheart-expanding-popover > contents,
   font-size: 0.82em;
 }
 
+.realmheart-media-content {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
 .realmheart-media-title {
   color: @rh_text;
   font-weight: 700;
+  margin-top: 4px;
 }
 
 .realmheart-media-artist {
   color: @rh_text_muted;
   font-size: 0.84em;
+  margin-bottom: 4px;
+}
+
+.realmheart-media-seek-row {
+  margin-top: 4px;
+  margin-bottom: 4px;
+}
+
+.realmheart-media-time {
+  color: @rh_text_muted;
+  font-size: 0.72em;
+  min-width: 30px;
+}
+
+.realmheart-media-seek {
+  min-height: 20px;
+  padding: 2px 0;
+}
+
+.realmheart-media-seek trough {
+  min-height: 5px;
+  background-color: alpha(@rh_surface_variant, 0.72);
+  border-radius: 999px;
+}
+
+.realmheart-media-seek highlight {
+  min-height: 5px;
+  background-color: @rh_primary;
+  border-radius: 999px;
+}
+
+.realmheart-media-seek slider {
+  min-width: 12px;
+  min-height: 12px;
+  margin: -4px;
+  background-color: @rh_primary;
+  border: 1px solid alpha(@rh_background, 0.55);
+  border-radius: 999px;
+  box-shadow: 0 1px 4px alpha(@rh_background, 0.48);
+}
+
+.realmheart-media-seek:disabled trough,
+.realmheart-media-seek:disabled highlight,
+.realmheart-media-seek:disabled slider {
+  opacity: 0.48;
+}
+
+.realmheart-media-controls {
+  margin-top: 7px;
+  margin-bottom: 4px;
 }
 
 .realmheart-media-control {
-  min-width: 34px;
-  min-height: 30px;
-  padding: 3px 8px;
+  min-width: 36px;
+  min-height: 32px;
+  padding: 4px 9px;
   color: @rh_text;
   background-color: alpha(@rh_surface_variant, 0.72);
   border: 1px solid alpha(@rh_outline, 0.34);

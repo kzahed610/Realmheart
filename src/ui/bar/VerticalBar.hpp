@@ -64,6 +64,8 @@ private:
     void apply_wifi(const std::optional<services::WifiState>& state);
     void apply_notifications(const services::NotificationSnapshot& notifications);
     void open_exclusive_popover(GtkPopover* popover);
+    void open_exclusive_media();
+    void open_exclusive_system();
     void activate_workspace(int workspace_id);
 
     GtkApplication* app_ = nullptr;

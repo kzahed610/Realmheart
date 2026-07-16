@@ -3,6 +3,9 @@
 #include <gio/gio.h>
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
+#include <optional>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -13,6 +16,71 @@ namespace {
 constexpr const char* kObjectPath = "/org/mpris/MediaPlayer2";
 constexpr const char* kPlayerInterface = "org.mpris.MediaPlayer2.Player";
 constexpr int kDbusTimeoutMs = 750;
+
+std::optional<gint64> variant_integer(GVariant* value) {
+    if (value == nullptr) return std::nullopt;
+
+    if (g_variant_is_of_type(value, G_VARIANT_TYPE_VARIANT)) {
+        GVariant* child = g_variant_get_variant(value);
+        const auto result = variant_integer(child);
+        g_variant_unref(child);
+        return result;
+    }
+    if (g_variant_is_of_type(value, G_VARIANT_TYPE_INT64)) {
+        return g_variant_get_int64(value);
+    }
+    if (g_variant_is_of_type(value, G_VARIANT_TYPE_UINT64)) {
+        const guint64 raw = g_variant_get_uint64(value);
+        return raw > static_cast<guint64>(std::numeric_limits<gint64>::max())
+            ? std::numeric_limits<gint64>::max()
+            : static_cast<gint64>(raw);
+    }
+    if (g_variant_is_of_type(value, G_VARIANT_TYPE_INT32)) {
+        return static_cast<gint64>(g_variant_get_int32(value));
+    }
+    if (g_variant_is_of_type(value, G_VARIANT_TYPE_UINT32)) {
+        return static_cast<gint64>(g_variant_get_uint32(value));
+    }
+    if (g_variant_is_of_type(value, G_VARIANT_TYPE_DOUBLE)) {
+        const double raw = g_variant_get_double(value);
+        if (!std::isfinite(raw)) return std::nullopt;
+        return static_cast<gint64>(std::clamp(
+            raw,
+            static_cast<double>(std::numeric_limits<gint64>::min()),
+            static_cast<double>(std::numeric_limits<gint64>::max())
+        ));
+    }
+    return std::nullopt;
+}
+
+std::optional<gint64> lookup_integer(GVariant* dictionary, const char* key) {
+    if (dictionary == nullptr || key == nullptr) return std::nullopt;
+    GVariant* value = g_variant_lookup_value(dictionary, key, nullptr);
+    if (value == nullptr) return std::nullopt;
+    const auto result = variant_integer(value);
+    g_variant_unref(value);
+    return result;
+}
+
+std::string lookup_string_like(GVariant* dictionary, const char* key) {
+    if (dictionary == nullptr || key == nullptr) return {};
+    GVariant* value = g_variant_lookup_value(dictionary, key, nullptr);
+    if (value == nullptr) return {};
+
+    while (g_variant_is_of_type(value, G_VARIANT_TYPE_VARIANT)) {
+        GVariant* child = g_variant_get_variant(value);
+        g_variant_unref(value);
+        value = child;
+    }
+
+    std::string result;
+    if (g_variant_is_of_type(value, G_VARIANT_TYPE_STRING) ||
+        g_variant_is_of_type(value, G_VARIANT_TYPE_OBJECT_PATH)) {
+        result = g_variant_get_string(value, nullptr);
+    }
+    g_variant_unref(value);
+    return result;
+}
 
 struct PlayerState {
     std::string bus_name;
@@ -94,10 +162,20 @@ std::optional<PlayerState> read_player(GDBusConnection* connection, const std::s
 
     PlayerState state;
     state.bus_name = bus_name;
+    state.info.player_bus_name = bus_name;
     const gchar* playback = nullptr;
     if (g_variant_lookup(properties, "PlaybackStatus", "&s", &playback) && playback != nullptr) {
         if (std::string_view(playback) == "Playing") state.info.playback_status = 1;
         else if (std::string_view(playback) == "Paused") state.info.playback_status = 2;
+    }
+
+    gboolean can_seek = FALSE;
+    if (g_variant_lookup(properties, "CanSeek", "b", &can_seek)) {
+        state.info.can_seek = can_seek;
+    }
+
+    if (const auto position_us = lookup_integer(properties, "Position")) {
+        state.info.position_us = std::max<gint64>(0, *position_us);
     }
 
     GVariant* metadata = g_variant_lookup_value(properties, "Metadata", G_VARIANT_TYPE("a{sv}"));
@@ -114,6 +192,13 @@ std::optional<PlayerState> read_player(GDBusConnection* connection, const std::s
         if (g_variant_lookup(metadata, "mpris:artUrl", "&s", &art_url) && art_url != nullptr) {
             state.info.art_url = art_url;
         }
+
+        if (const auto length_us = lookup_integer(metadata, "mpris:length")) {
+            state.info.length_us = std::max<gint64>(0, *length_us);
+        }
+
+        state.info.track_id = lookup_string_like(metadata, "mpris:trackid");
+
         state.info.artist = first_artist(metadata);
         g_variant_unref(metadata);
     }
@@ -354,5 +439,83 @@ bool MediaService::call_mpris_method(const std::string& method) {
 bool MediaService::play_pause() { return call_mpris_method("PlayPause"); }
 bool MediaService::next() { return call_mpris_method("Next"); }
 bool MediaService::previous() { return call_mpris_method("Previous"); }
+
+bool MediaService::seek_to(
+    std::string player_bus_name,
+    std::string track_id,
+    std::int64_t current_position_us,
+    std::int64_t target_position_us
+) {
+    std::optional<std::string> player;
+    if (!player_bus_name.empty()) player = std::move(player_bus_name);
+    else player = current_player_name();
+    if (!player) return false;
+
+    GError* error = nullptr;
+    GDBusConnection* connection = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
+    if (connection == nullptr) {
+        g_clear_error(&error);
+        return false;
+    }
+
+    const gint64 safe_current_us = std::max<gint64>(0, current_position_us);
+    const gint64 safe_target_us = std::max<gint64>(0, target_position_us);
+    bool success = false;
+
+    // SetPosition is the precise MPRIS operation, but a surprising number of
+    // browser/player bridges either omit a usable track id or reject it. Try it
+    // first when possible, then fall back to the relative Seek method.
+    if (!track_id.empty() && track_id.front() == '/') {
+        GVariant* reply = g_dbus_connection_call_sync(
+            connection,
+            player->c_str(),
+            kObjectPath,
+            kPlayerInterface,
+            "SetPosition",
+            g_variant_new("(ox)", track_id.c_str(), safe_target_us),
+            nullptr,
+            G_DBUS_CALL_FLAGS_NONE,
+            kDbusTimeoutMs,
+            nullptr,
+            &error
+        );
+        success = reply != nullptr;
+        if (reply != nullptr) g_variant_unref(reply);
+        g_clear_error(&error);
+    }
+
+    if (!success) {
+        const gint64 offset_us = safe_target_us - safe_current_us;
+        if (offset_us == 0) {
+            success = true;
+        } else {
+            GVariant* reply = g_dbus_connection_call_sync(
+                connection,
+                player->c_str(),
+                kObjectPath,
+                kPlayerInterface,
+                "Seek",
+                g_variant_new("(x)", offset_us),
+                nullptr,
+                G_DBUS_CALL_FLAGS_NONE,
+                kDbusTimeoutMs,
+                nullptr,
+                &error
+            );
+            success = reply != nullptr;
+            if (reply != nullptr) g_variant_unref(reply);
+        }
+    }
+
+    if (!success && error != nullptr) {
+        g_warning("Realmheart media seek failed: %s", error->message);
+    }
+    g_clear_error(&error);
+    g_object_unref(connection);
+
+    if (success) notify_changed();
+    else clear_cached_player();
+    return success;
+}
 
 } // namespace realmheart::services
