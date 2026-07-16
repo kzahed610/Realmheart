@@ -39,6 +39,7 @@ BarIconButton::BarIconButton(
             "clicked",
             G_CALLBACK(+[](GtkButton*, gpointer data) {
                 auto* self = static_cast<BarIconButton*>(data);
+                self->trigger_click_feedback();
                 if (self->on_click_) self->on_click_();
             }),
             this
@@ -53,6 +54,24 @@ BarIconButton::~BarIconButton() {
     if (button_ != nullptr && click_handler_ != 0) {
         g_signal_handler_disconnect(button_, click_handler_);
     }
+    if (click_feedback_timer_id_ != 0) {
+        g_source_remove(click_feedback_timer_id_);
+        click_feedback_timer_id_ = 0;
+    }
+}
+
+void BarIconButton::trigger_click_feedback() {
+    if (button_ == nullptr) return;
+    gtk_widget_add_css_class(button_, "realmheart-click-feedback");
+    if (click_feedback_timer_id_ != 0) g_source_remove(click_feedback_timer_id_);
+    click_feedback_timer_id_ = g_timeout_add(130, +[](gpointer data) -> gboolean {
+        auto* self = static_cast<BarIconButton*>(data);
+        self->click_feedback_timer_id_ = 0;
+        if (self->button_ != nullptr) {
+            gtk_widget_remove_css_class(self->button_, "realmheart-click-feedback");
+        }
+        return G_SOURCE_REMOVE;
+    }, this);
 }
 
 void BarIconButton::set_icon(std::string icon_path, std::string fallback_text) {

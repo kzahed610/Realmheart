@@ -11,6 +11,11 @@
 namespace realmheart::ui {
 namespace {
 
+// Realmheart owns the complete visual treatment of its shell surfaces. Load
+// its provider above ~/.config/gtk-4.0/gtk.css (USER priority), whose global
+// `window { background: ... }` rule otherwise paints native popover corners.
+constexpr guint kRealmheartStylePriority = GTK_STYLE_PROVIDER_PRIORITY_USER + 1;
+
 std::optional<double> hex_luminance(std::string_view color) {
     if (color.size() != 7 || color.front() != '#') return std::nullopt;
     const auto hex = [](char value) -> int {
@@ -52,7 +57,7 @@ ThemeStyles::ThemeStyles(std::shared_ptr<services::ThemeService> theme_service)
         gtk_style_context_add_provider_for_display(
             display_,
             GTK_STYLE_PROVIDER(provider_),
-            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
+            kRealmheartStylePriority
         );
     }
 

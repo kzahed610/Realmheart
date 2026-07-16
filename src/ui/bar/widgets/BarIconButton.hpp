@@ -34,6 +34,8 @@ public:
     void set_icon_size(int pixels);
 
 private:
+    void trigger_click_feedback();
+
     GtkWidget* button_ = nullptr;
     GtkWidget* overlay_ = nullptr;
     GtkWidget* stack_ = nullptr;
@@ -41,6 +43,7 @@ private:
     GtkWidget* fallback_ = nullptr;
     GtkWidget* badge_ = nullptr;
     gulong click_handler_ = 0;
+    guint click_feedback_timer_id_ = 0;
     std::function<void()> on_click_;
 };
 

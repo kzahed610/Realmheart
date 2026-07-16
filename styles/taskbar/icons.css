@@ -10,20 +10,32 @@
   border: none;
   border-radius: 13px;
   box-shadow: none;
+  transition:
+    background-color 120ms ease-out,
+    border-color 120ms ease-out,
+    box-shadow 140ms ease-out,
+    color 120ms ease-out,
+    opacity 120ms ease-out;
 }
 
 .realmheart-bar-icon-button:hover {
   background-color: alpha(@rh_surface_variant, 0.80);
+  box-shadow: 0 0 10px alpha(@rh_primary, 0.18);
 }
 
 .realmheart-bar-icon-button:active,
-.realmheart-bar-icon-button:checked {
+.realmheart-bar-icon-button:checked,
+.realmheart-bar-icon-button.realmheart-click-feedback {
   background-color: alpha(@rh_primary, 0.6);
+  box-shadow: 0 0 12px alpha(@rh_primary, 0.26);
 }
 
 .realmheart-bar-svg-icon {
   color: @rh_icon_primary;
   opacity: 1;
+  transition:
+    color 120ms ease-out,
+    opacity 120ms ease-out;
 }
 
 .realmheart-icon-accent-probe {
@@ -56,6 +68,10 @@
   padding: 0 3px;
   font-size: 0.62em;
   font-weight: 800;
+  transition:
+    background-color 120ms ease-out,
+    color 120ms ease-out,
+    opacity 120ms ease-out;
 }
 
 /* Launcher artwork carries fixed brand colours; the refresh/action control stays theme-driven. */
@@ -75,17 +91,25 @@
   border: 1px solid alpha(@rh_primary, 0.2);
   border-radius: 19px;
   box-shadow: none;
+  transition:
+    background-color 140ms ease-out,
+    border-color 140ms ease-out,
+    box-shadow 160ms ease-out,
+    color 120ms ease-out;
 }
 
 .realmheart-system-monitor-pill:hover {
   background-color: alpha(@rh_surface_variant, 0.24);
   border-color: alpha(@rh_primary, 0.58);
+  box-shadow: 0 0 14px alpha(@rh_primary, 0.16);
 }
 
 .realmheart-system-monitor-pill:active,
-.realmheart-system-monitor-pill:checked {
+.realmheart-system-monitor-pill:checked,
+.realmheart-system-monitor-pill.realmheart-click-feedback {
   background-color: alpha(@rh_primary, 0.12);
   border-color: alpha(@rh_primary, 0.66);
+  box-shadow: 0 0 16px alpha(@rh_primary, 0.20);
 }
 
 .realmheart-system-monitor-metrics {

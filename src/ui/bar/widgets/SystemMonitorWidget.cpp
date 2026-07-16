@@ -1,6 +1,8 @@
 #include "ui/bar/widgets/SystemMonitorWidget.hpp"
 
+#include "ui/bar/widgets/AttachedPopover.hpp"
 #include "core/TaskExecutor.hpp"
+#include "ui/bar/widgets/PopoverReveal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -58,6 +60,8 @@ std::string processor_text(double percent, const std::optional<double>& frequenc
     return text;
 }
 
+constexpr int kPopoverOffsetX = kExpandingPopoverOffsetX;
+constexpr int kPopoverOffsetY = 0;
 
 } // namespace
 
@@ -96,9 +100,9 @@ SystemMonitorWidget::SystemMonitorWidget(
     gtk_widget_add_css_class(popover_, "realmheart-bar-popover");
     gtk_widget_add_css_class(popover_, "realmheart-system-monitor-popover");
     gtk_popover_set_position(GTK_POPOVER(popover_), GTK_POS_RIGHT);
-    gtk_popover_set_has_arrow(GTK_POPOVER(popover_), TRUE);
+    gtk_popover_set_has_arrow(GTK_POPOVER(popover_), FALSE);
     gtk_popover_set_autohide(GTK_POPOVER(popover_), TRUE);
-    gtk_popover_set_offset(GTK_POPOVER(popover_), 9, -6);
+    gtk_popover_set_offset(GTK_POPOVER(popover_), kPopoverOffsetX, kPopoverOffsetY);
     gtk_widget_set_parent(popover_, button_);
 
     GtkWidget* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 7);
@@ -117,10 +121,12 @@ SystemMonitorWidget::SystemMonitorWidget(
     memory_ = add_row(root, "RAM");
     swap_ = add_row(root, "SWAP");
     gpu_ = add_row(root, "GPU / iGPU");
-    gtk_popover_set_child(GTK_POPOVER(popover_), root);
+    set_expanding_popover_child(GTK_POPOVER(popover_), root);
 
     g_signal_connect(button_, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
-        static_cast<SystemMonitorWidget*>(data)->toggle();
+        auto* self = static_cast<SystemMonitorWidget*>(data);
+        self->trigger_click_feedback();
+        self->toggle();
     }), this);
     g_signal_connect(popover_, "closed", G_CALLBACK(+[](GtkPopover*, gpointer data) {
         static_cast<SystemMonitorWidget*>(data)->handle_closed();
@@ -129,11 +135,29 @@ SystemMonitorWidget::SystemMonitorWidget(
 
 SystemMonitorWidget::~SystemMonitorWidget() {
     stop_live_refresh();
+    if (click_feedback_timer_id_ != 0) {
+        g_source_remove(click_feedback_timer_id_);
+        click_feedback_timer_id_ = 0;
+    }
     async_state_->alive = false;
     async_state_->owner = nullptr;
     if (popover_ != nullptr && gtk_widget_get_parent(popover_) != nullptr) {
         gtk_widget_unparent(popover_);
     }
+}
+
+void SystemMonitorWidget::trigger_click_feedback() {
+    if (button_ == nullptr) return;
+    gtk_widget_add_css_class(button_, "realmheart-click-feedback");
+    if (click_feedback_timer_id_ != 0) g_source_remove(click_feedback_timer_id_);
+    click_feedback_timer_id_ = g_timeout_add(130, +[](gpointer data) -> gboolean {
+        auto* self = static_cast<SystemMonitorWidget*>(data);
+        self->click_feedback_timer_id_ = 0;
+        if (self->button_ != nullptr) {
+            gtk_widget_remove_css_class(self->button_, "realmheart-click-feedback");
+        }
+        return G_SOURCE_REMOVE;
+    }, this);
 }
 
 SystemMonitorWidget::UsageRow SystemMonitorWidget::add_row(GtkWidget* parent, const char* name) {
@@ -169,7 +193,16 @@ void SystemMonitorWidget::open() {
     open_ = true;
     if (request_exclusive_open_) request_exclusive_open_(GTK_POPOVER(popover_));
     gtk_label_set_text(GTK_LABEL(state_label_), "Measuring…");
-    gtk_popover_popup(GTK_POPOVER(popover_));
+    reveal_popover(
+        GTK_POPOVER(popover_),
+        kPopoverOffsetX,
+        kPopoverOffsetY,
+        kExpandingPopoverRevealPixels,
+        popover_fade_delay_after_travel(
+            kExpandingPopoverRevealPixels,
+            kExpandingPopoverHiddenTravelPixels
+        )
+    );
     request_sample();
 
     if (refresh_timer_id_ == 0) {

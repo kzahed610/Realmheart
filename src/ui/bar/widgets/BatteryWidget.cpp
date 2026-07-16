@@ -1,5 +1,7 @@
 #include "ui/bar/widgets/BatteryWidget.hpp"
 
+#include "ui/bar/widgets/PopoverReveal.hpp"
+
 #include <iomanip>
 #include <sstream>
 #include <initializer_list>
@@ -8,6 +10,9 @@
 
 namespace realmheart::ui::bar::widgets {
 namespace {
+
+constexpr int kPopoverOffsetX = 9;
+constexpr int kPopoverOffsetY = -5;
 
 std::string battery_icon_path(const services::BatteryStatus& status) {
     int level = 100;
@@ -38,10 +43,11 @@ BatteryWidget::BatteryWidget(
     popover_ = gtk_popover_new();
     gtk_widget_add_css_class(popover_, "realmheart-bar-popover");
     gtk_widget_add_css_class(popover_, "realmheart-battery-popover");
+    gtk_widget_add_css_class(popover_, "realmheart-compact-popover");
     gtk_popover_set_position(GTK_POPOVER(popover_), GTK_POS_RIGHT);
     gtk_popover_set_has_arrow(GTK_POPOVER(popover_), TRUE);
     gtk_popover_set_autohide(GTK_POPOVER(popover_), FALSE);
-    gtk_popover_set_offset(GTK_POPOVER(popover_), 9, -5);
+    gtk_popover_set_offset(GTK_POPOVER(popover_), kPopoverOffsetX, kPopoverOffsetY);
     gtk_widget_set_parent(popover_, button_.button());
 
     GtkWidget* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
@@ -152,7 +158,7 @@ void BatteryWidget::update_popup() {
 void BatteryWidget::show_held() {
     update_popup();
     if (request_exclusive_open_) request_exclusive_open_(GTK_POPOVER(popover_));
-    gtk_popover_popup(GTK_POPOVER(popover_));
+    reveal_popover(GTK_POPOVER(popover_), kPopoverOffsetX, kPopoverOffsetY);
 }
 
 void BatteryWidget::hide_held() {

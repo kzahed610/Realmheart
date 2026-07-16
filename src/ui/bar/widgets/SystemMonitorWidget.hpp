@@ -40,6 +40,7 @@ private:
     void stop_live_refresh();
     void request_sample();
     void apply(const std::optional<services::SystemUsageSnapshot>& snapshot);
+    void trigger_click_feedback();
     UsageRow add_row(GtkWidget* parent, const char* name);
 
     std::function<void(GtkPopover*)> request_exclusive_open_;
@@ -53,6 +54,7 @@ private:
     UsageRow gpu_;
     std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
     guint refresh_timer_id_ = 0;
+    guint click_feedback_timer_id_ = 0;
     bool open_ = false;
 };
 

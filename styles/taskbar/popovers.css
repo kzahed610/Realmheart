@@ -1,19 +1,53 @@
-/* Shared taskbar popovers and their component-specific contents. */
+/* Shared taskbar extensions and their component-specific contents. */
 
-.realmheart-bar-popover > contents,
-.realmheart-workspace-preview > contents {
+/* Media and system usage are true rail extensions with custom Cairo shells. */
+popover.realmheart-expanding-popover,
+popover.realmheart-expanding-popover > contents,
+.realmheart-attached-popover > contents {
+  color: @rh_text;
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
+}
+
+/* Workspace and battery deliberately remain compact informational popovers. */
+.realmheart-compact-popover > contents {
   color: @rh_text;
   background-color: alpha(@rh_background, 0.97);
+  background-image: none;
   border: 1px solid alpha(@rh_primary, 0.52);
   border-radius: 13px;
   padding: 10px;
   box-shadow: 0 8px 24px alpha(@rh_background, 0.62);
 }
 
-.realmheart-bar-popover > arrow,
-.realmheart-workspace-preview > arrow {
+.realmheart-compact-popover > arrow {
   color: alpha(@rh_background, 0.97);
   border-color: alpha(@rh_primary, 0.52);
+}
+
+.realmheart-attached-popover-shell,
+.realmheart-attached-popover-content {
+  color: @rh_text;
+  background-color: transparent;
+}
+
+/* Cairo reads these computed foreground colors through gtk_widget_get_color(). */
+.realmheart-attached-popover-fill {
+  color: alpha(@rh_background, 0.94);
+  background-color: transparent;
+}
+
+.realmheart-expanding-popover .realmheart-attached-popover-fill {
+  color: @rh_background;
+}
+
+.realmheart-attached-popover-border {
+  color: @rh_taskbar_gold;
+  background-color: transparent;
 }
 
 .realmheart-popover-title,
@@ -21,7 +55,7 @@
   color: @rh_primary;
   font-weight: 800;
   font-size: 0.96em;
-  margin-bottom: 40px;
+  margin-bottom: 10px;
 }
 
 .realmheart-popover-muted,
@@ -33,6 +67,15 @@
 .realmheart-workspace-preview-row {
   padding: 5px 2px;
   border-top: 1px solid alpha(@rh_outline, 0.26);
+  border-radius: 8px;
+  transition:
+    background-color 110ms ease-out,
+    border-color 120ms ease-out;
+}
+
+.realmheart-workspace-preview-row:hover {
+  background-color: alpha(@rh_surface_variant, 0.22);
+  border-top-color: alpha(@rh_primary, 0.38);
 }
 
 .realmheart-workspace-preview-app {
@@ -45,14 +88,24 @@
   font-size: 0.80em;
 }
 
-.realmheart-media-art {
-  background-color: alpha(@rh_surface, 0.88);
+.realmheart-media-art-frame {
+  background-color: alpha(@rh_surface, 0.90);
   border: 1px solid alpha(@rh_outline, 0.38);
-  border-radius: 9px;
+  border-radius: 12px;
+}
+
+.realmheart-media-art {
+  background-color: transparent;
+}
+
+.realmheart-media-art-overlay {
+  color: @rh_background;
+  background-color: transparent;
 }
 
 .realmheart-media-art-fallback {
   color: @rh_text_muted;
+  font-size: 0.82em;
 }
 
 .realmheart-media-title {
@@ -73,10 +126,18 @@
   background-color: alpha(@rh_surface_variant, 0.72);
   border: 1px solid alpha(@rh_outline, 0.34);
   border-radius: 9px;
+  box-shadow: none;
+  transition:
+    background-color 120ms ease-out,
+    border-color 120ms ease-out,
+    box-shadow 140ms ease-out,
+    color 120ms ease-out;
 }
 
 .realmheart-media-control:hover {
+  background-color: alpha(@rh_surface_variant, 0.82);
   border-color: alpha(@rh_primary, 0.72);
+  box-shadow: 0 0 10px alpha(@rh_primary, 0.14);
 }
 
 .realmheart-system-usage-value {
@@ -94,6 +155,7 @@
   min-height: 5px;
   background-color: @rh_primary;
   border-radius: 999px;
+  transition: background-color 140ms ease-out;
 }
 
 .realmheart-battery-percentage {

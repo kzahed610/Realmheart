@@ -30,6 +30,9 @@ private:
     void show_preview();
     void schedule_preview_hide();
     void cancel_preview_hide();
+    void set_hovered(bool hovered);
+    void start_hover_animation();
+    static gboolean animate_hover(GtkWidget* widget, GdkFrameClock* frame_clock, gpointer data);
 
     GtkWidget* button_ = nullptr;
     GtkWidget* drawing_area_ = nullptr;
@@ -40,6 +43,10 @@ private:
     std::function<void()> on_right_click_;
     std::function<void(GtkPopover*)> request_exclusive_open_;
     guint hide_timer_id_ = 0;
+    guint hover_tick_id_ = 0;
+    gint64 hover_last_frame_us_ = 0;
+    double hover_progress_ = 0.0;
+    double hover_target_ = 0.0;
 };
 
 } // namespace realmheart::ui::bar::widgets

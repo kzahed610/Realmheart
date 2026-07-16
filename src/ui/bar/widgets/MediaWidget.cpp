@@ -1,10 +1,14 @@
 #include "ui/bar/widgets/MediaWidget.hpp"
 
+#include "ui/bar/widgets/AttachedPopover.hpp"
 #include "core/TaskExecutor.hpp"
 #include "ui/bar/MediaArtLoader.hpp"
+#include "ui/bar/widgets/PopoverReveal.hpp"
 
 #include <gdk-pixbuf/gdk-pixbuf.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -21,6 +25,114 @@ GtkWidget* image_button(GtkWidget* icon, const char* fallback) {
         icon != nullptr ? icon : gtk_label_new(fallback)
     );
     return button;
+}
+
+constexpr int kPopoverOffsetX = kExpandingPopoverOffsetX;
+constexpr int kPopoverOffsetY = 0;
+constexpr int kAlbumArtWidth = 204;
+constexpr int kAlbumArtHeight = 92;
+constexpr int kAlbumArtLoadSize = 512;
+
+void rounded_rectangle(cairo_t* cr, double x, double y, double width, double height, double radius) {
+    const double right = x + width;
+    const double bottom = y + height;
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, right - radius, y + radius, radius, -G_PI_2, 0.0);
+    cairo_arc(cr, right - radius, bottom - radius, radius, 0.0, G_PI_2);
+    cairo_arc(cr, x + radius, bottom - radius, radius, G_PI_2, G_PI);
+    cairo_arc(cr, x + radius, y + radius, radius, G_PI, 3.0 * G_PI_2);
+    cairo_close_path(cr);
+}
+
+GdkPixbuf* crop_album_art_banner(GdkPixbuf* source) {
+    if (source == nullptr) return nullptr;
+
+    const int source_width = gdk_pixbuf_get_width(source);
+    const int source_height = gdk_pixbuf_get_height(source);
+    if (source_width <= 0 || source_height <= 0) return nullptr;
+
+    constexpr double target_ratio =
+        static_cast<double>(kAlbumArtWidth) / static_cast<double>(kAlbumArtHeight);
+    const double source_ratio =
+        static_cast<double>(source_width) / static_cast<double>(source_height);
+
+    int crop_width = source_width;
+    int crop_height = source_height;
+    if (source_ratio > target_ratio) {
+        crop_width = std::clamp(
+            static_cast<int>(std::lround(static_cast<double>(source_height) * target_ratio)),
+            1,
+            source_width
+        );
+    } else {
+        crop_height = std::clamp(
+            static_cast<int>(std::lround(static_cast<double>(source_width) / target_ratio)),
+            1,
+            source_height
+        );
+    }
+
+    const int crop_x = (source_width - crop_width) / 2;
+    const int crop_y = (source_height - crop_height) / 2;
+    GdkPixbuf* cropped = gdk_pixbuf_new_subpixbuf(
+        source, crop_x, crop_y, crop_width, crop_height
+    );
+    if (cropped == nullptr) return nullptr;
+
+    GdkPixbuf* banner = gdk_pixbuf_scale_simple(
+        cropped,
+        kAlbumArtWidth,
+        kAlbumArtHeight,
+        GDK_INTERP_HYPER
+    );
+    g_object_unref(cropped);
+    return banner;
+}
+
+void draw_album_art_shadow(
+    GtkDrawingArea* area,
+    cairo_t* cr,
+    int width,
+    int height,
+    gpointer
+) {
+    if (width <= 0 || height <= 0) return;
+
+    constexpr double radius = 12.0;
+
+    // GtkOverlay overflow clipping is rectangular. Paint the four outside
+    // corners with the panel colour so the artwork is visibly rounded even on
+    // GTK renderers that do not clip child content to the CSS border radius.
+    GdkRGBA panel_fill{};
+    gtk_widget_get_color(GTK_WIDGET(area), &panel_fill);
+    cairo_save(cr);
+    cairo_new_path(cr);
+    cairo_rectangle(cr, 0.0, 0.0, width, height);
+    rounded_rectangle(cr, 0.0, 0.0, width, height, radius);
+    cairo_set_fill_rule(cr, CAIRO_FILL_RULE_EVEN_ODD);
+    gdk_cairo_set_source_rgba(cr, &panel_fill);
+    cairo_fill(cr);
+    cairo_restore(cr);
+
+    cairo_save(cr);
+    rounded_rectangle(cr, 0.0, 0.0, width, height, radius);
+    cairo_clip(cr);
+
+    cairo_pattern_t* vignette = cairo_pattern_create_linear(0.0, 0.0, 0.0, height);
+    cairo_pattern_add_color_stop_rgba(vignette, 0.0, 0.0, 0.0, 0.0, 0.22);
+    cairo_pattern_add_color_stop_rgba(vignette, 0.24, 0.0, 0.0, 0.0, 0.04);
+    cairo_pattern_add_color_stop_rgba(vignette, 0.62, 0.0, 0.0, 0.0, 0.00);
+    cairo_pattern_add_color_stop_rgba(vignette, 1.0, 0.0, 0.0, 0.0, 0.30);
+    cairo_rectangle(cr, 0.0, 0.0, width, height);
+    cairo_set_source(cr, vignette);
+    cairo_fill(cr);
+    cairo_pattern_destroy(vignette);
+
+    rounded_rectangle(cr, 0.75, 0.75, width - 1.5, height - 1.5, radius - 0.75);
+    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.32);
+    cairo_set_line_width(cr, 1.5);
+    cairo_stroke(cr);
+    cairo_restore(cr);
 }
 
 } // namespace
@@ -43,25 +155,54 @@ MediaWidget::MediaWidget(
     gtk_widget_add_css_class(popover_, "realmheart-bar-popover");
     gtk_widget_add_css_class(popover_, "realmheart-media-popover");
     gtk_popover_set_position(GTK_POPOVER(popover_), GTK_POS_RIGHT);
-    gtk_popover_set_has_arrow(GTK_POPOVER(popover_), TRUE);
+    gtk_popover_set_has_arrow(GTK_POPOVER(popover_), FALSE);
     gtk_popover_set_autohide(GTK_POPOVER(popover_), TRUE);
-    gtk_popover_set_offset(GTK_POPOVER(popover_), 9, -7);
+    gtk_popover_set_offset(GTK_POPOVER(popover_), kPopoverOffsetX, kPopoverOffsetY);
     gtk_widget_set_parent(popover_, button_.button());
 
     GtkWidget* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_widget_set_size_request(root, 220, -1);
 
+    GtkWidget* album_frame = gtk_overlay_new();
+    gtk_widget_add_css_class(album_frame, "realmheart-media-art-frame");
+    gtk_widget_set_size_request(album_frame, kAlbumArtWidth, kAlbumArtHeight);
+    gtk_widget_set_halign(album_frame, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(album_frame, GTK_ALIGN_CENTER);
+    gtk_widget_set_hexpand(album_frame, FALSE);
+    gtk_widget_set_vexpand(album_frame, FALSE);
+    gtk_widget_set_overflow(album_frame, GTK_OVERFLOW_HIDDEN);
+
     album_stack_ = gtk_stack_new();
     gtk_widget_add_css_class(album_stack_, "realmheart-media-art");
-    gtk_widget_set_size_request(album_stack_, 204, 116);
+    gtk_widget_set_size_request(album_stack_, kAlbumArtWidth, kAlbumArtHeight);
+    gtk_widget_set_hexpand(album_stack_, TRUE);
+    gtk_widget_set_vexpand(album_stack_, TRUE);
     album_picture_ = gtk_picture_new();
     gtk_picture_set_content_fit(GTK_PICTURE(album_picture_), GTK_CONTENT_FIT_COVER);
-    gtk_widget_set_size_request(album_picture_, 204, 116);
+    gtk_picture_set_can_shrink(GTK_PICTURE(album_picture_), TRUE);
+    gtk_picture_set_alternative_text(GTK_PICTURE(album_picture_), "Album artwork");
+    gtk_widget_set_size_request(album_picture_, kAlbumArtWidth, kAlbumArtHeight);
+    gtk_widget_set_hexpand(album_picture_, TRUE);
+    gtk_widget_set_vexpand(album_picture_, TRUE);
     album_fallback_ = gtk_label_new("No album art");
     gtk_widget_add_css_class(album_fallback_, "realmheart-media-art-fallback");
     gtk_stack_add_named(GTK_STACK(album_stack_), album_picture_, "picture");
     gtk_stack_add_named(GTK_STACK(album_stack_), album_fallback_, "fallback");
     gtk_stack_set_visible_child_name(GTK_STACK(album_stack_), "fallback");
+    gtk_overlay_set_child(GTK_OVERLAY(album_frame), album_stack_);
+
+    GtkWidget* album_shadow = gtk_drawing_area_new();
+    gtk_widget_add_css_class(album_shadow, "realmheart-media-art-overlay");
+    gtk_widget_set_can_target(album_shadow, FALSE);
+    gtk_widget_set_hexpand(album_shadow, TRUE);
+    gtk_widget_set_vexpand(album_shadow, TRUE);
+    gtk_drawing_area_set_draw_func(
+        GTK_DRAWING_AREA(album_shadow),
+        draw_album_art_shadow,
+        nullptr,
+        nullptr
+    );
+    gtk_overlay_add_overlay(GTK_OVERLAY(album_frame), album_shadow);
 
     title_label_ = gtk_label_new("No active media");
     gtk_widget_add_css_class(title_label_, "realmheart-media-title");
@@ -105,11 +246,11 @@ MediaWidget::MediaWidget(
     gtk_box_append(GTK_BOX(controls), previous_button_);
     gtk_box_append(GTK_BOX(controls), play_pause_button_);
     gtk_box_append(GTK_BOX(controls), next_button_);
-    gtk_box_append(GTK_BOX(root), album_stack_);
+    gtk_box_append(GTK_BOX(root), album_frame);
     gtk_box_append(GTK_BOX(root), title_label_);
     gtk_box_append(GTK_BOX(root), artist_label_);
     gtk_box_append(GTK_BOX(root), controls);
-    gtk_popover_set_child(GTK_POPOVER(popover_), root);
+    set_expanding_popover_child(GTK_POPOVER(popover_), root);
 
     update(std::nullopt);
 }
@@ -129,7 +270,16 @@ void MediaWidget::toggle() {
         return;
     }
     if (request_exclusive_open_) request_exclusive_open_(GTK_POPOVER(popover_));
-    gtk_popover_popup(GTK_POPOVER(popover_));
+    reveal_popover(
+        GTK_POPOVER(popover_),
+        kPopoverOffsetX,
+        kPopoverOffsetY,
+        kExpandingPopoverRevealPixels,
+        popover_fade_delay_after_travel(
+            kExpandingPopoverRevealPixels,
+            kExpandingPopoverHiddenTravelPixels
+        )
+    );
 }
 
 void MediaWidget::close() {
@@ -169,10 +319,19 @@ void MediaWidget::update_art(const std::string& art_url) {
             GdkPixbuf* pixbuf = nullptr;
             if (path && !cancelled()) {
                 GError* error = nullptr;
-                pixbuf = gdk_pixbuf_new_from_file_at_scale(
-                    path->string().c_str(), 204, 116, TRUE, &error
+                GdkPixbuf* source = gdk_pixbuf_new_from_file_at_scale(
+                    path->string().c_str(),
+                    kAlbumArtLoadSize,
+                    kAlbumArtLoadSize,
+                    TRUE,
+                    &error
                 );
-                if (pixbuf == nullptr) g_clear_error(&error);
+                if (source == nullptr) {
+                    g_clear_error(&error);
+                } else {
+                    pixbuf = crop_album_art_banner(source);
+                    g_object_unref(source);
+                }
             }
 
             struct Payload {

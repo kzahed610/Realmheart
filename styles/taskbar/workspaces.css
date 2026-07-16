@@ -8,6 +8,16 @@
   background-color: alpha(@rh_surface, 0.18);
   border: 1px solid alpha(@rh_outline, 0.20);
   border-radius: 25px;
+  transition:
+    background-color 140ms ease-out,
+    border-color 140ms ease-out,
+    box-shadow 160ms ease-out;
+}
+
+.realmheart-workspace-stack:hover {
+  background-color: alpha(@rh_surface, 0.24);
+  border-color: alpha(@rh_primary, 0.28);
+  box-shadow: 0 0 14px alpha(@rh_primary, 0.12);
 }
 
 .realmheart-workspace-rune {
@@ -18,14 +28,22 @@
   background-color: transparent;
   border: none;
   border-radius: 12px;
+  box-shadow: none;
+  transition:
+    background-color 110ms ease-out,
+    box-shadow 140ms ease-out;
 }
 
 .realmheart-workspace-rune:hover {
   background-color: alpha(@rh_surface_variant, 0.48);
+  box-shadow: 0 0 10px alpha(@rh_primary, 0.14);
 }
 
 .realmheart-workspace-rune-art {
   color: @rh_text_muted;
+  transition:
+    color 120ms ease-out,
+    opacity 120ms ease-out;
 }
 
 .realmheart-workspace-rune-occupied {

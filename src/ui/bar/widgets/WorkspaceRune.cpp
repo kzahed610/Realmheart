@@ -1,5 +1,7 @@
 #include "ui/bar/widgets/WorkspaceRune.hpp"
 
+#include "ui/bar/widgets/PopoverReveal.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -36,6 +38,9 @@ void clear_box(GtkWidget* box) {
         child = next;
     }
 }
+
+constexpr int kPreviewOffsetX = 8;
+constexpr int kPreviewOffsetY = -5;
 
 } // namespace
 
@@ -84,10 +89,11 @@ WorkspaceRune::WorkspaceRune(
 
     popover_ = gtk_popover_new();
     gtk_widget_add_css_class(popover_, "realmheart-workspace-preview");
+    gtk_widget_add_css_class(popover_, "realmheart-compact-popover");
     gtk_popover_set_position(GTK_POPOVER(popover_), GTK_POS_RIGHT);
     gtk_popover_set_has_arrow(GTK_POPOVER(popover_), TRUE);
     gtk_popover_set_autohide(GTK_POPOVER(popover_), FALSE);
-    gtk_popover_set_offset(GTK_POPOVER(popover_), 8, -5);
+    gtk_popover_set_offset(GTK_POPOVER(popover_), kPreviewOffsetX, kPreviewOffsetY);
     gtk_widget_set_parent(popover_, button_);
 
     preview_box_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -97,12 +103,16 @@ WorkspaceRune::WorkspaceRune(
     g_signal_connect(button_motion, "enter", G_CALLBACK(+[](
         GtkEventControllerMotion*, double, double, gpointer data
     ) {
-        static_cast<WorkspaceRune*>(data)->show_preview();
+        auto* self = static_cast<WorkspaceRune*>(data);
+        self->set_hovered(true);
+        self->show_preview();
     }), this);
     g_signal_connect(button_motion, "leave", G_CALLBACK(+[](
         GtkEventControllerMotion*, gpointer data
     ) {
-        static_cast<WorkspaceRune*>(data)->schedule_preview_hide();
+        auto* self = static_cast<WorkspaceRune*>(data);
+        self->set_hovered(false);
+        self->schedule_preview_hide();
     }), this);
     gtk_widget_add_controller(button_, button_motion);
 
@@ -124,6 +134,10 @@ WorkspaceRune::WorkspaceRune(
 
 WorkspaceRune::~WorkspaceRune() {
     cancel_preview_hide();
+    if (hover_tick_id_ != 0) {
+        gtk_widget_remove_tick_callback(drawing_area_, hover_tick_id_);
+        hover_tick_id_ = 0;
+    }
     if (popover_ != nullptr && gtk_widget_get_parent(popover_) != nullptr) {
         gtk_widget_unparent(popover_);
     }
@@ -154,14 +168,15 @@ void WorkspaceRune::draw(GtkDrawingArea* area, cairo_t* cr, int width, int heigh
     const auto* self = static_cast<WorkspaceRune*>(data);
     const bool active = self->state_.active;
     const bool occupied = self->state_.windows > 0;
+    const double hover = self->hover_progress_;
 
     GdkRGBA accent = foreground(
         GTK_WIDGET(area), GdkRGBA{0.72, 0.42, 0.95, 1.0}
     );
 
-    if (active) {
+    if (active || hover > 0.001) {
         GdkRGBA glow = accent;
-        glow.alpha = 0.22;
+        glow.alpha = (active ? 0.22 : 0.0) + (0.10 * hover);
         rune_path(cr, width, height);
         gdk_cairo_set_source_rgba(cr, &glow);
         cairo_fill(cr);
@@ -169,18 +184,21 @@ void WorkspaceRune::draw(GtkDrawingArea* area, cairo_t* cr, int width, int heigh
 
     rune_path(cr, width, height);
     GdkRGBA outline = accent;
-    outline.alpha = active ? 0.98 : (occupied ? 0.74 : 0.42);
+    outline.alpha = std::min(
+        1.0,
+        (active ? 0.98 : (occupied ? 0.74 : 0.42)) + (0.16 * hover)
+    );
     gdk_cairo_set_source_rgba(cr, &outline);
-    cairo_set_line_width(cr, active ? 1.6 : 1.15);
+    cairo_set_line_width(cr, (active ? 1.6 : 1.15) + (0.22 * hover));
     cairo_stroke(cr);
 
     const double cx = width / 2.0;
     const double cy = height / 2.0;
     if (occupied) {
         GdkRGBA mark = accent;
-        mark.alpha = active ? 1.0 : 0.78;
+        mark.alpha = std::min(1.0, (active ? 1.0 : 0.78) + (0.12 * hover));
         gdk_cairo_set_source_rgba(cr, &mark);
-        cairo_set_line_width(cr, active ? 1.5 : 1.15);
+        cairo_set_line_width(cr, (active ? 1.5 : 1.15) + (0.18 * hover));
         cairo_move_to(cr, cx, cy - 5.0);
         cairo_line_to(cr, cx + 2.2, cy - 1.5);
         cairo_line_to(cr, cx + 5.0, cy);
@@ -193,10 +211,10 @@ void WorkspaceRune::draw(GtkDrawingArea* area, cairo_t* cr, int width, int heigh
         if (active) cairo_fill(cr); else cairo_stroke(cr);
     } else {
         GdkRGBA mark = accent;
-        mark.alpha = active ? 0.92 : 0.45;
+        mark.alpha = std::min(1.0, (active ? 0.92 : 0.45) + (0.16 * hover));
         gdk_cairo_set_source_rgba(cr, &mark);
         cairo_set_line_width(cr, 1.1);
-        cairo_arc(cr, cx, cy, active ? 2.2 : 1.7, 0.0, 2.0 * std::acos(-1.0));
+        cairo_arc(cr, cx, cy, (active ? 2.2 : 1.7) + (0.22 * hover), 0.0, 2.0 * std::acos(-1.0));
         cairo_stroke(cr);
     }
 
@@ -207,6 +225,42 @@ void WorkspaceRune::draw(GtkDrawingArea* area, cairo_t* cr, int width, int heigh
         cairo_fill(cr);
         cairo_restore(cr);
     }
+}
+
+void WorkspaceRune::set_hovered(bool hovered) {
+    hover_target_ = hovered ? 1.0 : 0.0;
+    start_hover_animation();
+}
+
+void WorkspaceRune::start_hover_animation() {
+    if (hover_tick_id_ != 0) return;
+    hover_last_frame_us_ = 0;
+    hover_tick_id_ = gtk_widget_add_tick_callback(
+        drawing_area_,
+        &WorkspaceRune::animate_hover,
+        this,
+        nullptr
+    );
+}
+
+gboolean WorkspaceRune::animate_hover(GtkWidget* widget, GdkFrameClock* frame_clock, gpointer data) {
+    auto* self = static_cast<WorkspaceRune*>(data);
+    constexpr double kDurationUs = 120000.0;
+    const gint64 now = gdk_frame_clock_get_frame_time(frame_clock);
+    const gint64 previous = std::exchange(self->hover_last_frame_us_, now);
+    const double elapsed = previous == 0 ? 0.0 : static_cast<double>(now - previous);
+    const double step = std::clamp(elapsed / kDurationUs, 0.08, 1.0);
+    self->hover_progress_ += (self->hover_target_ - self->hover_progress_) * step;
+
+    if (std::abs(self->hover_progress_ - self->hover_target_) < 0.01) {
+        self->hover_progress_ = self->hover_target_;
+        self->hover_tick_id_ = 0;
+        gtk_widget_queue_draw(widget);
+        return G_SOURCE_REMOVE;
+    }
+
+    gtk_widget_queue_draw(widget);
+    return G_SOURCE_CONTINUE;
 }
 
 void WorkspaceRune::rebuild_preview() {
@@ -252,7 +306,7 @@ void WorkspaceRune::rebuild_preview() {
 void WorkspaceRune::show_preview() {
     cancel_preview_hide();
     if (request_exclusive_open_) request_exclusive_open_(GTK_POPOVER(popover_));
-    gtk_popover_popup(GTK_POPOVER(popover_));
+    reveal_popover(GTK_POPOVER(popover_), kPreviewOffsetX, kPreviewOffsetY);
 }
 
 void WorkspaceRune::schedule_preview_hide() {
