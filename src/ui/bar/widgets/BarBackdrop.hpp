@@ -15,8 +15,14 @@ public:
     BarBackdrop(GtkWindow* window, int rail_width, int visual_width, int curve_height);
     GtkWidget* widget() const { return widget_; }
 
+    // Temporarily omit the top portion of the gold contour while an attached
+    // layer-surface panel covers it. Passing 0 restores the complete contour.
+    // The rail fill and input region are deliberately unaffected.
+    void set_top_contour_occlusion(int bottom_y);
+
 private:
     GtkWidget* widget_ = nullptr;
+    GtkWidget* contour_ = nullptr;
 };
 
 } // namespace realmheart::ui::bar::widgets

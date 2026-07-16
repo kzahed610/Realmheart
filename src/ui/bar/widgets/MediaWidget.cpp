@@ -4,7 +4,7 @@
 #include "ui/LayerSurface.hpp"
 #include "core/TaskExecutor.hpp"
 #include "ui/bar/MediaArtLoader.hpp"
-#include "ui/bar/widgets/PopoverReveal.hpp"
+#include "ui/bar/widgets/SlideClip.hpp"
 
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <gtk4-layer-shell/gtk4-layer-shell.h>
@@ -34,10 +34,24 @@ GtkWidget* image_button(GtkWidget* icon, const char* fallback) {
 // layer surface computes its base position from the media button's real bounds.
 constexpr int kMediaLayerExtraOffsetX = kExpandingPopoverOffsetX + 2;
 constexpr int kMediaLayerFallbackLeft = 56;
+// The media surface itself becomes the outside-click catcher. Its Wayland
+// input region excludes the physical taskbar rail except where the attached
+// media shell overlaps it, so bar controls still receive their normal clicks.
+constexpr int kTaskbarInputPassThroughWidth = 56;
 // The media surface now owns the physical top edge, so the complete screen-hug
 // shoulder can use the same depth as the lower taskbar shoulder.
 constexpr int kMediaTopCurveHeight = 22;
-constexpr double kMediaRevealDurationUs = 210000.0;
+// The full shell keeps its final allocation while a snapshot clip advances
+// from left to right. This preserves every Cairo curve throughout the reveal
+// and gives concealment the exact reverse motion back into the taskbar.
+constexpr guint kMediaRevealDurationMs = 240;
+// The media shell has a decorative screen-hug shoulder on its far-right edge.
+// Reveal from the attached interior instead of translating that shoulder into
+// view first. The content host begins at x=14 and the centred album artwork
+// begins at x=22. Stopping the final conceal sample at x=14 keeps the last
+// clipped column inside the clean panel gutter instead of slicing through the
+// album image and producing a false gold/brown vertical streak.
+constexpr guint kMediaRevealTravelPx = 14;
 constexpr int kAlbumArtWidth = 204;
 constexpr int kAlbumArtHeight = 92;
 constexpr int kAlbumArtLoadSize = 512;
@@ -177,9 +191,11 @@ void draw_album_art_shadow(
 MediaWidget::MediaWidget(
     GtkApplication* app,
     services::MediaService& media_service,
-    std::function<void()> request_exclusive_open
+    std::function<void()> request_exclusive_open,
+    std::function<void(int)> set_bar_contour_occlusion
 ) : media_service_(media_service),
     request_exclusive_open_(std::move(request_exclusive_open)),
+    set_bar_contour_occlusion_(std::move(set_bar_contour_occlusion)),
     button_(
         "Realmheart-Icons/media.svg",
         "Md",
@@ -197,7 +213,10 @@ MediaWidget::MediaWidget(
         : gtk_window_new();
     gtk_window_set_title(GTK_WINDOW(layer_window_), "Realmheart Media");
     gtk_window_set_decorated(GTK_WINDOW(layer_window_), FALSE);
-    gtk_window_set_resizable(GTK_WINDOW(layer_window_), FALSE);
+    // The media window now spans the output and contains both the transparent
+    // outside-click target and the fixed-position media shell. The visible
+    // panel keeps its original natural size inside this fullscreen surface.
+    gtk_window_set_resizable(GTK_WINDOW(layer_window_), TRUE);
     gtk_widget_add_css_class(layer_window_, "realmheart-media-layer-window");
     gtk_widget_remove_css_class(layer_window_, "background");
 
@@ -206,7 +225,9 @@ MediaWidget::MediaWidget(
     media_surface.layer = realmheart::ui::LayerSurfaceLevel::Overlay;
     media_surface.keyboard_mode = realmheart::ui::LayerKeyboardMode::None;
     media_surface.anchor_left = true;
+    media_surface.anchor_right = true;
     media_surface.anchor_top = true;
+    media_surface.anchor_bottom = true;
     media_surface.exclusive_zone = 0;
     realmheart::ui::apply_layer_surface(GTK_WINDOW(layer_window_), media_surface);
 
@@ -216,6 +237,38 @@ MediaWidget::MediaWidget(
     // -1 deliberately ignores existing exclusive zones; our explicit left
     // margin can then align the media shell against the real monitor origin.
     gtk_layer_set_exclusive_zone(GTK_WINDOW(layer_window_), -1);
+
+    // Keep dismissal and the interactive panel inside one Wayland surface. A
+    // separate transparent layer was compositor-order dependent and never
+    // reliably received presses on this setup. GtkOverlay gives us a guaranteed
+    // full-output background target with the media shell as a sibling above it.
+    layer_overlay_ = gtk_overlay_new();
+    gtk_widget_set_hexpand(layer_overlay_, TRUE);
+    gtk_widget_set_vexpand(layer_overlay_, TRUE);
+
+    dismiss_target_ = gtk_drawing_area_new();
+    gtk_widget_set_hexpand(dismiss_target_, TRUE);
+    gtk_widget_set_vexpand(dismiss_target_, TRUE);
+    gtk_widget_set_can_target(dismiss_target_, TRUE);
+    gtk_overlay_set_child(GTK_OVERLAY(layer_overlay_), dismiss_target_);
+
+    GtkGesture* dismiss_click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(
+        GTK_GESTURE_SINGLE(dismiss_click),
+        GDK_BUTTON_PRIMARY
+    );
+    g_signal_connect(
+        dismiss_click,
+        "pressed",
+        G_CALLBACK(+[](GtkGestureClick*, int, double, double, gpointer data) {
+            static_cast<MediaWidget*>(data)->close();
+        }),
+        this
+    );
+    gtk_widget_add_controller(
+        dismiss_target_,
+        GTK_EVENT_CONTROLLER(dismiss_click)
+    );
 
     GtkWidget* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_add_css_class(root, "realmheart-media-content");
@@ -398,13 +451,55 @@ MediaWidget::MediaWidget(
         true,
         true
     );
-    gtk_window_set_child(GTK_WINDOW(layer_window_), media_shell);
+
+    // GtkRevealer changes the child's allocation during a slide, which made
+    // the Cairo shell redraw itself as a temporary 10-20 px-wide panel. The
+    // custom clip keeps media_shell at its complete final width on every frame
+    // and reveals only its snapshot from the taskbar edge toward the right.
+    layer_clip_ = realmheart_slide_clip_new(
+        media_shell,
+        kMediaRevealDurationMs
+    );
+    realmheart_slide_clip_set_leading_edge_reveal(
+        REALMHEART_SLIDE_CLIP(layer_clip_),
+        kMediaRevealTravelPx
+    );
+    g_signal_connect(
+        layer_clip_,
+        "concealed",
+        G_CALLBACK(+[](RealmheartSlideClip*, gpointer data) {
+            auto* self = static_cast<MediaWidget*>(data);
+            if (!self->layer_open_ && self->layer_window_ != nullptr) {
+                gtk_widget_set_visible(self->layer_window_, FALSE);
+                // The taskbar and media panel are separate Wayland surfaces.
+                // Restoring the bar contour in this same frame can commit one
+                // frame before the media surface's unmap, which produces the
+                // hairline gold streak seen at the end of concealment. Keep the
+                // contour suppressed until the next taskbar frame instead.
+                self->schedule_bar_contour_restore();
+            }
+        }),
+        this
+    );
+    gtk_widget_set_halign(layer_clip_, GTK_ALIGN_START);
+    gtk_widget_set_valign(layer_clip_, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(layer_clip_, FALSE);
+    gtk_widget_set_vexpand(layer_clip_, FALSE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(layer_overlay_), layer_clip_);
+    gtk_overlay_set_measure_overlay(
+        GTK_OVERLAY(layer_overlay_),
+        layer_clip_,
+        FALSE
+    );
+    gtk_window_set_child(GTK_WINDOW(layer_window_), layer_overlay_);
 
     update(std::nullopt);
 }
 
 MediaWidget::~MediaWidget() {
     hide_layer_window();
+    cancel_bar_contour_restore();
+    if (set_bar_contour_occlusion_) set_bar_contour_occlusion_(0);
     if (seek_commit_timer_id_ != 0) {
         g_source_remove(seek_commit_timer_id_);
         seek_commit_timer_id_ = 0;
@@ -416,6 +511,48 @@ MediaWidget::~MediaWidget() {
         gtk_window_destroy(GTK_WINDOW(layer_window_));
         layer_window_ = nullptr;
     }
+}
+
+void MediaWidget::cancel_bar_contour_restore() {
+    if (contour_restore_tick_id_ == 0) return;
+
+    GtkWidget* clock_widget = button_.widget();
+    if (clock_widget != nullptr) {
+        gtk_widget_remove_tick_callback(clock_widget, contour_restore_tick_id_);
+    }
+    contour_restore_tick_id_ = 0;
+}
+
+void MediaWidget::schedule_bar_contour_restore() {
+    cancel_bar_contour_restore();
+    if (!set_bar_contour_occlusion_) return;
+
+    GtkWidget* clock_widget = button_.widget();
+    if (clock_widget == nullptr) {
+        set_bar_contour_occlusion_(0);
+        return;
+    }
+
+    contour_restore_tick_id_ = gtk_widget_add_tick_callback(
+        clock_widget,
+        +[](GtkWidget*, GdkFrameClock*, gpointer data) -> gboolean {
+            auto* self = static_cast<MediaWidget*>(data);
+            self->contour_restore_tick_id_ = 0;
+
+            // A reopen may happen before this frame arrives. In that case the
+            // media shell still owns this section of the contour, so leave the
+            // taskbar's underlying stroke suppressed.
+            if (!self->layer_open_ &&
+                (self->layer_window_ == nullptr ||
+                 !gtk_widget_get_visible(self->layer_window_)) &&
+                self->set_bar_contour_occlusion_) {
+                self->set_bar_contour_occlusion_(0);
+            }
+            return G_SOURCE_REMOVE;
+        },
+        this,
+        nullptr
+    );
 }
 
 int MediaWidget::layer_left_margin() const {
@@ -437,83 +574,126 @@ int MediaWidget::layer_left_margin() const {
     );
 }
 
-void MediaWidget::show_layer_window() {
-    if (layer_window_ == nullptr) return;
+void MediaWidget::update_layer_input_region() {
+    if (layer_window_ == nullptr || layer_clip_ == nullptr) return;
 
-    if (reveal_tick_id_ != 0) {
-        gtk_widget_remove_tick_callback(layer_window_, reveal_tick_id_);
-        reveal_tick_id_ = 0;
+    GdkSurface* surface = gtk_native_get_surface(GTK_NATIVE(layer_window_));
+    if (surface == nullptr) return;
+
+    const int width = gdk_surface_get_width(surface);
+    const int height = gdk_surface_get_height(surface);
+    if (width <= 0 || height <= 0) return;
+
+    cairo_region_t* input_region = cairo_region_create();
+
+    // Everything to the right of the taskbar is an outside-click target.
+    if (width > kTaskbarInputPassThroughWidth) {
+        const cairo_rectangle_int_t outside_region{
+            kTaskbarInputPassThroughWidth,
+            0,
+            width - kTaskbarInputPassThroughWidth,
+            height
+        };
+        cairo_region_union_rectangle(input_region, &outside_region);
     }
 
-    reveal_target_x_ = layer_left_margin();
-    reveal_start_x_ = std::max(0, reveal_target_x_ - kExpandingPopoverRevealPixels);
-    reveal_started_us_ = 0;
+    // The attached media shell begins slightly inside the rail. Include its
+    // exact rectangle so its border and controls remain interactive while the
+    // rest of the taskbar stays pointer-pass-through.
+    const int media_width = gtk_widget_get_width(layer_clip_);
+    const int media_height = gtk_widget_get_height(layer_clip_);
+    if (media_width > 0 && media_height > 0) {
+        const cairo_rectangle_int_t media_region{
+            gtk_widget_get_margin_start(layer_clip_),
+            gtk_widget_get_margin_top(layer_clip_),
+            media_width,
+            media_height
+        };
+        cairo_region_union_rectangle(input_region, &media_region);
+    }
 
-    gtk_widget_set_opacity(layer_window_, 0.0);
-    gtk_layer_set_margin(
-        GTK_WINDOW(layer_window_),
-        GTK_LAYER_SHELL_EDGE_LEFT,
-        reveal_start_x_
-    );
-    gtk_layer_set_margin(
-        GTK_WINDOW(layer_window_),
-        GTK_LAYER_SHELL_EDGE_TOP,
-        0
+    gdk_surface_set_input_region(surface, input_region);
+    cairo_region_destroy(input_region);
+}
+
+void MediaWidget::show_layer_window() {
+    if (layer_window_ == nullptr || layer_clip_ == nullptr) return;
+
+    cancel_bar_contour_restore();
+    layer_open_ = true;
+
+    // The fullscreen surface stays fixed at the monitor origin. Move only the
+    // naturally sized media child to the exact finalized resting coordinate.
+    gtk_widget_set_margin_start(layer_clip_, layer_left_margin());
+    gtk_widget_set_margin_top(layer_clip_, 0);
+    gtk_widget_set_opacity(layer_window_, 1.0);
+
+    // Suppress the bar's own contour beneath the media shell before presenting
+    // the overlay surface. Otherwise that stationary line is progressively
+    // uncovered by the moving lower shoulder during concealment. Measurement
+    // works before mapping; the first mapped tick below refreshes the exact
+    // allocated height once GTK has completed layout.
+    if (set_bar_contour_occlusion_) {
+        int minimum_height = 0;
+        int natural_height = 0;
+        gtk_widget_measure(
+            layer_clip_,
+            GTK_ORIENTATION_VERTICAL,
+            -1,
+            &minimum_height,
+            &natural_height,
+            nullptr,
+            nullptr
+        );
+        set_bar_contour_occlusion_(std::max(minimum_height, natural_height));
+    }
+
+    if (gtk_widget_get_visible(layer_window_)) {
+        // The dismiss surface may have been remapped during a mid-concealment
+        // reversal. Re-present media so it remains stacked above the catcher.
+        gtk_window_present(GTK_WINDOW(layer_window_));
+        update_layer_input_region();
+        // Reopening during concealment retargets the clip from its exact current
+        // progress, so the animation reverses without a snap.
+        realmheart_slide_clip_set_revealed(
+            REALMHEART_SLIDE_CLIP(layer_clip_),
+            TRUE
+        );
+        return;
+    }
+
+    if (reveal_start_tick_id_ != 0) {
+        gtk_widget_remove_tick_callback(layer_window_, reveal_start_tick_id_);
+        reveal_start_tick_id_ = 0;
+    }
+
+    realmheart_slide_clip_set_revealed_immediately(
+        REALMHEART_SLIDE_CLIP(layer_clip_),
+        FALSE
     );
     gtk_window_present(GTK_WINDOW(layer_window_));
 
-    reveal_tick_id_ = gtk_widget_add_tick_callback(
+    // Map one fully concealed frame first. Beginning on the next compositor
+    // frame prevents the window's initial map from skipping the clipped start.
+    reveal_start_tick_id_ = gtk_widget_add_tick_callback(
         layer_window_,
-        +[](GtkWidget* widget, GdkFrameClock* frame_clock, gpointer data) -> gboolean {
+        +[](GtkWidget* widget, GdkFrameClock*, gpointer data) -> gboolean {
             auto* self = static_cast<MediaWidget*>(data);
-            if (!gtk_widget_get_visible(widget)) {
-                self->reveal_tick_id_ = 0;
-                return G_SOURCE_REMOVE;
-            }
-
-            const gint64 now = gdk_frame_clock_get_frame_time(frame_clock);
-            if (self->reveal_started_us_ == 0) self->reveal_started_us_ = now;
-
-            const double linear = std::clamp(
-                static_cast<double>(now - self->reveal_started_us_) /
-                    kMediaRevealDurationUs,
-                0.0,
-                1.0
-            );
-            const double eased = 1.0 - std::pow(1.0 - linear, 3.0);
-            const int left = self->reveal_start_x_ + static_cast<int>(std::lround(
-                static_cast<double>(self->reveal_target_x_ - self->reveal_start_x_) * eased
-            ));
-
-            const double fade_delay = popover_fade_delay_after_travel(
-                kExpandingPopoverRevealPixels,
-                kExpandingPopoverHiddenTravelPixels
-            );
-            const double opacity_linear = std::clamp(
-                (linear - fade_delay) / std::max(0.001, 1.0 - fade_delay),
-                0.0,
-                1.0
-            );
-            const double opacity = 1.0 - std::pow(1.0 - opacity_linear, 3.0);
-
-            gtk_layer_set_margin(
-                GTK_WINDOW(widget),
-                GTK_LAYER_SHELL_EDGE_LEFT,
-                left
-            );
-            gtk_widget_set_opacity(widget, opacity);
-
-            if (linear >= 1.0) {
-                self->reveal_tick_id_ = 0;
-                gtk_layer_set_margin(
-                    GTK_WINDOW(widget),
-                    GTK_LAYER_SHELL_EDGE_LEFT,
-                    self->reveal_target_x_
+            self->reveal_start_tick_id_ = 0;
+            if (self->layer_open_ && gtk_widget_get_visible(widget) &&
+                self->layer_clip_ != nullptr) {
+                self->update_layer_input_region();
+                if (self->set_bar_contour_occlusion_) {
+                    self->set_bar_contour_occlusion_(
+                        gtk_widget_get_height(self->layer_clip_)
+                    );
+                }
+                realmheart_slide_clip_set_revealed(
+                    REALMHEART_SLIDE_CLIP(self->layer_clip_),
+                    TRUE
                 );
-                gtk_widget_set_opacity(widget, 1.0);
-                return G_SOURCE_REMOVE;
             }
-            return G_SOURCE_CONTINUE;
+            return G_SOURCE_REMOVE;
         },
         this,
         nullptr
@@ -521,20 +701,41 @@ void MediaWidget::show_layer_window() {
 }
 
 void MediaWidget::hide_layer_window() {
-    if (reveal_tick_id_ != 0 && layer_window_ != nullptr) {
-        gtk_widget_remove_tick_callback(layer_window_, reveal_tick_id_);
-        reveal_tick_id_ = 0;
-    }
-    reveal_started_us_ = 0;
-    if (layer_window_ != nullptr) {
-        gtk_widget_set_opacity(layer_window_, 1.0);
-        gtk_widget_set_visible(layer_window_, FALSE);
-    }
+    layer_open_ = false;
     stop_position_refresh();
+
+    if (layer_window_ == nullptr || layer_clip_ == nullptr) return;
+
+    if (reveal_start_tick_id_ != 0) {
+        gtk_widget_remove_tick_callback(layer_window_, reveal_start_tick_id_);
+        reveal_start_tick_id_ = 0;
+    }
+
+    if (!gtk_widget_get_visible(layer_window_)) {
+        realmheart_slide_clip_set_revealed_immediately(
+            REALMHEART_SLIDE_CLIP(layer_clip_),
+            FALSE
+        );
+        cancel_bar_contour_restore();
+        if (set_bar_contour_occlusion_) set_bar_contour_occlusion_(0);
+        return;
+    }
+
+    realmheart_slide_clip_set_revealed(
+        REALMHEART_SLIDE_CLIP(layer_clip_),
+        FALSE
+    );
+
+    if (realmheart_slide_clip_is_concealed(
+            REALMHEART_SLIDE_CLIP(layer_clip_)
+        )) {
+        gtk_widget_set_visible(layer_window_, FALSE);
+        schedule_bar_contour_restore();
+    }
 }
 
 void MediaWidget::toggle() {
-    if (layer_window_ != nullptr && gtk_widget_get_visible(layer_window_)) {
+    if (layer_open_) {
         close();
         return;
     }
@@ -555,7 +756,6 @@ void MediaWidget::invoke_control(const char* method) {
         else if (action == "next") static_cast<void>(service->next());
         else static_cast<void>(service->play_pause());
     }));
-    close();
 }
 
 void MediaWidget::start_position_refresh() {

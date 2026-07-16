@@ -18,6 +18,7 @@ popover.realmheart-expanding-popover > contents,
  * nodes remain structurally transparent; the custom Cairo shell paints the
  * entire visible body with the same taskbar colour and opacity. */
 window.realmheart-media-layer-window,
+window.realmheart-media-dismiss-window,
 window.realmheart-system-monitor-layer-window {
   color: @rh_text;
   background-color: transparent;

@@ -77,6 +77,7 @@ add_library(realmheart_ui STATIC
     src/ui/bar/widgets/BarBackdrop.cpp
     src/ui/bar/widgets/BarIconButton.cpp
     src/ui/bar/widgets/ThemedSvgIcon.cpp
+    src/ui/bar/widgets/SlideClip.cpp
     src/ui/bar/widgets/ClockWidget.cpp
     src/ui/bar/widgets/WorkspaceRune.cpp
     src/ui/bar/widgets/MediaWidget.cpp

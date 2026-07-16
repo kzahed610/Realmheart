@@ -13,6 +13,7 @@ struct BackdropState {
     int rail_width = 0;
     int visual_width = 0;
     int curve_height = 0;
+    int top_contour_occlusion_bottom = 0;
 };
 
 void destroy_state(gpointer raw) {
@@ -102,20 +103,45 @@ void append_fill_path(cairo_t* cr, const Geometry& geometry, int height) {
     append_bottom_cap_path(cr, geometry, height);
 }
 
-void append_contour_path(cairo_t* cr, const Geometry& geometry, int height) {
+void append_contour_path(
+    cairo_t* cr,
+    const Geometry& geometry,
+    int height,
+    int top_occlusion_bottom
+) {
     const double bottom = static_cast<double>(height);
-
-    cairo_move_to(cr, geometry.visual, 0.0);
-    cairo_curve_to(
-        cr,
-        geometry.visual - (kQuarterEllipseKappa * geometry.cap),
+    const double vertical_bottom = bottom - geometry.curve;
+    const double occlusion_bottom = std::clamp(
+        static_cast<double>(top_occlusion_bottom),
         0.0,
-        geometry.rail,
-        geometry.curve - (kQuarterEllipseKappa * geometry.curve),
-        geometry.rail,
-        geometry.curve
+        bottom
     );
-    cairo_line_to(cr, geometry.rail, bottom - geometry.curve);
+
+    if (occlusion_bottom <= 0.0) {
+        cairo_move_to(cr, geometry.visual, 0.0);
+        cairo_curve_to(
+            cr,
+            geometry.visual - (kQuarterEllipseKappa * geometry.cap),
+            0.0,
+            geometry.rail,
+            geometry.curve - (kQuarterEllipseKappa * geometry.curve),
+            geometry.rail,
+            geometry.curve
+        );
+    } else if (occlusion_bottom < vertical_bottom) {
+        // Media's overlay surface replaces the top contour while it is visible.
+        // Begin the bar's own rail only below the media shell, so concealment
+        // cannot progressively uncover a thin gold line underneath it.
+        cairo_move_to(cr, geometry.rail, std::max(geometry.curve, occlusion_bottom));
+    } else {
+        // The occlusion reaches the lower cap. There is no straight rail left
+        // to draw; begin at the cap's natural start point instead.
+        cairo_move_to(cr, geometry.rail, vertical_bottom);
+    }
+
+    if (occlusion_bottom < vertical_bottom) {
+        cairo_line_to(cr, geometry.rail, vertical_bottom);
+    }
     cairo_curve_to(
         cr,
         geometry.rail,
@@ -160,7 +186,12 @@ void draw_contour(
     cairo_set_line_width(cr, kContourWidth);
     cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
-    append_contour_path(cr, geometry, height);
+    append_contour_path(
+        cr,
+        geometry,
+        height,
+        state.top_contour_occlusion_bottom
+    );
     cairo_stroke(cr);
 }
 
@@ -233,17 +264,38 @@ BarBackdrop::BarBackdrop(
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(fill), draw_fill, state, nullptr);
     gtk_overlay_set_child(GTK_OVERLAY(widget_), fill);
 
-    GtkWidget* contour = gtk_drawing_area_new();
-    gtk_widget_add_css_class(contour, "realmheart-bar-backdrop-contour");
-    gtk_widget_set_can_target(contour, FALSE);
-    gtk_widget_set_hexpand(contour, TRUE);
-    gtk_widget_set_vexpand(contour, TRUE);
-    gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(contour), draw_contour, state, nullptr);
-    gtk_overlay_add_overlay(GTK_OVERLAY(widget_), contour);
+    contour_ = gtk_drawing_area_new();
+    gtk_widget_add_css_class(contour_, "realmheart-bar-backdrop-contour");
+    gtk_widget_set_can_target(contour_, FALSE);
+    gtk_widget_set_hexpand(contour_, TRUE);
+    gtk_widget_set_vexpand(contour_, TRUE);
+    gtk_drawing_area_set_draw_func(
+        GTK_DRAWING_AREA(contour_),
+        draw_contour,
+        state,
+        nullptr
+    );
+    gtk_overlay_add_overlay(GTK_OVERLAY(widget_), contour_);
 
     // DrawingArea::resize fires once after realization and whenever the
     // monitor allocation changes, keeping the click-through region in sync.
     g_signal_connect(fill, "resize", G_CALLBACK(on_resize), state);
+}
+
+void BarBackdrop::set_top_contour_occlusion(int bottom_y) {
+    if (widget_ == nullptr || contour_ == nullptr) return;
+
+    auto* state = static_cast<BackdropState*>(g_object_get_data(
+        G_OBJECT(widget_),
+        "realmheart-bar-backdrop-state"
+    ));
+    if (state == nullptr) return;
+
+    const int clamped = std::max(bottom_y, 0);
+    if (state->top_contour_occlusion_bottom == clamped) return;
+
+    state->top_contour_occlusion_bottom = clamped;
+    gtk_widget_queue_draw(contour_);
 }
 
 } // namespace realmheart::ui::bar::widgets

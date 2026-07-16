@@ -3,7 +3,7 @@
 #include "ui/bar/widgets/AttachedPopover.hpp"
 #include "core/TaskExecutor.hpp"
 #include "ui/LayerSurface.hpp"
-#include "ui/bar/widgets/PopoverReveal.hpp"
+#include "ui/bar/widgets/SlideClip.hpp"
 
 #include <gtk4-layer-shell/gtk4-layer-shell.h>
 
@@ -69,7 +69,9 @@ std::string processor_text(double percent, const std::optional<double>& frequenc
 constexpr int kSystemLayerExtraOffsetX = kExpandingPopoverOffsetX;
 constexpr int kSystemLayerFallbackLeft = 56;
 constexpr int kSystemLayerFallbackTop = 92;
-constexpr double kSystemRevealDurationUs = 210000.0;
+// Match the media layer surface: enough visible horizontal travel to read
+// as a slide, without changing the finalized resting position.
+constexpr guint kSystemRevealDurationMs = 240;
 
 } // namespace
 
@@ -150,13 +152,70 @@ SystemMonitorWidget::SystemMonitorWidget(
 
     // Standard expanding geometry: no media-only top flush or screen hug.
     layer_shell_ = create_expanding_popover_shell(root);
-    gtk_window_set_child(GTK_WINDOW(layer_window_), layer_shell_);
 
-    g_signal_connect(button_, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
-        auto* self = static_cast<SystemMonitorWidget*>(data);
-        self->trigger_click_feedback();
-        self->toggle();
-    }), this);
+    // Keep the shell at its complete final allocation and animate only the
+    // snapshot clip. Unlike GtkRevealer, this never asks Cairo to redraw the
+    // panel at a temporary narrow width, so its gold contour cannot collapse.
+    layer_clip_ = realmheart_slide_clip_new(
+        layer_shell_,
+        kSystemRevealDurationMs
+    );
+    g_signal_connect(
+        layer_clip_,
+        "concealed",
+        G_CALLBACK(+[](RealmheartSlideClip*, gpointer data) {
+            auto* self = static_cast<SystemMonitorWidget*>(data);
+            if (!self->open_ && self->layer_window_ != nullptr) {
+                gtk_widget_set_visible(self->layer_window_, FALSE);
+            }
+        }),
+        this
+    );
+    gtk_window_set_child(GTK_WINDOW(layer_window_), layer_clip_);
+
+    // Press-and-hold semantics: the stats surface exists only for the lifetime
+    // of the primary-button press. GtkGestureClick keeps the implicit pointer
+    // grab, so releasing after moving away still conceals the panel.
+    GtkGesture* hold_gesture = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(
+        GTK_GESTURE_SINGLE(hold_gesture),
+        GDK_BUTTON_PRIMARY
+    );
+    gtk_event_controller_set_propagation_phase(
+        GTK_EVENT_CONTROLLER(hold_gesture),
+        GTK_PHASE_CAPTURE
+    );
+    g_signal_connect(
+        hold_gesture,
+        "pressed",
+        G_CALLBACK(+[](GtkGestureClick* gesture, int, double, double, gpointer data) {
+            auto* self = static_cast<SystemMonitorWidget*>(data);
+            gtk_gesture_set_state(
+                GTK_GESTURE(gesture),
+                GTK_EVENT_SEQUENCE_CLAIMED
+            );
+            self->trigger_click_feedback();
+            self->open();
+        }),
+        this
+    );
+    g_signal_connect(
+        hold_gesture,
+        "released",
+        G_CALLBACK(+[](GtkGestureClick*, int, double, double, gpointer data) {
+            static_cast<SystemMonitorWidget*>(data)->close();
+        }),
+        this
+    );
+    g_signal_connect(
+        hold_gesture,
+        "cancel",
+        G_CALLBACK(+[](GtkGesture*, GdkEventSequence*, gpointer data) {
+            static_cast<SystemMonitorWidget*>(data)->close();
+        }),
+        this
+    );
+    gtk_widget_add_controller(button_, GTK_EVENT_CONTROLLER(hold_gesture));
 }
 
 SystemMonitorWidget::~SystemMonitorWidget() {
@@ -275,79 +334,54 @@ int SystemMonitorWidget::layer_top_margin() const {
 }
 
 void SystemMonitorWidget::show_layer_window() {
-    if (layer_window_ == nullptr) return;
+    if (layer_window_ == nullptr || layer_clip_ == nullptr) return;
 
-    if (reveal_tick_id_ != 0) {
-        gtk_widget_remove_tick_callback(layer_window_, reveal_tick_id_);
-        reveal_tick_id_ = 0;
-    }
-
-    reveal_target_x_ = layer_left_margin();
-    reveal_target_y_ = layer_top_margin();
-    reveal_start_x_ = std::max(0, reveal_target_x_ - kExpandingPopoverRevealPixels);
-    reveal_started_us_ = 0;
-
-    gtk_widget_set_opacity(layer_window_, 0.0);
+    // Preserve the exact finalized resting coordinates. The layer margin and
+    // the shell allocation remain constant throughout the animation.
     gtk_layer_set_margin(
         GTK_WINDOW(layer_window_),
         GTK_LAYER_SHELL_EDGE_LEFT,
-        reveal_start_x_
+        layer_left_margin()
     );
     gtk_layer_set_margin(
         GTK_WINDOW(layer_window_),
         GTK_LAYER_SHELL_EDGE_TOP,
-        reveal_target_y_
+        layer_top_margin()
+    );
+    gtk_widget_set_opacity(layer_window_, 1.0);
+
+    if (gtk_widget_get_visible(layer_window_)) {
+        realmheart_slide_clip_set_revealed(
+            REALMHEART_SLIDE_CLIP(layer_clip_),
+            TRUE
+        );
+        return;
+    }
+
+    if (reveal_start_tick_id_ != 0) {
+        gtk_widget_remove_tick_callback(layer_window_, reveal_start_tick_id_);
+        reveal_start_tick_id_ = 0;
+    }
+
+    realmheart_slide_clip_set_revealed_immediately(
+        REALMHEART_SLIDE_CLIP(layer_clip_),
+        FALSE
     );
     gtk_window_present(GTK_WINDOW(layer_window_));
 
-    reveal_tick_id_ = gtk_widget_add_tick_callback(
+    reveal_start_tick_id_ = gtk_widget_add_tick_callback(
         layer_window_,
-        +[](GtkWidget* widget, GdkFrameClock* frame_clock, gpointer data) -> gboolean {
+        +[](GtkWidget* widget, GdkFrameClock*, gpointer data) -> gboolean {
             auto* self = static_cast<SystemMonitorWidget*>(data);
-            if (!gtk_widget_get_visible(widget)) {
-                self->reveal_tick_id_ = 0;
-                return G_SOURCE_REMOVE;
-            }
-
-            const gint64 now = gdk_frame_clock_get_frame_time(frame_clock);
-            if (self->reveal_started_us_ == 0) self->reveal_started_us_ = now;
-
-            const double linear = std::clamp(
-                static_cast<double>(now - self->reveal_started_us_) /
-                    kSystemRevealDurationUs,
-                0.0,
-                1.0
-            );
-            const double eased = 1.0 - std::pow(1.0 - linear, 3.0);
-            const int left = self->reveal_start_x_ + static_cast<int>(std::lround(
-                static_cast<double>(self->reveal_target_x_ - self->reveal_start_x_) * eased
-            ));
-
-            const double fade_delay = popover_fade_delay_after_travel(
-                kExpandingPopoverRevealPixels,
-                kExpandingPopoverHiddenTravelPixels
-            );
-            const double opacity_linear = std::clamp(
-                (linear - fade_delay) / std::max(0.001, 1.0 - fade_delay),
-                0.0,
-                1.0
-            );
-            const double opacity = 1.0 - std::pow(1.0 - opacity_linear, 3.0);
-
-            gtk_layer_set_margin(GTK_WINDOW(widget), GTK_LAYER_SHELL_EDGE_LEFT, left);
-            gtk_widget_set_opacity(widget, opacity);
-
-            if (linear >= 1.0) {
-                self->reveal_tick_id_ = 0;
-                gtk_layer_set_margin(
-                    GTK_WINDOW(widget),
-                    GTK_LAYER_SHELL_EDGE_LEFT,
-                    self->reveal_target_x_
+            self->reveal_start_tick_id_ = 0;
+            if (self->open_ && gtk_widget_get_visible(widget) &&
+                self->layer_clip_ != nullptr) {
+                realmheart_slide_clip_set_revealed(
+                    REALMHEART_SLIDE_CLIP(self->layer_clip_),
+                    TRUE
                 );
-                gtk_widget_set_opacity(widget, 1.0);
-                return G_SOURCE_REMOVE;
             }
-            return G_SOURCE_CONTINUE;
+            return G_SOURCE_REMOVE;
         },
         this,
         nullptr
@@ -355,25 +389,34 @@ void SystemMonitorWidget::show_layer_window() {
 }
 
 void SystemMonitorWidget::hide_layer_window() {
-    if (reveal_tick_id_ != 0 && layer_window_ != nullptr) {
-        gtk_widget_remove_tick_callback(layer_window_, reveal_tick_id_);
-        reveal_tick_id_ = 0;
-    }
-    reveal_started_us_ = 0;
-    if (layer_window_ != nullptr) {
-        gtk_widget_set_opacity(layer_window_, 1.0);
-        gtk_widget_set_visible(layer_window_, FALSE);
-    }
     open_ = false;
     stop_live_refresh();
-}
 
-void SystemMonitorWidget::toggle() {
-    if (open_) {
-        close();
+    if (layer_window_ == nullptr || layer_clip_ == nullptr) return;
+
+    if (reveal_start_tick_id_ != 0) {
+        gtk_widget_remove_tick_callback(layer_window_, reveal_start_tick_id_);
+        reveal_start_tick_id_ = 0;
+    }
+
+    if (!gtk_widget_get_visible(layer_window_)) {
+        realmheart_slide_clip_set_revealed_immediately(
+            REALMHEART_SLIDE_CLIP(layer_clip_),
+            FALSE
+        );
         return;
     }
-    open();
+
+    realmheart_slide_clip_set_revealed(
+        REALMHEART_SLIDE_CLIP(layer_clip_),
+        FALSE
+    );
+
+    if (realmheart_slide_clip_is_concealed(
+            REALMHEART_SLIDE_CLIP(layer_clip_)
+        )) {
+        gtk_widget_set_visible(layer_window_, FALSE);
+    }
 }
 
 void SystemMonitorWidget::open() {

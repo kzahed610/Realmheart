@@ -22,7 +22,8 @@ public:
     MediaWidget(
         GtkApplication* app,
         services::MediaService& media_service,
-        std::function<void()> request_exclusive_open
+        std::function<void()> request_exclusive_open,
+        std::function<void(int)> set_bar_contour_occlusion
     );
     ~MediaWidget();
 
@@ -43,6 +44,9 @@ private:
     void toggle();
     void show_layer_window();
     void hide_layer_window();
+    void update_layer_input_region();
+    void schedule_bar_contour_restore();
+    void cancel_bar_contour_restore();
     int layer_left_margin() const;
     void invoke_control(const char* method);
     void start_position_refresh();
@@ -56,12 +60,15 @@ private:
 
     services::MediaService& media_service_;
     std::function<void()> request_exclusive_open_;
+    std::function<void(int)> set_bar_contour_occlusion_;
     BarIconButton button_;
     GtkWidget* layer_window_ = nullptr;
-    guint reveal_tick_id_ = 0;
-    gint64 reveal_started_us_ = 0;
-    int reveal_start_x_ = 0;
-    int reveal_target_x_ = 0;
+    GtkWidget* layer_overlay_ = nullptr;
+    GtkWidget* dismiss_target_ = nullptr;
+    GtkWidget* layer_clip_ = nullptr;
+    guint reveal_start_tick_id_ = 0;
+    guint contour_restore_tick_id_ = 0;
+    bool layer_open_ = false;
     GtkWidget* album_stack_ = nullptr;
     GtkWidget* album_picture_ = nullptr;
     GtkWidget* album_fallback_ = nullptr;

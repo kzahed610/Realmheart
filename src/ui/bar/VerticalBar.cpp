@@ -246,6 +246,9 @@ void VerticalBar::setup_layout() {
 void VerticalBar::populate_widgets() {
     auto exclusive_open = [this](GtkPopover* popover) { open_exclusive_popover(popover); };
     auto media_exclusive_open = [this] { open_exclusive_media(); };
+    auto media_contour_occlusion = [this](int bottom_y) {
+        if (backdrop_ != nullptr) backdrop_->set_top_contour_occlusion(bottom_y);
+    };
     auto system_exclusive_open = [this] { open_exclusive_system(); };
 
     launcher_button_ = std::make_unique<widgets::BarIconButton>(
@@ -258,7 +261,10 @@ void VerticalBar::populate_widgets() {
     launcher_button_->set_icon_size(32);
 
     media_widget_ = std::make_unique<widgets::MediaWidget>(
-        app_, media_service_, media_exclusive_open
+        app_,
+        media_service_,
+        media_exclusive_open,
+        media_contour_occlusion
     );
     system_monitor_widget_ = std::make_unique<widgets::SystemMonitorWidget>(
         app_, system_exclusive_open
@@ -320,6 +326,45 @@ void VerticalBar::populate_widgets() {
         workspace_region_
     );
     gtk_center_box_set_end_widget(GTK_CENTER_BOX(content_container_), bottom_cluster);
+
+    // The media outside-click catcher deliberately leaves the physical bar
+    // pointer-transparent so bar controls keep their normal one-click actions.
+    // Close media during the bar's capture phase for every press except its own
+    // icon; the original target then continues handling the same event.
+    GtkGesture* bar_media_dismiss = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(
+        GTK_GESTURE_SINGLE(bar_media_dismiss),
+        GDK_BUTTON_PRIMARY
+    );
+    gtk_event_controller_set_propagation_phase(
+        GTK_EVENT_CONTROLLER(bar_media_dismiss),
+        GTK_PHASE_CAPTURE
+    );
+    g_signal_connect(
+        bar_media_dismiss,
+        "pressed",
+        G_CALLBACK(+[](GtkGestureClick*, int, double x, double y, gpointer data) {
+            auto* self = static_cast<VerticalBar*>(data);
+            if (self->media_widget_ == nullptr || self->window_ == nullptr) return;
+
+            GtkWidget* media_button = self->media_widget_->widget();
+            GtkWidget* target = gtk_widget_pick(
+                self->window_,
+                x,
+                y,
+                GTK_PICK_DEFAULT
+            );
+            const bool pressed_media_icon = target != nullptr &&
+                (target == media_button ||
+                 gtk_widget_is_ancestor(target, media_button));
+            if (!pressed_media_icon) self->media_widget_->close();
+        }),
+        this
+    );
+    gtk_widget_add_controller(
+        window_,
+        GTK_EVENT_CONTROLLER(bar_media_dismiss)
+    );
 
     apply_notifications(notification_history_.snapshot());
 }
