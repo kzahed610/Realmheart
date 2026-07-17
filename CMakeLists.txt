@@ -85,6 +85,7 @@ add_library(realmheart_ui STATIC
     src/ui/bar/widgets/BatteryWidget.cpp
     src/services/SystemMonitorService.cpp
     src/ui/sidebar/RightSidebar.cpp
+    src/ui/sidebar/SidebarFrame.cpp
     src/ui/NotificationToast.cpp
     src/ui/OSDOverlay.cpp
     src/ui/lockscreen/LockScreen.cpp

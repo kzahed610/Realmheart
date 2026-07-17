@@ -1,5 +1,7 @@
 #include "ui/sidebar/RightSidebar.hpp"
 
+#include "ui/sidebar/SidebarFrame.hpp"
+
 #include "core/TaskExecutor.hpp"
 #include "services/Audio.hpp"
 #include "services/Bluetooth.hpp"
@@ -15,12 +17,48 @@
 #include "ui/components/SliderWidget.hpp"
 #include "ui/components/ToggleWidget.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <optional>
 #include <utility>
 
 namespace realmheart::ui::sidebar {
+namespace {
+
+constexpr double kSidebarHeightFraction = 0.85;
+constexpr int kSidebarRightMargin = 2;
+
+} // namespace
+
+SidebarPlacement sidebar_placement_for(GtkWidget* widget) {
+    SidebarPlacement placement;
+    GdkDisplay* display = gtk_widget_get_display(widget);
+    if (display == nullptr) return placement;
+
+    GListModel* monitors = gdk_display_get_monitors(display);
+    if (monitors == nullptr || g_list_model_get_n_items(monitors) == 0) {
+        return placement;
+    }
+
+    auto* monitor = GDK_MONITOR(g_list_model_get_item(monitors, 0));
+    if (monitor == nullptr) return placement;
+
+    GdkRectangle geometry{};
+    gdk_monitor_get_geometry(monitor, &geometry);
+    g_object_unref(monitor);
+
+    if (geometry.height <= 0) return placement;
+
+    placement.height = std::max(
+        static_cast<int>(std::lround(
+            static_cast<double>(geometry.height) * kSidebarHeightFraction
+        )),
+        1
+    );
+    placement.top_margin = std::max((geometry.height - placement.height) / 2, 0);
+    return placement;
+}
 
 RightSidebar::RightSidebar(
     GtkApplication* app,
@@ -34,18 +72,29 @@ RightSidebar::RightSidebar(
     show_brightness_osd_(std::move(show_brightness_osd)) {
     window_ = gtk_application_window_new(app_);
     gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Right Sidebar");
-    gtk_window_set_default_size(GTK_WINDOW(window_), 300, 800);
+    gtk_widget_add_css_class(window_, "realmheart-sidebar-window");
     gtk_window_set_resizable(GTK_WINDOW(window_), FALSE);
     gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
 
-    apply_layer_surface(
+    const auto placement = sidebar_placement_for(window_);
+    gtk_window_set_default_size(
         GTK_WINDOW(window_),
-        make_layer_surface_spec(
-            "realmheart-right-sidebar",
-            LayerSurfaceLevel::Overlay,
-            LayerKeyboardMode::OnDemand
-        )
+        kDefaultSidebarFrameLayout.surface_width(),
+        placement.height
     );
+
+    auto layer_spec = make_layer_surface_spec(
+        "realmheart-right-sidebar",
+        LayerSurfaceLevel::Overlay,
+        LayerKeyboardMode::OnDemand
+    );
+    // A fixed-height, top-anchored layer surface gives us an exact 85% shell
+    // while the computed margin centres it vertically. Keeping bottom
+    // unanchored prevents layer-shell from stretching it back to full height.
+    layer_spec.anchor_bottom = false;
+    layer_spec.margin_top = placement.top_margin;
+    layer_spec.margin_right = kSidebarRightMargin;
+    apply_layer_surface(GTK_WINDOW(window_), layer_spec);
 
     setup_layout();
     populate_modules();
@@ -62,9 +111,13 @@ RightSidebar::~RightSidebar() {
 }
 
 void RightSidebar::setup_layout() {
+    frame_ = std::make_unique<SidebarFrame>(
+        GTK_WINDOW(window_),
+        kDefaultSidebarFrameLayout
+    );
+
     container_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(container_, "realmheart-right-sidebar");
-    gtk_widget_set_size_request(container_, 300, -1);
 
     GtkWidget* header = gtk_label_new("System Controls");
     gtk_widget_add_css_class(header, "realmheart-sidebar-header");
@@ -73,6 +126,7 @@ void RightSidebar::setup_layout() {
     gtk_box_append(GTK_BOX(container_), header);
 
     GtkWidget* scroller = gtk_scrolled_window_new();
+    gtk_widget_add_css_class(scroller, "realmheart-sidebar-scroller");
     gtk_scrolled_window_set_policy(
         GTK_SCROLLED_WINDOW(scroller),
         GTK_POLICY_NEVER,
@@ -85,7 +139,8 @@ void RightSidebar::setup_layout() {
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), module_box);
     gtk_box_append(GTK_BOX(container_), scroller);
 
-    gtk_window_set_child(GTK_WINDOW(window_), container_);
+    frame_->set_child(container_);
+    gtk_window_set_child(GTK_WINDOW(window_), frame_->widget());
 }
 
 void RightSidebar::add_module(std::unique_ptr<components::BaseWidget> module) {

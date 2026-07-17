@@ -18,6 +18,17 @@ class LabelWidget;
 
 namespace realmheart::ui::sidebar {
 
+struct SidebarPlacement {
+    int height = 760;
+    int top_margin = 76;
+};
+
+// Shared by the sidebar surface and its edge hotspot so both remain exactly
+// aligned if the height fraction changes later.
+[[nodiscard]] SidebarPlacement sidebar_placement_for(GtkWidget* widget);
+
+class SidebarFrame;
+
 class RightSidebar {
 public:
     RightSidebar(
@@ -49,6 +60,7 @@ private:
     GtkApplication* app_ = nullptr;
     GtkWidget* window_ = nullptr;
     GtkWidget* container_ = nullptr;
+    std::unique_ptr<SidebarFrame> frame_;
     std::vector<std::unique_ptr<components::BaseWidget>> modules_;
     std::shared_ptr<services::KeepAwake> keep_awake_;
     services::NotificationHistory& notification_history_;

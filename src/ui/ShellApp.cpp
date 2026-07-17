@@ -23,20 +23,24 @@
 #include "ui/bar/VerticalBar.hpp"
 #include "ui/launcher/LauncherOverlay.hpp"
 #include "ui/sidebar/RightSidebar.hpp"
+#include "ui/sidebar/SidebarFrame.hpp"
 #include "ui/wallpaper/WallpaperBackend.hpp"
 #include "ui/wallpaper/WallpaperController.hpp"
 
 #include <gtk/gtk.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <ctime>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <sys/types.h>
+#include <utility>
 #include <unistd.h>
 
 namespace realmheart::ui {
@@ -58,6 +62,231 @@ std::filesystem::path user_media_directory(GUserDirectory directory, const char*
         return std::filesystem::path(home) / fallback_name;
     }
     return std::filesystem::temp_directory_path() / "realmheart" / fallback_name;
+}
+
+constexpr int kHotspotHitWidth = 16;
+
+template <typename... Args>
+void sidebar_input_debug(Args&&... args) {
+    std::ofstream log(
+        "/tmp/realmheart-sidebar-input.log",
+        std::ios::app
+    );
+    if (!log) return;
+
+    log << g_get_monotonic_time() << " ";
+    (log << ... << std::forward<Args>(args));
+    log << '\n';
+}
+
+constexpr int kHotspotInputCommitFrames = 30;
+constexpr int kSidebarRightMargin = 2;
+
+struct HotspotInputSetup {
+    int frames_remaining = kHotspotInputCommitFrames;
+};
+
+struct BackdropInputSetup {
+    int frames_remaining = kHotspotInputCommitFrames;
+    int sidebar_top_margin = 0;
+    int sidebar_height = 1;
+};
+
+void draw_hotspot_commit_pixel(
+    GtkDrawingArea*,
+    cairo_t* cr,
+    int width,
+    int height,
+    gpointer
+) {
+    if (width <= 0 || height <= 0) return;
+
+    // A single almost-transparent pixel column prevents GTK/GSK from
+    // collapsing this otherwise visually empty layer surface. At 1/255 alpha
+    // it is effectively invisible, while still guaranteeing a buffer commit.
+    cairo_save(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 1.0 / 255.0);
+    cairo_rectangle(cr, static_cast<double>(width - 1), 0.0, 1.0, height);
+    cairo_fill(cr);
+    cairo_restore(cr);
+}
+
+void draw_backdrop_commit_fill(
+    GtkDrawingArea*,
+    cairo_t* cr,
+    int width,
+    int height,
+    gpointer
+) {
+    if (width <= 0 || height <= 0) return;
+
+    // Keep a real full-screen buffer alive at the minimum practical alpha.
+    // This is visually indistinguishable from transparent, but prevents GTK
+    // from collapsing the backdrop into an empty, click-through surface.
+    cairo_save(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+    // Keep one almost-transparent committed buffer so GTK/GSK does not
+    // collapse the input-only backdrop surface.
+    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 1.0 / 255.0);
+    cairo_paint(cr);
+    cairo_restore(cr);
+}
+
+bool apply_hotspot_input_region(GtkWidget* widget) {
+    GtkNative* native = gtk_widget_get_native(widget);
+    if (native == nullptr) return false;
+
+    GdkSurface* surface = gtk_native_get_surface(native);
+    if (surface == nullptr || !gdk_surface_get_mapped(surface)) return false;
+
+    const int width = gdk_surface_get_width(surface);
+    const int height = gdk_surface_get_height(surface);
+    if (width <= 0 || height <= 0) return false;
+
+    const cairo_rectangle_int_t rectangle{0, 0, width, height};
+    cairo_region_t* region = cairo_region_create_rectangle(&rectangle);
+    gdk_surface_set_input_region(surface, region);
+    cairo_region_destroy(region);
+
+    // Wayland input-region state is committed with the next surface commit.
+    // Force a render while the setup callback is active so the region cannot
+    // remain pending on an otherwise static transparent surface.
+    gdk_surface_queue_render(surface);
+    return true;
+}
+
+gboolean enforce_hotspot_input_region_on_tick(
+    GtkWidget* widget,
+    GdkFrameClock*,
+    gpointer data
+) {
+    auto* setup = static_cast<HotspotInputSetup*>(data);
+
+    if (!apply_hotspot_input_region(widget)) {
+        return G_SOURCE_CONTINUE;
+    }
+
+    gtk_widget_queue_draw(widget);
+    --setup->frames_remaining;
+    return setup->frames_remaining > 0 ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
+}
+
+void destroy_hotspot_input_setup(gpointer data) {
+    delete static_cast<HotspotInputSetup*>(data);
+}
+
+void enforce_hotspot_input_region(GtkWindow* window) {
+    gtk_widget_add_tick_callback(
+        GTK_WIDGET(window),
+        enforce_hotspot_input_region_on_tick,
+        new HotspotInputSetup{},
+        destroy_hotspot_input_setup
+    );
+}
+
+bool apply_sidebar_backdrop_input_region(
+    GtkWidget* widget,
+    const BackdropInputSetup& setup
+) {
+    GtkNative* native = gtk_widget_get_native(widget);
+    if (native == nullptr) return false;
+
+    GdkSurface* surface = gtk_native_get_surface(native);
+    if (surface == nullptr || !gdk_surface_get_mapped(surface)) return false;
+
+    const int width = gdk_surface_get_width(surface);
+    const int height = gdk_surface_get_height(surface);
+    if (width <= 0 || height <= 0) return false;
+
+    const cairo_rectangle_int_t full_surface{0, 0, width, height};
+    cairo_region_t* region = cairo_region_create_rectangle(&full_surface);
+
+    // Keep the fullscreen Overlay surface reactive only outside the sidebar.
+    // If the backdrop is stacked above the sidebar, the carved-out region lets
+    // input fall through; if it is below, the result is identical.
+    const int sidebar_width = sidebar::kDefaultSidebarFrameLayout.surface_width();
+    const int sidebar_x = std::max(width - kSidebarRightMargin - sidebar_width, 0);
+    const int sidebar_y = std::clamp(setup.sidebar_top_margin, 0, height);
+    const int sidebar_region_width = std::clamp(
+        sidebar_width,
+        0,
+        width - sidebar_x
+    );
+    const int sidebar_region_height = std::clamp(
+        setup.sidebar_height,
+        0,
+        height - sidebar_y
+    );
+
+    if (sidebar_region_width > 0 && sidebar_region_height > 0) {
+        const cairo_rectangle_int_t sidebar_rectangle{
+            sidebar_x,
+            sidebar_y,
+            sidebar_region_width,
+            sidebar_region_height
+        };
+        cairo_region_subtract_rectangle(region, &sidebar_rectangle);
+
+        // The same invisible edge remains a close target while the sidebar is
+        // open, even though most of the sidebar rectangle is click-through.
+        const int edge_x = std::max(width - kHotspotHitWidth, 0);
+        const cairo_rectangle_int_t edge_rectangle{
+            edge_x,
+            sidebar_y,
+            width - edge_x,
+            sidebar_region_height
+        };
+        cairo_region_union_rectangle(region, &edge_rectangle);
+    }
+
+    sidebar_input_debug(
+        "backdrop region: surface=", width, "x", height,
+        " sidebar=", sidebar_x, ",", sidebar_y, " ",
+        sidebar_region_width, "x", sidebar_region_height,
+        " edge_width=", kHotspotHitWidth
+    );
+
+    gdk_surface_set_input_region(surface, region);
+    cairo_region_destroy(region);
+    gdk_surface_queue_render(surface);
+    return true;
+}
+
+gboolean enforce_sidebar_backdrop_input_region_on_tick(
+    GtkWidget* widget,
+    GdkFrameClock*,
+    gpointer data
+) {
+    auto* setup = static_cast<BackdropInputSetup*>(data);
+
+    if (!apply_sidebar_backdrop_input_region(widget, *setup)) {
+        return G_SOURCE_CONTINUE;
+    }
+
+    gtk_widget_queue_draw(widget);
+    --setup->frames_remaining;
+    return setup->frames_remaining > 0 ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
+}
+
+void destroy_backdrop_input_setup(gpointer data) {
+    delete static_cast<BackdropInputSetup*>(data);
+}
+
+void enforce_sidebar_backdrop_input_region(
+    GtkWindow* window,
+    const sidebar::SidebarPlacement& placement
+) {
+    auto* setup = new BackdropInputSetup{};
+    setup->sidebar_top_margin = placement.top_margin;
+    setup->sidebar_height = placement.height;
+
+    gtk_widget_add_tick_callback(
+        GTK_WIDGET(window),
+        enforce_sidebar_backdrop_input_region_on_tick,
+        setup,
+        destroy_backdrop_input_setup
+    );
 }
 
 } // namespace
@@ -102,6 +331,11 @@ public:
         sidebar_.reset();
         bar_.reset();
 
+        if (sidebar_backdrop_ != nullptr) {
+            gtk_window_destroy(sidebar_backdrop_);
+            sidebar_backdrop_ = nullptr;
+        }
+
         if (hotspot_ != nullptr) {
             gtk_window_destroy(hotspot_);
             hotspot_ = nullptr;
@@ -129,7 +363,14 @@ public:
 
     void toggle_right_sidebar() {
         ensure_initialized();
+        const bool before = state_.right_sidebar_visible();
         state_.toggle_right_sidebar();
+        sidebar_input_debug(
+            "toggle_right_sidebar: ",
+            before ? "open" : "closed",
+            " -> ",
+            state_.right_sidebar_visible() ? "open" : "closed"
+        );
         apply_right_sidebar_visibility();
     }
 
@@ -376,27 +617,185 @@ private:
         if (hotspot_ == nullptr) {
             hotspot_ = GTK_WINDOW(gtk_application_window_new(application_));
             gtk_window_set_decorated(hotspot_, FALSE);
-            gtk_window_set_default_size(hotspot_, 16, 16);
+            gtk_window_set_resizable(hotspot_, FALSE);
+            gtk_widget_add_css_class(
+                GTK_WIDGET(hotspot_),
+                "realmheart-right-hotspot-window"
+            );
+
+            const auto placement = sidebar::sidebar_placement_for(
+                GTK_WIDGET(hotspot_)
+            );
+            gtk_window_set_default_size(
+                hotspot_,
+                kHotspotHitWidth,
+                placement.height
+            );
 
             LayerSurfaceSpec spec;
             spec.surface_namespace = "realmheart-right-hotspot";
             spec.layer = LayerSurfaceLevel::Overlay;
             spec.anchor_right = true;
             spec.anchor_top = true;
+            spec.anchor_bottom = false;
+            spec.margin_top = placement.top_margin;
             apply_layer_surface(hotspot_, spec);
 
             GtkWidget* button = gtk_button_new();
-            gtk_widget_set_tooltip_text(button, "Open Realmheart controls");
+            gtk_button_set_has_frame(GTK_BUTTON(button), FALSE);
+            gtk_widget_set_focusable(button, FALSE);
+            gtk_widget_set_hexpand(button, TRUE);
+            gtk_widget_set_vexpand(button, TRUE);
+            gtk_widget_set_size_request(
+                button,
+                kHotspotHitWidth,
+                placement.height
+            );
+            gtk_widget_add_css_class(button, "realmheart-right-hotspot-button");
             g_signal_connect(
                 button,
                 "clicked",
                 G_CALLBACK(+[](GtkButton*, gpointer data) {
+                    sidebar_input_debug("hotspot button: clicked");
                     static_cast<ShellRuntime*>(data)->toggle_right_sidebar();
                 }),
                 this
             );
-            gtk_window_set_child(hotspot_, button);
+            GtkWidget* overlay = gtk_overlay_new();
+            gtk_widget_set_hexpand(overlay, TRUE);
+            gtk_widget_set_vexpand(overlay, TRUE);
+            gtk_overlay_set_child(GTK_OVERLAY(overlay), button);
+
+            GtkWidget* commit_pixel = gtk_drawing_area_new();
+            gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(commit_pixel), 1);
+            gtk_drawing_area_set_content_height(
+                GTK_DRAWING_AREA(commit_pixel),
+                placement.height
+            );
+            gtk_drawing_area_set_draw_func(
+                GTK_DRAWING_AREA(commit_pixel),
+                draw_hotspot_commit_pixel,
+                nullptr,
+                nullptr
+            );
+            gtk_widget_set_halign(commit_pixel, GTK_ALIGN_END);
+            gtk_widget_set_valign(commit_pixel, GTK_ALIGN_FILL);
+            gtk_widget_set_can_target(commit_pixel, FALSE);
+            gtk_widget_set_focusable(commit_pixel, FALSE);
+            gtk_overlay_add_overlay(GTK_OVERLAY(overlay), commit_pixel);
+            gtk_overlay_set_measure_overlay(
+                GTK_OVERLAY(overlay),
+                commit_pixel,
+                FALSE
+            );
+
+            gtk_window_set_child(hotspot_, overlay);
             gtk_window_present(hotspot_);
+            enforce_hotspot_input_region(hotspot_);
+        }
+        if (sidebar_backdrop_ == nullptr) {
+            sidebar_backdrop_ = GTK_WINDOW(
+                gtk_application_window_new(application_)
+            );
+            gtk_window_set_decorated(sidebar_backdrop_, FALSE);
+            // Opposite layer-shell anchors only stretch the window when GTK
+            // permits it to resize. A non-resizable window stays at GTK's
+            // fallback natural size (observed as 200x200), so its input region
+            // can never cover the monitor.
+            gtk_window_set_resizable(sidebar_backdrop_, TRUE);
+            gtk_widget_add_css_class(
+                GTK_WIDGET(sidebar_backdrop_),
+                "realmheart-sidebar-backdrop-window"
+            );
+
+            LayerSurfaceSpec backdrop_spec;
+            backdrop_spec.surface_namespace = "realmheart-sidebar-backdrop";
+            backdrop_spec.layer = LayerSurfaceLevel::Overlay;
+            backdrop_spec.keyboard_mode = LayerKeyboardMode::None;
+            backdrop_spec.anchor_left = true;
+            backdrop_spec.anchor_right = true;
+            backdrop_spec.anchor_top = true;
+            backdrop_spec.anchor_bottom = true;
+            apply_layer_surface(sidebar_backdrop_, backdrop_spec);
+
+            GtkWidget* dismiss_button = gtk_button_new();
+            gtk_button_set_has_frame(GTK_BUTTON(dismiss_button), FALSE);
+            gtk_widget_set_focusable(dismiss_button, FALSE);
+            gtk_widget_set_hexpand(dismiss_button, TRUE);
+            gtk_widget_set_vexpand(dismiss_button, TRUE);
+            gtk_widget_add_css_class(
+                dismiss_button,
+                "realmheart-sidebar-backdrop-button"
+            );
+            g_signal_connect(
+                dismiss_button,
+                "clicked",
+                G_CALLBACK(+[](GtkButton*, gpointer data) {
+                    sidebar_input_debug("backdrop button: clicked");
+                    static_cast<ShellRuntime*>(data)->toggle_right_sidebar();
+                }),
+                this
+            );
+
+            GtkGesture* backdrop_probe = gtk_gesture_click_new();
+            gtk_event_controller_set_propagation_phase(
+                GTK_EVENT_CONTROLLER(backdrop_probe),
+                GTK_PHASE_CAPTURE
+            );
+            g_signal_connect(
+                backdrop_probe,
+                "pressed",
+                G_CALLBACK(+[](
+                    GtkGestureClick*,
+                    int,
+                    double x,
+                    double y,
+                    gpointer
+                ) {
+                    sidebar_input_debug(
+                        "backdrop surface: pointer pressed at ", x, ",", y
+                    );
+                }),
+                nullptr
+            );
+            gtk_widget_add_controller(
+                GTK_WIDGET(sidebar_backdrop_),
+                GTK_EVENT_CONTROLLER(backdrop_probe)
+            );
+
+            GtkWidget* backdrop_overlay = gtk_overlay_new();
+            gtk_widget_set_hexpand(backdrop_overlay, TRUE);
+            gtk_widget_set_vexpand(backdrop_overlay, TRUE);
+            gtk_overlay_set_child(
+                GTK_OVERLAY(backdrop_overlay),
+                dismiss_button
+            );
+
+            GtkWidget* commit_fill = gtk_drawing_area_new();
+            gtk_widget_set_hexpand(commit_fill, TRUE);
+            gtk_widget_set_vexpand(commit_fill, TRUE);
+            gtk_drawing_area_set_draw_func(
+                GTK_DRAWING_AREA(commit_fill),
+                draw_backdrop_commit_fill,
+                nullptr,
+                nullptr
+            );
+            gtk_widget_set_halign(commit_fill, GTK_ALIGN_FILL);
+            gtk_widget_set_valign(commit_fill, GTK_ALIGN_FILL);
+            gtk_widget_set_can_target(commit_fill, FALSE);
+            gtk_widget_set_focusable(commit_fill, FALSE);
+            gtk_overlay_add_overlay(
+                GTK_OVERLAY(backdrop_overlay),
+                commit_fill
+            );
+            gtk_overlay_set_measure_overlay(
+                GTK_OVERLAY(backdrop_overlay),
+                commit_fill,
+                FALSE
+            );
+
+            gtk_window_set_child(sidebar_backdrop_, backdrop_overlay);
+            gtk_widget_set_visible(GTK_WIDGET(sidebar_backdrop_), FALSE);
         }
         if (!launcher_overlay_) {
             launcher_overlay_ = std::make_unique<LauncherOverlay>(
@@ -420,11 +819,26 @@ private:
     void apply_right_sidebar_visibility() {
         GtkWidget* window = sidebar_->get_window();
         if (state_.right_sidebar_visible()) {
+            sidebar_input_debug("visibility: presenting backdrop then sidebar");
+            // Use an Overlay backdrop with a carved input region instead of
+            // relying on cross-layer stacking. Only clicks outside the sidebar
+            // are accepted by this surface.
+            gtk_window_present(sidebar_backdrop_);
+            const auto placement = sidebar::sidebar_placement_for(
+                GTK_WIDGET(sidebar_backdrop_)
+            );
+            enforce_sidebar_backdrop_input_region(
+                sidebar_backdrop_,
+                placement
+            );
+
             sidebar_->refresh();
             gtk_window_present(GTK_WINDOW(window));
         } else {
+            sidebar_input_debug("visibility: hiding sidebar and backdrop");
             // Hide, don't destroy: the controller and its workers remain valid.
             gtk_widget_set_visible(window, FALSE);
+            gtk_widget_set_visible(GTK_WIDGET(sidebar_backdrop_), FALSE);
         }
     }
 
@@ -460,6 +874,7 @@ private:
     std::unique_ptr<OSDOverlay> osd_;
     std::unique_ptr<bar::VerticalBar> bar_;
     GtkWindow* hotspot_ = nullptr;
+    GtkWindow* sidebar_backdrop_ = nullptr;
     std::unique_ptr<sidebar::RightSidebar> sidebar_;
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
     std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;
