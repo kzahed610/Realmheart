@@ -63,7 +63,7 @@ int main() {
                 "DBus body",
                 &actions,
                 &hints,
-                5000
+                120
             ),
             G_VARIANT_TYPE("(u)"),
             G_DBUS_CALL_FLAGS_NONE,
@@ -79,9 +79,13 @@ int main() {
         g_variant_unref(reply);
         require(id != 0, "Notify should return a non-zero id");
 
-        const auto snapshot = history.snapshot();
+        auto snapshot = history.snapshot();
         require(snapshot.entries.size() == 1, "Notify should enter history");
         require(snapshot.entries.front().summary == "DBus summary", "Notify summary should survive DBus");
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(260));
+        snapshot = history.snapshot();
+        require(snapshot.entries.size() == 1, "toast expiration must preserve sidebar history");
 
         reply = g_dbus_connection_call_sync(
             connection,
@@ -99,7 +103,7 @@ int main() {
         require(reply != nullptr, error != nullptr ? error->message : "CloseNotification failed");
         g_clear_error(&error);
         g_variant_unref(reply);
-        require(history.snapshot().entries.empty(), "CloseNotification should remove history entry");
+        require(history.snapshot().entries.size() == 1, "CloseNotification must preserve sidebar history");
 
         g_object_unref(connection);
         daemon.stop();

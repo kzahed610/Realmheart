@@ -30,10 +30,16 @@ int main() {
         const auto unknown_replacement = server.notify("build", 99, "Build", "Done");
         require(unknown_replacement == 3, "unknown replaces_id should allocate a fresh id");
 
-        require(server.close(second), "closing a known notification should succeed");
-        require(!server.close(second), "closing an already removed notification should fail");
+        require(server.close(second), "closing an active notification should succeed");
+        require(!server.close(second), "closing an already inactive notification should fail");
         snapshot = history.snapshot();
-        require(snapshot.entries.size() == 2, "close should remove exactly one entry");
+        require(snapshot.entries.size() == 3, "closing a toast must preserve sidebar history");
+
+        const auto replacement_after_close = server.notify(
+            "chat", second, "New chat", "Closed ids are no longer replaceable"
+        );
+        require(replacement_after_close == 4, "a closed replaces_id should allocate a fresh id");
+        require(history.snapshot().entries.size() == 4, "the fresh notification should append to history");
 
         std::string huge_app(realmheart::services::NotificationLimits::max_app_name_bytes + 100, 'a');
         std::string huge_summary(realmheart::services::NotificationLimits::max_summary_bytes + 100, 's');

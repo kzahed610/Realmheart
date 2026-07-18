@@ -19,6 +19,8 @@ std::uint32_t NotificationServer::notify(
         ? replaces_id
         : allocate_id();
 
+    active_ids_.insert(id);
+
     NotificationEntry entry;
     entry.id = id;
     entry.app_name = std::move(app_name);
@@ -32,7 +34,10 @@ std::uint32_t NotificationServer::notify(
 }
 
 bool NotificationServer::close(std::uint32_t id) {
-    return history_.dismiss(id);
+    // Closing a desktop notification ends its transient toast lifecycle, but
+    // Realmheart's sidebar is notification history. History is only removed
+    // by the user's dismiss/clear actions inside the sidebar.
+    return active_ids_.erase(id) != 0;
 }
 
 void NotificationServer::set_notification_handler(NotificationHandler handler) {
@@ -40,10 +45,7 @@ void NotificationServer::set_notification_handler(NotificationHandler handler) {
 }
 
 bool NotificationServer::contains(std::uint32_t id) const {
-    const auto snapshot = history_.snapshot();
-    return std::any_of(snapshot.entries.begin(), snapshot.entries.end(), [id](const auto& entry) {
-        return entry.id == id;
-    });
+    return active_ids_.contains(id);
 }
 
 std::uint32_t NotificationServer::allocate_id() {

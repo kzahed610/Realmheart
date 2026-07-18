@@ -17,7 +17,7 @@ struct SidebarFrameLayout {
     int character_gutter_width = 128;
 
     int content_inset_start = 76;
-    int content_inset_end = 30;
+    int content_inset_end = 42;
     int content_inset_top = 38;
     int content_inset_bottom = 38;
 

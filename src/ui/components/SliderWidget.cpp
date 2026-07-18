@@ -1,11 +1,30 @@
 #include "ui/components/SliderWidget.hpp"
 
 #include "core/TaskExecutor.hpp"
+#include "ui/bar/widgets/ThemedSvgIcon.hpp"
 
+#include <cmath>
 #include <exception>
+#include <string>
 #include <utility>
 
 namespace realmheart::ui::components {
+namespace {
+
+std::string value_text(double value) {
+    return std::to_string(static_cast<int>(std::lround(value))) + "%";
+}
+
+GtkWidget* slider_icon(const std::string& label) {
+    const char* path = label == "Brightness"
+        ? "Realmheart-Icons/brightness.svg"
+        : "Realmheart-Icons/speaker-2.svg";
+    realmheart::ui::bar::widgets::ThemedSvgIcon icon(path, 17);
+    icon.add_css_class("realmheart-slider-icon");
+    return icon.widget();
+}
+
+} // namespace
 
 SliderWidget::SliderWidget(
     std::string label,
@@ -19,21 +38,27 @@ SliderWidget::SliderWidget(
     state_->on_confirmed = std::move(on_confirmed);
     state_->confirmed_value.store(initial);
 
-    box_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-    gtk_widget_add_css_class(box_, "realmheart-module-row");
+    box_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 7);
     gtk_widget_add_css_class(box_, "realmheart-module-slider");
-    gtk_widget_set_margin_start(box_, 12);
-    gtk_widget_set_margin_end(box_, 12);
-    gtk_widget_set_margin_top(box_, 6);
-    gtk_widget_set_margin_bottom(box_, 6);
+    gtk_box_append(GTK_BOX(box_), slider_icon(label));
 
     GtkWidget* name = gtk_label_new(label.c_str());
+    gtk_widget_add_css_class(name, "realmheart-slider-label");
     gtk_label_set_xalign(GTK_LABEL(name), 0.0F);
+    gtk_widget_set_size_request(name, 69, -1);
     gtk_box_append(GTK_BOX(box_), name);
 
     scale_ = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, min, max, 1.0);
+    gtk_widget_add_css_class(scale_, "realmheart-rune-scale");
+    gtk_scale_set_draw_value(GTK_SCALE(scale_), FALSE);
+    gtk_widget_set_hexpand(scale_, TRUE);
     state_->scale = scale_;
     gtk_range_set_value(GTK_RANGE(scale_), initial);
+    value_label_ = gtk_label_new(value_text(initial).c_str());
+    gtk_widget_add_css_class(value_label_, "realmheart-slider-value");
+    gtk_label_set_xalign(GTK_LABEL(value_label_), 1.0F);
+    gtk_widget_set_size_request(value_label_, 34, -1);
+    state_->value_label = value_label_;
     state_->value_changed_handler = g_signal_connect(
         scale_,
         "value-changed",
@@ -42,6 +67,9 @@ SliderWidget::SliderWidget(
             if (self->updating_) return;
 
             self->pending_value_ = gtk_range_get_value(range);
+            gtk_label_set_text(
+                GTK_LABEL(self->value_label_), value_text(self->pending_value_).c_str()
+            );
             if (self->debounce_source_ != 0) g_source_remove(self->debounce_source_);
             self->debounce_source_ = g_timeout_add(
                 120,
@@ -92,6 +120,12 @@ SliderWidget::SliderWidget(
                                     GTK_RANGE(state.scale),
                                     state.confirmed_value.load()
                                 );
+                                if (state.value_label != nullptr) {
+                                    gtk_label_set_text(
+                                        GTK_LABEL(state.value_label),
+                                        value_text(state.confirmed_value.load()).c_str()
+                                    );
+                                }
                                 if (state.value_changed_handler != 0) {
                                     g_signal_handler_unblock(state.scale, state.value_changed_handler);
                                 }
@@ -112,6 +146,7 @@ SliderWidget::SliderWidget(
         this
     );
     gtk_box_append(GTK_BOX(box_), scale_);
+    gtk_box_append(GTK_BOX(box_), value_label_);
 }
 
 SliderWidget::~SliderWidget() {
@@ -121,6 +156,7 @@ SliderWidget::~SliderWidget() {
     }
     state_->alive = false;
     state_->scale = nullptr;
+    state_->value_label = nullptr;
     if (scale_ != nullptr && state_->value_changed_handler != 0) {
         g_signal_handler_disconnect(scale_, state_->value_changed_handler);
         state_->value_changed_handler = 0;
@@ -136,7 +172,24 @@ void SliderWidget::set_value(double value) {
     pending_value_ = value;
     updating_ = true;
     gtk_range_set_value(GTK_RANGE(scale_), value);
+    if (available_) {
+        gtk_label_set_text(GTK_LABEL(value_label_), value_text(value).c_str());
+    }
     updating_ = false;
+}
+
+void SliderWidget::set_available(bool available) {
+    available_ = available;
+    gtk_widget_set_sensitive(scale_, available);
+    gtk_widget_remove_css_class(box_, "unavailable");
+    if (!available) {
+        gtk_widget_add_css_class(box_, "unavailable");
+        gtk_label_set_text(GTK_LABEL(value_label_), "—");
+        return;
+    }
+    gtk_label_set_text(
+        GTK_LABEL(value_label_), value_text(state_->confirmed_value.load()).c_str()
+    );
 }
 
 } // namespace realmheart::ui::components

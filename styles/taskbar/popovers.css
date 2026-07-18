@@ -244,3 +244,653 @@ window.realmheart-system-monitor-layer-window .realmheart-attached-popover-fill 
   color: @rh_text;
   font-size: 0.82em;
 }
+
+/* Right sidebar interior styles are appended below. */
+.realmheart-right-sidebar {
+  color: @rh_text;
+  padding: 1px 2px 3px 2px;
+}
+
+.realmheart-identity-header {
+  margin-bottom: 11px;
+  padding: 4px 5px 11px 5px;
+  background-color: transparent;
+  border: 0;
+  border-bottom: 1px solid alpha(#c29148, 0.31);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.realmheart-identity-title {
+  color: #ead4a7;
+  text-align: center;
+  font-family: Cinzel, serif;
+  font-size: 1.40em;
+  font-weight: 700;
+  letter-spacing: 2.55px;
+  text-shadow: 0 1px alpha(#000000, 0.55);
+}
+
+.realmheart-identity-subtitle {
+  color: alpha(@rh_text, 0.83);
+  font-size: 0.73em;
+  font-weight: 600;
+}
+
+.realmheart-online-state {
+  color: #73dfcf;
+  font-size: 0.63em;
+  font-weight: 800;
+  letter-spacing: 0.75px;
+}
+
+.realmheart-online-state.offline { color: @rh_error; }
+.realmheart-uptime {
+  color: alpha(@rh_text_muted, 0.82);
+  font-size: 0.64em;
+}
+
+.realmheart-sidebar-section { margin-bottom: 11px; }
+
+.realmheart-section-title,
+.realmheart-notifications-title {
+  color: alpha(#e7c27a, 0.90);
+  font-family: Cinzel, serif;
+  font-size: 0.68em;
+  font-weight: 700;
+  letter-spacing: 1.75px;
+}
+
+.realmheart-section-title { margin-left: 4px; }
+
+.realmheart-quick-grid {
+  padding: 3px 0 0 0;
+  background-color: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+button.realmheart-quick-tile,
+menubutton.realmheart-quick-tile > button {
+  color: @rh_text;
+  margin: 0;
+  padding: 8px 11px;
+  background-image: linear-gradient(to bottom, alpha(#121a1c, 0.93), alpha(#091012, 0.94));
+  background-color: alpha(#091012, 0.94);
+  border: 1px solid alpha(#aa7d3c, 0.28);
+  border-radius: 18px;
+  box-shadow: inset 0 1px alpha(#ffffff, 0.018);
+}
+
+button.realmheart-quick-tile:hover,
+menubutton.realmheart-quick-tile > button:hover {
+  background-image: linear-gradient(to bottom, alpha(#172123, 0.96), alpha(#0c1416, 0.96));
+  border-color: alpha(#d0a055, 0.48);
+}
+
+button.realmheart-quick-tile:focus-visible,
+menubutton.realmheart-quick-tile > button:focus-visible {
+  outline: 1px solid alpha(@rh_primary, 0.58);
+  outline-offset: -2px;
+}
+
+button.realmheart-quick-tile:active,
+button.realmheart-quick-tile.active,
+menubutton.realmheart-quick-tile:active > button,
+menubutton.realmheart-quick-tile.active > button {
+  background-image: linear-gradient(to bottom, alpha(@rh_primary, 0.16), alpha(@rh_primary, 0.075));
+  background-color: alpha(@rh_primary, 0.10);
+  border-color: alpha(@rh_primary, 0.62);
+  box-shadow: inset 3px 0 alpha(@rh_primary, 0.42), inset 0 1px alpha(#ffffff, 0.025);
+}
+
+button.realmheart-quick-tile.unavailable,
+menubutton.realmheart-quick-tile.unavailable > button { opacity: 0.46; }
+
+.realmheart-quick-tile-icon {
+  color: alpha(#dfc17f, 0.88);
+}
+button.realmheart-quick-tile.active .realmheart-quick-tile-icon,
+menubutton.realmheart-quick-tile.active .realmheart-quick-tile-icon {
+  color: @rh_primary;
+}
+
+.realmheart-quick-tile-title {
+  color: alpha(@rh_text, 0.94);
+  font-size: 0.77em;
+  font-weight: 700;
+}
+
+.realmheart-quick-tile-status {
+  color: #73dfcf;
+  font-size: 0.66em;
+  font-weight: 550;
+}
+button.realmheart-quick-tile:not(.active) .realmheart-quick-tile-status,
+menubutton.realmheart-quick-tile:not(.active) .realmheart-quick-tile-status {
+  color: alpha(@rh_text_muted, 0.82);
+}
+
+.realmheart-levels-section { margin-bottom: 10px; }
+.realmheart-slider-chamber {
+  margin: 1px 0 0 0;
+  padding: 7px 9px;
+  background-image: linear-gradient(to bottom, alpha(#0c1315, 0.74), alpha(#070c0e, 0.68));
+  background-color: alpha(#080d0f, 0.72);
+  border: 1px solid alpha(#9d7138, 0.24);
+  border-radius: 14px;
+  box-shadow: inset 0 1px alpha(#ffffff, 0.015);
+}
+
+.realmheart-module-slider {
+  color: @rh_text;
+  min-height: 36px;
+}
+.realmheart-module-slider.unavailable { opacity: 0.48; }
+.realmheart-slider-icon { color: alpha(#dfc17f, 0.82); }
+.realmheart-slider-label {
+  color: alpha(@rh_text, 0.90);
+  font-size: 0.70em;
+  font-weight: 700;
+  letter-spacing: 0.45px;
+}
+.realmheart-slider-value {
+  color: alpha(#e2c68d, 0.94);
+  font-size: 0.70em;
+  font-weight: 600;
+}
+
+scale.realmheart-rune-scale { padding: 10px 0; }
+scale.realmheart-rune-scale trough {
+  min-height: 10px;
+  border-radius: 999px;
+  background-color: alpha(@rh_text_muted, 0.17);
+  border: 1px solid alpha(@rh_outline, 0.16);
+  box-shadow: inset 0 1px 2px alpha(#000000, 0.32);
+}
+scale.realmheart-rune-scale highlight {
+  min-height: 10px;
+  border-radius: 999px;
+  background-image: linear-gradient(to right, alpha(@rh_primary, 0.74), alpha(@rh_primary, 0.98));
+  border: 0;
+  box-shadow: 0 0 7px alpha(@rh_primary, 0.12);
+}
+scale.realmheart-rune-scale slider {
+  min-width: 1px;
+  min-height: 1px;
+  margin: 0;
+  padding: 0;
+  background-image: none;
+  background-color: transparent;
+  border: 0;
+  box-shadow: none;
+  opacity: 0;
+}
+
+.realmheart-power-section { margin-bottom: 10px; }
+.realmheart-power-segments {
+  margin-top: 3px;
+  padding: 3px;
+  background-color: alpha(#070c0e, 0.66);
+  border: 1px solid alpha(#9d7138, 0.22);
+  border-radius: 15px;
+}
+button.realmheart-power-segment {
+  min-height: 33px;
+  padding: 3px 4px;
+  color: alpha(@rh_text_muted, 0.90);
+  font-size: 0.66em;
+  font-weight: 600;
+  background-image: none;
+  background-color: transparent;
+  border: 0;
+  border-radius: 13px;
+  box-shadow: none;
+}
+button.realmheart-power-segment:hover {
+  color: @rh_text;
+  background-color: alpha(@rh_surface, 0.34);
+}
+button.realmheart-power-segment.active {
+  color: alpha(@rh_text, 0.98);
+  background-image: linear-gradient(to bottom, alpha(@rh_primary, 0.18), alpha(@rh_primary, 0.09));
+  background-color: alpha(@rh_primary, 0.12);
+  border: 1px solid alpha(@rh_primary, 0.50);
+  box-shadow: inset 0 1px alpha(#ffffff, 0.02);
+}
+button.realmheart-power-segment.pending {
+  opacity: 0.72;
+}
+
+.realmheart-notifications {
+  color: @rh_text;
+  min-height: 0;
+  background-color: transparent;
+  border: 0;
+  border-top: 1px solid alpha(#9d7138, 0.22);
+  border-radius: 0;
+  box-shadow: none;
+}
+.realmheart-notifications-header { padding: 11px 3px 8px 3px; }
+.realmheart-notifications-count {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0 5px;
+  color: alpha(@rh_primary, 0.94);
+  font-size: 0.57em;
+  font-weight: 750;
+  background-color: alpha(@rh_primary, 0.10);
+  border: 1px solid alpha(@rh_primary, 0.25);
+  border-radius: 999px;
+}
+button.realmheart-notifications-clear {
+  min-width: 44px;
+  min-height: 28px;
+  padding: 3px 8px;
+  color: alpha(@rh_text, 0.82);
+  font-size: 0.74em;
+  font-weight: 650;
+  background-color: transparent;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  box-shadow: none;
+}
+button.realmheart-notifications-clear:hover {
+  color: @rh_primary;
+  background-color: alpha(@rh_primary, 0.08);
+  border-color: alpha(@rh_primary, 0.22);
+}
+button.realmheart-notifications-clear:active {
+  background-color: alpha(@rh_primary, 0.14);
+}
+button.realmheart-notifications-clear:disabled { opacity: 0.38; }
+.realmheart-notifications-scroller {
+  background-image: linear-gradient(to bottom, alpha(#0a1012, 0.74), alpha(#060a0c, 0.64));
+  background-color: alpha(#070c0e, 0.68);
+  border: 1px solid alpha(#9d7138, 0.20);
+  border-radius: 15px;
+}
+.realmheart-notifications-scroller:hover {
+  border-color: alpha(#b98a45, 0.28);
+}
+.realmheart-notifications-scroller.dragging {
+  border-color: alpha(@rh_primary, 0.34);
+}
+.realmheart-notifications-scroller viewport { background-color: transparent; }
+.realmheart-notifications-list { padding: 8px 8px 10px 8px; }
+.realmheart-notification-row {
+  padding: 10px 11px 11px 12px;
+  background-image: linear-gradient(to bottom, alpha(#121a1c, 0.70), alpha(#0a1012, 0.78));
+  background-color: alpha(#0b1214, 0.76);
+  border: 1px solid alpha(@rh_outline, 0.16);
+  border-left: 2px solid alpha(#b48a49, 0.38);
+  border-radius: 11px;
+  box-shadow: inset 0 1px alpha(#ffffff, 0.012);
+}
+.realmheart-notification-row:hover {
+  border-color: alpha(#c59a54, 0.30);
+  border-left-color: alpha(#d0a45a, 0.62);
+}
+.realmheart-notification-row.unread {
+  background-image: linear-gradient(to bottom, alpha(@rh_primary, 0.075), alpha(@rh_primary, 0.035));
+  background-color: alpha(@rh_primary, 0.045);
+  border-color: alpha(@rh_primary, 0.26);
+  border-left-color: alpha(@rh_primary, 0.88);
+}
+.realmheart-notification-copy { min-width: 0; }
+.realmheart-notification-meta { min-height: 20px; }
+.realmheart-notification-app {
+  color: alpha(@rh_text_muted, 0.84);
+  font-size: 0.70em;
+  font-weight: 700;
+  letter-spacing: 0.45px;
+}
+.realmheart-notification-summary {
+  color: alpha(@rh_text, 0.98);
+  font-size: 0.88em;
+  font-weight: 750;
+}
+.realmheart-notification-body {
+  color: alpha(@rh_text, 0.86);
+  font-size: 0.80em;
+  font-weight: 500;
+}
+.realmheart-notification-unread-dot {
+  min-width: 5px;
+  min-height: 5px;
+  background-color: @rh_primary;
+  border-radius: 999px;
+  box-shadow: 0 0 5px alpha(@rh_primary, 0.34);
+}
+button.realmheart-notification-dismiss {
+  min-width: 28px;
+  min-height: 28px;
+  margin: 0;
+  padding: 0;
+  color: alpha(@rh_text_muted, 0.74);
+  font-size: 1.04em;
+  font-weight: 650;
+  background-color: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  box-shadow: none;
+}
+button.realmheart-notification-dismiss:hover {
+  color: @rh_error;
+  background-color: alpha(@rh_error, 0.10);
+  border-color: alpha(@rh_error, 0.18);
+}
+button.realmheart-notification-dismiss:active {
+  background-color: alpha(@rh_error, 0.16);
+}
+.realmheart-notifications-empty {
+  color: alpha(@rh_text, 0.68);
+  font-size: 0.76em;
+  font-weight: 650;
+  letter-spacing: 0.30px;
+}
+.realmheart-notifications-empty-state { opacity: 0.80; }
+.realmheart-notifications-empty-icon { color: alpha(#d5b46d, 0.42); }
+.realmheart-notifications-empty-detail {
+  color: alpha(@rh_text_muted, 0.52);
+  font-size: 0.65em;
+}
+
+.realmheart-notifications-scroller scrollbar,
+.realmheart-manager-scroller scrollbar { opacity: 0.34; }
+.realmheart-notifications-scroller scrollbar slider,
+.realmheart-manager-scroller scrollbar slider {
+  min-width: 4px;
+  min-height: 24px;
+  background-color: alpha(@rh_primary, 0.40);
+  border-radius: 999px;
+}
+
+.realmheart-sidebar-content-overlay {
+  background-color: transparent;
+}
+
+button.realmheart-connectivity-backdrop,
+button.realmheart-connectivity-backdrop:hover,
+button.realmheart-connectivity-backdrop:active,
+button.realmheart-connectivity-backdrop:focus,
+button.realmheart-connectivity-backdrop:focus-visible {
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  color: transparent;
+  background-image: none;
+  background-color: alpha(#020507, 0.34);
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  box-shadow: none;
+}
+
+.realmheart-connectivity-revealer {
+  background-color: transparent;
+}
+
+.realmheart-connectivity-panel {
+  color: @rh_text;
+  background-color: alpha(#080d0f, 0.985);
+  border: 1px solid alpha(#c79649, 0.58);
+  border-radius: 16px;
+  box-shadow:
+    0 16px 38px alpha(#000000, 0.54),
+    inset 0 0 0 1px alpha(#f1d69a, 0.035);
+}
+
+.realmheart-manager-header {
+  padding: 10px 11px 8px 11px;
+  border-bottom: 1px solid alpha(#9d7138, 0.24);
+}
+.realmheart-manager-header .realmheart-themed-svg-icon {
+  color: alpha(#dfbd78, 0.90);
+}
+.realmheart-manager-title {
+  color: alpha(#ead19d, 0.94);
+  font-family: Cinzel, serif;
+  font-weight: 700;
+  font-size: 0.72em;
+  letter-spacing: 1.15px;
+}
+
+button.realmheart-manager-close-button {
+  min-width: 24px;
+  min-height: 24px;
+  margin: 0;
+  padding: 0;
+  color: alpha(@rh_text_muted, 0.74);
+  font-size: 1.02em;
+  background-image: none;
+  background-color: transparent;
+  border: 0;
+  border-radius: 999px;
+  box-shadow: none;
+}
+button.realmheart-manager-close-button:hover {
+  color: @rh_text;
+  background-color: alpha(@rh_surface_variant, 0.34);
+}
+
+.realmheart-manager-toolbar {
+  padding: 7px 9px;
+  background-color: alpha(#030708, 0.26);
+  border-bottom: 1px solid alpha(@rh_outline, 0.15);
+}
+.realmheart-manager-status {
+  color: #73dfcf;
+  font-size: 0.66em;
+}
+.realmheart-manager-status.error { color: @rh_error; }
+.realmheart-manager-scroller,
+.realmheart-manager-scroller viewport { background-color: transparent; }
+.realmheart-manager-list { padding: 6px 7px 8px 7px; }
+.realmheart-manager-row {
+  padding: 7px 8px;
+  background-color: alpha(@rh_surface, 0.30);
+  border: 1px solid alpha(@rh_outline, 0.20);
+  border-radius: 11px;
+}
+.realmheart-manager-row:hover {
+  background-color: alpha(@rh_surface_variant, 0.36);
+  border-color: alpha(#c79649, 0.30);
+}
+.realmheart-manager-row.active {
+  background-color: alpha(@rh_primary, 0.065);
+  border-color: alpha(@rh_primary, 0.34);
+}
+.realmheart-manager-row > .realmheart-themed-svg-icon {
+  color: alpha(#d9b46d, 0.82);
+}
+.realmheart-manager-row.active > .realmheart-themed-svg-icon { color: @rh_primary; }
+.realmheart-manager-row-title {
+  color: alpha(@rh_text, 0.93);
+  font-size: 0.75em;
+  font-weight: 650;
+}
+.realmheart-manager-row-detail {
+  color: alpha(@rh_text_muted, 0.82);
+  font-size: 0.62em;
+}
+.realmheart-manager-empty {
+  color: alpha(@rh_text_muted, 0.72);
+  margin: 28px 6px;
+  font-size: 0.72em;
+}
+
+button.realmheart-manager-primary-button,
+button.realmheart-manager-quiet-button,
+button.realmheart-manager-forget-button {
+  min-height: 24px;
+  padding: 2px 7px;
+  font-size: 0.63em;
+  font-weight: 600;
+  background-image: none;
+  border-radius: 9px;
+  box-shadow: none;
+}
+button.realmheart-manager-primary-button {
+  color: alpha(@rh_text, 0.96);
+  background-color: alpha(@rh_primary, 0.13);
+  border: 1px solid alpha(@rh_primary, 0.45);
+}
+button.realmheart-manager-primary-button:hover {
+  background-color: alpha(@rh_primary, 0.19);
+  border-color: alpha(@rh_primary, 0.62);
+}
+button.realmheart-manager-quiet-button {
+  color: alpha(@rh_text_muted, 0.88);
+  background-color: alpha(@rh_surface, 0.30);
+  border: 1px solid alpha(@rh_outline, 0.22);
+}
+button.realmheart-manager-quiet-button:hover {
+  color: @rh_text;
+  background-color: alpha(@rh_surface_variant, 0.42);
+}
+button.realmheart-manager-forget-button {
+  color: alpha(@rh_error, 0.82);
+  background-color: transparent;
+  border: 1px solid alpha(@rh_error, 0.18);
+}
+button.realmheart-manager-forget-button:hover {
+  background-color: alpha(@rh_error, 0.07);
+  border-color: alpha(@rh_error, 0.34);
+}
+
+.realmheart-password-panel {
+  padding: 9px 10px 10px 10px;
+  border-top: 1px solid alpha(#9d7138, 0.24);
+  background-color: alpha(@rh_primary, 0.025);
+}
+.realmheart-password-title {
+  color: alpha(#e6ca93, 0.92);
+  font-size: 0.71em;
+  font-weight: 650;
+}
+.realmheart-password-entry {
+  min-height: 30px;
+  color: @rh_text;
+  background-color: alpha(#02040a, 0.64);
+  border: 1px solid alpha(@rh_primary, 0.32);
+  border-radius: 9px;
+}
+
+/* Night Light manager */
+.realmheart-identity-state-row {
+  padding-left: 9px;
+  padding-right: 8px;
+}
+
+.realmheart-night-light-panel {
+  background-image: linear-gradient(
+    to bottom,
+    alpha(#171713, 0.99),
+    alpha(#080c0e, 0.99)
+  );
+}
+
+.realmheart-night-light-body {
+  padding: 13px 13px 10px 13px;
+}
+
+.realmheart-night-light-enable-row {
+  padding: 10px 11px;
+  background-color: alpha(@rh_surface, 0.32);
+  border: 1px solid alpha(#c79649, 0.25);
+  border-radius: 13px;
+}
+
+.realmheart-night-light-control-title {
+  color: alpha(@rh_text, 0.96);
+  font-size: 0.79em;
+  font-weight: 720;
+}
+
+.realmheart-night-light-control-detail {
+  color: alpha(@rh_text_muted, 0.78);
+  font-size: 0.64em;
+}
+
+button.realmheart-night-light-toggle {
+  min-width: 54px;
+  min-height: 30px;
+  padding: 2px 9px;
+  color: alpha(@rh_text_muted, 0.90);
+  font-size: 0.66em;
+  font-weight: 800;
+  letter-spacing: 0.55px;
+  background-image: none;
+  background-color: alpha(#05090a, 0.60);
+  border: 1px solid alpha(@rh_outline, 0.28);
+  border-radius: 999px;
+  box-shadow: inset 0 1px alpha(#ffffff, 0.018);
+}
+
+button.realmheart-night-light-toggle:hover {
+  color: @rh_text;
+  border-color: alpha(#d2a45f, 0.45);
+}
+
+button.realmheart-night-light-toggle.active,
+button.realmheart-night-light-toggle:checked {
+  color: #0b1716;
+  background-color: alpha(@rh_primary, 0.92);
+  border-color: alpha(@rh_primary, 0.96);
+  box-shadow: 0 0 12px alpha(@rh_primary, 0.13);
+}
+
+.realmheart-night-light-strength-card {
+  padding: 10px 11px 8px 11px;
+  background-color: alpha(#05090b, 0.55);
+  border: 1px solid alpha(@rh_outline, 0.20);
+  border-radius: 13px;
+}
+
+.realmheart-night-light-strength-title {
+  color: alpha(#e2c181, 0.90);
+  font-family: Cinzel, serif;
+  font-size: 0.65em;
+  font-weight: 700;
+  letter-spacing: 1.25px;
+}
+
+.realmheart-night-light-strength-value {
+  color: alpha(@rh_primary, 0.96);
+  font-size: 0.72em;
+  font-weight: 760;
+}
+
+scale.realmheart-night-light-scale trough,
+scale.realmheart-night-light-scale highlight {
+  min-height: 11px;
+}
+
+scale.realmheart-night-light-scale highlight {
+  background-image: linear-gradient(to right, #efc273, #df8f4c);
+  box-shadow: 0 0 9px alpha(#e7a354, 0.18);
+}
+
+scale.realmheart-night-light-scale:disabled {
+  opacity: 0.34;
+}
+
+.realmheart-night-light-scale-legend {
+  color: alpha(@rh_text_muted, 0.62);
+  font-size: 0.58em;
+}
+
+.realmheart-night-light-temperature {
+  color: alpha(#e9c98f, 0.84);
+  font-size: 0.67em;
+  font-weight: 650;
+  letter-spacing: 0.35px;
+}
+
+.realmheart-night-light-footer {
+  padding: 8px 11px 10px 11px;
+  background-color: alpha(#030708, 0.28);
+  border-top: 1px solid alpha(#9d7138, 0.20);
+}

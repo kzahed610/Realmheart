@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_set>
 
 namespace realmheart::services {
 
@@ -29,6 +30,7 @@ private:
 
     NotificationHistory& history_;
     std::uint32_t next_id_ = 1;
+    std::unordered_set<std::uint32_t> active_ids_;
     NotificationHandler notification_handler_;
 };
 

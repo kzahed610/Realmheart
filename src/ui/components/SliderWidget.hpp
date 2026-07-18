@@ -29,6 +29,7 @@ public:
 
     GtkWidget* get_widget() override;
     void set_value(double value);
+    void set_available(bool available);
 
 private:
     struct AsyncState {
@@ -36,6 +37,7 @@ private:
         std::atomic<std::uint64_t> generation{0};
         std::mutex mutation_mutex;
         GtkWidget* scale = nullptr; // GTK main thread only
+        GtkWidget* value_label = nullptr; // GTK main thread only
         gulong value_changed_handler = 0;
         Mutator on_change;
         ConfirmedCallback on_confirmed;
@@ -44,7 +46,9 @@ private:
 
     GtkWidget* box_ = nullptr;
     GtkWidget* scale_ = nullptr;
+    GtkWidget* value_label_ = nullptr;
     bool updating_ = false;
+    bool available_ = true;
     double pending_value_ = 0.0;
     guint debounce_source_ = 0;
     std::shared_ptr<AsyncState> state_;

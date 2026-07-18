@@ -4,16 +4,19 @@
 #include "services/Notifications.hpp"
 #include "ui/components/BaseWidget.hpp"
 
+#include <array>
 #include <atomic>
 #include <functional>
 #include <gtk/gtk.h>
 #include <memory>
-#include <mutex>
 #include <cstdint>
+#include <mutex>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace realmheart::ui::components {
-class LabelWidget;
+class SliderWidget;
 }
 
 namespace realmheart::ui::sidebar {
@@ -28,6 +31,10 @@ struct SidebarPlacement {
 [[nodiscard]] SidebarPlacement sidebar_placement_for(GtkWidget* widget);
 
 class SidebarFrame;
+class QuickControlTile;
+class WifiManagerPopover;
+class BluetoothManagerPopover;
+class NightLightPanel;
 
 class RightSidebar {
 public:
@@ -42,23 +49,44 @@ public:
     RightSidebar(const RightSidebar&) = delete;
     RightSidebar& operator=(const RightSidebar&) = delete;
 
-    void add_module(std::unique_ptr<components::BaseWidget> module);
     void refresh();
     GtkWidget* get_window() const { return window_; }
 
 private:
     struct AsyncUiState {
         std::atomic<bool> alive{true};
-        std::atomic<std::uint64_t> power_profile_generation{0};
-        std::mutex power_profile_mutex;
-        components::LabelWidget* power_profile_label = nullptr; // GTK main thread only
+        std::atomic<std::uint64_t> generation{0};
+        std::atomic<bool> refresh_in_flight{false};
+        std::atomic<bool> refresh_pending{false};
+        std::mutex operation_mutex;
+        RightSidebar* owner = nullptr; // GTK main thread only
+    };
+
+    struct ControlRefreshResult {
+        std::shared_ptr<AsyncUiState> state;
+        std::optional<std::string> wifi_status;
+        bool wifi_active = false;
+        std::optional<bool> bluetooth_powered;
+        std::optional<bool> night_light_enabled;
+        std::optional<std::string> active_profile;
+        std::optional<double> brightness_percent;
+        std::optional<double> volume_percent;
     };
 
     void setup_layout();
     void populate_modules();
+    void build_identity_header();
+    void build_quick_controls();
+    void build_power_profiles();
+    void refresh_controls();
+    static gboolean finish_control_refresh(gpointer raw);
+    static void destroy_control_refresh_result(gpointer raw);
+    void post_control_action(std::function<void()> action);
+    void set_power_profile(const std::string& profile);
 
     GtkApplication* app_ = nullptr;
     GtkWidget* window_ = nullptr;
+    GtkWidget* content_overlay_ = nullptr;
     GtkWidget* container_ = nullptr;
     std::unique_ptr<SidebarFrame> frame_;
     std::vector<std::unique_ptr<components::BaseWidget>> modules_;
@@ -66,6 +94,18 @@ private:
     services::NotificationHistory& notification_history_;
     std::function<void(double)> show_volume_osd_;
     std::function<void(double)> show_brightness_osd_;
+    GtkWidget* online_label_ = nullptr;
+    GtkWidget* uptime_label_ = nullptr;
+    std::array<GtkWidget*, 3> power_profile_buttons_{};
+    std::unique_ptr<QuickControlTile> wifi_tile_;
+    std::unique_ptr<QuickControlTile> bluetooth_tile_;
+    std::unique_ptr<QuickControlTile> night_light_tile_;
+    std::unique_ptr<QuickControlTile> keep_awake_tile_;
+    components::SliderWidget* brightness_slider_ = nullptr;
+    components::SliderWidget* volume_slider_ = nullptr;
+    std::unique_ptr<WifiManagerPopover> wifi_panel_;
+    std::unique_ptr<BluetoothManagerPopover> bluetooth_panel_;
+    std::unique_ptr<NightLightPanel> night_light_panel_;
     std::shared_ptr<AsyncUiState> async_ui_state_ = std::make_shared<AsyncUiState>();
 };
 

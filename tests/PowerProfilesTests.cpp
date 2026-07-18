@@ -24,6 +24,7 @@ public:
         const auto executable = directory_ / "powerprofilesctl";
         std::ofstream script(executable);
         script << "#!/bin/sh\n"
+               << "if [ \"$REALMHEART_POWER_CLI_NOOP\" = 1 ]; then exit 0; fi\n"
                << "printf 'simulated broken Python wrapper\\n'\n"
                << "exit 1\n";
         script.close();
@@ -45,14 +46,20 @@ public:
         ::setenv("PATH", directory_.c_str(), 1);
         ::setenv("REALMHEART_POWER_TEST_STATE", state_file_.c_str(), 1);
         ::unsetenv("REALMHEART_POWER_IGNORE_WRITES");
+        ::unsetenv("REALMHEART_POWER_CLI_NOOP");
     }
 
     ~TemporaryFakePowerProfilesctl() {
         ::setenv("PATH", old_path_.c_str(), 1);
         ::unsetenv("REALMHEART_POWER_TEST_STATE");
         ::unsetenv("REALMHEART_POWER_IGNORE_WRITES");
+        ::unsetenv("REALMHEART_POWER_CLI_NOOP");
         std::error_code error;
         std::filesystem::remove_all(directory_, error);
+    }
+
+    void use_successful_noop_cli() {
+        ::setenv("REALMHEART_POWER_CLI_NOOP", "1", 1);
     }
 
     void ignore_writes() {
@@ -76,7 +83,8 @@ int main() {
         TemporaryFakePowerProfilesctl fake;
 
         require(realmheart::services::PowerProfiles::current() == "balanced", "profile should be readable");
-        require(realmheart::services::PowerProfiles::cycle() == "performance", "cycle should return matching readback");
+        fake.use_successful_noop_cli();
+        require(realmheart::services::PowerProfiles::cycle() == "performance", "cycle should fall back when the CLI reports success without changing the profile");
         require(realmheart::services::PowerProfiles::current() == "performance", "profile should actually change");
         require(realmheart::services::PowerProfiles::cycle() == "power-saver", "cycle should use PPD's power-saver name");
 
