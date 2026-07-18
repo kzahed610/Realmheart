@@ -32,6 +32,8 @@ public:
     void set_available(bool available);
 
 private:
+    void show_interaction_feedback();
+
     struct AsyncState {
         std::atomic<bool> alive{true};
         std::atomic<std::uint64_t> generation{0};
@@ -51,6 +53,7 @@ private:
     bool available_ = true;
     double pending_value_ = 0.0;
     guint debounce_source_ = 0;
+    guint interaction_feedback_source_ = 0;
     std::shared_ptr<AsyncState> state_;
 };
 

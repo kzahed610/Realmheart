@@ -73,8 +73,9 @@ public:
         std::int64_t target_position_us
     );
 
-    // PropertiesChanged and NameOwnerChanged wake subscribers immediately.
-    // A caller may still keep a slow fallback poll for bus reconnect edge cases.
+    // Relevant MPRIS PropertiesChanged events and NameOwnerChanged wake
+    // subscribers immediately. A caller may still keep a slow fallback poll
+    // for bus reconnect edge cases.
     Subscription subscribe(ChangedCallback callback);
 
 private:

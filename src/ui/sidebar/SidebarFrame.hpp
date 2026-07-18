@@ -7,13 +7,13 @@ namespace realmheart::ui::sidebar {
 // Geometry shared by the layer-shell surface, decorative frame, current
 // controls, and the future character composition.
 //
-// The visible frame remains 430 px wide. The additional left gutter belongs to
+// The visible frame is 486 px wide. The additional left gutter belongs to
 // the transparent surface, so Tessia can later extend beyond the metal shell
 // without being clipped by the Wayland surface boundary. Because the input
 // region follows only the shell silhouette, the unused gutter stays
 // click-through until character interaction is intentionally added.
 struct SidebarFrameLayout {
-    int frame_width = 430;
+    int frame_width = 486;
     int character_gutter_width = 128;
 
     int content_inset_start = 76;

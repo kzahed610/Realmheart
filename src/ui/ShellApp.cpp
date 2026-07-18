@@ -1,7 +1,9 @@
 #include "ui/ShellApp.hpp"
 
 #include "core/ShellControl.hpp"
+#include "core/TaskExecutor.hpp"
 #include "services/Audio.hpp"
+#include "services/AudioMonitor.hpp"
 #include "services/BatteryService.hpp"
 #include "services/Brightness.hpp"
 #include "services/LauncherService.hpp"
@@ -17,6 +19,7 @@
 #include "ui/LayerSurface.hpp"
 #include "ui/NotesOverlay.hpp"
 #include "ui/NotificationToast.hpp"
+#include "ui/NowPlayingOverlay.hpp"
 #include "ui/OSDOverlay.hpp"
 #include "ui/ShellState.hpp"
 #include "ui/ThemeStyles.hpp"
@@ -30,14 +33,17 @@
 #include <gtk/gtk.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cerrno>
+#include <cstdint>
 #include <ctime>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <sys/types.h>
 #include <utility>
@@ -292,6 +298,15 @@ void enforce_sidebar_backdrop_input_region(
 } // namespace
 
 class ShellRuntime {
+private:
+    struct NowPlayingAsyncState {
+        std::atomic<bool> alive{true};
+        std::atomic<std::uint64_t> generation{0};
+        std::atomic<bool> refresh_in_flight{false};
+        std::atomic<bool> refresh_pending{false};
+        std::atomic<ShellRuntime*> owner{nullptr};
+    };
+
 public:
     ShellRuntime(
         GtkApplication* application,
@@ -305,11 +320,13 @@ public:
           utilities_(std::make_unique<services::UtilityManager>(theme_service_)),
           session_(std::make_unique<services::SessionManager>()),
           battery_(std::make_unique<services::BatteryService>()),
-          media_(std::make_unique<services::MediaService>()),
+          media_(std::make_shared<services::MediaService>()),
           notes_service_(std::make_unique<services::NotesService>()),
           launcher_service_(std::make_unique<services::LauncherService>()) {
+        now_playing_async_state_->owner.store(this);
+
         notification_server_.set_notification_handler([this](const auto& entry) {
-            if (toast_) toast_->show(entry, 5000);
+            if (toast_) toast_->show(entry, 4000);
         });
 
         if (!notification_daemon_.start()) {
@@ -319,14 +336,19 @@ public:
 
     ~ShellRuntime() {
         // Stop callbacks that capture this before tearing down UI/controllers.
+        now_playing_async_state_->alive.store(false);
+        now_playing_async_state_->owner.store(nullptr);
+        now_playing_subscription_.reset();
         notification_server_.set_notification_handler({});
         notification_daemon_.stop();
+        audio_monitor_.reset();
 
         wallpaper_controller_.reset();
         launcher_overlay_.reset();
         notes_overlay_.reset();
         toast_.reset();
         osd_.reset();
+        now_playing_.reset();
 
         sidebar_.reset();
         bar_.reset();
@@ -387,7 +409,12 @@ public:
     void show_osd_volume() {
         ensure_initialized();
         if (const auto audio = services::Audio::read_default_sink()) {
-            show_osd_volume_value(audio->volume * 100.0);
+            double volume = audio->volume;
+            if (volume > 1.0) {
+                const auto normalized = services::Audio::set_default_sink_volume(1.0);
+                volume = normalized.success ? normalized.state.volume : 1.0;
+            }
+            show_osd_volume_value(std::clamp(volume * 100.0, 0.0, 100.0));
         }
     }
 
@@ -579,6 +606,116 @@ public:
     }
 
 private:
+    void request_now_playing_refresh() {
+        const auto state = now_playing_async_state_;
+        if (state->refresh_in_flight.exchange(true)) {
+            state->refresh_pending = true;
+            return;
+        }
+
+        const std::uint64_t generation = state->generation.fetch_add(1) + 1;
+        const auto service = media_;
+        const bool queued = core::shared_task_executor().post(
+            [state, service, generation] {
+                if (!state->alive.load() || !service) {
+                    state->refresh_in_flight = false;
+                    return;
+                }
+                auto info = service->get_current_media();
+
+                struct Payload {
+                    std::shared_ptr<NowPlayingAsyncState> state;
+                    std::uint64_t generation = 0;
+                    std::optional<services::MediaInfo> info;
+                };
+
+                g_idle_add_full(
+                    G_PRIORITY_DEFAULT_IDLE,
+                    +[](gpointer raw) -> gboolean {
+                        auto* payload = static_cast<Payload*>(raw);
+                        auto& state = *payload->state;
+                        ShellRuntime* owner = state.owner.load();
+                        if (state.alive.load() &&
+                            state.generation.load() == payload->generation &&
+                            owner != nullptr) {
+                            owner->apply_now_playing_media(std::move(payload->info));
+                        }
+
+                        state.refresh_in_flight = false;
+                        if (state.alive.load() && owner != nullptr &&
+                            state.refresh_pending.exchange(false)) {
+                            owner->request_now_playing_refresh();
+                        }
+                        return G_SOURCE_REMOVE;
+                    },
+                    new Payload{state, generation, std::move(info)},
+                    +[](gpointer raw) { delete static_cast<Payload*>(raw); }
+                );
+            }
+        );
+        if (!queued) state->refresh_in_flight = false;
+    }
+
+    void start_now_playing_monitor() {
+        if (now_playing_monitor_started_) return;
+        now_playing_monitor_started_ = true;
+        now_playing_subscription_ = media_->subscribe([state = now_playing_async_state_] {
+            ShellRuntime* owner = state->owner.load();
+            if (!state->alive.load() || owner == nullptr) return;
+            owner->request_now_playing_refresh();
+        });
+        request_now_playing_refresh();
+    }
+
+    void apply_now_playing_media(std::optional<services::MediaInfo> info) {
+        std::string identity;
+        if (info) {
+            identity.reserve(
+                info->player_bus_name.size() + info->track_id.size() +
+                info->title.size() + info->artist.size() + info->album.size() + 8
+            );
+            identity.append(info->player_bus_name);
+            identity.push_back('\x1f');
+            if (!info->track_id.empty()) {
+                identity.append("track:");
+                identity.append(info->track_id);
+            } else if (!info->title.empty() || !info->artist.empty() ||
+                       !info->album.empty()) {
+                // Some browser bridges omit mpris:trackid. Fall back to stable
+                // metadata, but deliberately ignore artwork and playback state
+                // so late artwork loads and pause/resume cannot duplicate a toast.
+                identity.append("metadata:");
+                identity.append(info->title);
+                identity.push_back('\x1f');
+                identity.append(info->artist);
+                identity.push_back('\x1f');
+                identity.append(info->album);
+            } else {
+                identity.clear();
+            }
+        }
+
+        if (!now_playing_seeded_) {
+            now_playing_seeded_ = true;
+            last_now_playing_identity_ = std::move(identity);
+            return;
+        }
+
+        if (identity.empty()) {
+            last_now_playing_identity_.clear();
+            return;
+        }
+        if (identity == last_now_playing_identity_) return;
+
+        last_now_playing_identity_ = std::move(identity);
+        if (!info || !now_playing_) return;
+        const std::string title = info->title.empty()
+            ? "Unknown track"
+            : info->title;
+        const std::string artist = info->artist.empty() ? info->album : info->artist;
+        now_playing_->show(title, artist);
+    }
+
     void generate_theme_for(const std::string& path) {
         if (path.empty()) return;
         if (!utilities_->generate_colors(path)) {
@@ -591,7 +728,29 @@ private:
             theme_styles_ = std::make_unique<ThemeStyles>(theme_service_);
         }
         if (!toast_) toast_ = std::make_unique<NotificationToast>(application_);
-        if (!osd_) osd_ = std::make_unique<OSDOverlay>(application_);
+        if (!now_playing_) {
+            now_playing_ = std::make_unique<NowPlayingOverlay>(application_);
+        }
+        if (!osd_) {
+            osd_ = std::make_unique<OSDOverlay>(
+                application_,
+                [this](bool visible) {
+                    if (now_playing_) now_playing_->set_system_osd_visible(visible);
+                }
+            );
+        }
+        if (!audio_monitor_) {
+            audio_monitor_ = std::make_unique<services::AudioMonitor>(
+                [this](const services::AudioState& audio) {
+                    const double percent = audio.muted
+                        ? 0.0
+                        : std::clamp(audio.volume * 100.0, 0.0, 100.0);
+                    show_osd_volume_value(percent);
+                }
+            );
+            audio_monitor_->start();
+        }
+        start_now_playing_monitor();
         if (!notes_overlay_) {
             notes_overlay_ = std::make_unique<NotesOverlay>(application_, notes_service_.get());
         }
@@ -864,14 +1023,22 @@ private:
     std::unique_ptr<services::UtilityManager> utilities_;
     std::unique_ptr<services::SessionManager> session_;
     std::unique_ptr<services::BatteryService> battery_;
-    std::unique_ptr<services::MediaService> media_;
+    std::shared_ptr<services::MediaService> media_;
+    services::MediaService::Subscription now_playing_subscription_;
+    std::shared_ptr<NowPlayingAsyncState> now_playing_async_state_ =
+        std::make_shared<NowPlayingAsyncState>();
+    bool now_playing_monitor_started_ = false;
+    bool now_playing_seeded_ = false;
+    std::string last_now_playing_identity_;
     std::unique_ptr<services::NotesService> notes_service_;
     std::unique_ptr<services::LauncherService> launcher_service_;
 
     std::unique_ptr<ThemeStyles> theme_styles_;
     std::unique_ptr<NotesOverlay> notes_overlay_;
     std::unique_ptr<NotificationToast> toast_;
+    std::unique_ptr<NowPlayingOverlay> now_playing_;
     std::unique_ptr<OSDOverlay> osd_;
+    std::unique_ptr<services::AudioMonitor> audio_monitor_;
     std::unique_ptr<bar::VerticalBar> bar_;
     GtkWindow* hotspot_ = nullptr;
     GtkWindow* sidebar_backdrop_ = nullptr;

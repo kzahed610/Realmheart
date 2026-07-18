@@ -20,13 +20,9 @@ constexpr int kCapExtension = 20;
 constexpr int kVisualWidth = kRailWidth + kCapExtension;
 constexpr int kCurveHeight = 35;
 
-int monitor_height_or_fallback() {
+int monitor_height_or_fallback(GtkWidget* widget) {
     constexpr int fallback_height = 1080;
-    GdkDisplay* display = gdk_display_get_default();
-    if (display == nullptr) return fallback_height;
-    GListModel* monitors = gdk_display_get_monitors(display);
-    if (monitors == nullptr || g_list_model_get_n_items(monitors) == 0) return fallback_height;
-    GdkMonitor* monitor = GDK_MONITOR(g_list_model_get_item(monitors, 0));
+    GdkMonitor* monitor = resolve_layer_surface_monitor(widget);
     if (monitor == nullptr) return fallback_height;
     GdkRectangle geometry{};
     gdk_monitor_get_geometry(monitor, &geometry);
@@ -72,7 +68,11 @@ VerticalBar::VerticalBar(
     g_weak_ref_init(&active_popover_ref_, nullptr);
     window_ = gtk_application_window_new(app_);
     gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Aether Spine");
-    gtk_window_set_default_size(GTK_WINDOW(window_), kVisualWidth, monitor_height_or_fallback());
+    gtk_window_set_default_size(
+        GTK_WINDOW(window_),
+        kVisualWidth,
+        monitor_height_or_fallback(window_)
+    );
     gtk_window_set_resizable(GTK_WINDOW(window_), FALSE);
     gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
     gtk_widget_add_css_class(window_, "realmheart-vertical-bar-window");
@@ -463,7 +463,10 @@ void VerticalBar::request_workspace_refresh() {
 }
 
 void VerticalBar::request_media_refresh() {
-    if (async_state_->media_in_flight.exchange(true)) return;
+    if (async_state_->media_in_flight.exchange(true)) {
+        async_state_->media_refresh_pending = true;
+        return;
+    }
     const auto state = async_state_;
     auto* service = &media_service_;
     if (!realmheart::core::shared_task_executor().post([state, service] {
@@ -479,6 +482,9 @@ void VerticalBar::request_media_refresh() {
                 payload->state->media_in_flight = false;
                 if (payload->state->alive.load() && payload->state->owner != nullptr) {
                     payload->state->owner->apply_media(payload->info);
+                    if (payload->state->media_refresh_pending.exchange(false)) {
+                        payload->state->owner->request_media_refresh();
+                    }
                 }
                 return G_SOURCE_REMOVE;
             },

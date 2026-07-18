@@ -248,11 +248,11 @@ window.realmheart-system-monitor-layer-window .realmheart-attached-popover-fill 
 /* Right sidebar interior styles are appended below. */
 .realmheart-right-sidebar {
   color: @rh_text;
-  padding: 1px 2px 3px 2px;
+  padding: 1px 10px 3px 16px;
 }
 
 .realmheart-identity-header {
-  margin-bottom: 11px;
+  margin-bottom: 23px;
   padding: 4px 5px 11px 5px;
   background-color: transparent;
   border: 0;
@@ -290,7 +290,7 @@ window.realmheart-system-monitor-layer-window .realmheart-attached-popover-fill 
   font-size: 0.64em;
 }
 
-.realmheart-sidebar-section { margin-bottom: 11px; }
+.realmheart-sidebar-section { margin-bottom: 27px; }
 
 .realmheart-section-title,
 .realmheart-notifications-title {
@@ -319,13 +319,22 @@ menubutton.realmheart-quick-tile > button {
   background-color: alpha(#091012, 0.94);
   border: 1px solid alpha(#aa7d3c, 0.28);
   border-radius: 18px;
-  box-shadow: inset 0 1px alpha(#ffffff, 0.018);
+  box-shadow:
+    0 6px 14px alpha(#000000, 0.18),
+    inset 0 1px alpha(#ffffff, 0.018);
+  transition:
+    background-color 105ms ease-out,
+    border-color 105ms ease-out,
+    box-shadow 125ms ease-out;
 }
 
 button.realmheart-quick-tile:hover,
 menubutton.realmheart-quick-tile > button:hover {
   background-image: linear-gradient(to bottom, alpha(#172123, 0.96), alpha(#0c1416, 0.96));
   border-color: alpha(#d0a055, 0.48);
+  box-shadow:
+    0 8px 18px alpha(#000000, 0.20),
+    inset 0 1px alpha(#ffffff, 0.018);
 }
 
 button.realmheart-quick-tile:focus-visible,
@@ -334,14 +343,34 @@ menubutton.realmheart-quick-tile > button:focus-visible {
   outline-offset: -2px;
 }
 
-button.realmheart-quick-tile:active,
 button.realmheart-quick-tile.active,
-menubutton.realmheart-quick-tile:active > button,
 menubutton.realmheart-quick-tile.active > button {
   background-image: linear-gradient(to bottom, alpha(@rh_primary, 0.16), alpha(@rh_primary, 0.075));
   background-color: alpha(@rh_primary, 0.10);
   border-color: alpha(@rh_primary, 0.62);
-  box-shadow: inset 3px 0 alpha(@rh_primary, 0.42), inset 0 1px alpha(#ffffff, 0.025);
+  box-shadow:
+    0 8px 18px alpha(#000000, 0.20),
+    inset 3px 0 alpha(@rh_primary, 0.42),
+    inset 0 1px alpha(#ffffff, 0.025);
+}
+
+button.realmheart-quick-tile:active,
+menubutton.realmheart-quick-tile > button:active {
+  background-image: linear-gradient(to bottom, alpha(@rh_primary, 0.24), alpha(#071012, 0.96));
+  background-color: alpha(@rh_primary, 0.15);
+  border-color: alpha(@rh_primary, 0.92);
+  box-shadow:
+    inset 0 0 0 2px alpha(@rh_primary, 0.18),
+    inset 0 4px 12px alpha(#000000, 0.34);
+}
+
+button.realmheart-quick-tile.click-confirmed,
+menubutton.realmheart-quick-tile.click-confirmed > button {
+  border-color: alpha(@rh_primary, 0.88);
+  box-shadow:
+    inset 0 0 0 2px alpha(@rh_primary, 0.22),
+    0 0 0 1px alpha(@rh_primary, 0.20),
+    0 0 14px alpha(@rh_primary, 0.16);
 }
 
 button.realmheart-quick-tile.unavailable,
@@ -371,7 +400,7 @@ menubutton.realmheart-quick-tile:not(.active) .realmheart-quick-tile-status {
   color: alpha(@rh_text_muted, 0.82);
 }
 
-.realmheart-levels-section { margin-bottom: 10px; }
+.realmheart-levels-section { margin-bottom: 26px; }
 .realmheart-slider-chamber {
   margin: 1px 0 0 0;
   padding: 7px 9px;
@@ -379,7 +408,9 @@ menubutton.realmheart-quick-tile:not(.active) .realmheart-quick-tile-status {
   background-color: alpha(#080d0f, 0.72);
   border: 1px solid alpha(#9d7138, 0.24);
   border-radius: 14px;
-  box-shadow: inset 0 1px alpha(#ffffff, 0.015);
+  box-shadow:
+    0 8px 18px alpha(#000000, 0.18),
+    inset 0 1px alpha(#ffffff, 0.015);
 }
 
 .realmheart-module-slider {
@@ -399,6 +430,12 @@ menubutton.realmheart-quick-tile:not(.active) .realmheart-quick-tile-status {
   font-size: 0.70em;
   font-weight: 600;
 }
+.realmheart-module-slider.interacting .realmheart-slider-icon {
+  color: alpha(@rh_primary, 0.98);
+}
+.realmheart-module-slider.interacting .realmheart-slider-value {
+  color: alpha(#f2d79b, 1.0);
+}
 
 scale.realmheart-rune-scale { padding: 10px 0; }
 scale.realmheart-rune-scale trough {
@@ -415,6 +452,15 @@ scale.realmheart-rune-scale highlight {
   border: 0;
   box-shadow: 0 0 7px alpha(@rh_primary, 0.12);
 }
+.realmheart-module-slider.interacting scale.realmheart-rune-scale highlight,
+scale.realmheart-rune-scale:active highlight {
+  background-image: linear-gradient(to right, alpha(@rh_primary, 0.88), alpha(#b9f0ea, 1.0));
+  box-shadow: 0 0 10px alpha(@rh_primary, 0.24);
+}
+.realmheart-module-slider.interacting scale.realmheart-rune-scale trough,
+scale.realmheart-rune-scale:active trough {
+  border-color: alpha(@rh_primary, 0.30);
+}
 scale.realmheart-rune-scale slider {
   min-width: 1px;
   min-height: 1px;
@@ -427,13 +473,14 @@ scale.realmheart-rune-scale slider {
   opacity: 0;
 }
 
-.realmheart-power-section { margin-bottom: 10px; }
+.realmheart-power-section { margin-bottom: 26px; }
 .realmheart-power-segments {
   margin-top: 3px;
   padding: 3px;
   background-color: alpha(#070c0e, 0.66);
   border: 1px solid alpha(#9d7138, 0.22);
   border-radius: 15px;
+  box-shadow: 0 8px 18px alpha(#000000, 0.16);
 }
 button.realmheart-power-segment {
   min-height: 33px;
@@ -459,7 +506,33 @@ button.realmheart-power-segment.active {
   box-shadow: inset 0 1px alpha(#ffffff, 0.02);
 }
 button.realmheart-power-segment.pending {
-  opacity: 0.72;
+  opacity: 0.78;
+  box-shadow:
+    inset 0 1px alpha(#ffffff, 0.025),
+    0 0 8px alpha(@rh_primary, 0.12);
+}
+button.realmheart-power-segment:active {
+  color: alpha(@rh_text, 1.0);
+  background-color: alpha(@rh_primary, 0.18);
+  box-shadow: inset 0 2px 5px alpha(#000000, 0.42);
+}
+button.realmheart-power-segment.confirmed {
+  color: alpha(#e8fff9, 1.0);
+  border-color: alpha(@rh_primary, 0.88);
+  background-image: linear-gradient(
+    to bottom,
+    alpha(@rh_primary, 0.28),
+    alpha(@rh_primary, 0.13)
+  );
+  box-shadow:
+    inset 0 0 0 1px alpha(#d9fff8, 0.08),
+    0 0 12px alpha(@rh_primary, 0.22);
+}
+button.realmheart-power-segment.failed {
+  color: alpha(#ffd1ca, 0.98);
+  border-color: alpha(#e36b5d, 0.72);
+  background-color: alpha(#9f332b, 0.16);
+  box-shadow: 0 0 10px alpha(#e36b5d, 0.14);
 }
 
 .realmheart-notifications {
@@ -509,6 +582,7 @@ button.realmheart-notifications-clear:disabled { opacity: 0.38; }
   background-color: alpha(#070c0e, 0.68);
   border: 1px solid alpha(#9d7138, 0.20);
   border-radius: 15px;
+  box-shadow: 0 10px 22px alpha(#000000, 0.18);
 }
 .realmheart-notifications-scroller:hover {
   border-color: alpha(#b98a45, 0.28);
@@ -525,7 +599,9 @@ button.realmheart-notifications-clear:disabled { opacity: 0.38; }
   border: 1px solid alpha(@rh_outline, 0.16);
   border-left: 2px solid alpha(#b48a49, 0.38);
   border-radius: 11px;
-  box-shadow: inset 0 1px alpha(#ffffff, 0.012);
+  box-shadow:
+    0 6px 14px alpha(#000000, 0.14),
+    inset 0 1px alpha(#ffffff, 0.012);
 }
 .realmheart-notification-row:hover {
   border-color: alpha(#c59a54, 0.30);
@@ -610,24 +686,6 @@ button.realmheart-notification-dismiss:active {
   background-color: transparent;
 }
 
-button.realmheart-connectivity-backdrop,
-button.realmheart-connectivity-backdrop:hover,
-button.realmheart-connectivity-backdrop:active,
-button.realmheart-connectivity-backdrop:focus,
-button.realmheart-connectivity-backdrop:focus-visible {
-  min-width: 0;
-  min-height: 0;
-  margin: 0;
-  padding: 0;
-  color: transparent;
-  background-image: none;
-  background-color: alpha(#020507, 0.34);
-  border: 0;
-  border-radius: 0;
-  outline: none;
-  box-shadow: none;
-}
-
 .realmheart-connectivity-revealer {
   background-color: transparent;
 }
@@ -638,7 +696,8 @@ button.realmheart-connectivity-backdrop:focus-visible {
   border: 1px solid alpha(#c79649, 0.58);
   border-radius: 16px;
   box-shadow:
-    0 16px 38px alpha(#000000, 0.54),
+    0 18px 42px alpha(#000000, 0.58),
+    0 4px 14px alpha(#000000, 0.30),
     inset 0 0 0 1px alpha(#f1d69a, 0.035);
 }
 
@@ -693,6 +752,7 @@ button.realmheart-manager-close-button:hover {
   background-color: alpha(@rh_surface, 0.30);
   border: 1px solid alpha(@rh_outline, 0.20);
   border-radius: 11px;
+  box-shadow: 0 6px 14px alpha(#000000, 0.14);
 }
 .realmheart-manager-row:hover {
   background-color: alpha(@rh_surface_variant, 0.36);
@@ -780,7 +840,7 @@ button.realmheart-manager-forget-button:hover {
 
 /* Night Light manager */
 .realmheart-identity-state-row {
-  padding-left: 9px;
+  padding-left: 22px;
   padding-right: 8px;
 }
 
@@ -801,6 +861,7 @@ button.realmheart-manager-forget-button:hover {
   background-color: alpha(@rh_surface, 0.32);
   border: 1px solid alpha(#c79649, 0.25);
   border-radius: 13px;
+  box-shadow: 0 6px 14px alpha(#000000, 0.14);
 }
 
 .realmheart-night-light-control-title {
@@ -847,6 +908,7 @@ button.realmheart-night-light-toggle:checked {
   background-color: alpha(#05090b, 0.55);
   border: 1px solid alpha(@rh_outline, 0.20);
   border-radius: 13px;
+  box-shadow: 0 6px 14px alpha(#000000, 0.14);
 }
 
 .realmheart-night-light-strength-title {
@@ -893,4 +955,198 @@ scale.realmheart-night-light-scale:disabled {
   padding: 8px 11px 10px 11px;
   background-color: alpha(#030708, 0.28);
   border-top: 1px solid alpha(#9d7138, 0.20);
+}
+
+/* Compact volume / brightness OSD */
+window.realmheart-osd-window,
+window.realmheart-osd-window > * {
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+}
+
+.realmheart-osd-card {
+  min-width: 330px;
+  min-height: 38px;
+  padding: 9px 14px;
+  color: @rh_text;
+  background-image: linear-gradient(
+    to bottom,
+    alpha(#151c20, 0.985),
+    alpha(#080d10, 0.992)
+  );
+  border: 1px solid alpha(#d7aa51, 0.82);
+  border-radius: 18px;
+  box-shadow:
+    0 16px 44px alpha(#000000, 0.48),
+    0 4px 12px alpha(#000000, 0.34),
+    inset 0 0 0 1px alpha(@rh_secondary, 0.16),
+    inset 0 1px alpha(#ffffff, 0.035);
+}
+
+.realmheart-osd-icon {
+  color: alpha(@rh_text, 0.96);
+}
+
+.realmheart-osd-title {
+  color: alpha(@rh_text, 0.96);
+  font-size: 0.78em;
+  font-weight: 760;
+  letter-spacing: 0.25px;
+}
+
+.realmheart-osd-value {
+  color: alpha(#efd18d, 0.96);
+  font-size: 0.72em;
+  font-weight: 760;
+}
+
+progressbar.realmheart-osd-progress {
+  min-height: 8px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background-color: transparent;
+}
+
+progressbar.realmheart-osd-progress trough {
+  min-height: 8px;
+  border-radius: 999px;
+  background-color: alpha(#d7e2e7, 0.12);
+  border: 1px solid alpha(@rh_outline, 0.22);
+  box-shadow: inset 0 1px 2px alpha(#000000, 0.42);
+}
+
+progressbar.realmheart-osd-progress progress {
+  min-height: 8px;
+  border-radius: 999px;
+  background-image: linear-gradient(
+    to right,
+    alpha(@rh_secondary, 0.98),
+    alpha(@rh_primary, 0.92)
+  );
+  box-shadow: 0 0 8px alpha(@rh_secondary, 0.14);
+}
+
+/* Incoming notification toast */
+window.realmheart-notification-window,
+window.realmheart-notification-window > * {
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+}
+
+.realmheart-notification-card {
+  min-width: 362px;
+  min-height: 68px;
+  padding: 13px 12px 13px 16px;
+  color: @rh_text;
+  background-image: linear-gradient(
+    to bottom,
+    alpha(#151d21, 0.99),
+    alpha(#080d10, 0.995)
+  );
+  border: 1px solid alpha(#d7aa51, 0.84);
+  border-radius: 18px;
+  box-shadow:
+    0 16px 42px alpha(#000000, 0.48),
+    0 4px 12px alpha(#000000, 0.34),
+    inset 0 0 0 1px alpha(@rh_secondary, 0.17),
+    inset 0 1px alpha(#ffffff, 0.038);
+}
+
+.realmheart-notification-icon {
+  color: alpha(@rh_primary, 0.97);
+}
+
+.realmheart-notification-app {
+  color: alpha(@rh_primary, 0.82);
+  font-size: 0.64em;
+  font-weight: 720;
+  letter-spacing: 0.45px;
+}
+
+.realmheart-notification-summary {
+  color: alpha(@rh_text, 0.98);
+  font-size: 0.88em;
+  font-weight: 780;
+  letter-spacing: 0.10px;
+}
+
+.realmheart-notification-body {
+  color: alpha(@rh_text_muted, 0.92);
+  font-size: 0.76em;
+}
+
+button.realmheart-notification-close {
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+  margin: -4px -3px 0 0;
+  color: alpha(@rh_text_muted, 0.78);
+  font-size: 1.12em;
+  font-weight: 720;
+  background-image: none;
+  background-color: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  box-shadow: none;
+}
+
+button.realmheart-notification-close:hover {
+  color: alpha(@rh_text, 0.98);
+  background-color: alpha(@rh_primary, 0.10);
+  border-color: alpha(@rh_primary, 0.28);
+}
+
+button.realmheart-notification-close:active {
+  color: #081110;
+  background-color: alpha(@rh_primary, 0.88);
+  border-color: alpha(@rh_primary, 0.95);
+}
+
+
+/* MPRIS track-change micro strip */
+window.realmheart-now-playing-window,
+window.realmheart-now-playing-window > * {
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+}
+
+.realmheart-now-playing-card {
+  min-width: 272px;
+  min-height: 32px;
+  padding: 8px 13px;
+  color: @rh_text;
+  background-image: linear-gradient(
+    to bottom,
+    alpha(#151c20, 0.988),
+    alpha(#080d10, 0.994)
+  );
+  border: 1px solid alpha(#d7aa51, 0.82);
+  border-radius: 16px;
+  box-shadow:
+    0 14px 34px alpha(#000000, 0.42),
+    0 4px 10px alpha(#000000, 0.28),
+    inset 0 0 0 1px alpha(@rh_secondary, 0.16),
+    inset 0 1px alpha(#ffffff, 0.035);
+}
+
+.realmheart-now-playing-icon {
+  color: alpha(@rh_primary, 0.96);
+}
+
+.realmheart-now-playing-title {
+  color: alpha(@rh_text, 0.98);
+  font-size: 0.78em;
+  font-weight: 770;
+  letter-spacing: 0.12px;
+}
+
+.realmheart-now-playing-artist {
+  color: alpha(@rh_text_muted, 0.90);
+  font-size: 0.65em;
+  font-weight: 620;
+  letter-spacing: 0.10px;
 }

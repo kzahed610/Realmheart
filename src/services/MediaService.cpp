@@ -221,6 +221,63 @@ std::optional<PlayerState> select_player(GDBusConnection* connection) {
     return fallback;
 }
 
+bool dictionary_contains_key(GVariant* dictionary, const char* key) {
+    if (dictionary == nullptr || key == nullptr) return false;
+    GVariant* value = g_variant_lookup_value(dictionary, key, nullptr);
+    if (value == nullptr) return false;
+    g_variant_unref(value);
+    return true;
+}
+
+bool string_array_contains(GVariant* values, const char* expected) {
+    if (values == nullptr || expected == nullptr) return false;
+    GVariantIter iterator;
+    const gchar* value = nullptr;
+    g_variant_iter_init(&iterator, values);
+    while (g_variant_iter_next(&iterator, "&s", &value)) {
+        if (value != nullptr && std::string_view(value) == expected) return true;
+    }
+    return false;
+}
+
+bool relevant_player_properties_changed(GVariant* parameters) {
+    if (parameters == nullptr) return true;
+
+    const gchar* interface_name = nullptr;
+    GVariant* changed = nullptr;
+    GVariant* invalidated = nullptr;
+    g_variant_get(
+        parameters,
+        "(&s@a{sv}@as)",
+        &interface_name,
+        &changed,
+        &invalidated
+    );
+
+    constexpr const char* relevant_keys[]{
+        "Metadata",
+        "PlaybackStatus",
+        "CanSeek",
+        "Position",
+    };
+    bool relevant = interface_name != nullptr &&
+        std::string_view(interface_name) == kPlayerInterface;
+    if (relevant) {
+        relevant = false;
+        for (const char* key : relevant_keys) {
+            if (dictionary_contains_key(changed, key) ||
+                string_array_contains(invalidated, key)) {
+                relevant = true;
+                break;
+            }
+        }
+    }
+
+    if (changed != nullptr) g_variant_unref(changed);
+    if (invalidated != nullptr) g_variant_unref(invalidated);
+    return relevant;
+}
+
 } // namespace
 
 MediaService::Subscription::~Subscription() { reset(); }
@@ -288,7 +345,16 @@ bool MediaService::ensure_signal_monitor() {
         kObjectPath,
         kPlayerInterface,
         G_DBUS_SIGNAL_FLAGS_NONE,
-        +[](GDBusConnection*, const gchar*, const gchar*, const gchar*, const gchar*, GVariant*, gpointer data) {
+        +[](
+            GDBusConnection*,
+            const gchar*,
+            const gchar*,
+            const gchar*,
+            const gchar*,
+            GVariant* parameters,
+            gpointer data
+        ) {
+            if (!relevant_player_properties_changed(parameters)) return;
             auto* self = static_cast<MediaService*>(data);
             // Playback changes can make a different player the best target.
             // Drop the cached bus name before waking UI/control callers.

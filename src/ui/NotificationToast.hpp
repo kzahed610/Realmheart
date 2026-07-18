@@ -4,6 +4,11 @@
 
 #include <deque>
 #include <gtk/gtk.h>
+#include <memory>
+
+namespace realmheart::ui::bar::widgets {
+class ThemedSvgIcon;
+}
 
 namespace realmheart::ui {
 
@@ -20,19 +25,29 @@ public:
 private:
     struct QueuedToast {
         services::NotificationEntry entry;
-        int timeout_ms = 5000;
+        int timeout_ms = 4000;
     };
 
     void show_next();
     void hide_current();
+    void schedule_timeout();
 
-    GtkApplication* app_;
+    static gboolean dismiss_timeout(gpointer data);
+
+    GtkApplication* app_ = nullptr;
     GtkWidget* window_ = nullptr;
+    GtkWidget* reveal_ = nullptr;
+    GtkWidget* label_app_ = nullptr;
     GtkWidget* label_summary_ = nullptr;
     GtkWidget* label_body_ = nullptr;
+    GtkWidget* close_button_ = nullptr;
+    std::unique_ptr<bar::widgets::ThemedSvgIcon> icon_;
+
     guint timeout_id_ = 0;
+    int current_timeout_ms_ = 4000;
     std::deque<QueuedToast> queue_;
     bool visible_ = false;
+    bool closing_ = false;
     bool destroying_ = false;
 };
 

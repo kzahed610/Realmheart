@@ -47,6 +47,7 @@ private:
         std::atomic<bool> workspace_in_flight{false};
         std::atomic<bool> workspace_refresh_pending{false};
         std::atomic<bool> media_in_flight{false};
+        std::atomic<bool> media_refresh_pending{false};
         std::atomic<bool> battery_in_flight{false};
         std::atomic<bool> wifi_in_flight{false};
         VerticalBar* owner = nullptr; // GTK main thread only

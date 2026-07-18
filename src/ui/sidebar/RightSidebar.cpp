@@ -22,6 +22,7 @@
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <string_view>
 #include <utility>
 
 namespace realmheart::ui::sidebar {
@@ -61,6 +62,70 @@ std::string uptime_text() {
     return result.str();
 }
 
+std::string unquote_os_release_value(std::string value) {
+    if (value.size() < 2 || value.front() != '"' || value.back() != '"') {
+        return value;
+    }
+
+    value = value.substr(1, value.size() - 2);
+    std::string decoded;
+    decoded.reserve(value.size());
+    bool escaped = false;
+    for (const char character : value) {
+        if (escaped) {
+            decoded.push_back(character);
+            escaped = false;
+        } else if (character == '\\') {
+            escaped = true;
+        } else {
+            decoded.push_back(character);
+        }
+    }
+    if (escaped) decoded.push_back('\\');
+    return decoded;
+}
+
+std::optional<std::string> os_release_value(std::string_view key) {
+    constexpr std::array<const char*, 2> paths{
+        "/etc/os-release",
+        "/usr/lib/os-release",
+    };
+
+    const std::string prefix = std::string(key) + "=";
+    for (const char* path : paths) {
+        std::ifstream input(path);
+        if (!input) continue;
+
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.starts_with(prefix)) continue;
+            return unquote_os_release_value(line.substr(prefix.size()));
+        }
+    }
+    return std::nullopt;
+}
+
+std::string distribution_name() {
+    if (auto name = os_release_value("NAME"); name && !name->empty()) {
+        return *name;
+    }
+    if (auto pretty = os_release_value("PRETTY_NAME");
+        pretty && !pretty->empty()) {
+        return *pretty;
+    }
+    return "Linux";
+}
+
+bool is_self_or_descendant(GtkWidget* widget, GtkWidget* ancestor) {
+    if (widget == nullptr || ancestor == nullptr) return false;
+    for (GtkWidget* current = widget;
+         current != nullptr;
+         current = gtk_widget_get_parent(current)) {
+        if (current == ancestor) return true;
+    }
+    return false;
+}
+
 } // namespace
 
 class QuickControlTile {
@@ -88,20 +153,31 @@ public:
         GtkWidget* title = gtk_label_new(label);
         gtk_widget_add_css_class(title, "realmheart-quick-tile-title");
         gtk_label_set_xalign(GTK_LABEL(title), 0.0F);
+        gtk_label_set_single_line_mode(GTK_LABEL(title), TRUE);
+        gtk_label_set_ellipsize(GTK_LABEL(title), PANGO_ELLIPSIZE_END);
         gtk_box_append(GTK_BOX(copy), title);
         status_ = gtk_label_new("Unavailable");
         gtk_widget_add_css_class(status_, "realmheart-quick-tile-status");
         gtk_label_set_xalign(GTK_LABEL(status_), 0.0F);
+        gtk_label_set_single_line_mode(GTK_LABEL(status_), TRUE);
         gtk_label_set_ellipsize(GTK_LABEL(status_), PANGO_ELLIPSIZE_END);
-        gtk_label_set_max_width_chars(GTK_LABEL(status_), 13);
+        gtk_label_set_max_width_chars(GTK_LABEL(status_), 18);
         gtk_box_append(GTK_BOX(copy), status_);
         gtk_box_append(GTK_BOX(content), copy);
         gtk_button_set_child(GTK_BUTTON(button_), content);
 
         g_signal_connect(button_, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
             auto* self = static_cast<QuickControlTile*>(data);
+            self->show_click_feedback();
             if (self->activated_) self->activated_();
         }), this);
+    }
+
+    ~QuickControlTile() {
+        if (click_feedback_timeout_ != 0) {
+            g_source_remove(click_feedback_timeout_);
+            click_feedback_timeout_ = 0;
+        }
     }
 
     GtkWidget* widget() const { return button_; }
@@ -116,22 +192,41 @@ public:
     }
 
 private:
+    void show_click_feedback() {
+        if (click_feedback_timeout_ != 0) {
+            g_source_remove(click_feedback_timeout_);
+            click_feedback_timeout_ = 0;
+        }
+
+        gtk_widget_remove_css_class(button_, "click-confirmed");
+        gtk_widget_add_css_class(button_, "click-confirmed");
+        click_feedback_timeout_ = g_timeout_add_full(
+            G_PRIORITY_DEFAULT,
+            155,
+            +[](gpointer data) -> gboolean {
+                auto* self = static_cast<QuickControlTile*>(data);
+                self->click_feedback_timeout_ = 0;
+                if (self->button_ != nullptr) {
+                    gtk_widget_remove_css_class(
+                        self->button_, "click-confirmed"
+                    );
+                }
+                return G_SOURCE_REMOVE;
+            },
+            this,
+            nullptr
+        );
+    }
+
     GtkWidget* button_ = nullptr;
     GtkWidget* status_ = nullptr;
     std::function<void()> activated_;
+    guint click_feedback_timeout_ = 0;
 };
 
 SidebarPlacement sidebar_placement_for(GtkWidget* widget) {
     SidebarPlacement placement;
-    GdkDisplay* display = gtk_widget_get_display(widget);
-    if (display == nullptr) return placement;
-
-    GListModel* monitors = gdk_display_get_monitors(display);
-    if (monitors == nullptr || g_list_model_get_n_items(monitors) == 0) {
-        return placement;
-    }
-
-    auto* monitor = GDK_MONITOR(g_list_model_get_item(monitors, 0));
+    GdkMonitor* monitor = resolve_layer_surface_monitor(widget);
     if (monitor == nullptr) return placement;
 
     GdkRectangle geometry{};
@@ -186,10 +281,15 @@ RightSidebar::RightSidebar(
 
     setup_layout();
     populate_modules();
+    install_panel_click_away();
     refresh_controls();
 }
 
 RightSidebar::~RightSidebar() {
+    if (power_feedback_timeout_ != 0) {
+        g_source_remove(power_feedback_timeout_);
+        power_feedback_timeout_ = 0;
+    }
     async_ui_state_->alive = false;
     async_ui_state_->owner = nullptr;
     wifi_panel_.reset();
@@ -239,14 +339,22 @@ void RightSidebar::build_identity_header() {
 
     GtkWidget* state_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_add_css_class(state_row, "realmheart-identity-state-row");
+    const std::string distro = distribution_name();
     GtkWidget* subtitle = left_label(
-        "Zahed  •  CachyOS", "realmheart-identity-subtitle"
+        distro.c_str(), "realmheart-identity-subtitle"
     );
     gtk_widget_set_hexpand(subtitle, TRUE);
+    gtk_label_set_single_line_mode(GTK_LABEL(subtitle), TRUE);
+    gtk_label_set_ellipsize(GTK_LABEL(subtitle), PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(GTK_LABEL(subtitle), 26);
     gtk_box_append(GTK_BOX(state_row), subtitle);
     online_label_ = left_label("●  ONLINE", "realmheart-online-state");
+    gtk_label_set_single_line_mode(GTK_LABEL(online_label_), TRUE);
     gtk_box_append(GTK_BOX(state_row), online_label_);
     uptime_label_ = left_label("Uptime", "realmheart-uptime");
+    gtk_label_set_single_line_mode(GTK_LABEL(uptime_label_), TRUE);
+    gtk_label_set_ellipsize(GTK_LABEL(uptime_label_), PANGO_ELLIPSIZE_END);
+    gtk_label_set_max_width_chars(GTK_LABEL(uptime_label_), 18);
     gtk_box_append(GTK_BOX(state_row), uptime_label_);
     gtk_box_append(GTK_BOX(header), state_row);
     gtk_box_append(GTK_BOX(container_), header);
@@ -350,6 +458,59 @@ void RightSidebar::build_power_profiles() {
     gtk_box_append(GTK_BOX(container_), section);
 }
 
+void RightSidebar::install_panel_click_away() {
+    GtkGesture* click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
+    gtk_event_controller_set_propagation_phase(
+        GTK_EVENT_CONTROLLER(click), GTK_PHASE_CAPTURE
+    );
+    g_signal_connect(click, "pressed", G_CALLBACK(+[](
+        GtkGestureClick*, int, double x, double y, gpointer data
+    ) {
+        auto* self = static_cast<RightSidebar*>(data);
+        if (self->frame_ == nullptr) return;
+
+        GtkWidget* frame = self->frame_->widget();
+        GtkWidget* picked = gtk_widget_pick(frame, x, y, GTK_PICK_DEFAULT);
+        if (picked == nullptr) return;
+
+        // Let clicks within the currently materialised panel pass through.
+        // The reveal clip's contains() implementation already excludes the
+        // still-hidden part of a panel while it is opening or closing.
+        if ((self->wifi_panel_ != nullptr && is_self_or_descendant(
+                 picked, self->wifi_panel_->widget()
+             )) ||
+            (self->bluetooth_panel_ != nullptr && is_self_or_descendant(
+                 picked, self->bluetooth_panel_->widget()
+             )) ||
+            (self->night_light_panel_ != nullptr && is_self_or_descendant(
+                 picked, self->night_light_panel_->widget()
+             ))) {
+            return;
+        }
+
+        // These three launchers own their own toggle/switch behaviour. Hiding
+        // during capture would make clicking the active launcher close and
+        // immediately reopen its panel when the button's clicked signal runs.
+        if ((self->wifi_tile_ != nullptr && is_self_or_descendant(
+                 picked, self->wifi_tile_->widget()
+             )) ||
+            (self->bluetooth_tile_ != nullptr && is_self_or_descendant(
+                 picked, self->bluetooth_tile_->widget()
+             )) ||
+            (self->night_light_tile_ != nullptr && is_self_or_descendant(
+                 picked, self->night_light_tile_->widget()
+             ))) {
+            return;
+        }
+
+        if (self->wifi_panel_ != nullptr) self->wifi_panel_->hide();
+        if (self->bluetooth_panel_ != nullptr) self->bluetooth_panel_->hide();
+        if (self->night_light_panel_ != nullptr) self->night_light_panel_->hide();
+    }), this);
+    gtk_widget_add_controller(frame_->widget(), GTK_EVENT_CONTROLLER(click));
+}
+
 void RightSidebar::populate_modules() {
     build_identity_header();
     build_quick_controls();
@@ -386,7 +547,7 @@ void RightSidebar::populate_modules() {
     auto volume_widget = std::make_unique<components::SliderWidget>(
         "Volume",
         0,
-        150,
+        100,
         0.0,
         [](double value) {
             const auto mutation = services::Audio::set_default_sink_volume(value / 100.0);
@@ -480,7 +641,7 @@ void RightSidebar::refresh_controls() {
                 ? std::optional<double>{brightness->percent}
                 : std::nullopt,
             .volume_percent = audio
-                ? std::optional<double>{audio->volume * 100.0}
+                ? std::optional<double>{std::clamp(audio->volume * 100.0, 0.0, 100.0)}
                 : std::nullopt,
         };
         if (wifi) {
@@ -549,6 +710,8 @@ gboolean RightSidebar::finish_control_refresh(gpointer raw) {
             }
         }
 
+        GtkWidget* pending_button = nullptr;
+        bool pending_succeeded = false;
         for (std::size_t index = 0;
              index < owner->power_profile_buttons_.size();
              ++index) {
@@ -563,6 +726,20 @@ gboolean RightSidebar::finish_control_refresh(gpointer raw) {
                 *result->active_profile == profile) {
                 gtk_widget_add_css_class(button, "active");
             }
+            if (!owner->pending_power_profile_.empty() && profile != nullptr &&
+                owner->pending_power_profile_ == profile) {
+                pending_button = button;
+                pending_succeeded = result->active_profile &&
+                    *result->active_profile == profile;
+            }
+        }
+
+        if (!owner->pending_power_profile_.empty()) {
+            owner->show_power_profile_feedback(
+                pending_button,
+                pending_succeeded
+            );
+            owner->pending_power_profile_.clear();
         }
     }
 
@@ -607,7 +784,45 @@ void RightSidebar::post_control_action(std::function<void()> action) {
     });
 }
 
+void RightSidebar::clear_power_profile_feedback() {
+    if (power_feedback_timeout_ != 0) {
+        g_source_remove(power_feedback_timeout_);
+        power_feedback_timeout_ = 0;
+    }
+    for (GtkWidget* button : power_profile_buttons_) {
+        gtk_widget_remove_css_class(button, "confirmed");
+        gtk_widget_remove_css_class(button, "failed");
+    }
+}
+
+void RightSidebar::show_power_profile_feedback(
+    GtkWidget* button,
+    bool success
+) {
+    clear_power_profile_feedback();
+    if (button == nullptr) return;
+
+    gtk_widget_add_css_class(button, success ? "confirmed" : "failed");
+    power_feedback_timeout_ = g_timeout_add_full(
+        G_PRIORITY_DEFAULT,
+        success ? 320U : 460U,
+        +[](gpointer data) -> gboolean {
+            auto* self = static_cast<RightSidebar*>(data);
+            self->power_feedback_timeout_ = 0;
+            for (GtkWidget* candidate : self->power_profile_buttons_) {
+                gtk_widget_remove_css_class(candidate, "confirmed");
+                gtk_widget_remove_css_class(candidate, "failed");
+            }
+            return G_SOURCE_REMOVE;
+        },
+        this,
+        nullptr
+    );
+}
+
 void RightSidebar::set_power_profile(const std::string& profile) {
+    clear_power_profile_feedback();
+    pending_power_profile_ = profile;
     for (GtkWidget* button : power_profile_buttons_) {
         gtk_widget_remove_css_class(button, "active");
         gtk_widget_remove_css_class(button, "pending");

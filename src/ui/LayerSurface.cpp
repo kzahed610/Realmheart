@@ -3,6 +3,7 @@
 #include <gtk4-layer-shell/gtk4-layer-shell.h>
 
 #include <algorithm>
+#include <limits>
 
 namespace realmheart::ui {
 namespace {
@@ -26,7 +27,45 @@ GtkLayerShellKeyboardMode to_gtk_keyboard_mode(LayerKeyboardMode mode) {
     return GTK_LAYER_SHELL_KEYBOARD_MODE_NONE;
 }
 
+int configured_monitor_index() {
+    static const int index = [] {
+        const char* configured = g_getenv("REALMHEART_MONITOR_INDEX");
+        if (configured == nullptr || *configured == '\0') return 0;
+
+        char* end = nullptr;
+        const gint64 parsed = g_ascii_strtoll(configured, &end, 10);
+        if (end == configured || end == nullptr || *end != '\0' ||
+            parsed < 0 || parsed > std::numeric_limits<int>::max()) {
+            return 0;
+        }
+        return static_cast<int>(parsed);
+    }();
+    return index;
+}
+
 } // namespace
+
+GdkMonitor* resolve_layer_surface_monitor(
+    GtkWidget* widget,
+    int requested_index
+) {
+    if (widget == nullptr) return nullptr;
+    GdkDisplay* display = gtk_widget_get_display(widget);
+    if (display == nullptr) return nullptr;
+
+    GListModel* monitors = gdk_display_get_monitors(display);
+    if (monitors == nullptr) return nullptr;
+    const guint count = g_list_model_get_n_items(monitors);
+    if (count == 0) return nullptr;
+
+    const int configured = requested_index >= 0
+        ? requested_index
+        : configured_monitor_index();
+    const guint index = configured >= 0 && static_cast<guint>(configured) < count
+        ? static_cast<guint>(configured)
+        : 0U;
+    return GDK_MONITOR(g_list_model_get_item(monitors, index));
+}
 
 LayerSurfaceSpec make_bar_surface_spec(int width) {
     LayerSurfaceSpec spec;
@@ -78,6 +117,13 @@ LayerSurfaceSpec make_test_surface_spec() {
 void apply_layer_surface(GtkWindow* window, const LayerSurfaceSpec& spec) {
     gtk_layer_init_for_window(window);
     gtk_layer_set_namespace(window, spec.surface_namespace.c_str());
+    if (GdkMonitor* monitor = resolve_layer_surface_monitor(
+            GTK_WIDGET(window),
+            spec.monitor_index
+        )) {
+        gtk_layer_set_monitor(window, monitor);
+        g_object_unref(monitor);
+    }
     gtk_layer_set_layer(window, to_gtk_layer(spec.layer));
     gtk_layer_set_keyboard_mode(window, to_gtk_keyboard_mode(spec.keyboard_mode));
     gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_LEFT, spec.anchor_left);

@@ -1,5 +1,7 @@
 #include "ui/sidebar/ConnectivityPanel.hpp"
 
+#include "ui/sidebar/VerticalRevealClip.hpp"
+
 #include "core/TaskExecutor.hpp"
 #include "ui/bar/widgets/ThemedSvgIcon.hpp"
 
@@ -64,6 +66,18 @@ std::string bluetooth_detail(const services::BluetoothDevice& device) {
     return "Available";
 }
 
+std::string wifi_display_name(const services::WifiNetwork& network) {
+    if (!network.ssid.empty()) return network.ssid;
+    return network.bssid.empty()
+        ? "Hidden network"
+        : "Hidden network  •  " + network.bssid;
+}
+
+std::string bluetooth_display_name(const services::BluetoothDevice& device) {
+    if (!device.name.empty()) return device.name;
+    return device.address.empty() ? "Unnamed device" : device.address;
+}
+
 } // namespace
 
 struct WifiManagerPopover::LifetimeState {
@@ -96,48 +110,32 @@ WifiManagerPopover::~WifiManagerPopover() {
     if (overlay_host_ != nullptr && revealer_ != nullptr) {
         gtk_overlay_remove_overlay(GTK_OVERLAY(overlay_host_), revealer_);
     }
-    if (overlay_host_ != nullptr && backdrop_ != nullptr) {
-        gtk_overlay_remove_overlay(GTK_OVERLAY(overlay_host_), backdrop_);
-    }
     revealer_ = nullptr;
-    backdrop_ = nullptr;
     content_ = nullptr;
 }
 
 void WifiManagerPopover::build() {
-    backdrop_ = gtk_button_new();
-    gtk_widget_add_css_class(backdrop_, "realmheart-connectivity-backdrop");
-    gtk_widget_set_halign(backdrop_, GTK_ALIGN_FILL);
-    gtk_widget_set_valign(backdrop_, GTK_ALIGN_FILL);
-    gtk_widget_set_hexpand(backdrop_, TRUE);
-    gtk_widget_set_vexpand(backdrop_, TRUE);
-    gtk_widget_set_visible(backdrop_, FALSE);
-    g_signal_connect(backdrop_, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
-        static_cast<WifiManagerPopover*>(data)->hide();
-    }), this);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay_host_), backdrop_);
-    gtk_overlay_set_clip_overlay(GTK_OVERLAY(overlay_host_), backdrop_, TRUE);
-
-    revealer_ = gtk_revealer_new();
-    gtk_widget_add_css_class(revealer_, "realmheart-connectivity-revealer");
-    gtk_revealer_set_transition_type(
-        GTK_REVEALER(revealer_), GTK_REVEALER_TRANSITION_TYPE_CROSSFADE
-    );
-    gtk_revealer_set_transition_duration(GTK_REVEALER(revealer_), 150);
-    gtk_widget_set_halign(revealer_, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(revealer_, GTK_ALIGN_CENTER);
-    // CROSSFADE revealers keep their full allocation even while visually
-    // hidden. Disable hit testing until the panel is actually shown so the
-    // transparent panel cannot block controls beneath it.
-    gtk_widget_set_can_target(revealer_, FALSE);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay_host_), revealer_);
-    gtk_overlay_set_clip_overlay(GTK_OVERLAY(overlay_host_), revealer_, TRUE);
-
     content_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(content_, "realmheart-connectivity-panel");
-    gtk_widget_set_size_request(content_, 304, 356);
+    gtk_widget_set_size_request(content_, 342, 356);
     gtk_widget_set_overflow(content_, GTK_OVERFLOW_HIDDEN);
-    gtk_revealer_set_child(GTK_REVEALER(revealer_), content_);
+
+    revealer_ = realmheart_vertical_reveal_clip_new(content_, 1010, 960, 16);
+    gtk_widget_add_css_class(revealer_, "realmheart-connectivity-revealer");
+    gtk_widget_set_halign(revealer_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(revealer_, GTK_ALIGN_CENTER);
+    gtk_widget_set_can_target(revealer_, FALSE);
+    gtk_widget_set_visible(revealer_, FALSE);
+    g_signal_connect(revealer_, "concealed", G_CALLBACK(+[](
+        RealmheartVerticalRevealClip*, gpointer data
+    ) {
+        auto* self = static_cast<WifiManagerPopover*>(data);
+        if (!self->requested_visible_ && self->revealer_ != nullptr) {
+            gtk_widget_set_visible(self->revealer_, FALSE);
+        }
+    }), this);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay_host_), revealer_);
+    gtk_overlay_set_clip_overlay(GTK_OVERLAY(overlay_host_), revealer_, TRUE);
 
     GtkWidget* header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_add_css_class(header, "realmheart-manager-header");
@@ -242,24 +240,31 @@ void WifiManagerPopover::build() {
 
 void WifiManagerPopover::show() {
     if (visible()) return;
-    gtk_widget_set_visible(backdrop_, TRUE);
+    requested_visible_ = true;
+    gtk_widget_set_visible(revealer_, TRUE);
     gtk_widget_set_can_target(revealer_, TRUE);
-    gtk_revealer_set_reveal_child(GTK_REVEALER(revealer_), TRUE);
+    realmheart_vertical_reveal_clip_set_revealed(
+        REALMHEART_VERTICAL_REVEAL_CLIP(revealer_), TRUE
+    );
     refresh(true);
 }
 
 void WifiManagerPopover::hide() {
+    if (!visible()) return;
+    requested_visible_ = false;
     hide_password_prompt();
-    // Stop intercepting clicks immediately; the fade-out can continue
-    // visually without leaving an invisible input shield over the sidebar.
     gtk_widget_set_can_target(revealer_, FALSE);
-    gtk_revealer_set_reveal_child(GTK_REVEALER(revealer_), FALSE);
-    gtk_widget_set_visible(backdrop_, FALSE);
+    realmheart_vertical_reveal_clip_set_revealed(
+        REALMHEART_VERTICAL_REVEAL_CLIP(revealer_), FALSE
+    );
 }
 
 bool WifiManagerPopover::visible() const {
-    return revealer_ != nullptr &&
-        gtk_revealer_get_reveal_child(GTK_REVEALER(revealer_));
+    return requested_visible_;
+}
+
+GtkWidget* WifiManagerPopover::widget() const {
+    return revealer_;
 }
 
 void WifiManagerPopover::toggle() {
@@ -352,15 +357,20 @@ void WifiManagerPopover::render(
         GtkWidget* labels = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
         gtk_widget_set_hexpand(labels, TRUE);
         gtk_widget_set_size_request(labels, 0, -1);
-        GtkWidget* name = make_text_label(network.ssid, "realmheart-manager-row-title");
+        GtkWidget* name = make_text_label(
+            wifi_display_name(network),
+            "realmheart-manager-row-title"
+        );
+        gtk_label_set_single_line_mode(GTK_LABEL(name), TRUE);
         gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_END);
-        gtk_label_set_max_width_chars(GTK_LABEL(name), 16);
+        gtk_label_set_max_width_chars(GTK_LABEL(name), 22);
         gtk_box_append(GTK_BOX(labels), name);
         GtkWidget* detail = make_text_label(
             wifi_detail(network), "realmheart-manager-row-detail"
         );
+        gtk_label_set_single_line_mode(GTK_LABEL(detail), TRUE);
         gtk_label_set_ellipsize(GTK_LABEL(detail), PANGO_ELLIPSIZE_END);
-        gtk_label_set_max_width_chars(GTK_LABEL(detail), 19);
+        gtk_label_set_max_width_chars(GTK_LABEL(detail), 25);
         gtk_box_append(GTK_BOX(labels), detail);
         gtk_box_append(GTK_BOX(row), labels);
 
@@ -563,48 +573,32 @@ BluetoothManagerPopover::~BluetoothManagerPopover() {
     if (overlay_host_ != nullptr && revealer_ != nullptr) {
         gtk_overlay_remove_overlay(GTK_OVERLAY(overlay_host_), revealer_);
     }
-    if (overlay_host_ != nullptr && backdrop_ != nullptr) {
-        gtk_overlay_remove_overlay(GTK_OVERLAY(overlay_host_), backdrop_);
-    }
     revealer_ = nullptr;
-    backdrop_ = nullptr;
     content_ = nullptr;
 }
 
 void BluetoothManagerPopover::build() {
-    backdrop_ = gtk_button_new();
-    gtk_widget_add_css_class(backdrop_, "realmheart-connectivity-backdrop");
-    gtk_widget_set_halign(backdrop_, GTK_ALIGN_FILL);
-    gtk_widget_set_valign(backdrop_, GTK_ALIGN_FILL);
-    gtk_widget_set_hexpand(backdrop_, TRUE);
-    gtk_widget_set_vexpand(backdrop_, TRUE);
-    gtk_widget_set_visible(backdrop_, FALSE);
-    g_signal_connect(backdrop_, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
-        static_cast<BluetoothManagerPopover*>(data)->hide();
-    }), this);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay_host_), backdrop_);
-    gtk_overlay_set_clip_overlay(GTK_OVERLAY(overlay_host_), backdrop_, TRUE);
-
-    revealer_ = gtk_revealer_new();
-    gtk_widget_add_css_class(revealer_, "realmheart-connectivity-revealer");
-    gtk_revealer_set_transition_type(
-        GTK_REVEALER(revealer_), GTK_REVEALER_TRANSITION_TYPE_CROSSFADE
-    );
-    gtk_revealer_set_transition_duration(GTK_REVEALER(revealer_), 150);
-    gtk_widget_set_halign(revealer_, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(revealer_, GTK_ALIGN_CENTER);
-    // CROSSFADE revealers keep their full allocation even while visually
-    // hidden. Disable hit testing until the panel is actually shown so the
-    // transparent panel cannot block controls beneath it.
-    gtk_widget_set_can_target(revealer_, FALSE);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay_host_), revealer_);
-    gtk_overlay_set_clip_overlay(GTK_OVERLAY(overlay_host_), revealer_, TRUE);
-
     content_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(content_, "realmheart-connectivity-panel");
-    gtk_widget_set_size_request(content_, 304, 356);
+    gtk_widget_set_size_request(content_, 342, 356);
     gtk_widget_set_overflow(content_, GTK_OVERFLOW_HIDDEN);
-    gtk_revealer_set_child(GTK_REVEALER(revealer_), content_);
+
+    revealer_ = realmheart_vertical_reveal_clip_new(content_, 1010, 960, 16);
+    gtk_widget_add_css_class(revealer_, "realmheart-connectivity-revealer");
+    gtk_widget_set_halign(revealer_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(revealer_, GTK_ALIGN_CENTER);
+    gtk_widget_set_can_target(revealer_, FALSE);
+    gtk_widget_set_visible(revealer_, FALSE);
+    g_signal_connect(revealer_, "concealed", G_CALLBACK(+[](
+        RealmheartVerticalRevealClip*, gpointer data
+    ) {
+        auto* self = static_cast<BluetoothManagerPopover*>(data);
+        if (!self->requested_visible_ && self->revealer_ != nullptr) {
+            gtk_widget_set_visible(self->revealer_, FALSE);
+        }
+    }), this);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay_host_), revealer_);
+    gtk_overlay_set_clip_overlay(GTK_OVERLAY(overlay_host_), revealer_, TRUE);
 
     GtkWidget* header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_add_css_class(header, "realmheart-manager-header");
@@ -667,23 +661,30 @@ void BluetoothManagerPopover::build() {
 
 void BluetoothManagerPopover::show() {
     if (visible()) return;
-    gtk_widget_set_visible(backdrop_, TRUE);
+    requested_visible_ = true;
+    gtk_widget_set_visible(revealer_, TRUE);
     gtk_widget_set_can_target(revealer_, TRUE);
-    gtk_revealer_set_reveal_child(GTK_REVEALER(revealer_), TRUE);
+    realmheart_vertical_reveal_clip_set_revealed(
+        REALMHEART_VERTICAL_REVEAL_CLIP(revealer_), TRUE
+    );
     refresh(true);
 }
 
 void BluetoothManagerPopover::hide() {
-    // Stop intercepting clicks immediately; the fade-out can continue
-    // visually without leaving an invisible input shield over the sidebar.
+    if (!visible()) return;
+    requested_visible_ = false;
     gtk_widget_set_can_target(revealer_, FALSE);
-    gtk_revealer_set_reveal_child(GTK_REVEALER(revealer_), FALSE);
-    gtk_widget_set_visible(backdrop_, FALSE);
+    realmheart_vertical_reveal_clip_set_revealed(
+        REALMHEART_VERTICAL_REVEAL_CLIP(revealer_), FALSE
+    );
 }
 
 bool BluetoothManagerPopover::visible() const {
-    return revealer_ != nullptr &&
-        gtk_revealer_get_reveal_child(GTK_REVEALER(revealer_));
+    return requested_visible_;
+}
+
+GtkWidget* BluetoothManagerPopover::widget() const {
+    return revealer_;
 }
 
 void BluetoothManagerPopover::toggle() {
@@ -775,13 +776,20 @@ void BluetoothManagerPopover::render(
         GtkWidget* labels = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
         gtk_widget_set_hexpand(labels, TRUE);
         gtk_widget_set_size_request(labels, 0, -1);
-        GtkWidget* name = make_text_label(device.name, "realmheart-manager-row-title");
+        GtkWidget* name = make_text_label(
+            bluetooth_display_name(device),
+            "realmheart-manager-row-title"
+        );
+        gtk_label_set_single_line_mode(GTK_LABEL(name), TRUE);
         gtk_label_set_ellipsize(GTK_LABEL(name), PANGO_ELLIPSIZE_END);
-        gtk_label_set_max_width_chars(GTK_LABEL(name), 16);
+        gtk_label_set_max_width_chars(GTK_LABEL(name), 22);
         gtk_box_append(GTK_BOX(labels), name);
-        gtk_box_append(GTK_BOX(labels), make_text_label(
+        GtkWidget* detail = make_text_label(
             bluetooth_detail(device), "realmheart-manager-row-detail"
-        ));
+        );
+        gtk_label_set_single_line_mode(GTK_LABEL(detail), TRUE);
+        gtk_label_set_ellipsize(GTK_LABEL(detail), PANGO_ELLIPSIZE_END);
+        gtk_box_append(GTK_BOX(labels), detail);
         gtk_box_append(GTK_BOX(row), labels);
 
         GtkWidget* action = gtk_button_new_with_label(device.connected ? "Disconnect" : "Connect");

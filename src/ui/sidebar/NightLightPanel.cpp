@@ -1,5 +1,7 @@
 #include "ui/sidebar/NightLightPanel.hpp"
 
+#include "ui/sidebar/VerticalRevealClip.hpp"
+
 #include "core/TaskExecutor.hpp"
 #include "ui/bar/widgets/ThemedSvgIcon.hpp"
 
@@ -64,46 +66,33 @@ NightLightPanel::~NightLightPanel() {
     if (overlay_host_ != nullptr && revealer_ != nullptr) {
         gtk_overlay_remove_overlay(GTK_OVERLAY(overlay_host_), revealer_);
     }
-    if (overlay_host_ != nullptr && backdrop_ != nullptr) {
-        gtk_overlay_remove_overlay(GTK_OVERLAY(overlay_host_), backdrop_);
-    }
     revealer_ = nullptr;
-    backdrop_ = nullptr;
     content_ = nullptr;
 }
 
 void NightLightPanel::build() {
-    backdrop_ = gtk_button_new();
-    gtk_widget_add_css_class(backdrop_, "realmheart-connectivity-backdrop");
-    gtk_widget_set_halign(backdrop_, GTK_ALIGN_FILL);
-    gtk_widget_set_valign(backdrop_, GTK_ALIGN_FILL);
-    gtk_widget_set_hexpand(backdrop_, TRUE);
-    gtk_widget_set_vexpand(backdrop_, TRUE);
-    gtk_widget_set_visible(backdrop_, FALSE);
-    g_signal_connect(backdrop_, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
-        static_cast<NightLightPanel*>(data)->hide();
-    }), this);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay_host_), backdrop_);
-    gtk_overlay_set_clip_overlay(GTK_OVERLAY(overlay_host_), backdrop_, TRUE);
-
-    revealer_ = gtk_revealer_new();
-    gtk_widget_add_css_class(revealer_, "realmheart-connectivity-revealer");
-    gtk_revealer_set_transition_type(
-        GTK_REVEALER(revealer_), GTK_REVEALER_TRANSITION_TYPE_CROSSFADE
-    );
-    gtk_revealer_set_transition_duration(GTK_REVEALER(revealer_), 150);
-    gtk_widget_set_halign(revealer_, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(revealer_, GTK_ALIGN_CENTER);
-    gtk_widget_set_can_target(revealer_, FALSE);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay_host_), revealer_);
-    gtk_overlay_set_clip_overlay(GTK_OVERLAY(overlay_host_), revealer_, TRUE);
-
     content_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(content_, "realmheart-connectivity-panel");
     gtk_widget_add_css_class(content_, "realmheart-night-light-panel");
-    gtk_widget_set_size_request(content_, 304, 276);
+    gtk_widget_set_size_request(content_, 342, 276);
     gtk_widget_set_overflow(content_, GTK_OVERFLOW_HIDDEN);
-    gtk_revealer_set_child(GTK_REVEALER(revealer_), content_);
+
+    revealer_ = realmheart_vertical_reveal_clip_new(content_, 1010, 960, 16);
+    gtk_widget_add_css_class(revealer_, "realmheart-connectivity-revealer");
+    gtk_widget_set_halign(revealer_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(revealer_, GTK_ALIGN_CENTER);
+    gtk_widget_set_can_target(revealer_, FALSE);
+    gtk_widget_set_visible(revealer_, FALSE);
+    g_signal_connect(revealer_, "concealed", G_CALLBACK(+[](
+        RealmheartVerticalRevealClip*, gpointer data
+    ) {
+        auto* self = static_cast<NightLightPanel*>(data);
+        if (!self->requested_visible_ && self->revealer_ != nullptr) {
+            gtk_widget_set_visible(self->revealer_, FALSE);
+        }
+    }), this);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay_host_), revealer_);
+    gtk_overlay_set_clip_overlay(GTK_OVERLAY(overlay_host_), revealer_, TRUE);
 
     GtkWidget* header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_widget_add_css_class(header, "realmheart-manager-header");
@@ -232,21 +221,30 @@ void NightLightPanel::build() {
 
 void NightLightPanel::show() {
     if (visible()) return;
-    gtk_widget_set_visible(backdrop_, TRUE);
+    requested_visible_ = true;
+    gtk_widget_set_visible(revealer_, TRUE);
     gtk_widget_set_can_target(revealer_, TRUE);
-    gtk_revealer_set_reveal_child(GTK_REVEALER(revealer_), TRUE);
+    realmheart_vertical_reveal_clip_set_revealed(
+        REALMHEART_VERTICAL_REVEAL_CLIP(revealer_), TRUE
+    );
     refresh();
 }
 
 void NightLightPanel::hide() {
+    if (!visible()) return;
+    requested_visible_ = false;
     gtk_widget_set_can_target(revealer_, FALSE);
-    gtk_revealer_set_reveal_child(GTK_REVEALER(revealer_), FALSE);
-    gtk_widget_set_visible(backdrop_, FALSE);
+    realmheart_vertical_reveal_clip_set_revealed(
+        REALMHEART_VERTICAL_REVEAL_CLIP(revealer_), FALSE
+    );
 }
 
 bool NightLightPanel::visible() const {
-    return revealer_ != nullptr &&
-        gtk_revealer_get_reveal_child(GTK_REVEALER(revealer_));
+    return requested_visible_;
+}
+
+GtkWidget* NightLightPanel::widget() const {
+    return revealer_;
 }
 
 void NightLightPanel::toggle() {

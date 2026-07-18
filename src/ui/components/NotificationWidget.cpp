@@ -280,13 +280,17 @@ void NotificationWidget::refresh() {
         GtkWidget* app = gtk_label_new(source.c_str());
         gtk_widget_add_css_class(app, "realmheart-notification-app");
         gtk_label_set_xalign(GTK_LABEL(app), 0.0F);
+        gtk_label_set_single_line_mode(GTK_LABEL(app), TRUE);
         gtk_label_set_ellipsize(GTK_LABEL(app), PANGO_ELLIPSIZE_END);
         gtk_widget_set_hexpand(app, TRUE);
         gtk_box_append(GTK_BOX(meta), app);
 
         gtk_box_append(GTK_BOX(copy), meta);
 
-        GtkWidget* summary = gtk_label_new(entry.summary.c_str());
+        const std::string summary_text = entry.summary.empty()
+            ? (entry.body.empty() ? source : "New notification")
+            : entry.summary;
+        GtkWidget* summary = gtk_label_new(summary_text.c_str());
         gtk_widget_add_css_class(summary, "realmheart-notification-summary");
         gtk_label_set_xalign(GTK_LABEL(summary), 0.0F);
         gtk_label_set_ellipsize(GTK_LABEL(summary), PANGO_ELLIPSIZE_END);

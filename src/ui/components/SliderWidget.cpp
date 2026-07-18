@@ -67,6 +67,7 @@ SliderWidget::SliderWidget(
             if (self->updating_) return;
 
             self->pending_value_ = gtk_range_get_value(range);
+            self->show_interaction_feedback();
             gtk_label_set_text(
                 GTK_LABEL(self->value_label_), value_text(self->pending_value_).c_str()
             );
@@ -150,6 +151,10 @@ SliderWidget::SliderWidget(
 }
 
 SliderWidget::~SliderWidget() {
+    if (interaction_feedback_source_ != 0) {
+        g_source_remove(interaction_feedback_source_);
+        interaction_feedback_source_ = 0;
+    }
     if (debounce_source_ != 0) {
         g_source_remove(debounce_source_);
         debounce_source_ = 0;
@@ -161,6 +166,31 @@ SliderWidget::~SliderWidget() {
         g_signal_handler_disconnect(scale_, state_->value_changed_handler);
         state_->value_changed_handler = 0;
     }
+}
+
+void SliderWidget::show_interaction_feedback() {
+    if (box_ == nullptr) return;
+
+    if (interaction_feedback_source_ != 0) {
+        g_source_remove(interaction_feedback_source_);
+        interaction_feedback_source_ = 0;
+    }
+
+    gtk_widget_add_css_class(box_, "interacting");
+    interaction_feedback_source_ = g_timeout_add_full(
+        G_PRIORITY_DEFAULT,
+        170,
+        +[](gpointer data) -> gboolean {
+            auto* self = static_cast<SliderWidget*>(data);
+            self->interaction_feedback_source_ = 0;
+            if (self->box_ != nullptr) {
+                gtk_widget_remove_css_class(self->box_, "interacting");
+            }
+            return G_SOURCE_REMOVE;
+        },
+        this,
+        nullptr
+    );
 }
 
 GtkWidget* SliderWidget::get_widget() {

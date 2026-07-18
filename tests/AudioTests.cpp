@@ -90,12 +90,12 @@ int main() {
 
         const auto clamped = realmheart::services::Audio::set_default_sink_volume(2.0);
         require(clamped.success, "clamped volume write should succeed");
-        require(near(clamped.state.volume, 1.5), "volume should clamp to the 150% ceiling");
+        require(near(clamped.state.volume, 1.0), "volume should clamp to the 100% ceiling");
 
         fake.drop_default_sink();
         const auto fallback = realmheart::services::Audio::read_default_sink();
         require(fallback.has_value(), "audio should fall back to an available hardware sink");
-        require(near(fallback->volume, 1.5), "fallback sink volume should be readable");
+        require(near(fallback->volume, 1.0), "fallback sink volume should be readable");
 
         const auto fallback_changed = realmheart::services::Audio::set_default_sink_volume(0.55);
         require(fallback_changed.success, "fallback hardware sink should remain writable");

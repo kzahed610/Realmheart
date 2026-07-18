@@ -27,6 +27,7 @@ public:
     void hide();
     void toggle();
     [[nodiscard]] bool visible() const;
+    [[nodiscard]] GtkWidget* widget() const;
     void refresh(bool rescan = true);
 
 private:
@@ -51,7 +52,6 @@ private:
     static void on_row_action(GtkButton* button, gpointer data);
 
     GtkWidget* overlay_host_ = nullptr;
-    GtkWidget* backdrop_ = nullptr;
     GtkWidget* revealer_ = nullptr;
     GtkWidget* content_ = nullptr;
     GtkWidget* list_ = nullptr;
@@ -64,6 +64,7 @@ private:
     std::optional<services::WifiNetwork> pending_network_;
     std::function<void()> state_changed_;
     std::shared_ptr<LifetimeState> lifetime_;
+    bool requested_visible_ = false;
 };
 
 class BluetoothManagerPopover {
@@ -78,6 +79,7 @@ public:
     void hide();
     void toggle();
     [[nodiscard]] bool visible() const;
+    [[nodiscard]] GtkWidget* widget() const;
     void refresh(bool scan_for_new_devices = true);
 
 private:
@@ -100,7 +102,6 @@ private:
     static void on_row_action(GtkButton* button, gpointer data);
 
     GtkWidget* overlay_host_ = nullptr;
-    GtkWidget* backdrop_ = nullptr;
     GtkWidget* revealer_ = nullptr;
     GtkWidget* content_ = nullptr;
     GtkWidget* list_ = nullptr;
@@ -109,6 +110,7 @@ private:
     GtkWidget* power_button_ = nullptr;
     std::function<void()> state_changed_;
     std::shared_ptr<LifetimeState> lifetime_;
+    bool requested_visible_ = false;
 };
 
 } // namespace realmheart::ui::sidebar

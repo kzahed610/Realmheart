@@ -78,11 +78,14 @@ private:
     void build_identity_header();
     void build_quick_controls();
     void build_power_profiles();
+    void install_panel_click_away();
     void refresh_controls();
     static gboolean finish_control_refresh(gpointer raw);
     static void destroy_control_refresh_result(gpointer raw);
     void post_control_action(std::function<void()> action);
     void set_power_profile(const std::string& profile);
+    void show_power_profile_feedback(GtkWidget* button, bool success);
+    void clear_power_profile_feedback();
 
     GtkApplication* app_ = nullptr;
     GtkWidget* window_ = nullptr;
@@ -97,6 +100,8 @@ private:
     GtkWidget* online_label_ = nullptr;
     GtkWidget* uptime_label_ = nullptr;
     std::array<GtkWidget*, 3> power_profile_buttons_{};
+    std::string pending_power_profile_;
+    guint power_feedback_timeout_ = 0;
     std::unique_ptr<QuickControlTile> wifi_tile_;
     std::unique_ptr<QuickControlTile> bluetooth_tile_;
     std::unique_ptr<QuickControlTile> night_light_tile_;

@@ -131,7 +131,7 @@ AudioMutationResult Audio::set_default_sink_volume(
         return mutation;
     }
 
-    const double requested = std::clamp(volume, 0.0, 1.5);
+    const double requested = std::clamp(volume, 0.0, 1.0);
     const auto write = realmheart::core::run_capture(
         {"wpctl", "set-volume", *target, std::to_string(requested)},
         options

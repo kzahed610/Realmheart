@@ -181,14 +181,15 @@ std::vector<Point> silhouette_points(
         {g.body_left - 19.0, lower_transition_y},
         {g.body_left - 29.0, lower_transition_inner_y},
         {g.body_left - 29.0, second_spine_bulge_y},
-        {g.body_left - 10.0, g.second_spine_start + 8.0},
-        {g.body_left - 10.0, g.first_spine_end + 23.0},
-        {g.body_left - 25.0, g.first_spine_end + 6.0},
-        {g.body_left - 25.0, g.header_end + 35.0},
-        {g.body_left - 6.0, g.header_end + 16.0},
-        {g.header_left - 25.0, g.header_end},
 
-        {g.header_left - 25.0, g.top + 72.0},
+        // Keep the lower forged irregularities, but remove the upper protruding
+        // spine entirely. The widened, nearly flat wall gives Tessia's cropped
+        // facial edge a clean occluding surface instead of fighting her pose.
+        {g.body_left, g.second_spine_start + 8.0},
+        {g.body_left, g.first_spine_end + 68.0},
+        {g.body_left - 10.0, g.first_spine_end + 50.0},
+        {g.body_left - 10.0, g.top + 96.0},
+        {g.body_left - 2.0, g.top + 72.0},
         {g.header_left - 15.0, g.top + 55.0},
         {g.header_left + 4.0, g.top + 45.0},
         {g.header_left + 14.0, g.top + 28.0},

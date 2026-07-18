@@ -31,6 +31,7 @@ add_executable(realmheart
     src/core/ShellCommand.cpp
     src/core/ShellControl.cpp
     src/services/Audio.cpp
+    src/services/AudioMonitor.cpp
     src/services/Bluetooth.cpp
     src/services/Brightness.cpp
     src/services/GameMode.cpp
@@ -84,11 +85,13 @@ add_library(realmheart_ui STATIC
     src/ui/bar/widgets/SystemMonitorWidget.cpp
     src/ui/bar/widgets/BatteryWidget.cpp
     src/services/SystemMonitorService.cpp
+    src/ui/sidebar/VerticalRevealClip.cpp
     src/ui/sidebar/ConnectivityPanel.cpp
     src/ui/sidebar/NightLightPanel.cpp
     src/ui/sidebar/RightSidebar.cpp
     src/ui/sidebar/SidebarFrame.cpp
     src/ui/NotificationToast.cpp
+    src/ui/NowPlayingOverlay.cpp
     src/ui/OSDOverlay.cpp
     src/ui/lockscreen/LockScreen.cpp
     src/ui/launcher/LauncherOverlay.cpp

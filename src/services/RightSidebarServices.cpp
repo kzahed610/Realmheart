@@ -10,6 +10,7 @@
 #include "services/PowerProfiles.hpp"
 #include "services/Wifi.hpp"
 
+#include <algorithm>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -106,7 +107,9 @@ ServiceStatus RightSidebarServices::getVolumeStatus() const {
     const auto audio = Audio::read_default_sink(command_options_);
     if (!audio) return {"Volume", unavailable("wpctl unavailable or unreadable"), false};
 
-    std::string status = format_percent(audio->volume * 100.0);
+    std::string status = format_percent(
+        std::clamp(audio->volume * 100.0, 0.0, 100.0)
+    );
     if (audio->muted) status += " (Muted)";
     return {"Volume", status, true};
 }

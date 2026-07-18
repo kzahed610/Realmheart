@@ -33,12 +33,19 @@ struct LayerSurfaceSpec {
     int margin_right = 0;
     int margin_top = 0;
     int margin_bottom = 0;
+    // -1 uses REALMHEART_MONITOR_INDEX, falling back to monitor 0.
+    int monitor_index = -1;
 };
 
 LayerSurfaceSpec make_bar_surface_spec(int width);
 LayerSurfaceSpec make_wallpaper_surface_spec();
 LayerSurfaceSpec make_layer_surface_spec(std::string_view ns, LayerSurfaceLevel level, LayerKeyboardMode keyboard);
 LayerSurfaceSpec make_test_surface_spec();
+// Returns a referenced monitor; callers must g_object_unref it.
+GdkMonitor* resolve_layer_surface_monitor(
+    GtkWidget* widget,
+    int requested_index = -1
+);
 void apply_layer_surface(GtkWindow* window, const LayerSurfaceSpec& spec);
 
 } // namespace realmheart::ui
