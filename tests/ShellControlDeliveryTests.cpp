@@ -141,15 +141,15 @@ int main() {
         ""
     );
     if (missing_argument != realmheart::core::ShellControlResult::InvalidArgument) {
-        std::cerr << "ShellRuntimeTests failed: expected InvalidArgument for an empty wallpaper path\n";
+        std::cerr << "ShellControlDeliveryTests failed: expected InvalidArgument for an empty wallpaper path\n";
         return 1;
     }
 
     if (!delivers_exact_wallpaper_path()) {
-        std::cerr << "ShellRuntimeTests failed: exact wallpaper path was not delivered\n";
+        std::cerr << "ShellControlDeliveryTests failed: exact wallpaper path was not delivered\n";
         return 1;
     }
 
-    std::cout << "ShellRuntimeTests passed\n";
+    std::cout << "ShellControlDeliveryTests passed\n";
     return 0;
 }

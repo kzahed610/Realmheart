@@ -54,6 +54,20 @@ int main() {
                 "summary payload must be bounded");
         require(bounded_entry.body.size() <= realmheart::services::NotificationLimits::max_body_bytes,
                 "body payload must be bounded");
+
+        realmheart::services::NotificationHistory tiny_history(2);
+        realmheart::services::NotificationServer tiny_server(tiny_history);
+        std::uint32_t retired_id = 0;
+        tiny_server.set_closed_handler([&](std::uint32_t id, std::uint32_t reason) {
+            require(reason == 4, "capacity retirement should use the undefined close reason");
+            retired_id = id;
+        });
+        const auto tiny_first = tiny_server.notify("one", 0, "one", "one");
+        const auto tiny_second = tiny_server.notify("two", 0, "two", "two");
+        static_cast<void>(tiny_second);
+        tiny_server.notify("three", 0, "three", "three");
+        require(retired_id == tiny_first, "active notification state must evict the oldest id");
+        require(!tiny_server.close(tiny_first), "retired ids must no longer remain active");
     } catch (const std::exception& error) {
         std::cerr << "NotificationServerTests failed: " << error.what() << '\n';
         return 1;

@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <cerrno>
 #include <cstdint>
 #include <ctime>
@@ -46,6 +47,7 @@
 #include <optional>
 #include <string>
 #include <sys/types.h>
+#include <thread>
 #include <utility>
 #include <unistd.h>
 
@@ -299,6 +301,14 @@ void enforce_sidebar_backdrop_input_region(
 
 class ShellRuntime {
 private:
+    struct RuntimeAsyncState {
+        std::atomic<bool> alive{true};
+        std::atomic<ShellRuntime*> owner{nullptr};
+        std::atomic<std::uint64_t> volume_generation{0};
+        std::atomic<std::uint64_t> brightness_generation{0};
+        std::atomic<std::uint64_t> theme_generation{0};
+    };
+
     struct NowPlayingAsyncState {
         std::atomic<bool> alive{true};
         std::atomic<std::uint64_t> generation{0};
@@ -317,12 +327,13 @@ public:
           notification_server_(notification_history_),
           notification_daemon_(notification_server_, notification_history_),
           theme_service_(std::make_shared<services::ThemeService>()),
-          utilities_(std::make_unique<services::UtilityManager>(theme_service_)),
+          utilities_(std::make_shared<services::UtilityManager>(theme_service_)),
           session_(std::make_unique<services::SessionManager>()),
           battery_(std::make_unique<services::BatteryService>()),
           media_(std::make_shared<services::MediaService>()),
           notes_service_(std::make_unique<services::NotesService>()),
           launcher_service_(std::make_unique<services::LauncherService>()) {
+        runtime_async_state_->owner.store(this);
         now_playing_async_state_->owner.store(this);
 
         notification_server_.set_notification_handler([this](const auto& entry) {
@@ -336,6 +347,11 @@ public:
 
     ~ShellRuntime() {
         // Stop callbacks that capture this before tearing down UI/controllers.
+        runtime_async_state_->alive.store(false);
+        runtime_async_state_->owner.store(nullptr);
+        ++runtime_async_state_->volume_generation;
+        ++runtime_async_state_->brightness_generation;
+        ++runtime_async_state_->theme_generation;
         now_playing_async_state_->alive.store(false);
         now_playing_async_state_->owner.store(nullptr);
         now_playing_subscription_.reset();
@@ -375,12 +391,7 @@ public:
         const std::string current_path = utilities_->load_wallpaper_path();
         if (current_path.empty()) return;
 
-        std::string error_message;
-        if (!wallpaper_controller_->set_wallpaper(current_path, &error_message)) {
-            std::cerr << "Unable to restore wallpaper: " << error_message << '\n';
-            return;
-        }
-        generate_theme_for(current_path);
+        request_wallpaper(current_path, "Unable to restore wallpaper");
     }
 
     void toggle_right_sidebar() {
@@ -408,21 +419,73 @@ public:
 
     void show_osd_volume() {
         ensure_initialized();
-        if (const auto audio = services::Audio::read_default_sink()) {
-            double volume = audio->volume;
-            if (volume > 1.0) {
-                const auto normalized = services::Audio::set_default_sink_volume(1.0);
-                volume = normalized.success ? normalized.state.volume : 1.0;
+        const auto state = runtime_async_state_;
+        const std::uint64_t generation = state->volume_generation.fetch_add(1) + 1;
+        static_cast<void>(core::shared_task_executor().post([state, generation] {
+            std::optional<double> percent;
+            if (const auto audio = services::Audio::read_default_sink()) {
+                double volume = audio->volume;
+                if (volume > 1.0) {
+                    const auto normalized = services::Audio::set_default_sink_volume(1.0);
+                    volume = normalized.success ? normalized.state.volume : 1.0;
+                }
+                percent = std::clamp(volume * 100.0, 0.0, 100.0);
             }
-            show_osd_volume_value(std::clamp(volume * 100.0, 0.0, 100.0));
-        }
+
+            struct Payload {
+                std::shared_ptr<RuntimeAsyncState> state;
+                std::uint64_t generation = 0;
+                std::optional<double> percent;
+            };
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,
+                +[](gpointer raw) -> gboolean {
+                    auto* payload = static_cast<Payload*>(raw);
+                    auto* owner = payload->state->owner.load();
+                    if (payload->state->alive.load() && owner != nullptr &&
+                        payload->state->volume_generation.load() == payload->generation &&
+                        payload->percent) {
+                        owner->show_osd_volume_value(*payload->percent);
+                    }
+                    return G_SOURCE_REMOVE;
+                },
+                new Payload{state, generation, percent},
+                +[](gpointer raw) { delete static_cast<Payload*>(raw); }
+            );
+        }));
     }
 
     void show_osd_brightness() {
         ensure_initialized();
-        if (const auto brightness = services::Brightness::read()) {
-            show_osd_brightness_value(brightness->percent);
-        }
+        const auto state = runtime_async_state_;
+        const std::uint64_t generation = state->brightness_generation.fetch_add(1) + 1;
+        static_cast<void>(core::shared_task_executor().post([state, generation] {
+            std::optional<double> percent;
+            if (const auto brightness = services::Brightness::read()) {
+                percent = brightness->percent;
+            }
+
+            struct Payload {
+                std::shared_ptr<RuntimeAsyncState> state;
+                std::uint64_t generation = 0;
+                std::optional<double> percent;
+            };
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,
+                +[](gpointer raw) -> gboolean {
+                    auto* payload = static_cast<Payload*>(raw);
+                    auto* owner = payload->state->owner.load();
+                    if (payload->state->alive.load() && owner != nullptr &&
+                        payload->state->brightness_generation.load() == payload->generation &&
+                        payload->percent) {
+                        owner->show_osd_brightness_value(*payload->percent);
+                    }
+                    return G_SOURCE_REMOVE;
+                },
+                new Payload{state, generation, percent},
+                +[](gpointer raw) { delete static_cast<Payload*>(raw); }
+            );
+        }));
     }
 
     void toggle_bar() {
@@ -458,22 +521,7 @@ public:
             return;
         }
 
-        std::string error_message;
-        if (!wallpaper_controller_->set_wallpaper(path, &error_message)) {
-            std::cerr << "Unable to set wallpaper: " << error_message << '\n';
-            return;
-        }
-
-        if (services::WallpaperService* service = utilities_->get_wallpaper_service()) {
-            if (!service->update_state(path)) {
-                std::cerr << "Wallpaper changed, but its path could not be persisted\n";
-            }
-        }
-
-        // Generate from the exact image that was just accepted by the renderer.
-        // Previously this was only called at startup, leaving the fallback palette
-        // unchanged for every later wallpaper swap.
-        generate_theme_for(path);
+        request_wallpaper(path, "Unable to set wallpaper");
     }
 
     void switch_wallpaper_backend(const std::string& backend_name) {
@@ -485,15 +533,33 @@ public:
             return;
         }
 
-        std::string error_message;
-        if (!wallpaper_controller_->switch_backend(*backend, &error_message)) {
-            std::cerr << "Unable to switch wallpaper backend to "
-                      << backend_name << ": " << error_message << '\n';
-            return;
-        }
+        const auto selected_backend = *backend;
+        wallpaper_controller_->switch_backend_async(
+            selected_backend,
+            [this, selected_backend, backend_name](
+                bool success,
+                std::string error_message
+            ) {
+                if (!success) {
+                    std::cerr << "Unable to switch wallpaper backend to "
+                              << backend_name << ": " << error_message << '\n';
+                    return;
+                }
+                requested_wallpaper_backend_ = selected_backend;
+                std::cerr << "Wallpaper backend switched to " << backend_name << '\n';
+            }
+        );
+    }
 
-        requested_wallpaper_backend_ = *backend;
-        std::cerr << "Wallpaper backend switched to " << backend_name << '\n';
+    void inject_stress_notifications(std::size_t count) {
+        for (std::size_t index = 0; index < count; ++index) {
+            notification_server_.notify(
+                "realmheart-lifetime-stress",
+                0,
+                "Lifetime notification " + std::to_string(index),
+                "Exercises bounded active IDs and coalesced GTK refreshes"
+            );
+        }
     }
 
     void choose_wallpaper_native() {
@@ -716,10 +782,71 @@ private:
         now_playing_->show(title, artist);
     }
 
+    void request_wallpaper(const std::string& path, const char* failure_prefix) {
+        if (path.empty() || wallpaper_controller_ == nullptr) return;
+        const auto utilities = utilities_;
+        wallpaper_controller_->set_wallpaper_async(
+            path,
+            [this, utilities, path, failure_prefix = std::string(failure_prefix)](
+                bool success,
+                std::string error_message
+            ) {
+                if (!success) {
+                    std::cerr << failure_prefix << ": " << error_message << '\n';
+                    return;
+                }
+
+                if (services::WallpaperService* service = utilities->get_wallpaper_service()) {
+                    if (!service->update_state(path)) {
+                        std::cerr << "Wallpaper changed, but its path could not be persisted\n";
+                    }
+                }
+                generate_theme_for(path);
+            }
+        );
+    }
+
     void generate_theme_for(const std::string& path) {
         if (path.empty()) return;
-        if (!utilities_->generate_colors(path)) {
-            std::cerr << "[Theme] Keeping the current palette because generation failed\n";
+        const auto state = runtime_async_state_;
+        const auto utilities = utilities_;
+        const auto theme_service = theme_service_;
+        const std::uint64_t generation = state->theme_generation.fetch_add(1) + 1;
+        const bool posted = core::shared_task_executor().post([
+            state, utilities, theme_service, path, generation
+        ] {
+            auto palette = utilities->generate_palette(path);
+
+            struct Payload {
+                std::shared_ptr<RuntimeAsyncState> state;
+                std::shared_ptr<services::ThemeService> theme_service;
+                std::uint64_t generation = 0;
+                std::optional<services::Palette> palette;
+            };
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,
+                +[](gpointer raw) -> gboolean {
+                    auto* payload = static_cast<Payload*>(raw);
+                    if (!payload->state->alive.load() ||
+                        payload->state->owner.load() == nullptr ||
+                        payload->state->theme_generation.load() != payload->generation) {
+                        return G_SOURCE_REMOVE;
+                    }
+                    if (payload->palette) {
+                        payload->theme_service->update_palette(
+                            std::move(*payload->palette)
+                        );
+                    } else {
+                        std::cerr << "[Theme] Keeping the current palette because generation failed\n";
+                    }
+                    return G_SOURCE_REMOVE;
+                },
+                new Payload{state, theme_service, generation, std::move(palette)},
+                +[](gpointer raw) { delete static_cast<Payload*>(raw); }
+            );
+        });
+        if (!posted) {
+            std::cerr << "[Theme] Worker queue unavailable; keeping the current palette\n";
         }
     }
 
@@ -742,9 +869,18 @@ private:
         if (!audio_monitor_) {
             audio_monitor_ = std::make_unique<services::AudioMonitor>(
                 [this](const services::AudioState& audio) {
-                    const double percent = audio.muted
-                        ? 0.0
-                        : std::clamp(audio.volume * 100.0, 0.0, 100.0);
+                    // Muting does not change PipeWire's stored volume. Showing
+                    // mute as 0% makes a late monitor refresh overwrite the
+                    // real level that was just displayed by the volume action.
+                    // Keep the OSD percentage tied to the actual volume level;
+                    // mute presentation can be handled independently by icon
+                    // state when the OSD gains that capability.
+                    ++runtime_async_state_->volume_generation;
+                    const double percent = std::clamp(
+                        audio.volume * 100.0,
+                        0.0,
+                        100.0
+                    );
                     show_osd_volume_value(percent);
                 }
             );
@@ -1020,13 +1156,15 @@ private:
     services::NotificationDaemon notification_daemon_;
 
     std::shared_ptr<services::ThemeService> theme_service_;
-    std::unique_ptr<services::UtilityManager> utilities_;
+    std::shared_ptr<services::UtilityManager> utilities_;
     std::unique_ptr<services::SessionManager> session_;
     std::unique_ptr<services::BatteryService> battery_;
     std::shared_ptr<services::MediaService> media_;
     services::MediaService::Subscription now_playing_subscription_;
     std::shared_ptr<NowPlayingAsyncState> now_playing_async_state_ =
         std::make_shared<NowPlayingAsyncState>();
+    std::shared_ptr<RuntimeAsyncState> runtime_async_state_ =
+        std::make_shared<RuntimeAsyncState>();
     bool now_playing_monitor_started_ = false;
     bool now_playing_seeded_ = false;
     std::string last_now_playing_identity_;
@@ -1188,6 +1326,80 @@ int run_shell(wallpaper::WallpaperBackendType wallpaper_backend) {
     runtime.reset();
     g_object_unref(application);
     return status;
+}
+
+int run_shell_lifetime_stress(
+    wallpaper::WallpaperBackendType wallpaper_backend,
+    int iterations
+) {
+    if (iterations <= 0) return 2;
+
+    const auto config_root = std::filesystem::temp_directory_path() /
+        ("realmheart-lifetime-stress-" + std::to_string(::getpid()));
+    std::error_code filesystem_error;
+    std::filesystem::remove_all(config_root, filesystem_error);
+    filesystem_error.clear();
+    std::filesystem::create_directories(config_root, filesystem_error);
+    if (filesystem_error) {
+        std::cerr << "Unable to create lifetime-stress config directory: "
+                  << filesystem_error.message() << '\n';
+        return 1;
+    }
+    g_setenv("XDG_CONFIG_HOME", config_root.c_str(), TRUE);
+
+    const auto drain_main_context = [](std::chrono::milliseconds duration) {
+        const auto deadline = std::chrono::steady_clock::now() + duration;
+        do {
+            while (g_main_context_pending(nullptr)) {
+                g_main_context_iteration(nullptr, FALSE);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        } while (std::chrono::steady_clock::now() < deadline);
+    };
+
+    for (int iteration = 0; iteration < iterations; ++iteration) {
+        GtkApplication* application = gtk_application_new(
+            nullptr,
+            G_APPLICATION_NON_UNIQUE
+        );
+        GError* registration_error = nullptr;
+        if (!g_application_register(
+                G_APPLICATION(application), nullptr, &registration_error
+            )) {
+            std::cerr << "Lifetime-stress application registration failed: "
+                      << (registration_error != nullptr
+                              ? registration_error->message
+                              : "unknown error")
+                      << '\n';
+            g_clear_error(&registration_error);
+            g_object_unref(application);
+            std::filesystem::remove_all(config_root, filesystem_error);
+            return 1;
+        }
+
+        auto runtime = std::make_unique<ShellRuntime>(
+            application, wallpaper_backend
+        );
+        runtime->activate();
+        runtime->inject_stress_notifications(150);
+        runtime->toggle_right_sidebar();
+        runtime->show_osd_volume();
+        runtime->show_osd_brightness();
+        drain_main_context(std::chrono::milliseconds(80));
+        runtime->toggle_right_sidebar();
+        drain_main_context(std::chrono::milliseconds(30));
+
+        runtime.reset();
+        // Drain callbacks that were queued immediately before destruction. Their
+        // lifetime tokens must discard them without dereferencing dead owners.
+        drain_main_context(std::chrono::milliseconds(30));
+        g_object_unref(application);
+    }
+
+    std::filesystem::remove_all(config_root, filesystem_error);
+    std::cout << "Realmheart lifetime stress passed " << iterations
+              << " iterations\n";
+    return 0;
 }
 
 } // namespace realmheart::ui

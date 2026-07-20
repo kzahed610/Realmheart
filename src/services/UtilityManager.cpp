@@ -102,13 +102,13 @@ bool UtilityManager::choose_wallpaper() {
     return wallpaper_service_->choose_wallpaper();
 }
 
-bool UtilityManager::generate_colors(const std::string& path) {
+std::optional<services::Palette> UtilityManager::generate_palette(const std::string& path) {
     const std::filesystem::path image_path(path);
     std::error_code error;
     if (path.empty() || !std::filesystem::is_regular_file(image_path, error) || error) {
         std::cerr << "[Theme] Refusing to generate colors for an invalid wallpaper path: "
                   << path << '\n';
-        return false;
+        return std::nullopt;
     }
 
     // Matugen 4.x changed the default JSON layout. --old-json-output gives us a
@@ -141,23 +141,29 @@ bool UtilityManager::generate_colors(const std::string& path) {
                          "matugen color generation failed"
                      )
                   << '\n';
-        return false;
+        return std::nullopt;
     }
     if (result.output.empty()) {
         std::cerr << "[Theme] Matugen produced no JSON output\n";
-        return false;
+        return std::nullopt;
     }
     if (result.truncated) {
         std::cerr << "[Theme] Matugen JSON output was truncated\n";
-        return false;
+        return std::nullopt;
     }
 
     auto palette = MatugenParser::parse(result.output, ThemeMode::Dark);
     if (!palette) {
         std::cerr << "[Theme] Matugen output did not contain a usable dark palette\n";
-        return false;
+        return std::nullopt;
     }
 
+    return palette;
+}
+
+bool UtilityManager::generate_colors(const std::string& path) {
+    auto palette = generate_palette(path);
+    if (!palette) return false;
     theme_service_->update_palette(std::move(*palette));
     return true;
 }

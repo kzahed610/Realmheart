@@ -39,7 +39,10 @@ private:
     struct SubscriberRegistry;
 
 public:
-    using ChangedCallback = std::function<void(const NotificationSnapshot&)>;
+    // Subscribers only need an invalidation signal. Passing a complete history
+    // snapshot here caused one multi-megabyte copy to be retained by every
+    // queued GTK idle callback during notification bursts.
+    using ChangedCallback = std::function<void()>;
 
     class Subscription {
     public:
@@ -67,6 +70,7 @@ public:
     void clear();
     void set_capture_active(bool active);
     [[nodiscard]] NotificationSnapshot snapshot() const;
+    [[nodiscard]] std::size_t capacity() const noexcept { return max_entries_; }
     [[nodiscard]] Subscription subscribe(ChangedCallback callback);
 
 private:
@@ -76,7 +80,7 @@ private:
         std::unordered_map<std::size_t, ChangedCallback> callbacks;
     };
 
-    void publish(const NotificationSnapshot& snapshot);
+    void publish();
 
     std::size_t max_entries_;
     mutable std::mutex mutex_;

@@ -30,6 +30,8 @@ public:
     GtkWidget* get_widget() override;
     void set_value(double value);
     void set_available(bool available);
+    [[nodiscard]] std::uint64_t refresh_generation() const noexcept;
+    void apply_refresh(std::optional<double> value, std::uint64_t generation);
 
 private:
     void show_interaction_feedback();
@@ -37,6 +39,7 @@ private:
     struct AsyncState {
         std::atomic<bool> alive{true};
         std::atomic<std::uint64_t> generation{0};
+        std::atomic<bool> mutation_pending{false};
         std::mutex mutation_mutex;
         GtkWidget* scale = nullptr; // GTK main thread only
         GtkWidget* value_label = nullptr; // GTK main thread only
@@ -52,6 +55,7 @@ private:
     bool updating_ = false;
     bool available_ = true;
     double pending_value_ = 0.0;
+    std::uint64_t pending_generation_ = 0;
     guint debounce_source_ = 0;
     guint interaction_feedback_source_ = 0;
     std::shared_ptr<AsyncState> state_;

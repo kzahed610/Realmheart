@@ -64,7 +64,6 @@ NotificationHistory::NotificationHistory(std::size_t max_entries)
 
 void NotificationHistory::upsert(NotificationEntry entry) {
     bound_notification_payload(entry);
-    NotificationSnapshot changed;
     {
         std::scoped_lock lock(mutex_);
         const auto existing = std::find_if(entries_.begin(), entries_.end(), [&entry](const auto& current) {
@@ -75,13 +74,11 @@ void NotificationHistory::upsert(NotificationEntry entry) {
             if (entries_.size() == max_entries_) entries_.erase(entries_.begin());
             entries_.push_back(std::move(entry));
         }
-        changed = make_snapshot(entries_, capture_active_);
     }
-    publish(changed);
+    publish();
 }
 
 bool NotificationHistory::dismiss(std::uint32_t id) {
-    NotificationSnapshot changed;
     {
         std::scoped_lock lock(mutex_);
         const auto existing = std::find_if(entries_.begin(), entries_.end(), [id](const auto& entry) {
@@ -89,41 +86,34 @@ bool NotificationHistory::dismiss(std::uint32_t id) {
         });
         if (existing == entries_.end()) return false;
         entries_.erase(existing);
-        changed = make_snapshot(entries_, capture_active_);
     }
-    publish(changed);
+    publish();
     return true;
 }
 
 void NotificationHistory::mark_all_read() {
-    NotificationSnapshot changed;
     {
         std::scoped_lock lock(mutex_);
         for (auto& entry : entries_) entry.unread = false;
-        changed = make_snapshot(entries_, capture_active_);
     }
-    publish(changed);
+    publish();
 }
 
 void NotificationHistory::clear() {
-    NotificationSnapshot changed;
     {
         std::scoped_lock lock(mutex_);
         entries_.clear();
-        changed = make_snapshot(entries_, capture_active_);
     }
-    publish(changed);
+    publish();
 }
 
 void NotificationHistory::set_capture_active(bool active) {
-    NotificationSnapshot changed;
     {
         std::scoped_lock lock(mutex_);
         if (capture_active_ == active) return;
         capture_active_ = active;
-        changed = make_snapshot(entries_, capture_active_);
     }
-    publish(changed);
+    publish();
 }
 
 NotificationSnapshot NotificationHistory::snapshot() const {
@@ -139,7 +129,7 @@ NotificationHistory::Subscription NotificationHistory::subscribe(ChangedCallback
     return Subscription{subscribers_, id};
 }
 
-void NotificationHistory::publish(const NotificationSnapshot& snapshot) {
+void NotificationHistory::publish() {
     std::vector<ChangedCallback> callbacks;
     {
         std::lock_guard lock(subscribers_->mutex);
@@ -147,7 +137,7 @@ void NotificationHistory::publish(const NotificationSnapshot& snapshot) {
         for (const auto& [_, callback] : subscribers_->callbacks) callbacks.push_back(callback);
     }
     for (auto& callback : callbacks) {
-        if (callback) callback(snapshot);
+        if (callback) callback();
     }
 }
 

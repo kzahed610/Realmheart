@@ -4,7 +4,10 @@
 
 #include <gtk/gtk.h>
 
+#include <atomic>
+#include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -12,11 +15,13 @@ namespace realmheart::ui::wallpaper {
 
 class WallpaperController {
 public:
+    using SetWallpaperCallback = std::function<void(bool, std::string)>;
+
     WallpaperController(
         GtkApplication* application,
         WallpaperBackendType requested_backend
     );
-    ~WallpaperController() = default;
+    ~WallpaperController();
 
     WallpaperController(const WallpaperController&) = delete;
     WallpaperController& operator=(const WallpaperController&) = delete;
@@ -28,6 +33,14 @@ public:
         const std::filesystem::path& path,
         std::string* error_message = nullptr
     );
+    void set_wallpaper_async(
+        std::filesystem::path path,
+        SetWallpaperCallback callback = {}
+    );
+    void switch_backend_async(
+        WallpaperBackendType backend,
+        SetWallpaperCallback callback = {}
+    );
     [[nodiscard]] bool switch_backend(
         WallpaperBackendType backend,
         std::string* error_message = nullptr
@@ -36,18 +49,31 @@ public:
     [[nodiscard]] WallpaperBackendType active_backend() const noexcept;
 
 private:
-    [[nodiscard]] std::unique_ptr<WallpaperBackend> create_backend(
+    struct AsyncState {
+        std::atomic<bool> alive{true};
+        std::atomic<std::uint64_t> generation{0};
+        std::atomic<WallpaperController*> owner{nullptr};
+    };
+
+    [[nodiscard]] std::shared_ptr<WallpaperBackend> create_backend(
         WallpaperBackendType type
     ) const;
     [[nodiscard]] bool activate_backend(
         WallpaperBackendType type,
         std::string* error_message
     );
+    void start_gtk_request(
+        std::shared_ptr<WallpaperBackend> backend,
+        std::filesystem::path path,
+        std::uint64_t generation,
+        SetWallpaperCallback callback
+    );
 
     GtkApplication* application_ = nullptr;
     WallpaperBackendType requested_backend_ = WallpaperBackendType::Gtk;
-    std::unique_ptr<WallpaperBackend> backend_;
+    std::shared_ptr<WallpaperBackend> backend_;
     std::filesystem::path current_wallpaper_;
+    std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
 };
 
 } // namespace realmheart::ui::wallpaper

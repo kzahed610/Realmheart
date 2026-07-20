@@ -51,9 +51,15 @@ constexpr const char* kIntrospectionXml = R"xml(
 } // namespace
 
 NotificationDaemon::NotificationDaemon(NotificationServer& server, NotificationHistory& history)
-    : server_(server), history_(history) {}
+    : server_(server), history_(history) {
+    server_.set_closed_handler([this](std::uint32_t id, std::uint32_t reason) {
+        cancel_expiration(id);
+        if (connection_ != nullptr) emit_closed(connection_, id, reason);
+    });
+}
 
 NotificationDaemon::~NotificationDaemon() {
+    server_.set_closed_handler({});
     stop();
 }
 

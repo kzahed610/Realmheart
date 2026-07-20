@@ -234,6 +234,14 @@ std::string ThemeStyles::build_css(const services::Palette& palette) {
         "  color: @rh_text;\n"
         "  font-family: 'JetBrains Mono';\n"
         "  font-size: 14px;\n"
+        "}\n"
+        ".realmheart-notes-save-state {\n"
+        "  padding: 5px 10px 7px;\n"
+        "  color: @rh_text_muted;\n"
+        "  font-size: 11px;\n"
+        "}\n"
+        ".realmheart-notes-save-state.pending { color: @rh_secondary; }\n"
+        ".realmheart-notes-save-state.failed { color: @rh_error; font-weight: 700;\n"
         "}\n";
 }
 

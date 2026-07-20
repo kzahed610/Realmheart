@@ -5,6 +5,7 @@
 #include <gio/gio.h>
 
 #include <filesystem>
+#include <mutex>
 #include <string>
 
 namespace realmheart::ui::wallpaper {
@@ -25,6 +26,11 @@ public:
     ) override;
 
 private:
+    [[nodiscard]] bool initialize_locked(std::string* error_message = nullptr);
+    [[nodiscard]] bool set_wallpaper_locked(
+        const std::filesystem::path& path,
+        std::string* error_message = nullptr
+    );
     [[nodiscard]] std::string find_renderer_executable() const;
     [[nodiscard]] bool send_line(
         const std::string& line,
@@ -35,7 +41,9 @@ private:
         std::string* error_message = nullptr
     );
     void stop() noexcept;
+    void stop_locked() noexcept;
 
+    std::mutex operation_mutex_;
     GSubprocess* process_ = nullptr;
     GOutputStream* command_stream_ = nullptr;
     GDataInputStream* response_stream_ = nullptr;

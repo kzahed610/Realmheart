@@ -68,6 +68,11 @@ NativeWallpaperBackend::~NativeWallpaperBackend() {
 }
 
 bool NativeWallpaperBackend::initialize(std::string* error_message) {
+    std::lock_guard lock(operation_mutex_);
+    return initialize_locked(error_message);
+}
+
+bool NativeWallpaperBackend::initialize_locked(std::string* error_message) {
     if (error_message != nullptr) error_message->clear();
     if (initialized_) return true;
 
@@ -106,14 +111,14 @@ bool NativeWallpaperBackend::initialize(std::string* error_message) {
     GInputStream* stdout_stream = g_subprocess_get_stdout_pipe(process_);
     if (command_stream_ == nullptr || stdout_stream == nullptr) {
         set_error(error_message, "native wallpaper renderer did not expose IPC streams");
-        stop();
+        stop_locked();
         return false;
     }
     g_object_ref(command_stream_);
     response_stream_ = g_data_input_stream_new(stdout_stream);
 
     if (!read_response("READY", error_message)) {
-        stop();
+        stop_locked();
         return false;
     }
 
@@ -125,8 +130,16 @@ bool NativeWallpaperBackend::set_wallpaper(
     const std::filesystem::path& path,
     std::string* error_message
 ) {
+    std::lock_guard lock(operation_mutex_);
+    return set_wallpaper_locked(path, error_message);
+}
+
+bool NativeWallpaperBackend::set_wallpaper_locked(
+    const std::filesystem::path& path,
+    std::string* error_message
+) {
     if (error_message != nullptr) error_message->clear();
-    if (!initialized_ && !initialize(error_message)) return false;
+    if (!initialized_ && !initialize_locked(error_message)) return false;
 
     const std::string raw_path = path.string();
     gchar* encoded = g_base64_encode(
@@ -144,7 +157,7 @@ bool NativeWallpaperBackend::set_wallpaper(
     g_free(encoded);
 
     if (!send_line(command, error_message) || !read_response("OK", error_message)) {
-        stop();
+        stop_locked();
         return false;
     }
     return true;
@@ -273,6 +286,11 @@ bool NativeWallpaperBackend::read_response(
 }
 
 void NativeWallpaperBackend::stop() noexcept {
+    std::lock_guard lock(operation_mutex_);
+    stop_locked();
+}
+
+void NativeWallpaperBackend::stop_locked() noexcept {
     // Closing stdin is a graceful protocol shutdown: the renderer treats EOF
     // exactly like QUIT. Avoid a final synchronous write that could otherwise
     // spend the normal command deadline waiting on an already-wedged helper.

@@ -6,6 +6,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <vector>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -70,6 +72,25 @@ int main() {
         require(keep_awake.active(), "Keep Awake should report active");
         require(keep_awake.set_enabled(false), "disabling inhibitor should pass readback");
         require(!keep_awake.active(), "Keep Awake should report inactive");
+
+        std::vector<std::thread> workers;
+        workers.reserve(8);
+        for (int worker = 0; worker < 8; ++worker) {
+            workers.emplace_back([&keep_awake, worker] {
+                for (int iteration = 0; iteration < 20; ++iteration) {
+                    if ((worker + iteration) % 3 == 0) {
+                        static_cast<void>(keep_awake.set_enabled(true));
+                    } else if ((worker + iteration) % 3 == 1) {
+                        static_cast<void>(keep_awake.active());
+                    } else {
+                        static_cast<void>(keep_awake.set_enabled(false));
+                    }
+                }
+            });
+        }
+        for (auto& worker : workers) worker.join();
+        require(keep_awake.set_enabled(false), "concurrent access should leave the inhibitor controllable");
+        require(!keep_awake.active(), "concurrent access should not corrupt the tracked pid");
     } catch (const std::exception& error) {
         std::cerr << "KeepAwakeTests failed: " << error.what() << '\n';
         return 1;

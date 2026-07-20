@@ -67,6 +67,8 @@ SliderWidget::SliderWidget(
             if (self->updating_) return;
 
             self->pending_value_ = gtk_range_get_value(range);
+            self->state_->mutation_pending = true;
+            self->pending_generation_ = self->state_->generation.fetch_add(1) + 1;
             self->show_interaction_feedback();
             gtk_label_set_text(
                 GTK_LABEL(self->value_label_), value_text(self->pending_value_).c_str()
@@ -80,8 +82,8 @@ SliderWidget::SliderWidget(
 
                     const auto state = widget->state_;
                     const double requested = widget->pending_value_;
-                    const std::uint64_t generation = state->generation.fetch_add(1) + 1;
-                    realmheart::core::shared_task_executor().post([state, requested, generation] {
+                    const std::uint64_t generation = widget->pending_generation_;
+                    const bool posted = realmheart::core::shared_task_executor().post([state, requested, generation] {
                         std::optional<double> actual;
                         {
                             // Preserve mutation order even though the shared pool has
@@ -130,6 +132,10 @@ SliderWidget::SliderWidget(
                                 if (state.value_changed_handler != 0) {
                                     g_signal_handler_unblock(state.scale, state.value_changed_handler);
                                 }
+                                // Invalidate reads that began while this mutation was
+                                // pending before allowing fresh reads to apply.
+                                state.generation.fetch_add(1);
+                                state.mutation_pending = false;
                                 if (result->actual && state.on_confirmed) {
                                     state.on_confirmed(*result->actual);
                                 }
@@ -139,6 +145,29 @@ SliderWidget::SliderWidget(
                             +[](gpointer data) { delete static_cast<Result*>(data); }
                         );
                     });
+                    if (!posted && state->generation.load() == generation) {
+                        if (state->value_changed_handler != 0) {
+                            g_signal_handler_block(
+                                state->scale, state->value_changed_handler
+                            );
+                        }
+                        gtk_range_set_value(
+                            GTK_RANGE(state->scale), state->confirmed_value.load()
+                        );
+                        if (state->value_label != nullptr) {
+                            gtk_label_set_text(
+                                GTK_LABEL(state->value_label),
+                                value_text(state->confirmed_value.load()).c_str()
+                            );
+                        }
+                        if (state->value_changed_handler != 0) {
+                            g_signal_handler_unblock(
+                                state->scale, state->value_changed_handler
+                            );
+                        }
+                        state->generation.fetch_add(1);
+                        state->mutation_pending = false;
+                    }
                     return G_SOURCE_REMOVE;
                 },
                 self
@@ -220,6 +249,19 @@ void SliderWidget::set_available(bool available) {
     gtk_label_set_text(
         GTK_LABEL(value_label_), value_text(state_->confirmed_value.load()).c_str()
     );
+}
+
+std::uint64_t SliderWidget::refresh_generation() const noexcept {
+    return state_->generation.load();
+}
+
+void SliderWidget::apply_refresh(
+    std::optional<double> value,
+    std::uint64_t generation
+) {
+    if (state_->generation.load() != generation || state_->mutation_pending.load()) return;
+    set_available(value.has_value());
+    if (value) set_value(*value);
 }
 
 } // namespace realmheart::ui::components

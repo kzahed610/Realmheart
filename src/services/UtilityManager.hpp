@@ -7,6 +7,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -61,6 +62,7 @@ public:
 
     bool set_wallpaper(const std::string& path);
     bool choose_wallpaper();
+    std::optional<services::Palette> generate_palette(const std::string& path);
     bool generate_colors(const std::string& path);
     std::string load_wallpaper_path();
 

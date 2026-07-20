@@ -1,10 +1,14 @@
 #include "services/NotesService.hpp"
 
+#include <cerrno>
+#include <cstring>
 #include <cstdlib>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <system_error>
+#include <unistd.h>
 
 namespace realmheart::services {
 namespace {
@@ -68,16 +72,20 @@ std::string NotesService::get_content() {
 }
 
 void NotesService::set_content(const std::string& content) {
+    SaveStateCallback callback;
     {
         std::lock_guard lock(mutex_);
         cached_content_ = content;
         dirty_ = true;
         ++edit_generation_;
+        save_state_ = NotesSaveState::Pending;
+        callback = save_state_callback_;
     }
+    if (callback) callback(NotesSaveState::Pending);
     cv_.notify_one();
 }
 
-void NotesService::save() {
+bool NotesService::save() {
     std::string content;
     std::size_t generation = 0;
     {
@@ -87,10 +95,36 @@ void NotesService::save() {
     }
 
     const bool written = write_atomically(content);
-    if (written) {
+    NotesSaveState state = NotesSaveState::Pending;
+    SaveStateCallback callback;
+    {
         std::lock_guard lock(mutex_);
-        if (edit_generation_ == generation) dirty_ = false;
+        const bool latest = edit_generation_ == generation;
+        if (written && latest) dirty_ = false;
+        state = !latest
+            ? NotesSaveState::Pending
+            : (written ? NotesSaveState::Saved : NotesSaveState::Failed);
+        save_state_ = state;
+        callback = save_state_callback_;
     }
+    if (callback) callback(state);
+    return written;
+}
+
+void NotesService::set_save_state_callback(SaveStateCallback callback) {
+    NotesSaveState current = NotesSaveState::Saved;
+    {
+        std::lock_guard lock(mutex_);
+        save_state_callback_ = std::move(callback);
+        current = save_state_;
+        callback = save_state_callback_;
+    }
+    if (callback) callback(current);
+}
+
+NotesSaveState NotesService::save_state() const {
+    std::lock_guard lock(mutex_);
+    return save_state_;
 }
 
 void NotesService::worker_loop() {
@@ -116,8 +150,18 @@ void NotesService::worker_loop() {
         const bool written = write_atomically(content);
         lock.lock();
 
-        if (written && edit_generation_ == generation) dirty_ = false;
-        if (stopping_) return;
+        const bool latest = edit_generation_ == generation;
+        if (written && latest) dirty_ = false;
+        const NotesSaveState state = !latest
+            ? NotesSaveState::Pending
+            : (written ? NotesSaveState::Saved : NotesSaveState::Failed);
+        save_state_ = state;
+        const SaveStateCallback callback = save_state_callback_;
+        const bool stopping = stopping_;
+        lock.unlock();
+        if (callback) callback(state);
+        if (stopping) return;
+        lock.lock();
     }
 }
 
@@ -127,30 +171,72 @@ bool NotesService::write_atomically(const std::string& content) {
     std::lock_guard io_lock(io_mutex_);
     const auto temporary_path = std::filesystem::path(notes_path_.string() + ".tmp");
 
-    {
-        std::ofstream file(temporary_path, std::ios::binary | std::ios::trunc);
-        if (!file.is_open()) {
-            std::cerr << "NotesService: failed to open temporary notes file\n";
-            return false;
-        }
-
-        file.write(content.data(), static_cast<std::streamsize>(content.size()));
-        file.flush();
-        if (!file.good()) {
-            std::cerr << "NotesService: failed to write temporary notes file\n";
-            file.close();
-            std::error_code remove_error;
-            std::filesystem::remove(temporary_path, remove_error);
-            return false;
-        }
+    const int temporary_fd = ::open(
+        temporary_path.c_str(),
+        O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+        0600
+    );
+    if (temporary_fd < 0) {
+        std::cerr << "NotesService: failed to open temporary notes file: "
+                  << std::strerror(errno) << '\n';
+        return false;
     }
 
-    std::error_code rename_error;
-    std::filesystem::rename(temporary_path, notes_path_, rename_error);
-    if (rename_error) {
-        std::cerr << "NotesService: failed to replace notes file: " << rename_error.message() << '\n';
+    int write_error = 0;
+    std::size_t offset = 0;
+    while (offset < content.size()) {
+        const ssize_t written = ::write(
+            temporary_fd,
+            content.data() + offset,
+            content.size() - offset
+        );
+        if (written > 0) {
+            offset += static_cast<std::size_t>(written);
+            continue;
+        }
+        if (written < 0 && errno == EINTR) continue;
+        write_error = written == 0 ? EIO : errno;
+        break;
+    }
+
+    if (write_error == 0 && ::fsync(temporary_fd) != 0) write_error = errno;
+    if (::close(temporary_fd) != 0 && write_error == 0) write_error = errno;
+    if (write_error != 0) {
+        std::cerr << "NotesService: failed to durably write temporary notes file: "
+                  << std::strerror(write_error) << '\n';
         std::error_code remove_error;
         std::filesystem::remove(temporary_path, remove_error);
+        return false;
+    }
+
+    if (::rename(temporary_path.c_str(), notes_path_.c_str()) != 0) {
+        std::cerr << "NotesService: failed to replace notes file: "
+                  << std::strerror(errno) << '\n';
+        std::error_code remove_error;
+        std::filesystem::remove(temporary_path, remove_error);
+        return false;
+    }
+
+    const auto parent = notes_path_.parent_path().empty()
+        ? std::filesystem::path{"."}
+        : notes_path_.parent_path();
+    const int directory_fd = ::open(
+        parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC
+    );
+    if (directory_fd < 0) {
+        std::cerr << "NotesService: failed to open notes directory for fsync: "
+                  << std::strerror(errno) << '\n';
+        return false;
+    }
+
+    int directory_error = 0;
+    if (::fsync(directory_fd) != 0) directory_error = errno;
+    if (::close(directory_fd) != 0 && directory_error == 0) {
+        directory_error = errno;
+    }
+    if (directory_error != 0) {
+        std::cerr << "NotesService: failed to durably commit notes rename: "
+                  << std::strerror(directory_error) << '\n';
         return false;
     }
 

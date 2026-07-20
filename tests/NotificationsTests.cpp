@@ -65,9 +65,9 @@ void test_subscribers_receive_changes_and_can_unsubscribe() {
     realmheart::services::NotificationHistory history;
     int calls = 0;
     std::size_t last_unread = 0;
-    auto subscription = history.subscribe([&](const auto& snapshot) {
+    auto subscription = history.subscribe([&] {
         ++calls;
-        last_unread = snapshot.unread_count;
+        last_unread = history.snapshot().unread_count;
     });
 
     history.upsert(notification(11, "live"));

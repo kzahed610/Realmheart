@@ -23,8 +23,7 @@ set(REALMHEART_WARNING_FLAGS
     $<$<BOOL:${REALMHEART_WARNINGS_AS_ERRORS}>:-Werror>
 )
 
-add_executable(realmheart
-    src/main.cpp
+set(REALMHEART_RUNTIME_SOURCES
     src/core/Command.cpp
     src/core/Diagnostics.cpp
     src/core/ModuleRegistry.cpp
@@ -52,6 +51,11 @@ add_executable(realmheart
     src/services/MediaService.cpp
     src/services/ThemeService.cpp
     src/services/MatugenParser.cpp
+)
+
+add_executable(realmheart
+    src/main.cpp
+    ${REALMHEART_RUNTIME_SOURCES}
 )
 target_include_directories(realmheart PRIVATE src third_party)
 target_compile_options(realmheart PRIVATE ${REALMHEART_WARNING_FLAGS})
@@ -251,9 +255,30 @@ if(BUILD_TESTING)
     add_executable(realmheart_shell_command_tests tests/ShellCommandTests.cpp src/core/ShellCommand.cpp)
     realmheart_register_test(realmheart_shell_command_tests)
 
-    add_executable(realmheart_shell_runtime_tests tests/ShellRuntimeTests.cpp src/core/ShellCommand.cpp src/core/ShellControl.cpp)
-    target_link_libraries(realmheart_shell_runtime_tests PRIVATE PkgConfig::GIO)
-    realmheart_register_dbus_test(realmheart_shell_runtime_tests)
+    add_executable(
+        realmheart_shell_control_delivery_tests
+        tests/ShellControlDeliveryTests.cpp
+        src/core/ShellCommand.cpp
+        src/core/ShellControl.cpp
+    )
+    target_link_libraries(realmheart_shell_control_delivery_tests PRIVATE PkgConfig::GIO)
+    realmheart_register_dbus_test(realmheart_shell_control_delivery_tests)
+
+    # Manual compositor-backed stress probe. It deliberately is not registered
+    # with CTest because layer-shell windows require the user's live Wayland
+    # session, but the executable is always available in build-hybrid.
+    add_executable(
+        realmheart_lifetime_stress
+        tests/ShellLifetimeStress.cpp
+        ${REALMHEART_RUNTIME_SOURCES}
+    )
+    target_include_directories(realmheart_lifetime_stress PRIVATE src third_party)
+    target_compile_options(realmheart_lifetime_stress PRIVATE ${REALMHEART_WARNING_FLAGS})
+    target_link_libraries(realmheart_lifetime_stress PRIVATE
+        realmheart_ui
+        PkgConfig::GIO
+        Threads::Threads
+    )
 
     add_executable(realmheart_audio_tests tests/AudioTests.cpp src/core/Command.cpp src/services/Audio.cpp)
     realmheart_register_test(realmheart_audio_tests)

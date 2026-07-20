@@ -14,10 +14,16 @@ extern char** environ;
 namespace realmheart::services {
 
 KeepAwake::~KeepAwake() {
-    stop_inhibitor();
+    std::lock_guard lock(mutex_);
+    stop_inhibitor_locked();
 }
 
 bool KeepAwake::active(const realmheart::core::CommandOptions&) const {
+    std::lock_guard lock(mutex_);
+    return active_locked();
+}
+
+bool KeepAwake::active_locked() const {
     if (child_pid_ <= 0) return false;
 
     int status = 0;
@@ -33,14 +39,15 @@ bool KeepAwake::active(const realmheart::core::CommandOptions&) const {
 }
 
 bool KeepAwake::set_enabled(bool enabled, const realmheart::core::CommandOptions&) {
-    if (enabled == active()) return true;
-    if (enabled) return start_inhibitor() && active();
-    stop_inhibitor();
-    return !active();
+    std::lock_guard lock(mutex_);
+    if (enabled == active_locked()) return true;
+    if (enabled) return start_inhibitor_locked() && active_locked();
+    stop_inhibitor_locked();
+    return !active_locked();
 }
 
-bool KeepAwake::start_inhibitor() {
-    if (child_pid_ > 0) return active();
+bool KeepAwake::start_inhibitor_locked() {
+    if (child_pid_ > 0) return active_locked();
     if (!realmheart::core::command_exists("systemd-inhibit")) return false;
 
     char executable[] = "systemd-inhibit";
@@ -87,7 +94,7 @@ bool KeepAwake::start_inhibitor() {
     return true;
 }
 
-void KeepAwake::stop_inhibitor() {
+void KeepAwake::stop_inhibitor_locked() {
     if (child_pid_ <= 0) return;
 
     static_cast<void>(::kill(-child_pid_, SIGTERM));

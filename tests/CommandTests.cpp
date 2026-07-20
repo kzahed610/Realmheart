@@ -8,6 +8,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -38,6 +39,21 @@ void test_timeout_escalates_and_returns_promptly() {
     require(!result.succeeded(), "timed-out command must not succeed");
     require(result.output == "started", "output produced before timeout must be retained");
     require(elapsed < 1500ms, "timeout plus escalation must remain intrinsically bounded");
+
+    const auto children_path = std::filesystem::path("/proc/self/task") /
+        std::to_string(::getpid()) / "children";
+    bool child_reaped = false;
+    for (int attempt = 0; attempt < 80; ++attempt) {
+        std::ifstream children(children_path);
+        std::string remaining;
+        std::getline(children, remaining);
+        if (remaining.empty()) {
+            child_reaped = true;
+            break;
+        }
+        std::this_thread::sleep_for(25ms);
+    }
+    require(child_reaped, "timed-out direct children must eventually be reaped");
 }
 
 void test_output_is_bounded_and_reported() {

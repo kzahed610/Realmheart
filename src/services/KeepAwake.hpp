@@ -2,6 +2,7 @@
 
 #include "core/Command.hpp"
 
+#include <mutex>
 #include <sys/types.h>
 
 namespace realmheart::services {
@@ -18,9 +19,11 @@ public:
     bool set_enabled(bool enabled, const realmheart::core::CommandOptions& options = {});
 
 private:
-    bool start_inhibitor();
-    void stop_inhibitor();
+    bool active_locked() const;
+    bool start_inhibitor_locked();
+    void stop_inhibitor_locked();
 
+    mutable std::mutex mutex_;
     mutable pid_t child_pid_ = -1;
 };
 

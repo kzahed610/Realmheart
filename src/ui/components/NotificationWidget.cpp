@@ -123,7 +123,7 @@ NotificationWidget::NotificationWidget(services::NotificationHistory& history)
 
     state_->owner = this;
     const auto state = state_;
-    subscription_ = history_.subscribe([state](const auto&) {
+    subscription_ = history_.subscribe([state] {
         if (!state->alive.load() || state->refresh_queued.exchange(true)) return;
         g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,

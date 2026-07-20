@@ -9,12 +9,14 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fcntl.h>
+#include <mutex>
 #include <poll.h>
 #include <sstream>
 #include <string_view>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <condition_variable>
 #include <vector>
 
 namespace realmheart::core {
@@ -45,6 +47,63 @@ void signal_process_group(pid_t child, int signal_number) {
     if (::kill(-child, signal_number) != 0 && errno == ESRCH) {
         ::kill(child, signal_number);
     }
+}
+
+class ChildReaper {
+public:
+    ChildReaper() : worker_([this] { run(); }) {
+        worker_.detach();
+    }
+
+    void adopt(pid_t child) {
+        if (child <= 0) return;
+        {
+            std::lock_guard lock(mutex_);
+            children_.push_back(child);
+        }
+        cv_.notify_one();
+    }
+
+private:
+    void run() {
+        std::unique_lock lock(mutex_);
+        for (;;) {
+            cv_.wait(lock, [this] { return !children_.empty(); });
+            lock.unlock();
+
+            bool pending = false;
+            {
+                std::lock_guard children_lock(mutex_);
+                auto iterator = children_.begin();
+                while (iterator != children_.end()) {
+                    int status = 0;
+                    const pid_t waited = ::waitpid(*iterator, &status, WNOHANG);
+                    if (waited == *iterator || (waited < 0 && errno == ECHILD)) {
+                        iterator = children_.erase(iterator);
+                        continue;
+                    }
+                    pending = true;
+                    ++iterator;
+                }
+            }
+
+            if (pending) std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            lock.lock();
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::vector<pid_t> children_;
+    std::thread worker_;
+};
+
+ChildReaper& child_reaper() {
+    // Intentionally process-lifetime. A detached reaper must remain available
+    // during static destruction because commands may still be timing out while
+    // other global services are shutting down.
+    static ChildReaper* reaper = new ChildReaper();
+    return *reaper;
 }
 
 void drain_output(int& fd, CommandResult& result, std::size_t max_output_bytes, std::string& io_error) {
@@ -424,6 +483,7 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
         signal_process_group(child, SIGKILL);
         const pid_t waited = ::waitpid(child, &wait_status, WNOHANG);
         child_reaped = waited == child;
+        if (!child_reaped) child_reaper().adopt(child);
     }
 
     close_fd(output_pipe[0]);

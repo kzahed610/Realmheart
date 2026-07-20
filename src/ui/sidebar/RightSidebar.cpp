@@ -590,9 +590,10 @@ void RightSidebar::refresh_controls() {
     gtk_widget_remove_css_class(online_label_, "offline");
     if (!online) gtk_widget_add_css_class(online_label_, "offline");
     gtk_label_set_text(GTK_LABEL(uptime_label_), uptime_text().c_str());
+    const bool keep_awake_active = keep_awake_->active();
     keep_awake_tile_->set_state(
-        keep_awake_->active() ? "Enabled" : "Disabled",
-        keep_awake_->active(),
+        keep_awake_active ? "Enabled" : "Disabled",
+        keep_awake_active,
         true
     );
 
@@ -602,7 +603,16 @@ void RightSidebar::refresh_controls() {
         return;
     }
 
-    const bool queued = realmheart::core::shared_task_executor().post([state] {
+    const std::uint64_t brightness_generation = brightness_slider_ != nullptr
+        ? brightness_slider_->refresh_generation()
+        : 0;
+    const std::uint64_t volume_generation = volume_slider_ != nullptr
+        ? volume_slider_->refresh_generation()
+        : 0;
+
+    const bool queued = realmheart::core::shared_task_executor().post([
+        state, brightness_generation, volume_generation
+    ] {
         std::optional<services::WifiState> wifi;
         std::optional<services::BluetoothState> bluetooth;
         std::optional<services::NightLightState> night_light;
@@ -610,9 +620,9 @@ void RightSidebar::refresh_controls() {
         std::optional<services::BrightnessState> brightness;
         std::optional<services::AudioState> audio;
         {
-            // Serialize reads with mutations so the UI never receives a
-            // half-updated state, while keeping every subprocess off GTK's
-            // main thread.
+            // Serialize sidebar-level service operations while keeping every
+            // subprocess off GTK's main thread. Slider generations below reject
+            // any read that became stale during a user mutation.
             std::lock_guard lock(state->operation_mutex);
             if (!state->alive.load()) {
                 state->refresh_in_flight = false;
@@ -643,6 +653,8 @@ void RightSidebar::refresh_controls() {
             .volume_percent = audio
                 ? std::optional<double>{std::clamp(audio->volume * 100.0, 0.0, 100.0)}
                 : std::nullopt,
+            .brightness_generation = brightness_generation,
+            .volume_generation = volume_generation,
         };
         if (wifi) {
             result->wifi_active = wifi->enabled;
@@ -695,19 +707,17 @@ gboolean RightSidebar::finish_control_refresh(gpointer raw) {
         }
 
         if (owner->brightness_slider_ != nullptr) {
-            owner->brightness_slider_->set_available(
-                result->brightness_percent.has_value()
+            owner->brightness_slider_->apply_refresh(
+                result->brightness_percent,
+                result->brightness_generation
             );
-            if (result->brightness_percent) {
-                owner->brightness_slider_->set_value(*result->brightness_percent);
-            }
         }
 
         if (owner->volume_slider_ != nullptr) {
-            owner->volume_slider_->set_available(result->volume_percent.has_value());
-            if (result->volume_percent) {
-                owner->volume_slider_->set_value(*result->volume_percent);
-            }
+            owner->volume_slider_->apply_refresh(
+                result->volume_percent,
+                result->volume_generation
+            );
         }
 
         GtkWidget* pending_button = nullptr;

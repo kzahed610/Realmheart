@@ -71,6 +71,8 @@ private:
         std::optional<std::string> active_profile;
         std::optional<double> brightness_percent;
         std::optional<double> volume_percent;
+        std::uint64_t brightness_generation = 0;
+        std::uint64_t volume_generation = 0;
     };
 
     void setup_layout();

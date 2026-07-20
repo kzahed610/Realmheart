@@ -1,13 +1,14 @@
 #include "services/NotificationServer.hpp"
 
 #include <algorithm>
+#include <iterator>
 #include <limits>
 #include <utility>
 
 namespace realmheart::services {
 
 NotificationServer::NotificationServer(NotificationHistory& history)
-    : history_(history) {}
+    : history_(history), max_active_(history.capacity()) {}
 
 std::uint32_t NotificationServer::notify(
     std::string app_name,
@@ -19,7 +20,20 @@ std::uint32_t NotificationServer::notify(
         ? replaces_id
         : allocate_id();
 
-    active_ids_.insert(id);
+    if (const auto existing = active_ids_.find(id); existing != active_ids_.end()) {
+        active_order_.erase(existing->second);
+        active_ids_.erase(existing);
+    } else if (max_active_ != 0 && active_ids_.size() >= max_active_) {
+        const std::uint32_t retired = active_order_.front();
+        active_order_.pop_front();
+        active_ids_.erase(retired);
+        if (closed_handler_) closed_handler_(retired, 4);
+    }
+
+    if (max_active_ != 0) {
+        active_order_.push_back(id);
+        active_ids_.emplace(id, std::prev(active_order_.end()));
+    }
 
     NotificationEntry entry;
     entry.id = id;
@@ -37,11 +51,19 @@ bool NotificationServer::close(std::uint32_t id) {
     // Closing a desktop notification ends its transient toast lifecycle, but
     // Realmheart's sidebar is notification history. History is only removed
     // by the user's dismiss/clear actions inside the sidebar.
-    return active_ids_.erase(id) != 0;
+    const auto existing = active_ids_.find(id);
+    if (existing == active_ids_.end()) return false;
+    active_order_.erase(existing->second);
+    active_ids_.erase(existing);
+    return true;
 }
 
 void NotificationServer::set_notification_handler(NotificationHandler handler) {
     notification_handler_ = std::move(handler);
+}
+
+void NotificationServer::set_closed_handler(ClosedHandler handler) {
+    closed_handler_ = std::move(handler);
 }
 
 bool NotificationServer::contains(std::uint32_t id) const {

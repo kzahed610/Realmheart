@@ -87,23 +87,23 @@ VerticalBar::VerticalBar(
     populate_widgets();
 
     const auto state = async_state_;
-    notification_subscription_ = notification_history_.subscribe([state](const auto& snapshot) {
-        if (!state->alive.load()) return;
-        struct Payload {
-            std::shared_ptr<AsyncState> state;
-            services::NotificationSnapshot snapshot;
-        };
+    notification_subscription_ = notification_history_.subscribe([state] {
+        if (!state->alive.load() ||
+            state->notification_refresh_queued.exchange(true)) return;
         g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,
             +[](gpointer raw) -> gboolean {
-                auto* payload = static_cast<Payload*>(raw);
-                if (payload->state->alive.load() && payload->state->owner != nullptr) {
-                    payload->state->owner->apply_notifications(payload->snapshot);
+                auto* shared = static_cast<std::shared_ptr<AsyncState>*>(raw);
+                (*shared)->notification_refresh_queued = false;
+                if ((*shared)->alive.load() && (*shared)->owner != nullptr) {
+                    (*shared)->owner->apply_notifications(
+                        (*shared)->owner->notification_history_.snapshot()
+                    );
                 }
                 return G_SOURCE_REMOVE;
             },
-            new Payload{state, snapshot},
-            +[](gpointer raw) { delete static_cast<Payload*>(raw); }
+            new std::shared_ptr<AsyncState>(state),
+            +[](gpointer raw) { delete static_cast<std::shared_ptr<AsyncState>*>(raw); }
         );
     });
 
