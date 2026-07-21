@@ -8,6 +8,7 @@ namespace realmheart::core {
 enum class ShellCommand {
     ToggleRightSidebar,
     ToggleBar,
+    ToggleCharacter,
     ShowOSDVolume,
     ShowOSDBrightness,
     LockSession,

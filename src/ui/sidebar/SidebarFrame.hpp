@@ -14,7 +14,7 @@ namespace realmheart::ui::sidebar {
 // click-through until character interaction is intentionally added.
 struct SidebarFrameLayout {
     int frame_width = 486;
-    int character_gutter_width = 128;
+    int character_gutter_width = 240;
 
     int content_inset_start = 76;
     int content_inset_end = 42;

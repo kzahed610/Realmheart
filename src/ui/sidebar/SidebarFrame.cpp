@@ -121,6 +121,11 @@ std::vector<Point> silhouette_points(
     );
     const double right_edge = g.right - right_spine_recess;
 
+    // One authoritative x-coordinate for the entire wall that Tessia grips.
+    // Keeping this separate from body_left preserves the lower ornament and
+    // upper shoulder while removing the visible mid-wall width change.
+    const double character_edge_x = g.body_left - 14.0;
+
     const double lower_transition_y = std::min(
         g.second_spine_end + 23.0,
         g.lower_step_start - 18.0
@@ -176,19 +181,24 @@ std::vector<Point> silhouette_points(
         {g.body_left + 15.0, g.bottom - 6.0},
         {g.lower_left, g.bottom - 27.0},
         {g.lower_left, g.bottom - 71.0},
-        {g.body_left - 8.0, g.bottom - 84.0},
-        {g.body_left - 19.0, g.lower_step_start - 4.0},
-        {g.body_left - 19.0, lower_transition_y},
-        {g.body_left - 29.0, lower_transition_inner_y},
-        {g.body_left - 29.0, second_spine_bulge_y},
+        {character_edge_x, g.bottom - 84.0},
+        {character_edge_x, g.lower_step_start - 4.0},
+        {character_edge_x, lower_transition_y},
 
-        // Keep the lower forged irregularities, but remove the upper protruding
-        // spine entirely. The widened, nearly flat wall gives Tessia's cropped
-        // facial edge a clean occluding surface instead of fighting her pose.
-        {g.body_left, g.second_spine_start + 8.0},
-        {g.body_left, g.first_spine_end + 68.0},
-        {g.body_left - 10.0, g.first_spine_end + 50.0},
-        {g.body_left - 10.0, g.top + 96.0},
+        // Keep the character-facing wall perfectly vertical through the hand
+        // and power-profile region. The old early inward step sat directly
+        // behind Tessia's side hand, making the grip look detached from a
+        // crooked shell edge. Delay all lower forged shaping until below the
+        // hand while preserving the original lower foundation silhouette.
+        {character_edge_x, lower_transition_inner_y},
+        {character_edge_x, second_spine_bulge_y},
+        {character_edge_x, g.second_spine_start + 8.0},
+        {character_edge_x, g.first_spine_end + 68.0},
+
+        // The upper wall remains flat beneath the stepped shoulder so Tessia's
+        // face and hair continue to meet a clean occluding edge.
+        {character_edge_x, g.first_spine_end + 50.0},
+        {character_edge_x, g.top + 96.0},
         {g.body_left - 2.0, g.top + 72.0},
         {g.header_left - 15.0, g.top + 55.0},
         {g.header_left + 4.0, g.top + 45.0},

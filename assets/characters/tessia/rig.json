@@ -1,0 +1,82 @@
+{
+  "character": "tessia",
+  "placement": {
+    "heightFraction": 0.885,
+    "sourceAnchor": {
+      "x": 0.7299270072992701,
+      "y": 0.0
+    },
+    "hostOffset": {
+      "x": 10.0,
+      "y": 130.0
+    }
+  },
+  "expression": {
+    "eyesLayer": "eyes",
+    "mouthLayer": "mouth",
+    "eyes": {
+      "inward": "eyes-inward.png",
+      "user": "eyes-user.png",
+      "half": "eyes-half.png",
+      "closed": "eyes-closed.png"
+    },
+    "mouth": {
+      "curious": "mouth-curious.png",
+      "smile": "mouth-smile.png"
+    }
+  },
+  "layers": [
+    {
+      "id": "rear-hair",
+      "asset": "hair-rear.png",
+      "plane": "back",
+      "renderer": "mesh",
+      "mask": "hair-mask-rear.png",
+      "meshRows": 24,
+      "meshStrength": 1.0,
+      "idleStrength": 14.0,
+      "idlePhase": 0.0
+    },
+    {
+      "id": "base",
+      "asset": "base.png",
+      "plane": "back"
+    },
+    {
+      "id": "eyes",
+      "asset": "eyes-inward.png",
+      "plane": "back"
+    },
+    {
+      "id": "mouth",
+      "asset": "mouth-curious.png",
+      "plane": "back"
+    },
+    {
+      "id": "front-hair",
+      "asset": "hair-front.png",
+      "plane": "back",
+      "renderer": "mesh",
+      "mask": "hair-mask-front.png",
+      "meshRows": 20,
+      "meshStrength": 1.0,
+      "idleStrength": 10.0,
+      "idlePhase": 0.82
+    },
+    {
+      "id": "side-hand",
+      "asset": "hand-side.png",
+      "plane": "front"
+    },
+    {
+      "id": "top-hand",
+      "asset": "hand-top.png",
+      "plane": "front",
+      "placement": "host",
+      "hostOffset": {
+        "x": 47.0,
+        "y": 34.0
+      }
+    }
+  ]
+}

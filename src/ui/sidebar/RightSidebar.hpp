@@ -15,6 +15,10 @@
 #include <string>
 #include <vector>
 
+namespace realmheart::animation::character {
+class CharacterCompositor;
+}
+
 namespace realmheart::ui::components {
 class SliderWidget;
 }
@@ -50,6 +54,10 @@ public:
     RightSidebar& operator=(const RightSidebar&) = delete;
 
     void refresh();
+    void toggle_character();
+    void animate_character_in();
+    [[nodiscard]] bool animate_character_out(std::function<void()> completion);
+    [[nodiscard]] bool character_enabled() const noexcept { return character_enabled_; }
     GtkWidget* get_window() const { return window_; }
 
 private:
@@ -76,6 +84,10 @@ private:
     };
 
     void setup_layout();
+    void initialize_character_compositor();
+    void cancel_character_hide_timeout();
+    static gboolean finish_character_hide(gpointer raw);
+    void set_character_enabled(bool enabled);
     void populate_modules();
     void build_identity_header();
     void build_quick_controls();
@@ -94,6 +106,11 @@ private:
     GtkWidget* content_overlay_ = nullptr;
     GtkWidget* container_ = nullptr;
     std::unique_ptr<SidebarFrame> frame_;
+    std::unique_ptr<realmheart::animation::character::CharacterCompositor> character_compositor_;
+    bool character_enabled_ = true;
+    bool sidebar_presented_ = false;
+    guint character_hide_timeout_ = 0;
+    std::function<void()> character_hide_completion_;
     std::vector<std::unique_ptr<components::BaseWidget>> modules_;
     std::shared_ptr<services::KeepAwake> keep_awake_;
     services::NotificationHistory& notification_history_;

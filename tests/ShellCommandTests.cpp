@@ -18,6 +18,8 @@ void parses_supported_shell_commands() {
             "sidebar-right-toggle should parse");
     require(parse_shell_command("bar-toggle") == ShellCommand::ToggleBar,
             "bar-toggle should parse");
+    require(parse_shell_command("character-toggle") == ShellCommand::ToggleCharacter,
+            "character-toggle should parse");
     require(parse_shell_command("start-recording") == ShellCommand::StartRecording,
             "start-recording should parse");
     require(parse_shell_command("stop-recording") == ShellCommand::StopRecording,
@@ -48,6 +50,8 @@ void maps_commands_to_stable_action_names() {
             "right sidebar action name should be stable");
     require(shell_action_name(ShellCommand::ToggleBar) == "bar-toggle",
             "bar action name should be stable");
+    require(shell_action_name(ShellCommand::ToggleCharacter) == "character-toggle",
+            "character action name should be stable");
     require(shell_action_name(ShellCommand::SetWallpaperPath) == "set-wallpaper-path",
             "direct wallpaper action name should be stable");
     require(shell_action_name(ShellCommand::SetWallpaperBackend) == "set-wallpaper-backend",
@@ -70,6 +74,8 @@ void identifies_commands_that_require_arguments() {
             "interactive set-wallpaper should remain parameterless");
     require(!shell_command_requires_argument(ShellCommand::ToggleBar),
             "ordinary shell commands should remain parameterless");
+    require(!shell_command_requires_argument(ShellCommand::ToggleCharacter),
+            "character toggle should remain parameterless");
     require(!shell_command_requires_argument(ShellCommand::Restart),
             "restart should remain parameterless");
 }

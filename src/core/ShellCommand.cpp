@@ -5,6 +5,7 @@ namespace realmheart::core {
 std::optional<ShellCommand> parse_shell_command(std::string_view name) {
     if (name == "sidebar-right-toggle") return ShellCommand::ToggleRightSidebar;
     if (name == "bar-toggle") return ShellCommand::ToggleBar;
+    if (name == "character-toggle") return ShellCommand::ToggleCharacter;
     if (name == "osd-volume") return ShellCommand::ShowOSDVolume;
     if (name == "osd-brightness") return ShellCommand::ShowOSDBrightness;
     if (name == "lock-session") return ShellCommand::LockSession;
@@ -29,6 +30,7 @@ std::string_view shell_action_name(ShellCommand command) {
     switch (command) {
     case ShellCommand::ToggleRightSidebar: return "sidebar-right-toggle";
     case ShellCommand::ToggleBar: return "bar-toggle";
+    case ShellCommand::ToggleCharacter: return "character-toggle";
     case ShellCommand::ShowOSDVolume: return "osd-volume";
     case ShellCommand::ShowOSDBrightness: return "osd-brightness";
     case ShellCommand::LockSession: return "lock-session";

@@ -62,6 +62,11 @@ target_compile_options(realmheart PRIVATE ${REALMHEART_WARNING_FLAGS})
 
 add_library(realmheart_ui STATIC
     src/core/TaskExecutor.cpp
+    src/animation/character/CharacterAnimator.cpp
+    src/animation/character/CharacterExpressionAnimator.cpp
+    src/animation/character/CharacterManifest.cpp
+    src/animation/character/HairMesh.cpp
+    src/animation/character/CharacterCompositor.cpp
     src/services/HyprlandEventMonitor.cpp
     src/ui/AssetResolver.cpp
     src/ui/ImageFileFilters.cpp
@@ -279,6 +284,37 @@ if(BUILD_TESTING)
         PkgConfig::GIO
         Threads::Threads
     )
+
+    add_executable(
+        realmheart_character_animator_tests
+        tests/CharacterAnimatorTests.cpp
+        src/animation/character/CharacterAnimator.cpp
+    )
+    realmheart_register_test(realmheart_character_animator_tests)
+
+    add_executable(
+        realmheart_character_expression_animator_tests
+        tests/CharacterExpressionAnimatorTests.cpp
+        src/animation/character/CharacterExpressionAnimator.cpp
+    )
+    realmheart_register_test(realmheart_character_expression_animator_tests)
+
+    add_executable(
+        realmheart_hair_mesh_tests
+        tests/HairMeshTests.cpp
+        src/animation/character/HairMesh.cpp
+    )
+    realmheart_register_test(realmheart_hair_mesh_tests)
+
+    add_executable(
+        realmheart_character_manifest_tests
+        tests/CharacterManifestTests.cpp
+        src/animation/character/CharacterManifest.cpp
+    )
+    target_compile_definitions(realmheart_character_manifest_tests PRIVATE
+        REALMHEART_TEST_TESSIA_ROOT="${CMAKE_SOURCE_DIR}/assets/characters/tessia"
+    )
+    realmheart_register_test(realmheart_character_manifest_tests)
 
     add_executable(realmheart_audio_tests tests/AudioTests.cpp src/core/Command.cpp src/services/Audio.cpp)
     realmheart_register_test(realmheart_audio_tests)

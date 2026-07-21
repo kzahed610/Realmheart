@@ -394,6 +394,11 @@ public:
         request_wallpaper(current_path, "Unable to restore wallpaper");
     }
 
+    void toggle_character() {
+        ensure_initialized();
+        sidebar_->toggle_character();
+    }
+
     void toggle_right_sidebar() {
         ensure_initialized();
         const bool before = state_.right_sidebar_visible();
@@ -1129,11 +1134,21 @@ private:
 
             sidebar_->refresh();
             gtk_window_present(GTK_WINDOW(window));
+            sidebar_->animate_character_in();
         } else {
-            sidebar_input_debug("visibility: hiding sidebar and backdrop");
-            // Hide, don't destroy: the controller and its workers remain valid.
-            gtk_widget_set_visible(window, FALSE);
+            sidebar_input_debug("visibility: animating character out, then hiding sidebar");
             gtk_widget_set_visible(GTK_WIDGET(sidebar_backdrop_), FALSE);
+
+            // Keep the layer surface mapped for the short character exit only.
+            // Reopening cancels this completion, so rapid toggles cannot hide a
+            // newly-presented sidebar from underneath the user.
+            if (!sidebar_->animate_character_out([this, window] {
+                    if (!state_.right_sidebar_visible()) {
+                        gtk_widget_set_visible(window, FALSE);
+                    }
+                })) {
+                gtk_widget_set_visible(window, FALSE);
+            }
         }
     }
 
@@ -1209,6 +1224,10 @@ void toggle_bar_action(GSimpleAction*, GVariant*, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->toggle_bar();
 }
 
+void toggle_character_action(GSimpleAction*, GVariant*, gpointer user_data) {
+    static_cast<ShellRuntime*>(user_data)->toggle_character();
+}
+
 void take_screenshot_full_action(GSimpleAction*, GVariant*, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->take_screenshot_full();
 }
@@ -1278,6 +1297,7 @@ void quit_action(GSimpleAction*, GVariant*, gpointer user_data) {
 constexpr GActionEntry kShellActions[] = {
     {"sidebar-right-toggle", toggle_right_sidebar_action, nullptr, nullptr, nullptr, {}},
     {"bar-toggle", toggle_bar_action, nullptr, nullptr, nullptr, {}},
+    {"character-toggle", toggle_character_action, nullptr, nullptr, nullptr, {}},
     {"osd-volume", show_osd_volume_action, nullptr, nullptr, nullptr, {}},
     {"osd-brightness", show_osd_brightness_action, nullptr, nullptr, nullptr, {}},
     {"lock-session", lock_session_action, nullptr, nullptr, nullptr, {}},

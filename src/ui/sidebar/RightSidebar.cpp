@@ -1,5 +1,6 @@
 #include "ui/sidebar/RightSidebar.hpp"
 
+#include "animation/character/CharacterCompositor.hpp"
 #include "ui/sidebar/ConnectivityPanel.hpp"
 #include "ui/sidebar/NightLightPanel.hpp"
 #include "ui/sidebar/SidebarFrame.hpp"
@@ -11,6 +12,7 @@
 #include "services/NightLight.hpp"
 #include "services/PowerProfiles.hpp"
 #include "services/Wifi.hpp"
+#include "ui/AssetResolver.hpp"
 #include "ui/LayerSurface.hpp"
 #include "ui/bar/widgets/ThemedSvgIcon.hpp"
 #include "ui/components/NotificationWidget.hpp"
@@ -18,8 +20,15 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <iostream>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -30,6 +39,87 @@ namespace {
 
 constexpr double kSidebarHeightFraction = 0.90;
 constexpr int kSidebarRightMargin = 2;
+
+std::filesystem::path character_enabled_preference_path() {
+    if (const char* config_home = std::getenv("XDG_CONFIG_HOME");
+        config_home != nullptr && *config_home != '\0') {
+        return std::filesystem::path(config_home) /
+            "realmheart/features/sidebar-character.enabled";
+    }
+    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+        return std::filesystem::path(home) /
+            ".config/realmheart/features/sidebar-character.enabled";
+    }
+    return std::filesystem::temp_directory_path() /
+        "realmheart-sidebar-character.enabled";
+}
+
+bool load_character_enabled_preference() {
+    std::ifstream input(character_enabled_preference_path());
+    if (!input) return true;
+
+    std::string value;
+    input >> value;
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+
+    if (value == "0" || value == "false" || value == "off" ||
+        value == "disabled" || value == "no") {
+        return false;
+    }
+    if (value == "1" || value == "true" || value == "on" ||
+        value == "enabled" || value == "yes") {
+        return true;
+    }
+
+    std::cerr << "Ignoring invalid sidebar character preference: " << value << '\n';
+    return true;
+}
+
+bool persist_character_enabled_preference(bool enabled) {
+    const auto path = character_enabled_preference_path();
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    if (error) {
+        std::cerr << "Unable to create Realmheart feature preference directory: "
+                  << error.message() << '\n';
+        return false;
+    }
+
+    auto temporary = path;
+    temporary += ".tmp";
+    {
+        std::ofstream output(temporary, std::ios::trunc);
+        if (!output) {
+            std::cerr << "Unable to write sidebar character preference: "
+                      << temporary << '\n';
+            return false;
+        }
+        output << (enabled ? "enabled\n" : "disabled\n");
+        output.flush();
+        if (!output) {
+            std::cerr << "Unable to flush sidebar character preference: "
+                      << temporary << '\n';
+            return false;
+        }
+    }
+
+    std::filesystem::rename(temporary, path, error);
+    if (error) {
+        std::error_code remove_error;
+        std::filesystem::remove(path, remove_error);
+        error.clear();
+        std::filesystem::rename(temporary, path, error);
+    }
+    if (error) {
+        std::cerr << "Unable to publish sidebar character preference: "
+                  << error.message() << '\n';
+        std::filesystem::remove(temporary, error);
+        return false;
+    }
+    return true;
+}
 
 GtkWidget* themed_icon(const char* path, int pixels, const char* css_class = nullptr) {
     realmheart::ui::bar::widgets::ThemedSvgIcon icon(path, pixels);
@@ -255,6 +345,7 @@ RightSidebar::RightSidebar(
     notification_history_(notification_history),
     show_volume_osd_(std::move(show_volume_osd)),
     show_brightness_osd_(std::move(show_brightness_osd)) {
+    character_enabled_ = load_character_enabled_preference();
     async_ui_state_->owner = this;
     window_ = gtk_application_window_new(app_);
     gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Right Sidebar");
@@ -286,6 +377,7 @@ RightSidebar::RightSidebar(
 }
 
 RightSidebar::~RightSidebar() {
+    cancel_character_hide_timeout();
     if (power_feedback_timeout_ != 0) {
         g_source_remove(power_feedback_timeout_);
         power_feedback_timeout_ = 0;
@@ -295,6 +387,7 @@ RightSidebar::~RightSidebar() {
     wifi_panel_.reset();
     bluetooth_panel_.reset();
     night_light_panel_.reset();
+    character_compositor_.reset();
     modules_.clear();
     wifi_tile_.reset();
     bluetooth_tile_.reset();
@@ -324,7 +417,131 @@ void RightSidebar::setup_layout() {
 
     frame_->set_child(content_overlay_);
     gtk_window_set_child(GTK_WINDOW(window_), frame_->widget());
+
+    if (character_enabled_) initialize_character_compositor();
 }
+
+void RightSidebar::initialize_character_compositor() {
+    if (character_compositor_ || frame_ == nullptr) return;
+
+    int preferred_scale = 1;
+    if (GdkMonitor* monitor = resolve_layer_surface_monitor(window_)) {
+        preferred_scale = std::max(gdk_monitor_get_scale_factor(monitor), 1);
+        g_object_unref(monitor);
+    }
+
+    const auto placement = sidebar_placement_for(window_);
+    std::string character_error;
+    const auto character_rig = resolve_project_asset("characters/tessia/rig.json");
+    if (!character_rig) {
+        std::cerr << "Unable to locate sidebar character rig\n";
+        return;
+    }
+
+    character_compositor_ =
+        realmheart::animation::character::CharacterCompositor::create(
+            frame_->back_art_layer(),
+            frame_->front_art_layer(),
+            character_rig->parent_path(),
+            preferred_scale,
+            {
+                .occlusion_left = static_cast<double>(
+                    frame_->layout().frame_origin_x()
+                ),
+                .occlusion_top = 0.0,
+                .surface_width = frame_->layout().surface_width(),
+                .surface_height = placement.height,
+            },
+            &character_error
+        );
+    if (!character_compositor_) {
+        std::cerr << "Unable to initialize sidebar character composition: "
+                  << character_error << '\n';
+    }
+}
+
+void RightSidebar::cancel_character_hide_timeout() {
+    if (character_hide_timeout_ != 0) {
+        g_source_remove(character_hide_timeout_);
+        character_hide_timeout_ = 0;
+    }
+    character_hide_completion_ = {};
+}
+
+gboolean RightSidebar::finish_character_hide(gpointer raw) {
+    auto* self = static_cast<RightSidebar*>(raw);
+    self->character_hide_timeout_ = 0;
+
+    auto completion = std::move(self->character_hide_completion_);
+    self->character_hide_completion_ = {};
+    if (!self->sidebar_presented_ && completion) completion();
+    return G_SOURCE_REMOVE;
+}
+
+void RightSidebar::animate_character_in() {
+    sidebar_presented_ = true;
+    cancel_character_hide_timeout();
+    if (!character_enabled_) return;
+
+    initialize_character_compositor();
+    if (character_compositor_) character_compositor_->start_enter();
+}
+
+bool RightSidebar::animate_character_out(std::function<void()> completion) {
+    sidebar_presented_ = false;
+    cancel_character_hide_timeout();
+    if (!character_enabled_ || !character_compositor_) return false;
+
+    character_compositor_->start_exit();
+    character_hide_completion_ = std::move(completion);
+    character_hide_timeout_ = g_timeout_add(
+        realmheart::animation::character::CharacterCompositor::exit_duration_ms() + 20,
+        &RightSidebar::finish_character_hide,
+        this
+    );
+    return true;
+}
+
+void RightSidebar::set_character_enabled(bool enabled) {
+    if (character_enabled_ == enabled) return;
+
+    character_enabled_ = enabled;
+    if (character_enabled_) {
+        initialize_character_compositor();
+        if (sidebar_presented_ && character_compositor_) {
+            character_compositor_->start_enter();
+        }
+    } else {
+        // Actual shutdown rather than visibility: this removes the drawing
+        // areas, the active tick callback, and all decoded textures.
+        character_compositor_.reset();
+#if defined(__GLIBC__)
+        // The kill switch is an explicit resource-release path. Cairo surfaces
+        // are gone at this point; ask glibc to return their now-free heap pages
+        // instead of retaining the previous character high-water mark.
+        static_cast<void>(malloc_trim(0));
+#endif
+
+        // If the kill switch lands during the short exit grace period, finish
+        // the pending close immediately instead of leaving the window mapped.
+        if (!sidebar_presented_ && character_hide_timeout_ != 0) {
+            g_source_remove(character_hide_timeout_);
+            character_hide_timeout_ = 0;
+            auto completion = std::move(character_hide_completion_);
+            character_hide_completion_ = {};
+            if (completion) completion();
+        }
+    }
+
+    static_cast<void>(persist_character_enabled_preference(character_enabled_));
+    std::cerr << "Sidebar character "
+              << (character_enabled_ ? "enabled" : "disabled") << '\n';
+}
+
+void RightSidebar::toggle_character() {
+    set_character_enabled(!character_enabled_);
+}
+
 
 void RightSidebar::build_identity_header() {
     GtkWidget* header = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
