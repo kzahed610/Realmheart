@@ -51,10 +51,14 @@ struct CharacterLayer {
     CharacterLayerRenderer renderer = CharacterLayerRenderer::Static;
     CharacterPoint host_offset;
     std::string mask_asset_id;
+    std::string flow_asset_id;
     int mesh_rows = 0;
     double mesh_strength = 1.0;
     double idle_strength = 0.0;
     double idle_phase = 0.0;
+    double flow_strength = 0.0;
+    double flow_frequency = 0.0;
+    double flow_phase = 0.0;
     bool visible = true;
 };
 
@@ -63,11 +67,9 @@ struct CharacterExpressionRig {
     std::string eyes_layer_id;
     std::string mouth_layer_id;
     std::string eyes_inward_asset_id;
-    std::string eyes_user_asset_id;
     std::string eyes_half_asset_id;
     std::string eyes_closed_asset_id;
     std::string mouth_curious_asset_id;
-    std::string mouth_smile_asset_id;
 };
 
 struct CharacterPlacement {

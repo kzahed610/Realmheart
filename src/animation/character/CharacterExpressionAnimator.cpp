@@ -16,13 +16,13 @@ bool samples_differ(
 } // namespace
 
 CharacterExpressionAnimator::CharacterExpressionAnimator() {
-    reset_inward();
+    reset_base();
 }
 
-void CharacterExpressionAnimator::reset_inward() {
+void CharacterExpressionAnimator::reset_base() {
     phase_ = CharacterExpressionPhase::Paused;
-    stable_gaze_ = StableGaze::Inward;
-    sample_ = stable_sample(stable_gaze_);
+    stable_expression_ = StableExpression::Base;
+    sample_ = stable_sample(stable_expression_);
     phase_elapsed_seconds_ = 0.0;
     phase_duration_seconds_ = 0.0;
 }
@@ -31,14 +31,14 @@ bool CharacterExpressionAnimator::resume() {
     if (active()) return false;
 
     const CharacterExpressionSample before = sample_;
-    begin_hold(stable_gaze_);
+    begin_hold(stable_expression_);
     return samples_differ(before, sample_);
 }
 
 bool CharacterExpressionAnimator::pause_stable() {
     const CharacterExpressionSample before = sample_;
-    stable_gaze_ = stable_gaze_for_phase();
-    sample_ = stable_sample(stable_gaze_);
+    stable_expression_ = stable_expression_for_phase();
+    sample_ = stable_sample(stable_expression_);
     phase_ = CharacterExpressionPhase::Paused;
     phase_elapsed_seconds_ = 0.0;
     phase_duration_seconds_ = 0.0;
@@ -65,13 +65,13 @@ bool CharacterExpressionAnimator::advance(double delta_seconds) {
     return samples_differ(before, sample_);
 }
 
-void CharacterExpressionAnimator::begin_hold(StableGaze gaze) {
-    stable_gaze_ = gaze;
+void CharacterExpressionAnimator::begin_hold(StableExpression expression) {
+    stable_expression_ = expression;
     begin_phase(
-        gaze == StableGaze::Inward
-            ? CharacterExpressionPhase::HoldingInward
-            : CharacterExpressionPhase::HoldingUser,
-        randomized_hold_seconds(gaze)
+        expression == StableExpression::Base
+            ? CharacterExpressionPhase::HoldingBase
+            : CharacterExpressionPhase::HoldingInward,
+        randomized_hold_seconds(expression)
     );
 }
 
@@ -85,67 +85,59 @@ void CharacterExpressionAnimator::begin_phase(
 
     switch (phase_) {
     case CharacterExpressionPhase::Paused:
-        sample_ = stable_sample(stable_gaze_);
+        sample_ = stable_sample(stable_expression_);
         break;
-    case CharacterExpressionPhase::HoldingInward:
-        stable_gaze_ = StableGaze::Inward;
-        sample_ = stable_sample(stable_gaze_);
-        break;
-    case CharacterExpressionPhase::ClosingToUser:
-        sample_ = {
-            .eyes = CharacterEyeFrame::Half,
-            .mouth = CharacterMouthFrame::Curious,
-        };
-        break;
-    case CharacterExpressionPhase::ClosedToUser:
-        // The gaze swaps while the eyes are shut, but the mouth deliberately
-        // remains curious. Tessia notices the user before reacting with a smile.
-        stable_gaze_ = StableGaze::User;
-        sample_ = {
-            .eyes = CharacterEyeFrame::Closed,
-            .mouth = CharacterMouthFrame::Curious,
-        };
-        break;
-    case CharacterExpressionPhase::OpeningToUser:
-        sample_ = {
-            .eyes = CharacterEyeFrame::Half,
-            .mouth = CharacterMouthFrame::Curious,
-        };
-        break;
-    case CharacterExpressionPhase::SettlingUser:
-        sample_ = {
-            .eyes = CharacterEyeFrame::User,
-            .mouth = CharacterMouthFrame::Curious,
-        };
-        break;
-    case CharacterExpressionPhase::HoldingUser:
-        stable_gaze_ = StableGaze::User;
-        sample_ = stable_sample(stable_gaze_);
+    case CharacterExpressionPhase::HoldingBase:
+        stable_expression_ = StableExpression::Base;
+        sample_ = stable_sample(stable_expression_);
         break;
     case CharacterExpressionPhase::ClosingToInward:
         sample_ = {
             .eyes = CharacterEyeFrame::Half,
-            .mouth = CharacterMouthFrame::Smile,
+            .mouth = CharacterMouthFrame::Base,
         };
         break;
     case CharacterExpressionPhase::ClosedToInward:
-        stable_gaze_ = StableGaze::Inward;
+        stable_expression_ = StableExpression::Inward;
         sample_ = {
             .eyes = CharacterEyeFrame::Closed,
-            .mouth = CharacterMouthFrame::Smile,
+            .mouth = CharacterMouthFrame::Curious,
         };
         break;
     case CharacterExpressionPhase::OpeningToInward:
         sample_ = {
             .eyes = CharacterEyeFrame::Half,
-            .mouth = CharacterMouthFrame::Smile,
+            .mouth = CharacterMouthFrame::Curious,
         };
         break;
     case CharacterExpressionPhase::SettlingInward:
+        sample_ = stable_sample(StableExpression::Inward);
+        break;
+    case CharacterExpressionPhase::HoldingInward:
+        stable_expression_ = StableExpression::Inward;
+        sample_ = stable_sample(stable_expression_);
+        break;
+    case CharacterExpressionPhase::ClosingToBase:
         sample_ = {
-            .eyes = CharacterEyeFrame::Inward,
-            .mouth = CharacterMouthFrame::Smile,
+            .eyes = CharacterEyeFrame::Half,
+            .mouth = CharacterMouthFrame::Curious,
         };
+        break;
+    case CharacterExpressionPhase::ClosedToBase:
+        stable_expression_ = StableExpression::Base;
+        sample_ = {
+            .eyes = CharacterEyeFrame::Closed,
+            .mouth = CharacterMouthFrame::Base,
+        };
+        break;
+    case CharacterExpressionPhase::OpeningToBase:
+        sample_ = {
+            .eyes = CharacterEyeFrame::Half,
+            .mouth = CharacterMouthFrame::Base,
+        };
+        break;
+    case CharacterExpressionPhase::SettlingBase:
+        sample_ = stable_sample(StableExpression::Base);
         break;
     }
 }
@@ -154,34 +146,7 @@ void CharacterExpressionAnimator::finish_phase() {
     switch (phase_) {
     case CharacterExpressionPhase::Paused:
         break;
-    case CharacterExpressionPhase::HoldingInward:
-        begin_phase(
-            CharacterExpressionPhase::ClosingToUser,
-            kBlinkCloseSeconds
-        );
-        break;
-    case CharacterExpressionPhase::ClosingToUser:
-        begin_phase(
-            CharacterExpressionPhase::ClosedToUser,
-            kBlinkClosedSeconds
-        );
-        break;
-    case CharacterExpressionPhase::ClosedToUser:
-        begin_phase(
-            CharacterExpressionPhase::OpeningToUser,
-            kBlinkOpenSeconds
-        );
-        break;
-    case CharacterExpressionPhase::OpeningToUser:
-        begin_phase(
-            CharacterExpressionPhase::SettlingUser,
-            kUserReactionDelaySeconds
-        );
-        break;
-    case CharacterExpressionPhase::SettlingUser:
-        begin_hold(StableGaze::User);
-        break;
-    case CharacterExpressionPhase::HoldingUser:
+    case CharacterExpressionPhase::HoldingBase:
         begin_phase(
             CharacterExpressionPhase::ClosingToInward,
             kBlinkCloseSeconds
@@ -206,14 +171,43 @@ void CharacterExpressionAnimator::finish_phase() {
         );
         break;
     case CharacterExpressionPhase::SettlingInward:
-        begin_hold(StableGaze::Inward);
+        begin_hold(StableExpression::Inward);
+        break;
+    case CharacterExpressionPhase::HoldingInward:
+        begin_phase(
+            CharacterExpressionPhase::ClosingToBase,
+            kBlinkCloseSeconds
+        );
+        break;
+    case CharacterExpressionPhase::ClosingToBase:
+        begin_phase(
+            CharacterExpressionPhase::ClosedToBase,
+            kBlinkClosedSeconds
+        );
+        break;
+    case CharacterExpressionPhase::ClosedToBase:
+        begin_phase(
+            CharacterExpressionPhase::OpeningToBase,
+            kBlinkOpenSeconds
+        );
+        break;
+    case CharacterExpressionPhase::OpeningToBase:
+        begin_phase(
+            CharacterExpressionPhase::SettlingBase,
+            kBaseReactionDelaySeconds
+        );
+        break;
+    case CharacterExpressionPhase::SettlingBase:
+        begin_hold(StableExpression::Base);
         break;
     }
 }
 
-double CharacterExpressionAnimator::randomized_hold_seconds(StableGaze gaze) {
-    const double minimum = gaze == StableGaze::Inward ? 3.2 : 2.6;
-    const double maximum = gaze == StableGaze::Inward ? 5.0 : 4.0;
+double CharacterExpressionAnimator::randomized_hold_seconds(
+    StableExpression expression
+) {
+    const double minimum = expression == StableExpression::Inward ? 3.2 : 2.6;
+    const double maximum = expression == StableExpression::Inward ? 5.0 : 4.0;
     double duration = minimum + ((maximum - minimum) * random_unit());
 
     // Roughly one hold in five lingers a little longer. It remains bounded and
@@ -226,8 +220,6 @@ double CharacterExpressionAnimator::randomized_hold_seconds(StableGaze gaze) {
 }
 
 double CharacterExpressionAnimator::random_unit() noexcept {
-    // xorshift32: tiny, deterministic, and more than sufficient for timing
-    // variation. No platform RNG or global state is involved.
     std::uint32_t value = random_state_;
     value ^= value << 13u;
     value ^= value >> 17u;
@@ -238,38 +230,38 @@ double CharacterExpressionAnimator::random_unit() noexcept {
 }
 
 CharacterExpressionSample CharacterExpressionAnimator::stable_sample(
-    StableGaze gaze
+    StableExpression expression
 ) const {
-    return gaze == StableGaze::Inward
+    return expression == StableExpression::Base
         ? CharacterExpressionSample{
-            .eyes = CharacterEyeFrame::Inward,
-            .mouth = CharacterMouthFrame::Curious,
+            .eyes = CharacterEyeFrame::Base,
+            .mouth = CharacterMouthFrame::Base,
         }
         : CharacterExpressionSample{
-            .eyes = CharacterEyeFrame::User,
-            .mouth = CharacterMouthFrame::Smile,
+            .eyes = CharacterEyeFrame::Inward,
+            .mouth = CharacterMouthFrame::Curious,
         };
 }
 
-CharacterExpressionAnimator::StableGaze
-CharacterExpressionAnimator::stable_gaze_for_phase() const noexcept {
+CharacterExpressionAnimator::StableExpression
+CharacterExpressionAnimator::stable_expression_for_phase() const noexcept {
     switch (phase_) {
     case CharacterExpressionPhase::Paused:
-    case CharacterExpressionPhase::HoldingInward:
-    case CharacterExpressionPhase::ClosingToUser:
-        return StableGaze::Inward;
-    case CharacterExpressionPhase::ClosedToUser:
-    case CharacterExpressionPhase::OpeningToUser:
-    case CharacterExpressionPhase::SettlingUser:
-    case CharacterExpressionPhase::HoldingUser:
+    case CharacterExpressionPhase::HoldingBase:
     case CharacterExpressionPhase::ClosingToInward:
-        return StableGaze::User;
+        return StableExpression::Base;
     case CharacterExpressionPhase::ClosedToInward:
     case CharacterExpressionPhase::OpeningToInward:
     case CharacterExpressionPhase::SettlingInward:
-        return StableGaze::Inward;
+    case CharacterExpressionPhase::HoldingInward:
+    case CharacterExpressionPhase::ClosingToBase:
+        return StableExpression::Inward;
+    case CharacterExpressionPhase::ClosedToBase:
+    case CharacterExpressionPhase::OpeningToBase:
+    case CharacterExpressionPhase::SettlingBase:
+        return StableExpression::Base;
     }
-    return StableGaze::Inward;
+    return StableExpression::Base;
 }
 
 } // namespace realmheart::animation::character

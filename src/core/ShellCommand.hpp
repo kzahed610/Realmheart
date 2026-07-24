@@ -9,6 +9,7 @@ enum class ShellCommand {
     ToggleRightSidebar,
     ToggleBar,
     ToggleCharacter,
+    SetCharacterHairMode,
     ShowOSDVolume,
     ShowOSDBrightness,
     LockSession,

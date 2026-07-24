@@ -1,5 +1,7 @@
 #pragma once
 
+#include "animation/character/CharacterHairMode.hpp"
+#include "animation/character/CharacterQualityPreset.hpp"
 #include "services/KeepAwake.hpp"
 #include "services/Notifications.hpp"
 #include "ui/components/BaseWidget.hpp"
@@ -13,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace realmheart::animation::character {
@@ -55,6 +58,12 @@ public:
 
     void refresh();
     void toggle_character();
+    bool set_character_hair_mode(std::string_view mode_name);
+    // Future settings-panel hook. Deliberately not wired to the sidebar's
+    // existing system power-profile buttons.
+    bool set_character_quality_preset(
+        realmheart::animation::character::CharacterQualityPreset preset
+    );
     void animate_character_in();
     [[nodiscard]] bool animate_character_out(std::function<void()> completion);
     [[nodiscard]] bool character_enabled() const noexcept { return character_enabled_; }
@@ -88,6 +97,9 @@ private:
     void cancel_character_hide_timeout();
     static gboolean finish_character_hide(gpointer raw);
     void set_character_enabled(bool enabled);
+    bool apply_character_hair_mode(
+        realmheart::animation::character::CharacterHairMode mode
+    );
     void populate_modules();
     void build_identity_header();
     void build_quick_controls();
@@ -108,6 +120,8 @@ private:
     std::unique_ptr<SidebarFrame> frame_;
     std::unique_ptr<realmheart::animation::character::CharacterCompositor> character_compositor_;
     bool character_enabled_ = true;
+    realmheart::animation::character::CharacterHairMode character_hair_mode_ =
+        realmheart::animation::character::CharacterHairMode::Mesh;
     bool sidebar_presented_ = false;
     guint character_hide_timeout_ = 0;
     std::function<void()> character_hide_completion_;

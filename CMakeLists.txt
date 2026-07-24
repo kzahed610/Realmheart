@@ -64,7 +64,10 @@ add_library(realmheart_ui STATIC
     src/core/TaskExecutor.cpp
     src/animation/character/CharacterAnimator.cpp
     src/animation/character/CharacterExpressionAnimator.cpp
+    src/animation/character/CharacterHairMode.cpp
+    src/animation/character/CharacterQualityPreset.cpp
     src/animation/character/CharacterManifest.cpp
+    src/animation/character/HairFlowWarp.cpp
     src/animation/character/HairMesh.cpp
     src/animation/character/CharacterCompositor.cpp
     src/services/HyprlandEventMonitor.cpp
@@ -305,6 +308,28 @@ if(BUILD_TESTING)
         src/animation/character/HairMesh.cpp
     )
     realmheart_register_test(realmheart_hair_mesh_tests)
+
+    add_executable(
+        realmheart_character_hair_mode_tests
+        tests/CharacterHairModeTests.cpp
+        src/animation/character/CharacterHairMode.cpp
+    )
+    realmheart_register_test(realmheart_character_hair_mode_tests)
+
+    add_executable(
+        realmheart_character_quality_preset_tests
+        tests/CharacterQualityPresetTests.cpp
+        src/animation/character/CharacterQualityPreset.cpp
+        src/animation/character/CharacterHairMode.cpp
+    )
+    realmheart_register_test(realmheart_character_quality_preset_tests)
+
+    add_executable(
+        realmheart_hair_flow_warp_tests
+        tests/HairFlowWarpTests.cpp
+        src/animation/character/HairFlowWarp.cpp
+    )
+    realmheart_register_test(realmheart_hair_flow_warp_tests)
 
     add_executable(
         realmheart_character_manifest_tests

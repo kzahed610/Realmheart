@@ -77,6 +77,72 @@ bool load_character_enabled_preference() {
     return true;
 }
 
+std::filesystem::path character_hair_mode_preference_path() {
+    if (const char* config_home = std::getenv("XDG_CONFIG_HOME");
+        config_home != nullptr && *config_home != '\0') {
+        return std::filesystem::path(config_home) /
+            "realmheart/features/sidebar-character.hair-mode";
+    }
+    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+        return std::filesystem::path(home) /
+            ".config/realmheart/features/sidebar-character.hair-mode";
+    }
+    return std::filesystem::temp_directory_path() /
+        "realmheart-sidebar-character.hair-mode";
+}
+
+realmheart::animation::character::CharacterHairMode
+load_character_hair_mode_preference() {
+    using realmheart::animation::character::CharacterHairMode;
+    std::ifstream input(character_hair_mode_preference_path());
+    if (!input) return CharacterHairMode::Mesh;
+
+    std::string value;
+    input >> value;
+    if (const auto mode =
+            realmheart::animation::character::parse_character_hair_mode(value)) {
+        return *mode;
+    }
+    std::cerr << "Ignoring invalid sidebar character hair mode: " << value << '\n';
+    return CharacterHairMode::Mesh;
+}
+
+bool persist_character_hair_mode_preference(
+    realmheart::animation::character::CharacterHairMode mode
+) {
+    const auto path = character_hair_mode_preference_path();
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    if (error) {
+        std::cerr << "Unable to create character hair-mode preference directory: "
+                  << error.message() << '\n';
+        return false;
+    }
+
+    auto temporary = path;
+    temporary += ".tmp";
+    {
+        std::ofstream output(temporary, std::ios::trunc);
+        if (!output) return false;
+        output << realmheart::animation::character::character_hair_mode_name(mode)
+               << '\n';
+        output.flush();
+        if (!output) return false;
+    }
+    std::filesystem::rename(temporary, path, error);
+    if (error) {
+        std::error_code remove_error;
+        std::filesystem::remove(path, remove_error);
+        error.clear();
+        std::filesystem::rename(temporary, path, error);
+    }
+    if (error) {
+        std::filesystem::remove(temporary, error);
+        return false;
+    }
+    return true;
+}
+
 bool persist_character_enabled_preference(bool enabled) {
     const auto path = character_enabled_preference_path();
     std::error_code error;
@@ -346,6 +412,7 @@ RightSidebar::RightSidebar(
     show_volume_osd_(std::move(show_volume_osd)),
     show_brightness_osd_(std::move(show_brightness_osd)) {
     character_enabled_ = load_character_enabled_preference();
+    character_hair_mode_ = load_character_hair_mode_preference();
     async_ui_state_->owner = this;
     window_ = gtk_application_window_new(app_);
     gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Right Sidebar");
@@ -457,6 +524,26 @@ void RightSidebar::initialize_character_compositor() {
     if (!character_compositor_) {
         std::cerr << "Unable to initialize sidebar character composition: "
                   << character_error << '\n';
+    } else {
+        std::string hair_mode_error;
+        if (!character_compositor_->set_hair_mode(
+                character_hair_mode_,
+                &hair_mode_error
+            )) {
+            std::cerr << "Unable to initialize character hair mode "
+                      << realmheart::animation::character::character_hair_mode_name(
+                             character_hair_mode_
+                         )
+                      << ": " << hair_mode_error << '\n';
+            character_hair_mode_ =
+                realmheart::animation::character::CharacterHairMode::Mesh;
+            static_cast<void>(character_compositor_->set_hair_mode(
+                character_hair_mode_
+            ));
+            static_cast<void>(persist_character_hair_mode_preference(
+                character_hair_mode_
+            ));
+        }
     }
 }
 
@@ -540,6 +627,49 @@ void RightSidebar::set_character_enabled(bool enabled) {
 
 void RightSidebar::toggle_character() {
     set_character_enabled(!character_enabled_);
+}
+
+bool RightSidebar::apply_character_hair_mode(
+    realmheart::animation::character::CharacterHairMode mode
+) {
+    if (character_enabled_) initialize_character_compositor();
+    if (character_compositor_) {
+        std::string hair_mode_error;
+        if (!character_compositor_->set_hair_mode(mode, &hair_mode_error)) {
+            std::cerr << "Unable to switch character hair mode to "
+                      << realmheart::animation::character::character_hair_mode_name(mode)
+                      << ": " << hair_mode_error << '\n';
+            return false;
+        }
+    }
+
+    character_hair_mode_ = mode;
+    static_cast<void>(persist_character_hair_mode_preference(character_hair_mode_));
+    std::cerr << "Character hair mode set to "
+              << realmheart::animation::character::character_hair_mode_name(
+                     character_hair_mode_
+                 )
+              << '\n';
+    return true;
+}
+
+bool RightSidebar::set_character_hair_mode(std::string_view mode_name) {
+    const auto parsed =
+        realmheart::animation::character::parse_character_hair_mode(mode_name);
+    if (!parsed) {
+        std::cerr << "Unknown character hair mode: " << mode_name
+                  << " (expected static, mesh, or mesh-flow)\n";
+        return false;
+    }
+    return apply_character_hair_mode(*parsed);
+}
+
+bool RightSidebar::set_character_quality_preset(
+    realmheart::animation::character::CharacterQualityPreset preset
+) {
+    const auto policy =
+        realmheart::animation::character::character_quality_policy(preset);
+    return apply_character_hair_mode(policy.hair_mode);
 }
 
 

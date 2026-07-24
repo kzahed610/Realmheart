@@ -17,63 +17,51 @@ void require(bool condition, const std::string& message) {
     }
 }
 
-void test_starts_paused_with_inward_curious_face() {
+void test_starts_paused_on_authored_base_face() {
     CharacterExpressionAnimator animator;
     require(!animator.active(), "expression animator must start paused");
-    require(animator.sample().eyes == CharacterEyeFrame::Inward,
-            "initial gaze must face inward toward the widgets");
-    require(animator.sample().mouth == CharacterMouthFrame::Curious,
-            "initial mouth must use the curious frame");
+    require(animator.sample().eyes == CharacterEyeFrame::Base,
+            "default gaze must reveal the eyes authored in base.png");
+    require(animator.sample().mouth == CharacterMouthFrame::Base,
+            "default smile must reveal the mouth authored in base.png");
     require(!animator.advance(1.0),
             "paused expressions must perform zero timing work");
 }
 
-void test_first_gaze_change_uses_complete_blink_sequence() {
+void test_first_change_blinks_from_base_to_inward() {
     CharacterExpressionAnimator animator;
     animator.resume();
 
     double elapsed = 0.0;
-    while (animator.sample().eyes == CharacterEyeFrame::Inward && elapsed < 8.0) {
+    while (animator.sample().eyes == CharacterEyeFrame::Base && elapsed < 8.0) {
         animator.advance(0.01);
         elapsed += 0.01;
     }
-    require(elapsed >= 3.0 && elapsed <= 7.1,
-            "inward hold must be varied but remain bounded");
+    require(elapsed >= 2.4 && elapsed <= 6.1,
+            "base-face hold must be varied but remain bounded");
     require(animator.sample().eyes == CharacterEyeFrame::Half,
-            "gaze transition must begin with a half-lid frame");
-    require(animator.sample().mouth == CharacterMouthFrame::Curious,
-            "mouth must remain curious while the blink closes");
+            "base-to-inward transition must begin with a half-lid overlay");
+    require(animator.sample().mouth == CharacterMouthFrame::Base,
+            "base smile must remain visible while the blink starts closing");
 
-    double transition_elapsed = 0.0;
     while (animator.sample().eyes != CharacterEyeFrame::Closed) {
         animator.advance(0.01);
-        transition_elapsed += 0.01;
     }
     require(animator.sample().mouth == CharacterMouthFrame::Curious,
-            "mouth must remain curious while the gaze swaps behind closed eyes");
+            "curious mouth overlay should appear while the eyes are closed");
 
-    while (animator.sample().eyes != CharacterEyeFrame::User) {
+    while (animator.sample().eyes != CharacterEyeFrame::Inward) {
         animator.advance(0.01);
-        transition_elapsed += 0.01;
     }
     require(animator.sample().mouth == CharacterMouthFrame::Curious,
-            "Tessia should look at the user before reacting with a smile");
-
-    while (animator.sample().mouth != CharacterMouthFrame::Smile) {
-        animator.advance(0.01);
-        transition_elapsed += 0.01;
-    }
-    require(transition_elapsed >= 0.50,
-            "inward-to-user transition must feel deliberate rather than instant");
-    require(animator.sample().eyes == CharacterEyeFrame::User,
-            "smile must arrive only after the user-facing gaze has settled");
+            "inward gaze must settle with the curious mouth overlay");
 }
 
-void test_pause_resolves_partial_blink_to_stable_face() {
+void test_pause_resolves_partial_blink_to_base_face() {
     CharacterExpressionAnimator animator;
     animator.resume();
 
-    while (animator.sample().eyes == CharacterEyeFrame::Inward) {
+    while (animator.sample().eyes == CharacterEyeFrame::Base) {
         animator.advance(0.02);
     }
     require(animator.sample().eyes == CharacterEyeFrame::Half,
@@ -82,36 +70,36 @@ void test_pause_resolves_partial_blink_to_stable_face() {
     require(animator.pause_stable(),
             "pausing a partial blink must change the displayed frame");
     require(!animator.active(), "paused expression must stop all timing");
-    require(animator.sample().eyes == CharacterEyeFrame::Inward,
-            "early closing blink must resolve back to inward gaze");
-    require(animator.sample().mouth == CharacterMouthFrame::Curious,
-            "resolved inward gaze must restore the curious mouth");
+    require(animator.sample().eyes == CharacterEyeFrame::Base,
+            "early closing blink must resolve back to the authored base gaze");
+    require(animator.sample().mouth == CharacterMouthFrame::Base,
+            "early closing blink must restore the authored base smile");
 }
 
-void test_round_trip_returns_to_inward_face() {
+void test_round_trip_returns_to_base_face() {
     CharacterExpressionAnimator animator;
     animator.resume();
 
-    bool saw_user = false;
+    bool saw_inward = false;
     for (int frame = 0; frame < 2000; ++frame) {
         animator.advance(0.01);
-        if (animator.sample().eyes == CharacterEyeFrame::User) saw_user = true;
-        if (saw_user &&
-            animator.sample().eyes == CharacterEyeFrame::Inward &&
-            animator.sample().mouth == CharacterMouthFrame::Curious) {
+        if (animator.sample().eyes == CharacterEyeFrame::Inward) saw_inward = true;
+        if (saw_inward &&
+            animator.sample().eyes == CharacterEyeFrame::Base &&
+            animator.sample().mouth == CharacterMouthFrame::Base) {
             return;
         }
     }
-    require(false, "expression loop must return inward within a bounded interval");
+    require(false, "expression loop must return to the authored base face");
 }
 
 } // namespace
 
 int main() {
-    test_starts_paused_with_inward_curious_face();
-    test_first_gaze_change_uses_complete_blink_sequence();
-    test_pause_resolves_partial_blink_to_stable_face();
-    test_round_trip_returns_to_inward_face();
+    test_starts_paused_on_authored_base_face();
+    test_first_change_blinks_from_base_to_inward();
+    test_pause_resolves_partial_blink_to_base_face();
+    test_round_trip_returns_to_base_face();
     std::cout << "Character expression animator tests passed\n";
     return 0;
 }

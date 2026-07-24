@@ -6,6 +6,7 @@ std::optional<ShellCommand> parse_shell_command(std::string_view name) {
     if (name == "sidebar-right-toggle") return ShellCommand::ToggleRightSidebar;
     if (name == "bar-toggle") return ShellCommand::ToggleBar;
     if (name == "character-toggle") return ShellCommand::ToggleCharacter;
+    if (name == "character-hair-mode") return ShellCommand::SetCharacterHairMode;
     if (name == "osd-volume") return ShellCommand::ShowOSDVolume;
     if (name == "osd-brightness") return ShellCommand::ShowOSDBrightness;
     if (name == "lock-session") return ShellCommand::LockSession;
@@ -31,6 +32,7 @@ std::string_view shell_action_name(ShellCommand command) {
     case ShellCommand::ToggleRightSidebar: return "sidebar-right-toggle";
     case ShellCommand::ToggleBar: return "bar-toggle";
     case ShellCommand::ToggleCharacter: return "character-toggle";
+    case ShellCommand::SetCharacterHairMode: return "character-hair-mode";
     case ShellCommand::ShowOSDVolume: return "osd-volume";
     case ShellCommand::ShowOSDBrightness: return "osd-brightness";
     case ShellCommand::LockSession: return "lock-session";
@@ -53,7 +55,8 @@ std::string_view shell_action_name(ShellCommand command) {
 }
 
 bool shell_command_requires_argument(ShellCommand command) {
-    return command == ShellCommand::SetWallpaperPath ||
+    return command == ShellCommand::SetCharacterHairMode ||
+           command == ShellCommand::SetWallpaperPath ||
            command == ShellCommand::SetWallpaperBackend;
 }
 

@@ -27,7 +27,7 @@
 namespace {
 
 std::string get_supported_commands() {
-    std::string list = "sidebar-right-toggle, bar-toggle, character-toggle, osd-volume, osd-brightness, lock-session, logout-menu, screenshot-full, screenshot-area, extract-ocr, start-recording, stop-recording, toggle-notes, set-wallpaper, set-wallpaper-path, set-wallpaper-backend, generate-theme, launch-launcher, restart, quit";
+    std::string list = "sidebar-right-toggle, bar-toggle, character-toggle, character-hair-mode, osd-volume, osd-brightness, lock-session, logout-menu, screenshot-full, screenshot-area, extract-ocr, start-recording, stop-recording, toggle-notes, set-wallpaper, set-wallpaper-path, set-wallpaper-backend, generate-theme, launch-launcher, restart, quit";
     return list;
 }
 

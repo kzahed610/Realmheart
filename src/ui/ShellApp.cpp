@@ -399,6 +399,11 @@ public:
         sidebar_->toggle_character();
     }
 
+    void set_character_hair_mode(std::string_view mode_name) {
+        ensure_initialized();
+        static_cast<void>(sidebar_->set_character_hair_mode(mode_name));
+    }
+
     void toggle_right_sidebar() {
         ensure_initialized();
         const bool before = state_.right_sidebar_visible();
@@ -1228,6 +1233,17 @@ void toggle_character_action(GSimpleAction*, GVariant*, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->toggle_character();
 }
 
+void set_character_hair_mode_action(
+    GSimpleAction*,
+    GVariant* parameter,
+    gpointer user_data
+) {
+    if (parameter == nullptr) return;
+    static_cast<ShellRuntime*>(user_data)->set_character_hair_mode(
+        g_variant_get_string(parameter, nullptr)
+    );
+}
+
 void take_screenshot_full_action(GSimpleAction*, GVariant*, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->take_screenshot_full();
 }
@@ -1298,6 +1314,7 @@ constexpr GActionEntry kShellActions[] = {
     {"sidebar-right-toggle", toggle_right_sidebar_action, nullptr, nullptr, nullptr, {}},
     {"bar-toggle", toggle_bar_action, nullptr, nullptr, nullptr, {}},
     {"character-toggle", toggle_character_action, nullptr, nullptr, nullptr, {}},
+    {"character-hair-mode", set_character_hair_mode_action, "s", nullptr, nullptr, {}},
     {"osd-volume", show_osd_volume_action, nullptr, nullptr, nullptr, {}},
     {"osd-brightness", show_osd_brightness_action, nullptr, nullptr, nullptr, {}},
     {"lock-session", lock_session_action, nullptr, nullptr, nullptr, {}},

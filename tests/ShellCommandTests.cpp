@@ -20,6 +20,8 @@ void parses_supported_shell_commands() {
             "bar-toggle should parse");
     require(parse_shell_command("character-toggle") == ShellCommand::ToggleCharacter,
             "character-toggle should parse");
+    require(parse_shell_command("character-hair-mode") == ShellCommand::SetCharacterHairMode,
+            "character-hair-mode should parse");
     require(parse_shell_command("start-recording") == ShellCommand::StartRecording,
             "start-recording should parse");
     require(parse_shell_command("stop-recording") == ShellCommand::StopRecording,
@@ -52,6 +54,8 @@ void maps_commands_to_stable_action_names() {
             "bar action name should be stable");
     require(shell_action_name(ShellCommand::ToggleCharacter) == "character-toggle",
             "character action name should be stable");
+    require(shell_action_name(ShellCommand::SetCharacterHairMode) == "character-hair-mode",
+            "character hair mode action name should be stable");
     require(shell_action_name(ShellCommand::SetWallpaperPath) == "set-wallpaper-path",
             "direct wallpaper action name should be stable");
     require(shell_action_name(ShellCommand::SetWallpaperBackend) == "set-wallpaper-backend",
@@ -66,6 +70,8 @@ void identifies_commands_that_require_arguments() {
     using realmheart::core::ShellCommand;
     using realmheart::core::shell_command_requires_argument;
 
+    require(shell_command_requires_argument(ShellCommand::SetCharacterHairMode),
+            "character-hair-mode should require a mode argument");
     require(shell_command_requires_argument(ShellCommand::SetWallpaperPath),
             "set-wallpaper-path should require a path argument");
     require(shell_command_requires_argument(ShellCommand::SetWallpaperBackend),

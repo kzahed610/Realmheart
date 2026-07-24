@@ -2,6 +2,7 @@
 
 #include "animation/character/CharacterAnimator.hpp"
 #include "animation/character/CharacterExpressionAnimator.hpp"
+#include "animation/character/CharacterHairMode.hpp"
 #include "animation/character/CharacterManifest.hpp"
 #include "animation/character/HairMesh.hpp"
 
@@ -11,6 +12,7 @@
 #include <gtk/gtk.h>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -25,8 +27,8 @@ struct CharacterHostGeometry {
 };
 
 // Layer compositor plus lifecycle animation, mask-weighted macro hair
-// inertia, a restrained low-rate idle sway, and discrete blink-hidden facial
-// expression swaps. Fine flow-map displacement remains a later stage.
+// inertia, a restrained low-rate idle sway, discrete blink-hidden facial
+// expression swaps, and optional rear-hair directional flow.
 class CharacterCompositor {
 public:
     static std::unique_ptr<CharacterCompositor> create(
@@ -45,6 +47,11 @@ public:
 
     void start_enter();
     void start_exit();
+    bool set_hair_mode(
+        CharacterHairMode mode,
+        std::string* error_message = nullptr
+    );
+    [[nodiscard]] CharacterHairMode hair_mode() const noexcept { return hair_mode_; }
     void queue_draw();
     [[nodiscard]] static constexpr unsigned int exit_duration_ms() noexcept {
         return static_cast<unsigned int>(
@@ -81,6 +88,12 @@ private:
         double inner_x = 0.0;
     };
 
+    struct HairFlowPose {
+        double displacement = 0.0;
+        TexturePtr texture;
+        std::vector<RenderNodePtr> quantized_nodes;
+    };
+
     struct HairRenderCache {
         TexturePtr texture;
         int width = 0;
@@ -89,6 +102,18 @@ private:
         double node_min_offset = 0.0;
         double node_step = 1.0;
         std::vector<RenderNodePtr> quantized_nodes;
+        double flow_min_displacement = 0.0;
+        double flow_step = 1.0;
+        std::vector<HairFlowPose> flow_poses;
+
+        // Cross-faded flow poses are immutable too. Prebuilding a denser
+        // displacement ladder means the runtime snapshot appends one cached
+        // node instead of constructing and rendering a fresh two-child
+        // cross-fade tree on every frame.
+        double flow_node_min_displacement = 0.0;
+        double flow_node_step = 1.0;
+        std::size_t flow_mesh_pose_count = 0;
+        std::vector<RenderNodePtr> flow_quantized_nodes;
     };
 
     // Consecutive layers with the same invalidation behavior share one GTK
@@ -134,6 +159,14 @@ private:
 
     bool load_surfaces(std::string* error_message);
     bool build_hair_meshes(std::string* error_message);
+    bool ensure_flow_caches(std::string* error_message);
+    bool build_flow_cache_for_layer(
+        const CharacterLayer& layer,
+        HairRenderCache& cache,
+        std::string* error_message
+    );
+    static void release_flow_cache(HairRenderCache& cache) noexcept;
+    void release_flow_caches() noexcept;
     bool create_draw_groups(std::string* error_message);
     [[nodiscard]] DrawGroupKind classify_layer(
         const CharacterLayer& layer
@@ -147,12 +180,15 @@ private:
     static void append_hair_mesh_geometry(
         GtkSnapshot* snapshot,
         const HairRenderCache& cache,
+        GdkTexture* texture,
         double origin_x,
         double origin_y,
         double tip_offset_logical_pixels
     );
     static bool build_hair_node_cache(
         HairRenderCache& cache,
+        GdkTexture* texture,
+        std::vector<RenderNodePtr>& output,
         const std::string& layer_id,
         std::string* error_message
     );
@@ -166,6 +202,23 @@ private:
         double origin_x,
         double origin_y,
         double tip_offset_logical_pixels
+    );
+    static bool build_flow_node_cache(
+        HairRenderCache& cache,
+        const std::string& layer_id,
+        std::string* error_message
+    );
+    static std::size_t quantized_flow_node_index(
+        const HairRenderCache& cache,
+        double flow_displacement
+    ) noexcept;
+    static void append_cached_hair_mesh_flow(
+        GtkSnapshot* snapshot,
+        const HairRenderCache& cache,
+        double origin_x,
+        double origin_y,
+        double tip_offset_logical_pixels,
+        double flow_displacement
     );
     static gboolean tick_callback(
         GtkWidget* widget,
@@ -183,13 +236,17 @@ private:
     [[nodiscard]] double idle_hair_offset(
         const CharacterLayer& layer
     ) const noexcept;
+    [[nodiscard]] double flow_hair_displacement(
+        const CharacterLayer& layer
+    ) const noexcept;
+    [[nodiscard]] bool flow_tick_active() const noexcept;
     [[nodiscard]] std::size_t hair_pose_signature(
         const DrawGroup& group
     ) const noexcept;
     void queue_hair_draw(bool force = false);
     void queue_lifecycle_draw(gint64 frame_time_us);
     void queue_expression_draw();
-    [[nodiscard]] const std::string& selected_asset_id(
+    [[nodiscard]] const std::string* selected_asset_id(
         const CharacterLayer& layer
     ) const noexcept;
     static void draw_callback(
@@ -229,6 +286,9 @@ private:
     gint64 last_hair_draw_time_us_ = 0;
     gint64 last_idle_time_us_ = 0;
     double idle_elapsed_seconds_ = 0.0;
+    double flow_elapsed_seconds_ = 0.0;
+    CharacterHairMode hair_mode_ = CharacterHairMode::Mesh;
+    bool flow_caches_loaded_ = false;
 };
 
 } // namespace realmheart::animation::character

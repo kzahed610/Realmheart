@@ -97,6 +97,12 @@ void test_rig_planes_and_host_anchor_are_declarative() {
     require(std::abs(rear_hair->idle_phase) < 0.0001 &&
                 std::abs(front_hair->idle_phase - 0.82) < 0.0001,
             "rear and front hair must be able to use distinct idle phases");
+    require(rear_hair->flow_asset_id == "hair-flow-rear.png" &&
+                front_hair->flow_asset_id.empty(),
+            "rear-only directional flow must remain declarative");
+    require(std::abs(rear_hair->flow_strength - 1.6) < 0.0001 &&
+                std::abs(rear_hair->flow_frequency - 0.92) < 0.0001,
+            "rear flow amplitude and timing must remain rig-controlled");
 }
 
 void test_expression_assets_are_declared_and_geometry_safe() {
@@ -107,13 +113,11 @@ void test_expression_assets_are_declared_and_geometry_safe() {
                 manifest.expression.mouth_layer_id == "mouth",
             "expression rig must target the authored eye and mouth layers");
     require(manifest.expression.eyes_inward_asset_id == "eyes-inward.png" &&
-                manifest.expression.eyes_user_asset_id == "eyes-user.png" &&
                 manifest.expression.eyes_half_asset_id == "eyes-half.png" &&
                 manifest.expression.eyes_closed_asset_id == "eyes-closed.png",
-            "all eye frames must remain selectable through the rig manifest");
-    require(manifest.expression.mouth_curious_asset_id == "mouth-curious.png" &&
-                manifest.expression.mouth_smile_asset_id == "mouth-smile.png",
-            "both mouth frames must remain selectable through the rig manifest");
+            "only temporary eye overlays must be selected through the rig manifest");
+    require(manifest.expression.mouth_curious_asset_id == "mouth-curious.png",
+            "only the temporary curious-mouth overlay must be selected through the rig manifest");
 }
 
 void test_side_hand_source_anchor_maps_to_host_occlusion_edge() {

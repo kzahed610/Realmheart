@@ -311,10 +311,17 @@ std::optional<CharacterManifest> CharacterManifest::load(
                 layer.mesh_strength = layer_json.value("meshStrength", 1.0);
                 layer.idle_strength = layer_json.value("idleStrength", 0.0);
                 layer.idle_phase = layer_json.value("idlePhase", 0.0);
+                layer.flow_asset_id = layer_json.value("flow", std::string{});
+                layer.flow_strength = layer_json.value("flowStrength", 0.0);
+                layer.flow_frequency = layer_json.value("flowFrequency", 0.0);
+                layer.flow_phase = layer_json.value("flowPhase", 0.0);
 
                 const CharacterAsset* mask_asset = manifest.find_asset(
                     layer.mask_asset_id
                 );
+                const CharacterAsset* flow_asset = layer.flow_asset_id.empty()
+                    ? nullptr
+                    : manifest.find_asset(layer.flow_asset_id);
                 if (layer.placement != CharacterLayerPlacement::SourceCanvas ||
                     mask_asset == nullptr || layer.mesh_rows < 2 ||
                     layer.mesh_rows > 128 ||
@@ -323,7 +330,14 @@ std::optional<CharacterManifest> CharacterManifest::load(
                     !std::isfinite(layer.idle_strength) ||
                     layer.idle_strength < 0.0 || layer.idle_strength > 32.0 ||
                     !std::isfinite(layer.idle_phase) ||
-                    std::abs(layer.idle_phase) > 100.0) {
+                    std::abs(layer.idle_phase) > 100.0 ||
+                    !std::isfinite(layer.flow_strength) ||
+                    layer.flow_strength < 0.0 || layer.flow_strength > 4.0 ||
+                    !std::isfinite(layer.flow_frequency) ||
+                    layer.flow_frequency < 0.0 || layer.flow_frequency > 10.0 ||
+                    !std::isfinite(layer.flow_phase) ||
+                    std::abs(layer.flow_phase) > 100.0 ||
+                    (!layer.flow_asset_id.empty() && flow_asset == nullptr)) {
                     set_error(
                         error_message,
                         "Character mesh layer '" + layer.id + "' has invalid mesh settings"
@@ -341,6 +355,18 @@ std::optional<CharacterManifest> CharacterManifest::load(
                     );
                     return std::nullopt;
                 }
+                if (flow_asset != nullptr &&
+                    (flow_asset->size.width != texture_asset->size.width ||
+                     flow_asset->size.height != texture_asset->size.height ||
+                     flow_asset->offset.x != texture_asset->offset.x ||
+                     flow_asset->offset.y != texture_asset->offset.y)) {
+                    set_error(
+                        error_message,
+                        "Character mesh layer '" + layer.id +
+                            "' texture and flow-map geometry disagree"
+                    );
+                    return std::nullopt;
+                }
             }
             manifest.layers.push_back(std::move(layer));
         }
@@ -353,16 +379,12 @@ std::optional<CharacterManifest> CharacterManifest::load(
             expression.mouth_layer_id = expression_json.at("mouthLayer").get<std::string>();
             expression.eyes_inward_asset_id =
                 expression_json.at("eyes").at("inward").get<std::string>();
-            expression.eyes_user_asset_id =
-                expression_json.at("eyes").at("user").get<std::string>();
             expression.eyes_half_asset_id =
                 expression_json.at("eyes").at("half").get<std::string>();
             expression.eyes_closed_asset_id =
                 expression_json.at("eyes").at("closed").get<std::string>();
             expression.mouth_curious_asset_id =
                 expression_json.at("mouth").at("curious").get<std::string>();
-            expression.mouth_smile_asset_id =
-                expression_json.at("mouth").at("smile").get<std::string>();
 
             const CharacterLayer* eyes_layer = manifest.find_layer(
                 expression.eyes_layer_id
@@ -405,25 +427,16 @@ std::optional<CharacterManifest> CharacterManifest::load(
                 ) &&
                 geometry_matches(
                     eyes_base,
-                    manifest.find_asset(expression.eyes_user_asset_id)
-                ) &&
-                geometry_matches(
-                    eyes_base,
                     manifest.find_asset(expression.eyes_half_asset_id)
                 ) &&
                 geometry_matches(
                     eyes_base,
                     manifest.find_asset(expression.eyes_closed_asset_id)
                 );
-            const bool mouth_valid =
-                geometry_matches(
-                    mouth_base,
-                    manifest.find_asset(expression.mouth_curious_asset_id)
-                ) &&
-                geometry_matches(
-                    mouth_base,
-                    manifest.find_asset(expression.mouth_smile_asset_id)
-                );
+            const bool mouth_valid = geometry_matches(
+                mouth_base,
+                manifest.find_asset(expression.mouth_curious_asset_id)
+            );
             if (!eyes_valid || !mouth_valid) {
                 set_error(
                     error_message,
