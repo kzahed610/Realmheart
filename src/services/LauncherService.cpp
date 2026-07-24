@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <string_view>
 
 namespace realmheart::services {
 
@@ -34,6 +35,38 @@ char ascii_lower(char value) {
 bool running_inside_systemd_unit() {
     const char* invocation_id = std::getenv("INVOCATION_ID");
     return invocation_id != nullptr && *invocation_id != '\0';
+}
+
+std::string trim_copy(std::string_view value) {
+    const auto first = value.find_first_not_of(" \t\n\r");
+    if (first == std::string_view::npos) return {};
+    const auto last = value.find_last_not_of(" \t\n\r");
+    return std::string(value.substr(first, last - first + 1));
+}
+
+bool contains_shell_syntax(std::string_view value) {
+    constexpr std::string_view syntax = "|&;<>(){}$`\n\r";
+    return value.find_first_of(syntax) != std::string_view::npos;
+}
+
+std::string first_command_token(std::string_view command) {
+    const auto first = command.find_first_not_of(" \t");
+    if (first == std::string_view::npos) return {};
+    const auto end = command.find_first_of(" \t", first);
+    return std::string(command.substr(first, end == std::string_view::npos ? command.size() - first : end - first));
+}
+
+bool is_valid_plain_command(std::string_view command) {
+    if (command.empty() || contains_shell_syntax(command)) return false;
+    const std::string executable = first_command_token(command);
+    if (executable.empty()) return false;
+
+    if (executable.find('/') != std::string::npos) {
+        std::error_code error;
+        const fs::path path(executable);
+        return fs::is_regular_file(path, error) && !error;
+    }
+    return realmheart::core::command_exists(executable);
 }
 
 } // namespace
@@ -196,50 +229,72 @@ int LauncherService::calculate_score(const LauncherResult& res, std::string_view
     return 0;
 }
 
-std::vector<LauncherResult> LauncherService::search(std::string_view query, std::size_t limit) const {
-    if (query.empty()) return {};
+std::vector<LauncherResult> LauncherService::recommendations(std::size_t limit) const {
+    std::vector<LauncherResult> results;
+    if (limit == 0) return results;
 
-    const bool has_shell_prefix = query.front() == '$';
-    bool is_explicit_command = has_shell_prefix;
-    if (query[0] == '/' || query[0] == '~' || query.find(' ') != std::string::npos) {
-        is_explicit_command = true;
-    }
-
-    std::vector<ScoredResult> scored;
-    for (std::size_t i = 0; i < index_.size(); ++i) {
-        int score = calculate_score(index_[i], query);
-        if (score > 0) {
-            scored.push_back({i, score});
+    for (const auto& item : index_) {
+        if (item.kind == LauncherResultKind::Application ||
+            item.kind == LauncherResultKind::Action) {
+            results.push_back(item);
         }
     }
 
-    std::sort(scored.begin(), scored.end(), std::greater<>());
+    std::stable_sort(results.begin(), results.end(), [](const auto& left, const auto& right) {
+        if (left.kind != right.kind) {
+            return left.kind == LauncherResultKind::Application;
+        }
+        std::string left_title = left.title;
+        std::string right_title = right.title;
+        std::transform(left_title.begin(), left_title.end(), left_title.begin(), ascii_lower);
+        std::transform(right_title.begin(), right_title.end(), right_title.begin(), ascii_lower);
+        return left_title < right_title;
+    });
 
+    if (results.size() > limit) results.resize(limit);
+    return results;
+}
+
+std::vector<LauncherResult> LauncherService::search(std::string_view query, std::size_t limit) const {
     std::vector<LauncherResult> results;
     if (limit == 0) return results;
-    results.reserve(limit);
 
-    std::string command(query);
-    if (has_shell_prefix) {
-        command.erase(command.begin());
-        const auto first = command.find_first_not_of(" \t");
-        command = first == std::string::npos ? std::string{} : command.substr(first);
+    const std::string trimmed = trim_copy(query);
+    if (trimmed.empty()) return results;
+
+    const bool explicit_command = trimmed.front() == '>' || trimmed.front() == '$';
+    std::string searchable = trimmed;
+    if (explicit_command) {
+        searchable = trim_copy(std::string_view(trimmed).substr(1));
+        if (searchable.empty()) return results;
     }
+
+    std::vector<ScoredResult> scored;
+    if (!explicit_command) {
+        for (std::size_t i = 0; i < index_.size(); ++i) {
+            const int score = calculate_score(index_[i], searchable);
+            if (score > 0) scored.push_back({i, score});
+        }
+        std::sort(scored.begin(), scored.end(), std::greater<>());
+    }
+
     LauncherResult command_result;
     command_result.kind = LauncherResultKind::Command;
-    command_result.id = command;
-    command_result.title = "Execute Command";
-    command_result.subtitle = command;
+    command_result.id = searchable;
+    command_result.title = explicit_command ? "Run explicit command" : "Run command";
+    command_result.subtitle = searchable;
     command_result.icon_name = "utilities-terminal";
 
-    if (is_explicit_command) results.push_back(command_result);
+    if (explicit_command) results.push_back(command_result);
 
     for (const auto& item : scored) {
         if (results.size() >= limit) break;
         results.push_back(index_[item.index]);
     }
 
-    if (!is_explicit_command && results.size() < limit) results.push_back(command_result);
+    if (!explicit_command && results.size() < limit && is_valid_plain_command(searchable)) {
+        results.push_back(std::move(command_result));
+    }
     return results;
 }
 

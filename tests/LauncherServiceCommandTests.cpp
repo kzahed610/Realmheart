@@ -33,20 +33,18 @@ protected:
     LauncherService service;
 };
 
-TEST_F(LauncherServiceCommandTest, CommandQueryReturnsCommandResult) {
-    // Query starting with / should be treated as a command
-    auto results = service.search("/usr/bin/kitty", 10);
+TEST_F(LauncherServiceCommandTest, ExplicitPrefixReturnsCommandResult) {
+    auto results = service.search("> /usr/bin/kitty", 10);
     ASSERT_FALSE(results.empty());
     EXPECT_EQ(results[0].kind, LauncherResultKind::Command);
     EXPECT_EQ(results[0].id, "/usr/bin/kitty");
 }
 
-TEST_F(LauncherServiceCommandTest, SpaceInQueryReturnsCommandResult) {
-    // Query with spaces should be treated as a command
-    auto results = service.search("kitty -e htop", 10);
+TEST_F(LauncherServiceCommandTest, ValidExecutableWithArgumentsReturnsCommandCandidate) {
+    auto results = service.search("sh -c true", 10);
     ASSERT_FALSE(results.empty());
-    EXPECT_EQ(results[0].kind, LauncherResultKind::Command);
-    EXPECT_EQ(results[0].id, "kitty -e htop");
+    EXPECT_EQ(results.back().kind, LauncherResultKind::Command);
+    EXPECT_EQ(results.back().id, "sh -c true");
 }
 
 TEST_F(LauncherServiceCommandTest, ShellPrefixReturnsStrippedCommandResult) {
@@ -63,12 +61,27 @@ TEST_F(LauncherServiceCommandTest, NormalQueryDoesNotForceCommand) {
     EXPECT_EQ(results[0].kind, LauncherResultKind::Application);
 }
 
-TEST_F(LauncherServiceCommandTest, BareCommandIsAvailableWhenNoApplicationMatches) {
+TEST_F(LauncherServiceCommandTest, BareInstalledCommandIsAvailableWhenNoApplicationMatches) {
     service.set_mock_index({});
-    auto results = service.search("btop", 10);
+    auto results = service.search("sh", 10);
     ASSERT_EQ(results.size(), 1U);
     EXPECT_EQ(results[0].kind, LauncherResultKind::Command);
-    EXPECT_EQ(results[0].id, "btop");
+    EXPECT_EQ(results[0].id, "sh");
+}
+
+TEST_F(LauncherServiceCommandTest, UnmatchedTextDoesNotBecomeACommand) {
+    service.set_mock_index({});
+    auto results = service.search("definitely-not-a-realmheart-command", 10);
+    EXPECT_TRUE(results.empty());
+}
+
+TEST_F(LauncherServiceCommandTest, ShellSyntaxRequiresExplicitMode) {
+    service.set_mock_index({});
+    EXPECT_TRUE(service.search("printf hello | wl-copy", 10).empty());
+
+    const auto explicit_results = service.search("> printf hello | wl-copy", 10);
+    ASSERT_EQ(explicit_results.size(), 1U);
+    EXPECT_EQ(explicit_results[0].kind, LauncherResultKind::Command);
 }
 
 TEST(LauncherServiceCommandActivationTest, ExecutesExactCommandThroughExecutor) {

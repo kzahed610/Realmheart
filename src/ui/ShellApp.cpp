@@ -1105,7 +1105,8 @@ private:
         if (!launcher_overlay_) {
             launcher_overlay_ = std::make_unique<LauncherOverlay>(
                 application_,
-                *launcher_service_
+                *launcher_service_,
+                *utilities_->get_wallpaper_service()
             );
         }
         if (!wallpaper_controller_) {

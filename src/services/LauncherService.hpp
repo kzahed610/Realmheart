@@ -62,6 +62,7 @@ public:
 
     void refresh_index();
     std::vector<LauncherResult> search(std::string_view query, std::size_t limit = 10) const;
+    std::vector<LauncherResult> recommendations(std::size_t limit = 5) const;
     bool activate(const LauncherResult& result);
 
     // For TDD

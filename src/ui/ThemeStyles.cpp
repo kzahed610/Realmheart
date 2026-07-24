@@ -61,13 +61,14 @@ ThemeStyles::ThemeStyles(std::shared_ptr<services::ThemeService> theme_service)
         );
     }
 
-    constexpr std::array<std::string_view, 4> taskbar_modules{
+    constexpr std::array<std::string_view, 5> component_modules{
         "taskbar/bar.css",
         "taskbar/icons.css",
         "taskbar/workspaces.css",
         "taskbar/popovers.css",
+        "launcher/launcher.css",
     };
-    component_css_ = styles::load_css_modules(taskbar_modules);
+    component_css_ = styles::load_css_modules(component_modules);
 
     subscription_ = theme_service_->subscribe([this](const services::Palette& palette) {
         apply(palette);

@@ -1,0 +1,306 @@
+/* Realmheart launcher silhouette prototype.
+ * This pass intentionally favours adjustable geometry over final ornament. */
+
+window.realmheart-launcher-window,
+window.realmheart-launcher-window > *,
+.realmheart-launcher-root,
+.realmheart-launcher-stage,
+.realmheart-launcher-centre-column {
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  color: @rh_text;
+}
+
+.realmheart-launcher-dismiss,
+.realmheart-launcher-dismiss:hover,
+.realmheart-launcher-dismiss:active,
+.realmheart-launcher-dismiss:focus,
+.realmheart-launcher-dismiss:focus-visible {
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  outline: none;
+  background-color: alpha(@rh_background, 0.76);
+  background-image: none;
+  box-shadow: none;
+}
+
+.realmheart-launcher-centre-shell {
+  color: @rh_text;
+  background-color: alpha(@rh_background, 0.985);
+  background-image: linear-gradient(
+    to bottom,
+    alpha(@rh_surface_variant, 0.16),
+    alpha(@rh_background, 0.04)
+  );
+  border: 1px solid alpha(@rh_icon_accent, 0.72);
+  border-radius: 25px;
+  box-shadow:
+    0 22px 54px alpha(#000000, 0.52),
+    inset 0 1px alpha(@rh_text, 0.06);
+}
+
+.realmheart-launcher-wallpaper-frame {
+  background-color: alpha(@rh_surface, 0.88);
+  background-image: linear-gradient(
+    135deg,
+    alpha(@rh_primary, 0.14),
+    alpha(@rh_background, 0.76)
+  );
+  border: 1px solid alpha(@rh_icon_accent, 0.45);
+  border-radius: 19px;
+  box-shadow:
+    inset 0 0 0 1px alpha(@rh_text, 0.025),
+    inset 0 -22px 34px alpha(#000000, 0.30);
+}
+
+.realmheart-launcher-wallpaper {
+  border-radius: 18px;
+}
+
+.realmheart-launcher-wallpaper-viewport,
+.realmheart-launcher-wallpaper-viewport viewport {
+  padding: 0;
+  border: none;
+  background-color: transparent;
+  background-image: none;
+}
+
+.realmheart-launcher-wallpaper-missing {
+  opacity: 0;
+}
+
+.realmheart-launcher-wallpaper-shade {
+  background-color: transparent;
+  background-image: linear-gradient(
+    to bottom,
+    alpha(@rh_background, 0.00),
+    alpha(@rh_background, 0.48) 44%,
+    alpha(@rh_background, 0.86)
+  );
+  border-radius: 0 0 18px 18px;
+}
+
+entry.realmheart-launcher-search {
+  min-height: 50px;
+  padding: 0 19px;
+  color: @rh_text;
+  caret-color: @rh_primary;
+  background-color: alpha(@rh_background, 0.90);
+  background-image: linear-gradient(
+    to bottom,
+    alpha(@rh_surface_variant, 0.25),
+    alpha(@rh_background, 0.08)
+  );
+  border: 1px solid alpha(@rh_outline, 0.72);
+  border-radius: 25px;
+  box-shadow:
+    0 8px 24px alpha(#000000, 0.36),
+    inset 0 1px alpha(@rh_text, 0.06);
+  font-size: 0.94em;
+}
+
+entry.realmheart-launcher-search:focus,
+entry.realmheart-launcher-search:focus-within {
+  border-color: alpha(@rh_primary, 0.92);
+  box-shadow:
+    0 8px 24px alpha(#000000, 0.40),
+    0 0 0 1px alpha(@rh_primary, 0.20),
+    0 0 18px alpha(@rh_primary, 0.14);
+}
+
+entry.realmheart-launcher-search placeholder {
+  color: alpha(@rh_text_muted, 0.82);
+}
+
+.realmheart-launcher-eyebrow,
+.realmheart-launcher-inspector-kind,
+.realmheart-launcher-result-kind {
+  color: alpha(@rh_icon_accent, 0.86);
+  font-size: 0.70em;
+  font-weight: 700;
+}
+
+.realmheart-launcher-recommendations {
+  min-height: 48px;
+}
+
+.realmheart-launcher-recommendation,
+.realmheart-launcher-recommendation:hover,
+.realmheart-launcher-recommendation:active,
+.realmheart-launcher-recommendation:focus,
+.realmheart-launcher-recommendation:focus-visible {
+  min-height: 42px;
+  margin: 0;
+  padding: 4px;
+  color: @rh_text;
+  background-color: alpha(@rh_surface_variant, 0.30);
+  background-image: none;
+  border: 1px solid alpha(@rh_outline, 0.24);
+  border-radius: 13px;
+  box-shadow: none;
+  outline: none;
+}
+
+.realmheart-launcher-recommendation:hover,
+.realmheart-launcher-recommendation:focus-visible {
+  background-color: alpha(@rh_surface_variant, 0.52);
+  border-color: alpha(@rh_primary, 0.48);
+  box-shadow: 0 0 14px alpha(@rh_primary, 0.11);
+}
+
+.realmheart-launcher-recommendation:active {
+  background-color: alpha(@rh_primary, 0.22);
+  border-color: alpha(@rh_primary, 0.72);
+}
+
+.realmheart-launcher-recommendation-label {
+  color: @rh_text;
+  font-size: 0.72em;
+  font-weight: 600;
+}
+
+.realmheart-launcher-panel {
+  padding: 24px;
+  color: @rh_text;
+  background-color: alpha(@rh_background, 0.972);
+  background-image: linear-gradient(
+    to bottom,
+    alpha(@rh_surface_variant, 0.13),
+    alpha(@rh_background, 0.02)
+  );
+  border: 1px solid alpha(@rh_icon_accent, 0.42);
+  border-radius: 27px;
+  box-shadow:
+    0 20px 48px alpha(#000000, 0.46),
+    inset 0 1px alpha(@rh_text, 0.04);
+}
+
+.realmheart-launcher-session-panel {
+  border-color: alpha(@rh_icon_accent, 0.32);
+}
+
+.realmheart-launcher-inspector-panel {
+  border-color: alpha(@rh_primary, 0.48);
+}
+
+.realmheart-launcher-panel-title {
+  color: @rh_text;
+  font-size: 1.22em;
+  font-weight: 700;
+}
+
+.realmheart-launcher-session-row {
+  min-height: 56px;
+  padding: 10px 12px;
+  color: @rh_text;
+  background-color: alpha(@rh_surface_variant, 0.25);
+  border: 1px solid alpha(@rh_outline, 0.22);
+  border-radius: 16px;
+}
+
+.realmheart-launcher-session-icon {
+  color: @rh_text_muted;
+}
+
+.realmheart-launcher-row-title {
+  color: @rh_text;
+  font-weight: 600;
+}
+
+.realmheart-launcher-row-subtitle,
+.realmheart-launcher-panel-note,
+.realmheart-launcher-inspector-subtitle {
+  color: @rh_text_muted;
+  font-size: 0.86em;
+}
+
+.realmheart-launcher-panel-note {
+  padding-top: 12px;
+  border-top: 1px solid alpha(@rh_outline, 0.28);
+}
+
+.realmheart-launcher-inspector-identity {
+  padding-top: 6px;
+}
+
+.realmheart-launcher-inspector-icon {
+  color: @rh_text;
+  margin-bottom: 8px;
+}
+
+.realmheart-launcher-inspector-title {
+  color: @rh_text;
+  font-size: 1.32em;
+  font-weight: 700;
+}
+
+.realmheart-launcher-inspector-hint {
+  padding: 15px 16px;
+  color: alpha(@rh_text, 0.88);
+  background-color: alpha(@rh_primary, 0.10);
+  border: 1px solid alpha(@rh_primary, 0.24);
+  border-radius: 16px;
+  font-size: 0.84em;
+}
+
+.realmheart-launcher-results-shell {
+  color: @rh_text;
+  background-color: alpha(@rh_background, 0.985);
+  background-image: linear-gradient(
+    to bottom,
+    alpha(@rh_surface_variant, 0.16),
+    alpha(@rh_background, 0.03)
+  );
+  border: 1px solid alpha(@rh_icon_accent, 0.48);
+  border-radius: 21px;
+  box-shadow:
+    0 20px 46px alpha(#000000, 0.48),
+    inset 0 1px alpha(@rh_text, 0.04);
+  padding: 10px;
+}
+
+.realmheart-launcher-results-shell scrolledwindow,
+.realmheart-launcher-results-shell viewport,
+.realmheart-launcher-results-list {
+  color: @rh_text;
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+}
+
+.realmheart-launcher-result-row {
+  color: @rh_text;
+  background-color: transparent;
+  border: none;
+  border-radius: 14px;
+  margin: 2px 0;
+}
+
+.realmheart-launcher-result-row:hover {
+  background-color: alpha(@rh_surface_variant, 0.36);
+}
+
+.realmheart-launcher-result-row:selected {
+  color: @rh_text;
+  background-color: alpha(@rh_primary, 0.18);
+  box-shadow: inset 3px 0 alpha(@rh_primary, 0.92);
+}
+
+.realmheart-launcher-result-row:selected .realmheart-launcher-result-kind {
+  color: @rh_primary;
+}
+
+.realmheart-launcher-result-kind {
+  color: alpha(@rh_text_muted, 0.76);
+  font-size: 0.62em;
+}
+
+.realmheart-launcher-empty {
+  color: @rh_text_muted;
+  font-size: 0.86em;
+}

@@ -77,7 +77,21 @@ TEST_F(LauncherServiceTest, ExplicitCommandConsumesOneResultSlot) {
     service.set_mock_index({
         {LauncherResultKind::Application, "a", "Kitty Command", "", "", {}}
     });
-    const auto results = service.search("kitty --single-instance", 1);
+    const auto results = service.search("> kitty --single-instance", 1);
     ASSERT_EQ(results.size(), 1U);
     EXPECT_EQ(results.front().kind, LauncherResultKind::Command);
+}
+
+TEST_F(LauncherServiceTest, RecommendationsContainOnlyLaunchableEntriesAndRespectLimit) {
+    service.set_mock_index({
+        {LauncherResultKind::Emoji, "emoji", "Fire", "", "", {}},
+        {LauncherResultKind::Action, "action", "Build", "", "", {}},
+        {LauncherResultKind::Application, "z", "Zen", "", "", {}},
+        {LauncherResultKind::Application, "a", "Antigravity", "", "", {}}
+    });
+
+    const auto results = service.recommendations(2);
+    ASSERT_EQ(results.size(), 2U);
+    EXPECT_EQ(results[0].id, "a");
+    EXPECT_EQ(results[1].id, "z");
 }
