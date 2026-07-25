@@ -1,15 +1,23 @@
 #include "LauncherService.hpp"
+
 #include "core/Command.hpp"
-#include <algorithm>
-#include <cstdlib>
-#include <iostream>
-#include <cctype>
+#include "services/HyprlandApplicationMonitor.hpp"
+#include "services/HyprlandSession.hpp"
+
 #include <gio/gio.h>
-#include <vector>
+
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <sstream>
+#include <limits>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 
 namespace realmheart::services {
 
@@ -17,24 +25,39 @@ namespace fs = std::filesystem;
 
 namespace {
 
-fs::path actions_directory() {
-    if (const char* config = std::getenv("XDG_CONFIG_HOME");
-        config != nullptr && *config != '\0') {
-        return fs::path(config) / "realmheart/actions";
+fs::path xdg_home_path(const char* variable, std::string_view fallback_suffix) {
+    if (const char* configured = std::getenv(variable);
+        configured != nullptr && *configured != '\0') {
+        return fs::path(configured);
     }
     if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
-        return fs::path(home) / ".config/realmheart/actions";
+        return fs::path(home) / fallback_suffix;
     }
-    return fs::temp_directory_path() / "realmheart/actions";
+    return fs::temp_directory_path() / "realmheart";
+}
+
+fs::path actions_directory() {
+    return xdg_home_path("XDG_CONFIG_HOME", ".config") / "realmheart/actions";
+}
+
+fs::path launcher_pins_path() {
+    return xdg_home_path("XDG_CONFIG_HOME", ".config") /
+        "realmheart/launcher-pins.txt";
+}
+
+fs::path launcher_history_path() {
+    return xdg_home_path("XDG_STATE_HOME", ".local/state") /
+        "realmheart/launcher-history.tsv";
 }
 
 char ascii_lower(char value) {
     return static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
 }
 
-bool running_inside_systemd_unit() {
-    const char* invocation_id = std::getenv("INVOCATION_ID");
-    return invocation_id != nullptr && *invocation_id != '\0';
+std::string lowercase_copy(std::string_view value) {
+    std::string lowered(value);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), ascii_lower);
+    return lowered;
 }
 
 std::string trim_copy(std::string_view value) {
@@ -42,6 +65,100 @@ std::string trim_copy(std::string_view value) {
     if (first == std::string_view::npos) return {};
     const auto last = value.find_last_not_of(" \t\n\r");
     return std::string(value.substr(first, last - first + 1));
+}
+
+std::string normalized_copy(std::string_view value) {
+    std::string normalized;
+    normalized.reserve(value.size());
+    bool pending_space = false;
+
+    for (const char character : value) {
+        const unsigned char byte = static_cast<unsigned char>(character);
+        if (std::isalnum(byte) != 0) {
+            if (pending_space && !normalized.empty()) normalized.push_back(' ');
+            normalized.push_back(ascii_lower(character));
+            pending_space = false;
+        } else {
+            pending_space = true;
+        }
+    }
+    return normalized;
+}
+
+bool starts_at_word_boundary(std::string_view haystack, std::string_view needle) {
+    if (needle.empty()) return false;
+    std::size_t position = haystack.find(needle);
+    while (position != std::string_view::npos) {
+        if (position == 0 || haystack[position - 1] == ' ') return true;
+        position = haystack.find(needle, position + 1);
+    }
+    return false;
+}
+
+std::string acronym_for(std::string_view value) {
+    std::string acronym;
+    bool at_word_start = true;
+    for (const char character : value) {
+        if (character == ' ') {
+            at_word_start = true;
+            continue;
+        }
+        if (at_word_start) acronym.push_back(character);
+        at_word_start = false;
+    }
+    return acronym;
+}
+
+int fuzzy_subsequence_score(std::string_view value, std::string_view query) {
+    if (query.empty() || query.size() > value.size()) return 0;
+
+    std::size_t query_index = 0;
+    int gaps = 0;
+    int consecutive = 0;
+    int best_consecutive = 0;
+    std::size_t previous_match = std::numeric_limits<std::size_t>::max();
+
+    for (std::size_t index = 0; index < value.size() && query_index < query.size(); ++index) {
+        if (value[index] != query[query_index]) continue;
+
+        if (previous_match != std::numeric_limits<std::size_t>::max()) {
+            const int distance = static_cast<int>(index - previous_match - 1);
+            gaps += distance;
+            consecutive = distance == 0 ? consecutive + 1 : 1;
+        } else {
+            consecutive = 1;
+        }
+        best_consecutive = std::max(best_consecutive, consecutive);
+        previous_match = index;
+        ++query_index;
+    }
+
+    if (query_index != query.size()) return 0;
+    return std::max(1, 1300 + best_consecutive * 70 - gaps * 18);
+}
+
+int score_field(std::string_view value, std::string_view query, int tier) {
+    const std::string normalized_value = normalized_copy(value);
+    if (normalized_value.empty()) return 0;
+
+    if (normalized_value == query) return tier + 1000;
+    if (normalized_value.starts_with(query)) return tier + 800;
+    if (starts_at_word_boundary(normalized_value, query)) return tier + 620;
+    if (normalized_value.find(query) != std::string::npos) return tier + 430;
+
+    const std::string acronym = acronym_for(normalized_value);
+    if (!acronym.empty()) {
+        if (acronym == query) return tier + 390;
+        if (acronym.starts_with(query)) return tier + 340;
+    }
+
+    const int fuzzy = fuzzy_subsequence_score(normalized_value, query);
+    return fuzzy > 0 ? tier + fuzzy / 4 : 0;
+}
+
+bool running_inside_systemd_unit() {
+    const char* invocation_id = std::getenv("INVOCATION_ID");
+    return invocation_id != nullptr && *invocation_id != '\0';
 }
 
 bool contains_shell_syntax(std::string_view value) {
@@ -53,7 +170,76 @@ std::string first_command_token(std::string_view command) {
     const auto first = command.find_first_not_of(" \t");
     if (first == std::string_view::npos) return {};
     const auto end = command.find_first_of(" \t", first);
-    return std::string(command.substr(first, end == std::string_view::npos ? command.size() - first : end - first));
+    return std::string(command.substr(
+        first,
+        end == std::string_view::npos ? command.size() - first : end - first
+    ));
+}
+
+std::string compact_identity(std::string_view value) {
+    std::string compact;
+    for (const char character : normalized_copy(value)) {
+        if (character != ' ') compact.push_back(character);
+    }
+    return compact;
+}
+
+std::string desktop_identity(std::string_view value) {
+    std::string identity(value);
+    constexpr std::string_view suffix = ".desktop";
+    if (identity.size() >= suffix.size() &&
+        std::string_view(identity).substr(identity.size() - suffix.size()) == suffix) {
+        identity.resize(identity.size() - suffix.size());
+    }
+    return identity;
+}
+
+std::string executable_identity(std::string_view value) {
+    const std::string token = first_command_token(value);
+    if (token.empty()) return {};
+    return fs::path(token).filename().string();
+}
+
+int hyprland_identity_score(std::string_view observed, std::string_view candidate) {
+    const std::string observed_normalized = normalized_copy(observed);
+    const std::string candidate_normalized = normalized_copy(candidate);
+    if (observed_normalized.empty() || candidate_normalized.empty()) return 0;
+
+    if (observed_normalized == candidate_normalized) return 1000;
+
+    const std::string observed_compact = compact_identity(observed_normalized);
+    const std::string candidate_compact = compact_identity(candidate_normalized);
+    if (observed_compact == candidate_compact) return 950;
+
+    // Hyprland classes often use reverse-DNS desktop IDs while the executable
+    // is just the final component (org.kde.dolphin -> dolphin).
+    if (observed_compact.size() >= 4 && candidate_compact.size() >= 4) {
+        if (observed_compact.ends_with(candidate_compact) ||
+            candidate_compact.ends_with(observed_compact)) {
+            return 760;
+        }
+    }
+
+    if (starts_at_word_boundary(candidate_normalized, observed_normalized) ||
+        starts_at_word_boundary(observed_normalized, candidate_normalized)) {
+        return 620;
+    }
+    return 0;
+}
+
+std::vector<std::string> split_tabs(std::string_view line) {
+    std::vector<std::string> fields;
+    std::size_t start = 0;
+    while (start <= line.size()) {
+        const std::size_t tab = line.find('\t', start);
+        fields.emplace_back(line.substr(
+            start,
+            tab == std::string_view::npos ? line.size() - start : tab - start
+        ));
+        if (tab == std::string_view::npos) break;
+        start = tab + 1;
+    }
+    return fields;
 }
 
 bool is_valid_plain_command(std::string_view command) {
@@ -69,13 +255,61 @@ bool is_valid_plain_command(std::string_view command) {
     return realmheart::core::command_exists(executable);
 }
 
+std::string recommendation_identity(const LauncherResult& result) {
+    return normalized_copy(result.title) + "\n" + normalized_copy(result.executable);
+}
+
+std::int64_t current_epoch_seconds() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+}
+
+bool ignored_session_identity(std::string_view identity) {
+    const std::string normalized = compact_identity(identity);
+    if (normalized.empty()) return true;
+
+    constexpr std::array<std::string_view, 8> ignored{
+        "realmheart",
+        "xwaylandvideobridge",
+        "xdgdesktopportal",
+        "polkitkdeauthenticationagent",
+        "gcrprompter",
+        "pinentry",
+        "notificationdaemon",
+        "hyprlandsharepicker",
+    };
+    return std::ranges::any_of(ignored, [&normalized](std::string_view value) {
+        return normalized.find(value) != std::string::npos;
+    });
+}
+
+std::string session_fallback_title(std::string_view identity) {
+    std::string title(identity);
+    if (title.empty()) return "Unknown application";
+
+    const std::size_t separator = title.find_last_of("./");
+    if (separator != std::string::npos && separator + 1 < title.size()) {
+        title.erase(0, separator + 1);
+    }
+    if (!title.empty()) {
+        title.front() = static_cast<char>(std::toupper(
+            static_cast<unsigned char>(title.front())
+        ));
+    }
+    return title;
+}
+
 } // namespace
 
 std::vector<std::string> launcher_command_argv(std::string_view command) {
     const auto first = command.find_first_not_of(" \t\n\r");
-    const std::string_view trimmed = first == std::string_view::npos ? std::string_view{} : command.substr(first);
+    const std::string_view trimmed = first == std::string_view::npos
+        ? std::string_view{}
+        : command.substr(first);
     const bool needs_terminal = trimmed == "sudo" ||
-        (trimmed.starts_with("sudo") && trimmed.size() > 4 && std::isspace(static_cast<unsigned char>(trimmed[4])));
+        (trimmed.starts_with("sudo") && trimmed.size() > 4 &&
+         std::isspace(static_cast<unsigned char>(trimmed[4])) != 0);
 
     std::vector<std::string> argv;
     if (needs_terminal) argv.emplace_back("kitty");
@@ -109,16 +343,9 @@ std::vector<std::string> launcher_scoped_argv(const std::vector<std::string>& ar
 bool SystemLauncherProcessExecutor::run(const std::vector<std::string>& argv) {
     if (argv.empty() || argv.front().empty()) return false;
 
-    // Applications launched by a shell service must not remain in that
-    // service's cgroup. Otherwise systemd's default KillMode=control-group
-    // terminates them whenever Realmheart stops or restarts. A transient user
-    // scope gives each launch an independent lifetime while preserving argv.
     if (running_inside_systemd_unit() && realmheart::core::command_exists("systemd-run")) {
         return realmheart::core::run_background(launcher_scoped_argv(argv));
     }
-
-    // Manually launched Realmheart instances and non-systemd systems do not
-    // have a shell service cgroup whose shutdown can take the application down.
     return realmheart::core::run_background(argv);
 }
 
@@ -133,43 +360,75 @@ LauncherService::LauncherService(
     std::unique_ptr<ILauncherProcessExecutor> process_executor
 ) : command_executor_(std::move(command_executor)),
     process_executor_(std::move(process_executor)) {
+    load_user_state();
     refresh_index();
+    hyprland_monitor_ = std::make_unique<HyprlandApplicationMonitor>(
+        [this](const HyprlandApplicationEvent& event) {
+            record_hyprland_activity(event);
+            session_revision_.fetch_add(1, std::memory_order_relaxed);
+        }
+    );
+    hyprland_monitor_->start();
+}
+
+LauncherService::~LauncherService() {
+    hyprland_monitor_.reset();
+    save_usage_history();
 }
 
 void LauncherService::refresh_index() {
     index_.clear();
+    std::unordered_set<std::string> application_identities;
 
-    // 1. Index Desktop Applications
     GList* apps = g_app_info_get_all();
-    if (apps) {
-        for (GList* iter = apps; iter != nullptr; iter = g_list_next(iter)) {
-            GAppInfo* app = static_cast<GAppInfo*>(iter->data);
+    if (apps != nullptr) {
+        for (GList* iterator = apps; iterator != nullptr; iterator = g_list_next(iterator)) {
+            GAppInfo* app = static_cast<GAppInfo*>(iterator->data);
             if (!g_app_info_should_show(app)) continue;
 
-            LauncherResult res;
-            res.kind = LauncherResultKind::Application;
             const char* id = g_app_info_get_id(app);
             const char* name = g_app_info_get_name(app);
             if (id == nullptr || name == nullptr) continue;
-            res.id = id;
-            res.title = name;
-            res.subtitle = g_app_info_get_display_name(app) ? g_app_info_get_display_name(app) : "";
-            
-            GIcon* icon = g_app_info_get_icon(app);
-            if (icon) {
-                if (G_TYPE_CHECK_INSTANCE_TYPE(icon, G_TYPE_THEMED_ICON)) {
-                    const char* const* names = g_themed_icon_get_names(G_THEMED_ICON(icon));
-                    if (names && names[0]) {
-                        res.icon_name = names[0];
-                    }
-                }
+
+            LauncherResult result;
+            result.kind = LauncherResultKind::Application;
+            result.id = id;
+            result.title = name;
+
+            const char* display_name = g_app_info_get_display_name(app);
+            const char* description = g_app_info_get_description(app);
+            const char* executable = g_app_info_get_executable(app);
+            const char* commandline = g_app_info_get_commandline(app);
+
+            result.description = description != nullptr ? description : "";
+            result.executable = executable != nullptr ? executable : "";
+            if (!result.description.empty() && result.description != result.title) {
+                result.subtitle = result.description;
+            } else if (display_name != nullptr && result.title != display_name) {
+                result.subtitle = display_name;
+            } else {
+                result.subtitle = result.executable;
             }
-            index_.push_back(res);
+
+            result.search_terms.push_back(result.id);
+            if (display_name != nullptr) result.search_terms.emplace_back(display_name);
+            if (description != nullptr) result.search_terms.emplace_back(description);
+            if (executable != nullptr) result.search_terms.emplace_back(executable);
+            if (commandline != nullptr) result.search_terms.emplace_back(commandline);
+
+            GIcon* icon = g_app_info_get_icon(app);
+            if (icon != nullptr && G_TYPE_CHECK_INSTANCE_TYPE(icon, G_TYPE_THEMED_ICON)) {
+                const char* const* names = g_themed_icon_get_names(G_THEMED_ICON(icon));
+                if (names != nullptr && names[0] != nullptr) result.icon_name = names[0];
+            }
+
+            const std::string identity = recommendation_identity(result);
+            if (!application_identities.insert(identity).second) continue;
+            index_.push_back(std::move(result));
         }
         g_list_free_full(apps, g_object_unref);
     }
 
-    // 2. Index Custom Actions from the user's XDG config directory.
     const fs::path actions_path = actions_directory();
     std::error_code filesystem_error;
     if (fs::is_directory(actions_path, filesystem_error) && !filesystem_error) {
@@ -178,84 +437,263 @@ void LauncherService::refresh_index() {
         for (; !filesystem_error && iterator != end; iterator.increment(filesystem_error)) {
             const auto& entry = *iterator;
             if (!entry.is_regular_file(filesystem_error) || filesystem_error) continue;
-            const std::string action_name = entry.path().stem().string();
 
-            LauncherResult res;
-            res.kind = LauncherResultKind::Action;
-            res.id = entry.path().string();
-            res.title = action_name;
-            res.subtitle = "Custom Action";
-            res.icon_name = "system-run";
-            index_.push_back(std::move(res));
+            LauncherResult result;
+            result.kind = LauncherResultKind::Action;
+            result.id = entry.path().string();
+            result.title = entry.path().stem().string();
+            result.subtitle = "Realmheart action";
+            result.icon_name = "system-run";
+            result.description = "Custom action from ~/.config/realmheart/actions";
+            result.executable = "/bin/bash " + result.id;
+            result.search_terms = {result.id, entry.path().filename().string()};
+            index_.push_back(std::move(result));
+        }
+    }
+}
+
+const LauncherResult* LauncherService::match_hyprland_application(
+    std::string_view identity
+) const {
+    if (identity.empty()) return nullptr;
+
+    const LauncherResult* best = nullptr;
+    int best_score = 0;
+    for (const auto& result : index_) {
+        if (result.kind != LauncherResultKind::Application) continue;
+
+        int score = 0;
+        score = std::max(score, hyprland_identity_score(identity, result.title));
+        score = std::max(score, hyprland_identity_score(
+            identity,
+            desktop_identity(result.id)
+        ));
+        score = std::max(score, hyprland_identity_score(
+            identity,
+            executable_identity(result.executable)
+        ));
+        for (const auto& term : result.search_terms) {
+            score = std::max(score, hyprland_identity_score(identity, term));
+        }
+
+        if (score > best_score) {
+            best_score = score;
+            best = &result;
         }
     }
 
-    // 3. Index Emojis ( loading from a simple text file for stability)
-    // We assume the system has a common emoji list or we provide a basic one.
-    // For now, we'll index a small set of common ones.
-    std::vector<std::pair<std::string, std::string>> common_emojis = {
-        {"smile", "😊"}, {"laugh", "😂"}, {"heart", "❤️"}, {"fire", "🔥"},
-        {"thumbsup", "👍"}, {"thumbsdown", "👎"}, {"cry", "😭"}, {"skull", "💀"},
-        {"star", "⭐"}, {"rocket", "🚀"}, {"sparkles", "✨"}, {"thinking", "🤔"}
-    };
-    for (const auto& emoji : common_emojis) {
-        LauncherResult res;
-        res.kind = LauncherResultKind::Emoji;
-        res.id = emoji.second;
-        res.title = emoji.first;
-        res.subtitle = "Emoji";
-        res.icon_name = "emoji";
-        index_.push_back(res);
-    }
+    // Avoid loose matches such as a short generic class accidentally mapping
+    // to an unrelated desktop entry.
+    return best_score >= 620 ? best : nullptr;
 }
 
 void LauncherService::set_mock_index(std::vector<LauncherResult> index) {
     index_ = std::move(index);
 }
 
-int LauncherService::calculate_score(const LauncherResult& res, std::string_view query) const {
-    if (query.empty()) return 0;
+int LauncherService::calculate_score(
+    const LauncherResult& result,
+    std::string_view query
+) const {
+    const std::string normalized_query = normalized_copy(query);
+    if (normalized_query.empty()) return 0;
 
-    std::string title_lower = res.title;
-    std::transform(title_lower.begin(), title_lower.end(), title_lower.begin(), ascii_lower);
-    std::string query_lower = std::string(query);
-    std::transform(query_lower.begin(), query_lower.end(), query_lower.begin(), ascii_lower);
+    int score = score_field(result.title, normalized_query, 9000);
+    score = std::max(score, score_field(result.subtitle, normalized_query, 4300));
+    score = std::max(score, score_field(result.description, normalized_query, 3900));
+    score = std::max(score, score_field(result.executable, normalized_query, 3600));
+    score = std::max(score, score_field(result.id, normalized_query, 3200));
+    for (const auto& term : result.search_terms) {
+        score = std::max(score, score_field(term, normalized_query, 3000));
+    }
 
-    if (title_lower == query_lower) return 1000;
-    if (title_lower.find(query_lower) == 0) return 500;
-    if (title_lower.find(" " + query_lower) != std::string::npos) return 250;
-    if (title_lower.find(query_lower) != std::string::npos) return 100;
+    if (score <= 0) return 0;
+    return score + usage_boost(result);
+}
 
-    return 0;
+int LauncherService::usage_boost(const LauncherResult& result) const {
+    int boost = 0;
+    if (pin_rank(result) >= 0) boost += 900;
+
+    std::scoped_lock lock(usage_mutex_);
+    if (result.id == active_hyprland_app_id_) boost += 650;
+
+    const auto found = usage_history_.find(result.id);
+    if (found == usage_history_.end()) return boost;
+
+    const UsageRecord& record = found->second;
+    boost += static_cast<int>(
+        std::min<std::uint64_t>(record.launcher_launch_count, 50) * 12
+    );
+    boost += static_cast<int>(
+        std::min<std::uint64_t>(record.hyprland_open_count, 50) * 9
+    );
+    boost += static_cast<int>(
+        std::min<std::uint64_t>(record.hyprland_focus_count, 120) * 5
+    );
+
+    const std::int64_t age = std::max<std::int64_t>(
+        0,
+        current_epoch_seconds() - record.last_used_epoch
+    );
+    constexpr std::int64_t hour = 60 * 60;
+    constexpr std::int64_t day = 24 * hour;
+    if (age <= hour) boost += 700;
+    else if (age <= day) boost += 480;
+    else if (age <= 7 * day) boost += 260;
+    else if (age <= 30 * day) boost += 110;
+    return boost;
+}
+
+int LauncherService::pin_rank(const LauncherResult& result) const {
+    const std::array<std::string, 3> identities{
+        lowercase_copy(result.id),
+        lowercase_copy(result.title),
+        lowercase_copy(result.executable),
+    };
+
+    for (std::size_t index = 0; index < pinned_entries_.size(); ++index) {
+        const std::string& pin = pinned_entries_[index];
+        if (std::find(identities.begin(), identities.end(), pin) != identities.end()) {
+            return static_cast<int>(index);
+        }
+    }
+    return -1;
 }
 
 std::vector<LauncherResult> LauncherService::recommendations(std::size_t limit) const {
-    std::vector<LauncherResult> results;
-    if (limit == 0) return results;
+    if (limit == 0) return {};
 
+    struct Candidate {
+        const LauncherResult* result = nullptr;
+        int pin = -1;
+        int score = 0;
+    };
+
+    std::vector<Candidate> candidates;
+    std::unordered_set<std::string> seen;
     for (const auto& item : index_) {
-        if (item.kind == LauncherResultKind::Application ||
-            item.kind == LauncherResultKind::Action) {
-            results.push_back(item);
+        if (item.kind != LauncherResultKind::Application &&
+            item.kind != LauncherResultKind::Action) {
+            continue;
         }
+        if (!seen.insert(recommendation_identity(item)).second) continue;
+        candidates.push_back({&item, pin_rank(item), usage_boost(item)});
     }
 
-    std::stable_sort(results.begin(), results.end(), [](const auto& left, const auto& right) {
-        if (left.kind != right.kind) {
-            return left.kind == LauncherResultKind::Application;
+    std::stable_sort(candidates.begin(), candidates.end(), [](const Candidate& left, const Candidate& right) {
+        const bool left_pinned = left.pin >= 0;
+        const bool right_pinned = right.pin >= 0;
+        if (left_pinned != right_pinned) return left_pinned;
+        if (left_pinned && left.pin != right.pin) return left.pin < right.pin;
+        if (left.score != right.score) return left.score > right.score;
+        if (left.result->kind != right.result->kind) {
+            return left.result->kind == LauncherResultKind::Application;
         }
-        std::string left_title = left.title;
-        std::string right_title = right.title;
-        std::transform(left_title.begin(), left_title.end(), left_title.begin(), ascii_lower);
-        std::transform(right_title.begin(), right_title.end(), right_title.begin(), ascii_lower);
-        return left_title < right_title;
+        const std::string left_title = lowercase_copy(left.result->title);
+        const std::string right_title = lowercase_copy(right.result->title);
+        if (left_title != right_title) return left_title < right_title;
+        return left.result->id < right.result->id;
     });
 
-    if (results.size() > limit) results.resize(limit);
+    std::vector<LauncherResult> results;
+    results.reserve(std::min(limit, candidates.size()));
+    for (const auto& candidate : candidates) {
+        if (results.size() >= limit) break;
+        results.push_back(*candidate.result);
+    }
     return results;
 }
 
-std::vector<LauncherResult> LauncherService::search(std::string_view query, std::size_t limit) const {
+std::optional<LauncherResult> LauncherService::application_by_id(std::string_view id) const {
+    const auto iterator = std::find_if(index_.begin(), index_.end(), [id](const LauncherResult& result) {
+        return result.kind == LauncherResultKind::Application && result.id == id;
+    });
+    if (iterator == index_.end()) return std::nullopt;
+    return *iterator;
+}
+
+std::vector<LauncherSessionApplication> LauncherService::session_applications(
+    std::size_t limit
+) const {
+    if (limit == 0) return {};
+
+    realmheart::core::CommandOptions options;
+    options.deadline = std::chrono::milliseconds(650);
+    options.max_output_bytes = 1024 * 1024;
+    const HyprlandSessionSnapshot snapshot = HyprlandSession::read(options);
+    if (!snapshot.available) return {};
+
+    std::vector<LauncherSessionApplication> groups;
+    std::unordered_map<std::string, std::size_t> group_by_identity;
+    groups.reserve(std::min(limit, snapshot.windows.size()));
+
+    for (const auto& window : snapshot.windows) {
+        if (ignored_session_identity(window.app_id)) continue;
+
+        const LauncherResult* matched = match_hyprland_application(window.app_id);
+        LauncherResult application;
+        std::string identity;
+        if (matched != nullptr) {
+            application = *matched;
+            identity = application.id;
+        } else {
+            identity = "hyprland:" + compact_identity(window.app_id);
+            application.kind = LauncherResultKind::Application;
+            application.id = identity;
+            application.title = session_fallback_title(window.app_id);
+            application.subtitle = window.app_id;
+            application.icon_name = "application-x-executable";
+            application.description = "Running Hyprland application";
+            application.executable = window.app_id;
+            application.search_terms = {window.app_id};
+        }
+
+        auto found = group_by_identity.find(identity);
+        if (found == group_by_identity.end()) {
+            LauncherSessionApplication group;
+            group.application = std::move(application);
+            group.active = window.active;
+            group.focus_rank = window.focus_history_id;
+            groups.push_back(std::move(group));
+            found = group_by_identity.emplace(identity, groups.size() - 1).first;
+        }
+
+        LauncherSessionApplication& group = groups[found->second];
+        group.active = group.active || window.active;
+        group.focus_rank = std::min(group.focus_rank, window.focus_history_id);
+        group.windows.push_back({
+            window.address,
+            window.title,
+            window.workspace_id,
+            window.active,
+        });
+    }
+
+    std::stable_sort(groups.begin(), groups.end(), [](const auto& left, const auto& right) {
+        if (left.active != right.active) return left.active;
+        if (left.focus_rank != right.focus_rank) return left.focus_rank < right.focus_rank;
+        return left.application.title < right.application.title;
+    });
+    if (groups.size() > limit) groups.resize(limit);
+    return groups;
+}
+
+bool LauncherService::focus_window(std::string_view address) const {
+    realmheart::core::CommandOptions options;
+    options.deadline = std::chrono::milliseconds(650);
+    options.max_output_bytes = 8 * 1024;
+    return HyprlandSession::focus_window(address, options);
+}
+
+std::uint64_t LauncherService::session_revision() const noexcept {
+    return session_revision_.load(std::memory_order_relaxed);
+}
+
+std::vector<LauncherResult> LauncherService::search(
+    std::string_view query,
+    std::size_t limit
+) const {
     std::vector<LauncherResult> results;
     if (limit == 0) return results;
 
@@ -271,11 +709,19 @@ std::vector<LauncherResult> LauncherService::search(std::string_view query, std:
 
     std::vector<ScoredResult> scored;
     if (!explicit_command) {
-        for (std::size_t i = 0; i < index_.size(); ++i) {
-            const int score = calculate_score(index_[i], searchable);
-            if (score > 0) scored.push_back({i, score});
+        for (std::size_t index = 0; index < index_.size(); ++index) {
+            const int score = calculate_score(index_[index], searchable);
+            if (score > 0) scored.push_back({index, score});
         }
-        std::sort(scored.begin(), scored.end(), std::greater<>());
+        std::stable_sort(scored.begin(), scored.end(), [this](const auto& left, const auto& right) {
+            if (left.score != right.score) return left.score > right.score;
+            const auto& left_result = index_[left.index];
+            const auto& right_result = index_[right.index];
+            const std::string left_title = lowercase_copy(left_result.title);
+            const std::string right_title = lowercase_copy(right_result.title);
+            if (left_title != right_title) return left_title < right_title;
+            return left_result.id < right_result.id;
+        });
     }
 
     LauncherResult command_result;
@@ -284,12 +730,17 @@ std::vector<LauncherResult> LauncherService::search(std::string_view query, std:
     command_result.title = explicit_command ? "Run explicit command" : "Run command";
     command_result.subtitle = searchable;
     command_result.icon_name = "utilities-terminal";
+    command_result.description = "Execute this command through fish";
+    command_result.executable = first_command_token(searchable);
 
     if (explicit_command) results.push_back(command_result);
 
+    std::unordered_set<std::string> seen;
     for (const auto& item : scored) {
         if (results.size() >= limit) break;
-        results.push_back(index_[item.index]);
+        const LauncherResult& result = index_[item.index];
+        if (!seen.insert(recommendation_identity(result)).second) continue;
+        results.push_back(result);
     }
 
     if (!explicit_command && results.size() < limit && is_valid_plain_command(searchable)) {
@@ -299,34 +750,190 @@ std::vector<LauncherResult> LauncherService::search(std::string_view query, std:
 }
 
 bool LauncherService::activate(const LauncherResult& result) {
+    bool activated = false;
     if (result.kind == LauncherResultKind::Application) {
         if (result.id.empty()) return false;
-        return process_executor_->run(launcher_application_argv(result.id));
-    }
-
-    if (result.kind == LauncherResultKind::Command) {
+        activated = process_executor_->run(launcher_application_argv(result.id));
+    } else if (result.kind == LauncherResultKind::Command) {
         if (result.id.find_first_not_of(" \t\n\r") == std::string::npos) return false;
-        return command_executor_->run_command(result.id);
-    }
-
-    if (result.kind == LauncherResultKind::Action) {
+        activated = command_executor_->run_command(result.id);
+    } else if (result.kind == LauncherResultKind::Action) {
         if (result.id.empty()) return false;
-        return process_executor_->run({"/bin/bash", result.id});
-    }
-
-    if (result.kind == LauncherResultKind::Emoji) {
+        activated = process_executor_->run({"/bin/bash", result.id});
+    } else if (result.kind == LauncherResultKind::Emoji) {
         if (result.id.empty()) return false;
-        return process_executor_->run({"wl-copy", result.id});
-    }
-
-    if (result.kind == LauncherResultKind::Clipboard) {
+        activated = process_executor_->run({"wl-copy", result.id});
+    } else if (result.kind == LauncherResultKind::Clipboard) {
         if (result.id.empty()) return false;
-        return process_executor_->run({
+        activated = process_executor_->run({
             "sh", "-c", "cliphist decode \"$1\" | wl-copy", "realmheart-clipboard", result.id
         });
     }
 
-    return false;
+    if (activated && (result.kind == LauncherResultKind::Application ||
+                      result.kind == LauncherResultKind::Action)) {
+        record_activation(result);
+    }
+    return activated;
+}
+
+void LauncherService::load_user_state() {
+    pinned_entries_.clear();
+    std::ifstream pins(launcher_pins_path());
+    std::string line;
+    while (std::getline(pins, line)) {
+        const std::string trimmed = trim_copy(line);
+        if (trimmed.empty() || trimmed.front() == '#') continue;
+        pinned_entries_.push_back(lowercase_copy(trimmed));
+    }
+
+    std::unordered_map<std::string, UsageRecord> loaded;
+    std::ifstream history(launcher_history_path());
+    while (std::getline(history, line)) {
+        const auto fields = split_tabs(line);
+        try {
+            UsageRecord record;
+            std::string id;
+
+            if (fields.size() == 3) {
+                // v0.7 compatibility: launcher_count, last_launch, desktop_id
+                record.launcher_launch_count = std::stoull(fields[0]);
+                record.last_used_epoch = std::stoll(fields[1]);
+                id = fields[2];
+            } else if (fields.size() == 5) {
+                record.launcher_launch_count = std::stoull(fields[0]);
+                record.hyprland_focus_count = std::stoull(fields[1]);
+                record.hyprland_open_count = std::stoull(fields[2]);
+                record.last_used_epoch = std::stoll(fields[3]);
+                id = fields[4];
+            } else {
+                continue;
+            }
+
+            if (!id.empty()) loaded[id] = record;
+        } catch (...) {
+            // A malformed line must not prevent the launcher from opening.
+        }
+    }
+
+    std::scoped_lock lock(usage_mutex_);
+    usage_history_ = std::move(loaded);
+}
+
+void LauncherService::save_usage_history() const {
+    std::scoped_lock file_lock(history_file_mutex_);
+
+    std::unordered_map<std::string, UsageRecord> snapshot;
+    {
+        std::scoped_lock lock(usage_mutex_);
+        if (!usage_dirty_) return;
+        snapshot = usage_history_;
+        usage_dirty_ = false;
+    }
+
+    const fs::path path = launcher_history_path();
+    std::error_code error;
+    fs::create_directories(path.parent_path(), error);
+    if (error) {
+        std::scoped_lock lock(usage_mutex_);
+        usage_dirty_ = true;
+        return;
+    }
+
+    const fs::path temporary = path.string() + ".tmp";
+    std::ofstream output(temporary, std::ios::trunc);
+    if (!output) {
+        std::scoped_lock lock(usage_mutex_);
+        usage_dirty_ = true;
+        return;
+    }
+    for (const auto& [id, record] : snapshot) {
+        output << record.launcher_launch_count << '\t'
+               << record.hyprland_focus_count << '\t'
+               << record.hyprland_open_count << '\t'
+               << record.last_used_epoch << '\t'
+               << id << '\n';
+    }
+    output.close();
+    if (!output) {
+        std::scoped_lock lock(usage_mutex_);
+        usage_dirty_ = true;
+        return;
+    }
+
+    fs::rename(temporary, path, error);
+    if (error) {
+        fs::remove(path, error);
+        error.clear();
+        fs::rename(temporary, path, error);
+    }
+    if (error) {
+        std::scoped_lock lock(usage_mutex_);
+        usage_dirty_ = true;
+    }
+}
+
+void LauncherService::record_activation(const LauncherResult& result) {
+    {
+        std::scoped_lock lock(usage_mutex_);
+        UsageRecord& record = usage_history_[result.id];
+        ++record.launcher_launch_count;
+        record.last_used_epoch = current_epoch_seconds();
+        usage_dirty_ = true;
+    }
+    save_usage_history();
+}
+
+void LauncherService::record_hyprland_activity(
+    const HyprlandApplicationEvent& event
+) {
+    if (event.kind == HyprlandApplicationEventKind::ContextChanged) return;
+
+    const LauncherResult* result = match_hyprland_application(event.app_identity);
+    if (result == nullptr) {
+        if (event.kind == HyprlandApplicationEventKind::Focused) {
+            std::scoped_lock lock(usage_mutex_);
+            active_hyprland_app_id_.clear();
+        }
+        return;
+    }
+
+    const std::int64_t now = current_epoch_seconds();
+    bool should_save = false;
+    {
+        std::scoped_lock lock(usage_mutex_);
+
+        if (event.kind == HyprlandApplicationEventKind::Focused) {
+            const std::string normalized = normalized_copy(event.app_identity);
+            // Hyprland may repeat the same active-window class during quick
+            // title or state changes. Count a sustained focus at most once per
+            // minute, while still counting real switches immediately.
+            if (normalized == last_focused_hyprland_identity_ &&
+                now - last_focus_epoch_ < 60) {
+                return;
+            }
+            last_focused_hyprland_identity_ = normalized;
+            last_focus_epoch_ = now;
+            active_hyprland_app_id_ = result->id;
+        }
+
+        UsageRecord& record = usage_history_[result->id];
+        if (event.kind == HyprlandApplicationEventKind::Opened) {
+            ++record.hyprland_open_count;
+        } else {
+            ++record.hyprland_focus_count;
+        }
+        record.last_used_epoch = now;
+        usage_dirty_ = true;
+
+        ++unsaved_hyprland_events_;
+        if (unsaved_hyprland_events_ >= 12) {
+            unsaved_hyprland_events_ = 0;
+            should_save = true;
+        }
+    }
+
+    if (should_save) save_usage_history();
 }
 
 } // namespace realmheart::services

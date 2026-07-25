@@ -17,6 +17,7 @@ pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4>=4.12)
 pkg_check_modules(GTK4_LAYER_SHELL REQUIRED IMPORTED_TARGET gtk4-layer-shell-0)
 pkg_check_modules(GDK_PIXBUF REQUIRED IMPORTED_TARGET gdk-pixbuf-2.0)
+pkg_check_modules(JPEG REQUIRED IMPORTED_TARGET libjpeg)
 
 set(REALMHEART_WARNING_FLAGS
     -Wall -Wextra -Wpedantic
@@ -71,6 +72,8 @@ add_library(realmheart_ui STATIC
     src/animation/character/HairMesh.cpp
     src/animation/character/CharacterCompositor.cpp
     src/services/HyprlandEventMonitor.cpp
+    src/services/HyprlandApplicationMonitor.cpp
+    src/services/HyprlandSession.cpp
     src/ui/AssetResolver.cpp
     src/ui/ImageFileFilters.cpp
     src/ui/GtkApp.cpp
@@ -107,6 +110,7 @@ add_library(realmheart_ui STATIC
     src/ui/OSDOverlay.cpp
     src/ui/lockscreen/LockScreen.cpp
     src/ui/launcher/LauncherOverlay.cpp
+    src/ui/launcher/CommandReceiptOverlay.cpp
     src/services/LauncherService.cpp
     src/services/NotesService.cpp
     src/ui/NotesOverlay.cpp
@@ -129,6 +133,7 @@ target_link_libraries(realmheart_ui PRIVATE
     PkgConfig::GTK4
     PkgConfig::GTK4_LAYER_SHELL
     PkgConfig::GDK_PIXBUF
+    PkgConfig::JPEG
     Threads::Threads
 )
 
@@ -366,14 +371,54 @@ if(BUILD_TESTING)
     add_executable(realmheart_hyprland_event_monitor_tests tests/HyprlandEventMonitorTests.cpp src/services/HyprlandEventMonitor.cpp)
     realmheart_register_test(realmheart_hyprland_event_monitor_tests)
 
+    add_executable(
+        realmheart_hyprland_application_monitor_tests
+        tests/HyprlandApplicationMonitorTests.cpp
+        src/services/HyprlandApplicationMonitor.cpp
+        src/services/HyprlandEventMonitor.cpp
+    )
+    target_link_libraries(
+        realmheart_hyprland_application_monitor_tests
+        PRIVATE GTest::gtest GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_hyprland_application_monitor_tests)
+
+    add_executable(
+        realmheart_hyprland_session_tests
+        tests/HyprlandSessionTests.cpp
+        src/core/Command.cpp
+        src/services/HyprlandSession.cpp
+    )
+    target_link_libraries(
+        realmheart_hyprland_session_tests
+        PRIVATE GTest::gtest GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_hyprland_session_tests)
+
     add_executable(realmheart_keep_awake_tests tests/KeepAwakeTests.cpp src/core/Command.cpp src/services/KeepAwake.cpp)
     realmheart_register_test(realmheart_keep_awake_tests)
 
-    add_executable(realmheart_launcher_service_command_tests tests/LauncherServiceCommandTests.cpp src/core/Command.cpp src/services/LauncherService.cpp)
+    add_executable(
+        realmheart_launcher_service_command_tests
+        tests/LauncherServiceCommandTests.cpp
+        src/core/Command.cpp
+        src/services/LauncherService.cpp
+        src/services/HyprlandApplicationMonitor.cpp
+        src/services/HyprlandEventMonitor.cpp
+        src/services/HyprlandSession.cpp
+    )
     target_link_libraries(realmheart_launcher_service_command_tests PRIVATE GTest::gtest GTest::gtest_main PkgConfig::GIO)
     realmheart_register_test(realmheart_launcher_service_command_tests)
 
-    add_executable(realmheart_launcher_service_tests tests/LauncherServiceTests.cpp src/core/Command.cpp src/services/LauncherService.cpp)
+    add_executable(
+        realmheart_launcher_service_tests
+        tests/LauncherServiceTests.cpp
+        src/core/Command.cpp
+        src/services/LauncherService.cpp
+        src/services/HyprlandApplicationMonitor.cpp
+        src/services/HyprlandEventMonitor.cpp
+        src/services/HyprlandSession.cpp
+    )
     target_link_libraries(realmheart_launcher_service_tests PRIVATE GTest::gtest GTest::gtest_main PkgConfig::GIO)
     realmheart_register_test(realmheart_launcher_service_tests)
 

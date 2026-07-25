@@ -6,16 +6,25 @@
 #include <gtk/gtk.h>
 
 #include <cstddef>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace realmheart::ui {
+
+class CommandReceiptOverlay;
 
 class LauncherOverlay {
 public:
     LauncherOverlay(
         GtkApplication* app,
         services::LauncherService& service,
-        services::WallpaperService& wallpaper_service
+        services::WallpaperService& wallpaper_service,
+        CommandReceiptOverlay& command_receipts
     );
     ~LauncherOverlay();
 
@@ -24,36 +33,193 @@ public:
     void hide();
 
 private:
+    enum class SpatialDirection {
+        Left,
+        Right,
+        Up,
+        Down,
+    };
+
+    struct ConstellationPlacement {
+        std::string application_id;
+        double normalized_x = 0.5;
+        double normalized_y = 0.5;
+    };
+
+    struct ResultRowMotion {
+        GtkListBoxRow* row = nullptr;
+        GtkWidget* content = nullptr;
+        double lift = 0.0;
+        double velocity = 0.0;
+    };
+
+    struct ConstellationNode {
+        services::LauncherResult result;
+        GtkWidget* widget = nullptr;
+        GtkWidget* menu = nullptr;
+        double normalized_x = 0.5;
+        double normalized_y = 0.5;
+        double drag_grab_x = 0.0;
+        double drag_grab_y = 0.0;
+        double drag_pointer_start_x = 0.0;
+        double drag_pointer_start_y = 0.0;
+        double current_x = 0.0;
+        double current_y = 0.0;
+        double render_x = 0.0;
+        double render_y = 0.0;
+        double velocity_x = 0.0;
+        double velocity_y = 0.0;
+        double opacity = 1.0;
+        double visibility_delay = 0.0;
+        double selection_amount = 0.0;
+        double selection_velocity = 0.0;
+        bool dragging = false;
+        bool settling = false;
+        bool position_initialized = false;
+    };
+
     void setup_window();
     void setup_ui();
     void refresh_wallpaper();
     void refresh_idle_content();
-    void rebuild_recommendations();
+    void clear_launcher_icon_cache();
+    [[nodiscard]] GdkTexture* launcher_icon_texture(
+        std::string_view icon_name,
+        int logical_pixels
+    );
+    [[nodiscard]] GtkWidget* make_launcher_icon(
+        std::string_view icon_name,
+        int logical_pixels
+    );
     void rebuild_results();
     void on_search_changed();
     void on_result_selected(GtkListBoxRow* row);
-    void update_inspector(const services::LauncherResult* result);
+    void set_selected_result(const services::LauncherResult* result);
+    void retarget_result_selection(GtkListBoxRow* row);
+    [[nodiscard]] ResultRowMotion* result_row_motion(GtkListBoxRow* row);
+    [[nodiscard]] bool update_result_selection_target();
+    void schedule_result_selection_frame();
+    [[nodiscard]] bool advance_result_selection_frame(GdkFrameClock* frame_clock);
+    void activate_selected();
     void activate_result(std::size_t index);
-    void activate_recommendation(std::size_t index);
-    bool handle_key(guint keyval);
+    bool handle_key(guint keyval, GdkModifierType modifiers);
+
+    void load_constellation_layout();
+    void save_constellation_layout() const;
+    void seed_constellation_layout();
+    void rebuild_constellation();
+    void layout_constellation();
+    [[nodiscard]] std::pair<double, double> constrain_constellation_position(
+        double requested_x,
+        double requested_y
+    ) const;
+    void set_constellation_visible(bool visible);
+    void clear_constellation_selection();
+    void select_constellation_node(ConstellationNode* node, bool grab_focus);
+    void set_hovered_constellation_node(ConstellationNode* node);
+    [[nodiscard]] ConstellationNode* active_constellation_highlight() const;
+    void retarget_constellation_indicator(bool start_from_search);
+    [[nodiscard]] bool navigate_constellation(SpatialDirection direction);
+    [[nodiscard]] bool pointer_position_in_constellation(
+        GtkEventController* controller,
+        double& x,
+        double& y
+    ) const;
+    void schedule_constellation_frame();
+    [[nodiscard]] bool advance_constellation_frame(GdkFrameClock* frame_clock);
+    void schedule_central_frame();
+    [[nodiscard]] bool advance_central_frame(GdkFrameClock* frame_clock);
+    void apply_central_motion();
+    void finish_central_hide();
+    [[nodiscard]] bool search_query_active() const;
+    [[nodiscard]] std::pair<double, double> search_centre_in_constellation() const;
+    [[nodiscard]] std::pair<double, double> constellation_emergence_position(
+        const ConstellationNode& node
+    ) const;
+    [[nodiscard]] bool point_hits_constellation_node(double x, double y) const;
+    [[nodiscard]] bool constellation_contains(std::string_view application_id) const;
+    void pin_constellation_application(std::string_view application_id);
+    void unpin_constellation_application(std::string_view application_id);
+    void toggle_constellation_application(std::string_view application_id);
+    void activate_constellation_node(ConstellationNode& node);
+    void begin_constellation_drag(
+        ConstellationNode& node,
+        GtkEventController* controller,
+        double grab_x,
+        double grab_y
+    );
+    void update_constellation_drag(
+        ConstellationNode& node,
+        double offset_x,
+        double offset_y,
+        GtkGesture* gesture
+    );
+    void end_constellation_drag(ConstellationNode& node);
+    void show_constellation_menu(ConstellationNode& node, double x, double y);
+    [[nodiscard]] std::pair<double, double> default_constellation_position(
+        std::size_t index
+    ) const;
 
     GtkWindow* window_ = nullptr;
+    GtkWidget* root_ = nullptr;
+    GtkWidget* dismiss_ = nullptr;
     GtkWidget* search_entry_ = nullptr;
     GtkWidget* wallpaper_picture_ = nullptr;
-    GtkWidget* recommendations_revealer_ = nullptr;
-    GtkWidget* recommendations_box_ = nullptr;
+    GtkWidget* centre_column_ = nullptr;
+    GtkWidget* centre_shell_ = nullptr;
+    GtkWidget* wallpaper_frame_ = nullptr;
+    GtkWidget* activation_sweep_ = nullptr;
+    GtkWidget* constellation_canvas_ = nullptr;
+    GtkWidget* selection_indicator_ = nullptr;
     GtkWidget* results_revealer_ = nullptr;
+    GtkWidget* results_overlay_ = nullptr;
     GtkWidget* results_list_ = nullptr;
-    GtkWidget* inspector_icon_ = nullptr;
-    GtkWidget* inspector_kind_ = nullptr;
-    GtkWidget* inspector_title_ = nullptr;
-    GtkWidget* inspector_subtitle_ = nullptr;
-    GtkWidget* inspector_hint_ = nullptr;
+    GtkWidget* result_selection_indicator_ = nullptr;
 
     services::LauncherService& service_;
     services::WallpaperService& wallpaper_service_;
+    CommandReceiptOverlay& command_receipts_;
+    std::string wallpaper_texture_path_;
+    int wallpaper_texture_scale_factor_ = 0;
+    std::unordered_map<std::string, GdkTexture*> launcher_icon_textures_;
+    GtkIconTheme* launcher_icon_theme_ = nullptr;
+    gulong launcher_icon_theme_changed_handler_ = 0;
     std::vector<services::LauncherResult> current_results_;
-    std::vector<services::LauncherResult> recommendations_;
+    std::optional<services::LauncherResult> selected_result_;
+    std::vector<std::unique_ptr<ResultRowMotion>> result_row_motions_;
+    std::vector<ConstellationPlacement> constellation_layout_;
+    std::vector<std::unique_ptr<ConstellationNode>> constellation_nodes_;
+    ConstellationNode* selected_constellation_node_ = nullptr;
+    ConstellationNode* hovered_constellation_node_ = nullptr;
+    double selection_indicator_x_ = 0.0;
+    double selection_indicator_y_ = 0.0;
+    double selection_indicator_velocity_x_ = 0.0;
+    double selection_indicator_velocity_y_ = 0.0;
+    double selection_indicator_opacity_ = 0.0;
+    bool selection_indicator_initialized_ = false;
+    bool selection_indicator_target_visible_ = false;
+    guint constellation_tick_id_ = 0;
+    gint64 constellation_last_frame_time_ = 0;
+    guint result_selection_tick_id_ = 0;
+    gint64 result_selection_last_frame_time_ = 0;
+    GtkListBoxRow* selected_result_row_ = nullptr;
+    double result_selection_y_ = 0.0;
+    double result_selection_velocity_y_ = 0.0;
+    double result_selection_height_ = 0.0;
+    double result_selection_velocity_height_ = 0.0;
+    double result_selection_target_x_ = 0.0;
+    double result_selection_target_y_ = 0.0;
+    double result_selection_target_width_ = 0.0;
+    double result_selection_target_height_ = 0.0;
+    double result_selection_opacity_ = 0.0;
+    bool result_selection_initialized_ = false;
+    bool result_selection_target_visible_ = false;
+    guint central_tick_id_ = 0;
+    gint64 central_last_frame_time_ = 0;
+    double central_progress_ = 0.0;
+    bool central_target_visible_ = false;
+    bool constellation_layout_loaded_ = false;
+    bool constellation_target_visible_ = true;
 };
 
 } // namespace realmheart::ui

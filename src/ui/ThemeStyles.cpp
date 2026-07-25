@@ -61,12 +61,13 @@ ThemeStyles::ThemeStyles(std::shared_ptr<services::ThemeService> theme_service)
         );
     }
 
-    constexpr std::array<std::string_view, 5> component_modules{
+    constexpr std::array<std::string_view, 6> component_modules{
         "taskbar/bar.css",
         "taskbar/icons.css",
         "taskbar/workspaces.css",
         "taskbar/popovers.css",
         "launcher/launcher.css",
+        "launcher/command-receipt.css",
     };
     component_css_ = styles::load_css_modules(component_modules);
 

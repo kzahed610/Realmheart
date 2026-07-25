@@ -24,6 +24,7 @@
 #include "ui/ShellState.hpp"
 #include "ui/ThemeStyles.hpp"
 #include "ui/bar/VerticalBar.hpp"
+#include "ui/launcher/CommandReceiptOverlay.hpp"
 #include "ui/launcher/LauncherOverlay.hpp"
 #include "ui/sidebar/RightSidebar.hpp"
 #include "ui/sidebar/SidebarFrame.hpp"
@@ -330,14 +331,13 @@ public:
           utilities_(std::make_shared<services::UtilityManager>(theme_service_)),
           session_(std::make_unique<services::SessionManager>()),
           battery_(std::make_unique<services::BatteryService>()),
-          media_(std::make_shared<services::MediaService>()),
-          notes_service_(std::make_unique<services::NotesService>()),
-          launcher_service_(std::make_unique<services::LauncherService>()) {
+          media_(std::make_shared<services::MediaService>()) {
         runtime_async_state_->owner.store(this);
         now_playing_async_state_->owner.store(this);
 
         notification_server_.set_notification_handler([this](const auto& entry) {
-            if (toast_) toast_->show(entry, 4000);
+            ensure_toast_overlay();
+            toast_->show(entry, 4000);
         });
 
         if (!notification_daemon_.start()) {
@@ -361,6 +361,7 @@ public:
 
         wallpaper_controller_.reset();
         launcher_overlay_.reset();
+        command_receipts_.reset();
         notes_overlay_.reset();
         toast_.reset();
         osd_.reset();
@@ -384,7 +385,7 @@ public:
     }
 
     void activate() {
-        ensure_initialized();
+        ensure_core_initialized();
         state_.show_bar();
         apply_bar_visibility();
 
@@ -395,17 +396,17 @@ public:
     }
 
     void toggle_character() {
-        ensure_initialized();
+        ensure_sidebar_initialized();
         sidebar_->toggle_character();
     }
 
     void set_character_hair_mode(std::string_view mode_name) {
-        ensure_initialized();
+        ensure_sidebar_initialized();
         static_cast<void>(sidebar_->set_character_hair_mode(mode_name));
     }
 
     void toggle_right_sidebar() {
-        ensure_initialized();
+        ensure_sidebar_initialized();
         const bool before = state_.right_sidebar_visible();
         state_.toggle_right_sidebar();
         sidebar_input_debug(
@@ -418,17 +419,17 @@ public:
     }
 
     void show_osd_volume_value(double value) {
-        ensure_initialized();
+        ensure_osd_overlay();
         osd_->show_volume(value);
     }
 
     void show_osd_brightness_value(double value) {
-        ensure_initialized();
+        ensure_osd_overlay();
         osd_->show_brightness(value);
     }
 
     void show_osd_volume() {
-        ensure_initialized();
+        ensure_core_initialized();
         const auto state = runtime_async_state_;
         const std::uint64_t generation = state->volume_generation.fetch_add(1) + 1;
         static_cast<void>(core::shared_task_executor().post([state, generation] {
@@ -466,7 +467,7 @@ public:
     }
 
     void show_osd_brightness() {
-        ensure_initialized();
+        ensure_core_initialized();
         const auto state = runtime_async_state_;
         const std::uint64_t generation = state->brightness_generation.fetch_add(1) + 1;
         static_cast<void>(core::shared_task_executor().post([state, generation] {
@@ -499,7 +500,7 @@ public:
     }
 
     void toggle_bar() {
-        ensure_initialized();
+        ensure_core_initialized();
         state_.toggle_bar();
         apply_bar_visibility();
     }
@@ -520,12 +521,12 @@ public:
     }
 
     void launch_launcher() {
-        ensure_initialized();
+        ensure_launcher_initialized();
         launcher_overlay_->toggle();
     }
 
     void set_wallpaper(const std::string& path = {}) {
-        ensure_initialized();
+        ensure_core_initialized();
         if (path.empty()) {
             choose_wallpaper_native();
             return;
@@ -535,7 +536,7 @@ public:
     }
 
     void switch_wallpaper_backend(const std::string& backend_name) {
-        ensure_initialized();
+        ensure_core_initialized();
         const auto backend = wallpaper::parse_wallpaper_backend_type(backend_name);
         if (!backend) {
             std::cerr << "Unknown wallpaper backend: " << backend_name
@@ -627,7 +628,7 @@ public:
     }
 
     void toggle_notes() {
-        ensure_initialized();
+        ensure_notes_overlay();
         notes_overlay_->toggle();
     }
 
@@ -784,7 +785,8 @@ private:
         if (identity == last_now_playing_identity_) return;
 
         last_now_playing_identity_ = std::move(identity);
-        if (!info || !now_playing_) return;
+        if (!info) return;
+        ensure_now_playing_overlay();
         const std::string title = info->title.empty()
             ? "Unknown track"
             : info->title;
@@ -860,56 +862,46 @@ private:
         }
     }
 
-    void ensure_initialized() {
-        if (!theme_styles_) {
-            theme_styles_ = std::make_unique<ThemeStyles>(theme_service_);
+    void ensure_toast_overlay() {
+        if (!toast_) {
+            toast_ = std::make_unique<NotificationToast>(application_);
         }
-        if (!toast_) toast_ = std::make_unique<NotificationToast>(application_);
-        if (!now_playing_) {
-            now_playing_ = std::make_unique<NowPlayingOverlay>(application_);
-        }
-        if (!osd_) {
-            osd_ = std::make_unique<OSDOverlay>(
-                application_,
-                [this](bool visible) {
-                    if (now_playing_) now_playing_->set_system_osd_visible(visible);
+    }
+
+    void ensure_now_playing_overlay() {
+        if (now_playing_) return;
+        now_playing_ = std::make_unique<NowPlayingOverlay>(application_);
+        now_playing_->set_system_osd_visible(system_osd_visible_);
+    }
+
+    void ensure_osd_overlay() {
+        if (osd_) return;
+        osd_ = std::make_unique<OSDOverlay>(
+            application_,
+            [this](bool visible) {
+                system_osd_visible_ = visible;
+                if (now_playing_) {
+                    now_playing_->set_system_osd_visible(visible);
                 }
-            );
+            }
+        );
+    }
+
+    void ensure_notes_overlay() {
+        ensure_core_initialized();
+        if (!notes_service_) {
+            notes_service_ = std::make_unique<services::NotesService>();
         }
-        if (!audio_monitor_) {
-            audio_monitor_ = std::make_unique<services::AudioMonitor>(
-                [this](const services::AudioState& audio) {
-                    // Muting does not change PipeWire's stored volume. Showing
-                    // mute as 0% makes a late monitor refresh overwrite the
-                    // real level that was just displayed by the volume action.
-                    // Keep the OSD percentage tied to the actual volume level;
-                    // mute presentation can be handled independently by icon
-                    // state when the OSD gains that capability.
-                    ++runtime_async_state_->volume_generation;
-                    const double percent = std::clamp(
-                        audio.volume * 100.0,
-                        0.0,
-                        100.0
-                    );
-                    show_osd_volume_value(percent);
-                }
-            );
-            audio_monitor_->start();
-        }
-        start_now_playing_monitor();
         if (!notes_overlay_) {
-            notes_overlay_ = std::make_unique<NotesOverlay>(application_, notes_service_.get());
-        }
-        if (!bar_) {
-            bar_ = std::make_unique<bar::VerticalBar>(
+            notes_overlay_ = std::make_unique<NotesOverlay>(
                 application_,
-                notification_history_,
-                *battery_,
-                *media_,
-                [this] { toggle_right_sidebar(); },
-                [this] { launch_launcher(); }
+                notes_service_.get()
             );
         }
+    }
+
+    void ensure_sidebar_initialized() {
+        ensure_core_initialized();
         if (!sidebar_) {
             sidebar_ = std::make_unique<sidebar::RightSidebar>(
                 application_,
@@ -918,85 +910,6 @@ private:
                 [this](double value) { show_osd_brightness_value(value); }
             );
             gtk_widget_set_visible(sidebar_->get_window(), FALSE);
-        }
-        if (hotspot_ == nullptr) {
-            hotspot_ = GTK_WINDOW(gtk_application_window_new(application_));
-            gtk_window_set_decorated(hotspot_, FALSE);
-            gtk_window_set_resizable(hotspot_, FALSE);
-            gtk_widget_add_css_class(
-                GTK_WIDGET(hotspot_),
-                "realmheart-right-hotspot-window"
-            );
-
-            const auto placement = sidebar::sidebar_placement_for(
-                GTK_WIDGET(hotspot_)
-            );
-            gtk_window_set_default_size(
-                hotspot_,
-                kHotspotHitWidth,
-                placement.height
-            );
-
-            LayerSurfaceSpec spec;
-            spec.surface_namespace = "realmheart-right-hotspot";
-            spec.layer = LayerSurfaceLevel::Overlay;
-            spec.anchor_right = true;
-            spec.anchor_top = true;
-            spec.anchor_bottom = false;
-            spec.margin_top = placement.top_margin;
-            apply_layer_surface(hotspot_, spec);
-
-            GtkWidget* button = gtk_button_new();
-            gtk_button_set_has_frame(GTK_BUTTON(button), FALSE);
-            gtk_widget_set_focusable(button, FALSE);
-            gtk_widget_set_hexpand(button, TRUE);
-            gtk_widget_set_vexpand(button, TRUE);
-            gtk_widget_set_size_request(
-                button,
-                kHotspotHitWidth,
-                placement.height
-            );
-            gtk_widget_add_css_class(button, "realmheart-right-hotspot-button");
-            g_signal_connect(
-                button,
-                "clicked",
-                G_CALLBACK(+[](GtkButton*, gpointer data) {
-                    sidebar_input_debug("hotspot button: clicked");
-                    static_cast<ShellRuntime*>(data)->toggle_right_sidebar();
-                }),
-                this
-            );
-            GtkWidget* overlay = gtk_overlay_new();
-            gtk_widget_set_hexpand(overlay, TRUE);
-            gtk_widget_set_vexpand(overlay, TRUE);
-            gtk_overlay_set_child(GTK_OVERLAY(overlay), button);
-
-            GtkWidget* commit_pixel = gtk_drawing_area_new();
-            gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(commit_pixel), 1);
-            gtk_drawing_area_set_content_height(
-                GTK_DRAWING_AREA(commit_pixel),
-                placement.height
-            );
-            gtk_drawing_area_set_draw_func(
-                GTK_DRAWING_AREA(commit_pixel),
-                draw_hotspot_commit_pixel,
-                nullptr,
-                nullptr
-            );
-            gtk_widget_set_halign(commit_pixel, GTK_ALIGN_END);
-            gtk_widget_set_valign(commit_pixel, GTK_ALIGN_FILL);
-            gtk_widget_set_can_target(commit_pixel, FALSE);
-            gtk_widget_set_focusable(commit_pixel, FALSE);
-            gtk_overlay_add_overlay(GTK_OVERLAY(overlay), commit_pixel);
-            gtk_overlay_set_measure_overlay(
-                GTK_OVERLAY(overlay),
-                commit_pixel,
-                FALSE
-            );
-
-            gtk_window_set_child(hotspot_, overlay);
-            gtk_window_present(hotspot_);
-            enforce_hotspot_input_region(hotspot_);
         }
         if (sidebar_backdrop_ == nullptr) {
             sidebar_backdrop_ = GTK_WINDOW(
@@ -1102,12 +1015,139 @@ private:
             gtk_window_set_child(sidebar_backdrop_, backdrop_overlay);
             gtk_widget_set_visible(GTK_WIDGET(sidebar_backdrop_), FALSE);
         }
+    }
+
+    void ensure_launcher_initialized() {
+        ensure_core_initialized();
+        if (!launcher_service_) {
+            launcher_service_ = std::make_unique<services::LauncherService>();
+        }
+        if (!command_receipts_) {
+            command_receipts_ = std::make_unique<CommandReceiptOverlay>();
+        }
         if (!launcher_overlay_) {
             launcher_overlay_ = std::make_unique<LauncherOverlay>(
                 application_,
                 *launcher_service_,
-                *utilities_->get_wallpaper_service()
+                *utilities_->get_wallpaper_service(),
+                *command_receipts_
             );
+        }
+    }
+
+    void ensure_core_initialized() {
+        if (!theme_styles_) {
+            theme_styles_ = std::make_unique<ThemeStyles>(theme_service_);
+        }
+        if (!audio_monitor_) {
+            audio_monitor_ = std::make_unique<services::AudioMonitor>(
+                [this](const services::AudioState& audio) {
+                    // Muting does not change PipeWire's stored volume. Showing
+                    // mute as 0% makes a late monitor refresh overwrite the
+                    // real level that was just displayed by the volume action.
+                    // Keep the OSD percentage tied to the actual volume level;
+                    // mute presentation can be handled independently by icon
+                    // state when the OSD gains that capability.
+                    ++runtime_async_state_->volume_generation;
+                    const double percent = std::clamp(
+                        audio.volume * 100.0,
+                        0.0,
+                        100.0
+                    );
+                    show_osd_volume_value(percent);
+                }
+            );
+            audio_monitor_->start();
+        }
+        start_now_playing_monitor();
+        if (!bar_) {
+            bar_ = std::make_unique<bar::VerticalBar>(
+                application_,
+                notification_history_,
+                *battery_,
+                *media_,
+                [this] { toggle_right_sidebar(); },
+                [this] { launch_launcher(); }
+            );
+        }
+        if (hotspot_ == nullptr) {
+            hotspot_ = GTK_WINDOW(gtk_application_window_new(application_));
+            gtk_window_set_decorated(hotspot_, FALSE);
+            gtk_window_set_resizable(hotspot_, FALSE);
+            gtk_widget_add_css_class(
+                GTK_WIDGET(hotspot_),
+                "realmheart-right-hotspot-window"
+            );
+
+            const auto placement = sidebar::sidebar_placement_for(
+                GTK_WIDGET(hotspot_)
+            );
+            gtk_window_set_default_size(
+                hotspot_,
+                kHotspotHitWidth,
+                placement.height
+            );
+
+            LayerSurfaceSpec spec;
+            spec.surface_namespace = "realmheart-right-hotspot";
+            spec.layer = LayerSurfaceLevel::Overlay;
+            spec.anchor_right = true;
+            spec.anchor_top = true;
+            spec.anchor_bottom = false;
+            spec.margin_top = placement.top_margin;
+            apply_layer_surface(hotspot_, spec);
+
+            GtkWidget* button = gtk_button_new();
+            gtk_button_set_has_frame(GTK_BUTTON(button), FALSE);
+            gtk_widget_set_focusable(button, FALSE);
+            gtk_widget_set_hexpand(button, TRUE);
+            gtk_widget_set_vexpand(button, TRUE);
+            gtk_widget_set_size_request(
+                button,
+                kHotspotHitWidth,
+                placement.height
+            );
+            gtk_widget_add_css_class(button, "realmheart-right-hotspot-button");
+            g_signal_connect(
+                button,
+                "clicked",
+                G_CALLBACK(+[](GtkButton*, gpointer data) {
+                    sidebar_input_debug("hotspot button: clicked");
+                    static_cast<ShellRuntime*>(data)->toggle_right_sidebar();
+                }),
+                this
+            );
+            GtkWidget* overlay = gtk_overlay_new();
+            gtk_widget_set_hexpand(overlay, TRUE);
+            gtk_widget_set_vexpand(overlay, TRUE);
+            gtk_overlay_set_child(GTK_OVERLAY(overlay), button);
+
+            GtkWidget* commit_pixel = gtk_drawing_area_new();
+            gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(commit_pixel), 1);
+            gtk_drawing_area_set_content_height(
+                GTK_DRAWING_AREA(commit_pixel),
+                placement.height
+            );
+            gtk_drawing_area_set_draw_func(
+                GTK_DRAWING_AREA(commit_pixel),
+                draw_hotspot_commit_pixel,
+                nullptr,
+                nullptr
+            );
+            gtk_widget_set_halign(commit_pixel, GTK_ALIGN_END);
+            gtk_widget_set_valign(commit_pixel, GTK_ALIGN_FILL);
+            gtk_widget_set_can_target(commit_pixel, FALSE);
+            gtk_widget_set_focusable(commit_pixel, FALSE);
+            gtk_overlay_add_overlay(GTK_OVERLAY(overlay), commit_pixel);
+            gtk_overlay_set_measure_overlay(
+                GTK_OVERLAY(overlay),
+                commit_pixel,
+                FALSE
+            );
+
+            gtk_window_set_child(hotspot_, overlay);
+            gtk_window_present(hotspot_);
+            enforce_hotspot_input_region(hotspot_);
         }
         if (!wallpaper_controller_) {
             wallpaper_controller_ = std::make_unique<wallpaper::WallpaperController>(
@@ -1188,6 +1228,7 @@ private:
         std::make_shared<RuntimeAsyncState>();
     bool now_playing_monitor_started_ = false;
     bool now_playing_seeded_ = false;
+    bool system_osd_visible_ = false;
     std::string last_now_playing_identity_;
     std::unique_ptr<services::NotesService> notes_service_;
     std::unique_ptr<services::LauncherService> launcher_service_;
@@ -1202,6 +1243,7 @@ private:
     GtkWindow* hotspot_ = nullptr;
     GtkWindow* sidebar_backdrop_ = nullptr;
     std::unique_ptr<sidebar::RightSidebar> sidebar_;
+    std::unique_ptr<CommandReceiptOverlay> command_receipts_;
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
     std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;
 

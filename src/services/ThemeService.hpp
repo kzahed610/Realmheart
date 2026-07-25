@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -71,6 +72,7 @@ private:
 
     mutable std::mutex palette_mutex_;
     Palette palette_;
+    std::filesystem::path cache_path_;
     std::shared_ptr<SubscriberRegistry> subscribers_ = std::make_shared<SubscriberRegistry>();
 };
 

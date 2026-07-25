@@ -95,3 +95,42 @@ TEST_F(LauncherServiceTest, RecommendationsContainOnlyLaunchableEntriesAndRespec
     EXPECT_EQ(results[0].id, "a");
     EXPECT_EQ(results[1].id, "z");
 }
+
+TEST_F(LauncherServiceTest, SearchesExecutableAndDescriptionMetadata) {
+    LauncherResult browser{
+        LauncherResultKind::Application,
+        "org.example.Browser.desktop",
+        "Aurora",
+        "",
+        "web-browser",
+        {}
+    };
+    browser.description = "Private web browser";
+    browser.executable = "aurora-browser";
+    browser.search_terms = {"internet", "navigation"};
+    service.set_mock_index({browser});
+
+    ASSERT_EQ(service.search("aurora-browser", 10).front().id, browser.id);
+    ASSERT_EQ(service.search("private web", 10).front().id, browser.id);
+    ASSERT_EQ(service.search("navigation", 10).front().id, browser.id);
+}
+
+TEST_F(LauncherServiceTest, AcronymSearchFindsApplication) {
+    service.set_mock_index({
+        {LauncherResultKind::Application, "code", "Visual Studio Code", "", "", {}}
+    });
+
+    const auto results = service.search("vsc", 10);
+    ASSERT_FALSE(results.empty());
+    EXPECT_EQ(results.front().id, "code");
+}
+
+TEST_F(LauncherServiceTest, FuzzySearchFindsApplication) {
+    service.set_mock_index({
+        {LauncherResultKind::Application, "gravity", "Antigravity", "", "", {}}
+    });
+
+    const auto results = service.search("antgrvty", 10);
+    ASSERT_FALSE(results.empty());
+    EXPECT_EQ(results.front().id, "gravity");
+}

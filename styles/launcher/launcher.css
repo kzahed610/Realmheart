@@ -38,8 +38,19 @@ window.realmheart-launcher-window > *,
   );
   border: 1px solid alpha(@rh_icon_accent, 0.72);
   border-radius: 25px;
+  /* Keep this shadow compact. A very wide blur intersects the freely placed
+   * constellation nodes and GTK rasterises the overlap as a serrated edge. */
   box-shadow:
-    0 22px 54px alpha(#000000, 0.52),
+    0 14px 26px alpha(#000000, 0.46),
+    inset 0 1px alpha(@rh_text, 0.06);
+}
+
+
+.realmheart-launcher-centre-shell.searching {
+  /* Avoid two blurred layers intersecting above the results sheet. The gold
+   * frame and opaque surface already preserve separation in this state. */
+  box-shadow:
+    0 4px 10px alpha(#000000, 0.20),
     inset 0 1px alpha(@rh_text, 0.06);
 }
 
@@ -116,94 +127,96 @@ entry.realmheart-launcher-search placeholder {
   color: alpha(@rh_text_muted, 0.82);
 }
 
-.realmheart-launcher-eyebrow,
-.realmheart-launcher-inspector-kind,
 .realmheart-launcher-result-kind {
   color: alpha(@rh_icon_accent, 0.86);
   font-size: 0.70em;
   font-weight: 700;
 }
 
-.realmheart-launcher-recommendations {
-  min-height: 48px;
+.realmheart-launcher-constellation {
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
 }
 
-.realmheart-launcher-recommendation,
-.realmheart-launcher-recommendation:hover,
-.realmheart-launcher-recommendation:active,
-.realmheart-launcher-recommendation:focus,
-.realmheart-launcher-recommendation:focus-visible {
-  min-height: 42px;
+.realmheart-launcher-constellation-node,
+.realmheart-launcher-constellation-node:hover,
+.realmheart-launcher-constellation-node:active,
+.realmheart-launcher-constellation-node:focus,
+.realmheart-launcher-constellation-node:focus-visible {
+  min-width: 72px;
+  min-height: 62px;
   margin: 0;
-  padding: 4px;
+  padding: 4px 6px;
   color: @rh_text;
-  background-color: alpha(@rh_surface_variant, 0.30);
+  background-color: transparent;
   background-image: none;
-  border: 1px solid alpha(@rh_outline, 0.24);
-  border-radius: 13px;
+  border: 1px solid transparent;
+  border-radius: 16px;
   box-shadow: none;
   outline: none;
 }
 
-.realmheart-launcher-recommendation:hover,
-.realmheart-launcher-recommendation:focus-visible {
-  background-color: alpha(@rh_surface_variant, 0.52);
-  border-color: alpha(@rh_primary, 0.48);
-  box-shadow: 0 0 14px alpha(@rh_primary, 0.11);
-}
-
-.realmheart-launcher-recommendation:active {
-  background-color: alpha(@rh_primary, 0.22);
-  border-color: alpha(@rh_primary, 0.72);
-}
-
-.realmheart-launcher-recommendation-label {
-  color: @rh_text;
-  font-size: 0.72em;
-  font-weight: 600;
-}
-
-.realmheart-launcher-panel {
-  padding: 24px;
-  color: @rh_text;
-  background-color: alpha(@rh_background, 0.972);
-  background-image: linear-gradient(
-    to bottom,
-    alpha(@rh_surface_variant, 0.13),
-    alpha(@rh_background, 0.02)
-  );
-  border: 1px solid alpha(@rh_icon_accent, 0.42);
-  border-radius: 27px;
+.realmheart-launcher-constellation-node:active,
+.realmheart-launcher-constellation-node.dragging {
+  background-color: alpha(@rh_primary, 0.18);
+  border-color: alpha(@rh_primary, 0.82);
   box-shadow:
-    0 20px 48px alpha(#000000, 0.46),
+    0 16px 24px alpha(#000000, 0.40),
+    0 0 0 1px alpha(@rh_primary, 0.18),
+    0 0 16px alpha(@rh_primary, 0.10),
+    inset 0 1px alpha(@rh_text, 0.055);
+}
+
+.realmheart-launcher-constellation-node.settling {
+  background-color: alpha(@rh_primary, 0.10);
+  border-color: alpha(@rh_primary, 0.48);
+  box-shadow:
+    0 10px 17px alpha(#000000, 0.31),
+    0 0 0 1px alpha(@rh_primary, 0.08),
     inset 0 1px alpha(@rh_text, 0.04);
 }
 
-.realmheart-launcher-session-panel {
-  border-color: alpha(@rh_icon_accent, 0.32);
+.realmheart-launcher-constellation-label {
+  color: alpha(@rh_text, 0.82);
+  font-size: 0.67em;
+  font-weight: 600;
+  text-shadow: 0 1px 5px alpha(#000000, 0.88);
 }
 
-.realmheart-launcher-inspector-panel {
-  border-color: alpha(@rh_primary, 0.48);
-}
-
-.realmheart-launcher-panel-title {
+.realmheart-launcher-constellation-node:hover .realmheart-launcher-constellation-label,
+.realmheart-launcher-constellation-node.keyboard-selected .realmheart-launcher-constellation-label,
+.realmheart-launcher-constellation-node.dragging .realmheart-launcher-constellation-label {
   color: @rh_text;
-  font-size: 1.22em;
-  font-weight: 700;
 }
 
-.realmheart-launcher-session-row {
-  min-height: 56px;
-  padding: 10px 12px;
+popover.realmheart-launcher-constellation-menu > contents {
   color: @rh_text;
-  background-color: alpha(@rh_surface_variant, 0.25);
-  border: 1px solid alpha(@rh_outline, 0.22);
-  border-radius: 16px;
+  background-color: alpha(@rh_background, 0.985);
+  border: 1px solid alpha(@rh_icon_accent, 0.46);
+  border-radius: 14px;
+  box-shadow: 0 14px 34px alpha(#000000, 0.50);
 }
 
-.realmheart-launcher-session-icon {
-  color: @rh_text_muted;
+.realmheart-launcher-constellation-menu-item,
+.realmheart-launcher-constellation-menu-item:hover,
+.realmheart-launcher-constellation-menu-item:active,
+.realmheart-launcher-constellation-menu-item:focus-visible {
+  min-height: 34px;
+  padding: 4px 10px;
+  color: @rh_text;
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  border-radius: 9px;
+  box-shadow: none;
+  outline: none;
+}
+
+.realmheart-launcher-constellation-menu-item:hover,
+.realmheart-launcher-constellation-menu-item:focus-visible {
+  background-color: alpha(@rh_surface_variant, 0.52);
 }
 
 .realmheart-launcher-row-title {
@@ -211,41 +224,11 @@ entry.realmheart-launcher-search placeholder {
   font-weight: 600;
 }
 
-.realmheart-launcher-row-subtitle,
-.realmheart-launcher-panel-note,
-.realmheart-launcher-inspector-subtitle {
+.realmheart-launcher-row-subtitle {
   color: @rh_text_muted;
   font-size: 0.86em;
 }
 
-.realmheart-launcher-panel-note {
-  padding-top: 12px;
-  border-top: 1px solid alpha(@rh_outline, 0.28);
-}
-
-.realmheart-launcher-inspector-identity {
-  padding-top: 6px;
-}
-
-.realmheart-launcher-inspector-icon {
-  color: @rh_text;
-  margin-bottom: 8px;
-}
-
-.realmheart-launcher-inspector-title {
-  color: @rh_text;
-  font-size: 1.32em;
-  font-weight: 700;
-}
-
-.realmheart-launcher-inspector-hint {
-  padding: 15px 16px;
-  color: alpha(@rh_text, 0.88);
-  background-color: alpha(@rh_primary, 0.10);
-  border: 1px solid alpha(@rh_primary, 0.24);
-  border-radius: 16px;
-  font-size: 0.84em;
-}
 
 .realmheart-launcher-results-shell {
   color: @rh_text;
@@ -257,8 +240,10 @@ entry.realmheart-launcher-search placeholder {
   );
   border: 1px solid alpha(@rh_icon_accent, 0.48);
   border-radius: 21px;
+  /* Search mode gives the lower sheet the only meaningful external shadow.
+   * Keep it compact and downward-biased so the upper edge stays crisp. */
   box-shadow:
-    0 20px 46px alpha(#000000, 0.48),
+    0 11px 18px alpha(#000000, 0.26),
     inset 0 1px alpha(@rh_text, 0.04);
   padding: 10px;
 }
@@ -282,13 +267,31 @@ entry.realmheart-launcher-search placeholder {
 }
 
 .realmheart-launcher-result-row:hover {
-  background-color: alpha(@rh_surface_variant, 0.36);
+  background-color: transparent;
 }
 
 .realmheart-launcher-result-row:selected {
   color: @rh_text;
-  background-color: alpha(@rh_primary, 0.18);
-  box-shadow: inset 3px 0 alpha(@rh_primary, 0.92);
+  background-color: transparent;
+  box-shadow: none;
+}
+
+/* One selection plate glides between result rows. Keeping the highlight in a
+ * dedicated overlay avoids the abrupt selected-background swap performed by
+ * GtkListBox itself and allows momentum to carry through rapid key repeats. */
+.realmheart-launcher-result-selection {
+  background-color: alpha(@rh_primary, 0.14);
+  background-image: linear-gradient(
+    to right,
+    alpha(@rh_primary, 0.09),
+    alpha(@rh_surface_variant, 0.20)
+  );
+  border: 1px solid alpha(@rh_primary, 0.16);
+  border-left: 3px solid alpha(@rh_primary, 0.94);
+  border-radius: 14px;
+  box-shadow:
+    0 8px 17px alpha(#000000, 0.18),
+    inset 0 1px alpha(@rh_text, 0.035);
 }
 
 .realmheart-launcher-result-row:selected .realmheart-launcher-result-kind {
@@ -303,4 +306,63 @@ entry.realmheart-launcher-search placeholder {
 .realmheart-launcher-empty {
   color: @rh_text_muted;
   font-size: 0.86em;
+}
+
+.realmheart-launcher-result-pin,
+.realmheart-launcher-result-pin:hover,
+.realmheart-launcher-result-pin:active,
+.realmheart-launcher-result-pin:focus,
+.realmheart-launcher-result-pin:focus-visible {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  color: @rh_text_muted;
+  background-color: transparent;
+  background-image: none;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  box-shadow: none;
+  outline: none;
+}
+
+.realmheart-launcher-result-pin:hover,
+.realmheart-launcher-result-pin:focus-visible {
+  color: @rh_primary;
+  background-color: alpha(@rh_surface_variant, 0.44);
+  border-color: alpha(@rh_primary, 0.34);
+}
+
+/* One-shot activation trace. It travels across the lower edge while the
+ * aperture comes online, then removes itself completely from the scene. */
+.realmheart-launcher-activation-sweep {
+  min-height: 2px;
+  border-radius: 999px;
+  background-color: transparent;
+  background-image: linear-gradient(
+    to right,
+    alpha(@rh_icon_accent, 0.00),
+    alpha(@rh_icon_accent, 0.92) 48%,
+    alpha(@rh_text, 0.72) 52%,
+    alpha(@rh_icon_accent, 0.00)
+  );
+  box-shadow: 0 0 10px alpha(@rh_icon_accent, 0.24);
+}
+
+/* Spatial keyboard focus is rendered as one reticle that physically travels
+ * between nodes. The selected node itself only lifts subtly, avoiding an
+ * abrupt card-to-card highlight swap when an arrow key is pressed. */
+.realmheart-launcher-constellation-cursor {
+  background-color: alpha(@rh_primary, 0.055);
+  background-image: radial-gradient(
+    circle at center,
+    alpha(@rh_primary, 0.035),
+    transparent 68%
+  );
+  border: 1px solid alpha(@rh_primary, 0.58);
+  border-radius: 20px;
+  box-shadow:
+    0 10px 22px alpha(#000000, 0.24),
+    0 0 0 1px alpha(@rh_primary, 0.09),
+    0 0 18px alpha(@rh_primary, 0.10),
+    inset 0 1px alpha(@rh_text, 0.04);
 }

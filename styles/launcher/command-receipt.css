@@ -1,0 +1,250 @@
+.realmheart-command-receipt-host {
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  color: @rh_text;
+}
+
+.realmheart-command-receipt-card {
+  min-width: 390px;
+  color: @rh_text;
+  background-color: alpha(@rh_background, 0.985);
+  background-image: linear-gradient(
+    to bottom,
+    alpha(@rh_surface_variant, 0.20),
+    alpha(@rh_background, 0.04)
+  );
+  border: 1px solid alpha(@rh_icon_accent, 0.54);
+  border-radius: 20px;
+  box-shadow:
+    0 16px 34px alpha(#000000, 0.46),
+    inset 0 1px alpha(@rh_text, 0.05);
+  cursor: grab;
+}
+
+.realmheart-command-receipt-card.running {
+  border-color: alpha(@rh_primary, 0.72);
+}
+
+.realmheart-command-receipt-card.success {
+  border-color: alpha(@rh_icon_accent, 0.70);
+}
+
+.realmheart-command-receipt-card.failure {
+  border-color: alpha(@rh_error, 0.82);
+}
+
+.realmheart-command-receipt-header {
+  padding: 14px 14px 10px;
+  border-bottom: 1px solid alpha(@rh_outline, 0.34);
+}
+
+.realmheart-command-receipt-status-glyph {
+  min-width: 30px;
+  min-height: 30px;
+  border-radius: 15px;
+  color: @rh_primary;
+  background-color: alpha(@rh_primary, 0.14);
+  font-size: 1.06em;
+  font-weight: 800;
+}
+
+.realmheart-command-receipt-card.success .realmheart-command-receipt-status-glyph {
+  color: @rh_icon_accent;
+  background-color: alpha(@rh_icon_accent, 0.13);
+}
+
+.realmheart-command-receipt-card.failure .realmheart-command-receipt-status-glyph {
+  color: @rh_error;
+  background-color: alpha(@rh_error, 0.14);
+}
+
+.realmheart-command-receipt-title {
+  color: @rh_text;
+  font-size: 1.00em;
+  font-weight: 700;
+}
+
+.realmheart-command-receipt-state {
+  color: @rh_text_muted;
+  font-size: 0.78em;
+  font-weight: 600;
+}
+
+.realmheart-command-receipt-card.running .realmheart-command-receipt-state {
+  color: alpha(@rh_primary, 0.94);
+}
+
+.realmheart-command-receipt-card.success .realmheart-command-receipt-state {
+  color: alpha(@rh_icon_accent, 0.94);
+}
+
+.realmheart-command-receipt-card.failure .realmheart-command-receipt-state {
+  color: alpha(@rh_error, 0.96);
+}
+
+.realmheart-command-receipt-close,
+.realmheart-command-receipt-close:hover,
+.realmheart-command-receipt-close:active,
+.realmheart-command-receipt-close:focus-visible {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 15px;
+  color: alpha(@rh_text_muted, 0.84);
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+  outline: none;
+  font-size: 1.18em;
+}
+
+.realmheart-command-receipt-close:hover,
+.realmheart-command-receipt-close:focus-visible {
+  color: @rh_text;
+  background-color: alpha(@rh_surface_variant, 0.50);
+}
+
+.realmheart-command-receipt-body {
+  padding: 12px 15px 11px;
+}
+
+.realmheart-command-receipt-command {
+  color: alpha(@rh_text, 0.88);
+  font-family: monospace;
+  font-size: 0.82em;
+}
+
+.realmheart-command-receipt-summary {
+  color: @rh_text;
+}
+
+.realmheart-command-receipt-metadata {
+  color: alpha(@rh_text_muted, 0.82);
+  font-size: 0.76em;
+}
+
+.realmheart-command-receipt-log-shell {
+  margin: 0 14px;
+  padding-top: 10px;
+  border-top: 1px solid alpha(@rh_outline, 0.34);
+}
+
+.realmheart-command-receipt-log-scroller {
+  border: 1px solid alpha(@rh_outline, 0.38);
+  border-radius: 13px;
+  background-color: alpha(#000000, 0.22);
+  box-shadow: inset 0 1px 10px alpha(#000000, 0.20);
+}
+
+.realmheart-command-receipt-log-scroller viewport,
+.realmheart-command-receipt-log-view,
+.realmheart-command-receipt-log-view text {
+  color: alpha(@rh_text, 0.90);
+  background-color: transparent;
+  background-image: none;
+  border: none;
+}
+
+.realmheart-command-receipt-log-view {
+  padding: 12px;
+  font-size: 0.82em;
+}
+
+.realmheart-command-receipt-actions {
+  padding: 10px 14px 14px;
+}
+
+.realmheart-command-receipt-action,
+.realmheart-command-receipt-action:hover,
+.realmheart-command-receipt-action:active,
+.realmheart-command-receipt-action:focus-visible {
+  min-height: 32px;
+  padding: 3px 11px;
+  color: @rh_text;
+  background-color: alpha(@rh_surface_variant, 0.34);
+  background-image: none;
+  border: 1px solid alpha(@rh_outline, 0.40);
+  border-radius: 11px;
+  box-shadow: none;
+  outline: none;
+  font-size: 0.80em;
+  font-weight: 600;
+}
+
+.realmheart-command-receipt-action:hover,
+.realmheart-command-receipt-action:focus-visible {
+  background-color: alpha(@rh_surface_variant, 0.56);
+  border-color: alpha(@rh_primary, 0.54);
+}
+
+.realmheart-command-receipt-action.suggested-action {
+  color: @rh_text;
+  background-color: alpha(@rh_primary, 0.17);
+  border-color: alpha(@rh_primary, 0.48);
+}
+
+.realmheart-command-receipt-card.dragging,
+.realmheart-command-receipt-card.discarding {
+  cursor: grabbing;
+}
+
+.realmheart-command-receipt-close,
+.realmheart-command-receipt-action {
+  cursor: pointer;
+}
+
+.realmheart-command-receipt-card.dragging {
+  box-shadow:
+    0 22px 42px alpha(#000000, 0.52),
+    0 0 0 1px alpha(@rh_primary, 0.13),
+    inset 0 1px alpha(@rh_text, 0.05);
+}
+
+.realmheart-command-receipt-card.dismiss-armed {
+  border-color: alpha(@rh_error, 0.94);
+  box-shadow:
+    0 24px 44px alpha(#000000, 0.50),
+    0 0 28px alpha(@rh_error, 0.24),
+    inset 0 1px alpha(@rh_text, 0.05);
+}
+
+.realmheart-command-receipt-trash-host {
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+}
+
+.realmheart-command-receipt-trash-target {
+  min-width: 112px;
+  min-height: 112px;
+  border: 1px solid alpha(@rh_error, 0.42);
+  border-radius: 56px;
+  background-color: alpha(@rh_error, 0.10);
+  background-image: radial-gradient(
+    circle,
+    alpha(@rh_error, 0.16),
+    alpha(@rh_error, 0.04) 66%,
+    transparent
+  );
+  box-shadow:
+    0 0 32px alpha(@rh_error, 0.20),
+    inset 0 0 25px alpha(@rh_error, 0.11);
+}
+
+.realmheart-command-receipt-trash-target.armed {
+  border-color: alpha(@rh_error, 0.96);
+  background-color: alpha(@rh_error, 0.22);
+  box-shadow:
+    0 0 52px alpha(@rh_error, 0.44),
+    0 0 0 10px alpha(@rh_error, 0.08),
+    inset 0 0 30px alpha(@rh_error, 0.19);
+}
+
+.realmheart-command-receipt-trash-icon {
+  color: @rh_error;
+  margin: 0;
+}

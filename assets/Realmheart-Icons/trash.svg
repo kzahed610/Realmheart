@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+  <!-- lid -->
+  <path d="M8.2 5.25H15.8L17.1 6.55V7.7H6.9V6.55L8.2 5.25Z" fill="currentColor"/>
+  <!-- handle -->
+  <path d="M10.05 3.85H13.95L14.75 4.65V5.45H9.25V4.65L10.05 3.85Z" fill="currentColor"/>
+  <!-- upper lip -->
+  <path d="M4.95 8.8H19.05" stroke="currentColor" stroke-width="1.85" stroke-linecap="round"/>
+  <!-- body -->
+  <path d="M7.05 9.7H16.95L18.15 10.9L17.35 18.55L15.9 20H8.1L6.65 18.55L5.85 10.9L7.05 9.7Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+  <!-- inner slats -->
+  <path d="M9.35 11.55V17.75" stroke="currentColor" stroke-width="1.65" stroke-linecap="round"/>
+  <path d="M12 11L13.15 12.15L12 13.3L10.85 12.15L12 11Z" fill="currentColor"/>
+  <path d="M12 11.55V17.75" stroke="currentColor" stroke-width="1.65" stroke-linecap="round"/>
+  <path d="M14.65 11.55V17.75" stroke="currentColor" stroke-width="1.65" stroke-linecap="round"/>
+  <!-- bottom shard detail -->
+  <path d="M10.4 18.55L12 20.15L13.6 18.55" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
