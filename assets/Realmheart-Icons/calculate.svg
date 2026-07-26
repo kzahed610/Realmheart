@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+  <!-- body -->
+  <path d="M7 4.75H17L18.4 6.15V17.85L17 19.25H7L5.6 17.85V6.15L7 4.75Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+  <!-- display -->
+  <path d="M8.55 7.1H15.45" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
+  <!-- plus -->
+  <path d="M9 11.15V13.65" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
+  <path d="M7.75 12.4H10.25" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
+  <!-- minus -->
+  <path d="M13.75 12.4H16.25" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
+  <!-- multiply as diamond -->
+  <path d="M9 15.1L10.25 16.35L9 17.6L7.75 16.35L9 15.1Z" fill="currentColor"/>
+  <!-- equals -->
+  <path d="M13.8 15.55H16.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+  <path d="M13.8 17.15H16.2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+</svg>

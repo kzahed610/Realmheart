@@ -10,11 +10,15 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <charconv>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <string_view>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -65,6 +69,37 @@ std::string trim_copy(std::string_view value) {
     if (first == std::string_view::npos) return {};
     const auto last = value.find_last_not_of(" \t\n\r");
     return std::string(value.substr(first, last - first + 1));
+}
+
+std::size_t data_start_after_standalone_marker(
+    std::string_view contents,
+    std::string_view marker
+) {
+    std::size_t line_start = 0;
+    while (line_start <= contents.size()) {
+        const std::size_t line_end = contents.find('\n', line_start);
+        std::string_view line = contents.substr(
+            line_start,
+            line_end == std::string_view::npos
+                ? contents.size() - line_start
+                : line_end - line_start
+        );
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+
+        const std::size_t first = line.find_first_not_of(" \t");
+        if (first != std::string_view::npos) {
+            const std::size_t last = line.find_last_not_of(" \t");
+            if (line.substr(first, last - first + 1) == marker) {
+                return line_end == std::string_view::npos
+                    ? contents.size()
+                    : line_end + 1;
+            }
+        }
+
+        if (line_end == std::string_view::npos) break;
+        line_start = line_end + 1;
+    }
+    return std::string_view::npos;
 }
 
 std::string normalized_copy(std::string_view value) {
@@ -161,11 +196,6 @@ bool running_inside_systemd_unit() {
     return invocation_id != nullptr && *invocation_id != '\0';
 }
 
-bool contains_shell_syntax(std::string_view value) {
-    constexpr std::string_view syntax = "|&;<>(){}$`\n\r";
-    return value.find_first_of(syntax) != std::string_view::npos;
-}
-
 std::string first_command_token(std::string_view command) {
     const auto first = command.find_first_not_of(" \t");
     if (first == std::string_view::npos) return {};
@@ -242,17 +272,266 @@ std::vector<std::string> split_tabs(std::string_view line) {
     return fields;
 }
 
-bool is_valid_plain_command(std::string_view command) {
-    if (command.empty() || contains_shell_syntax(command)) return false;
-    const std::string executable = first_command_token(command);
-    if (executable.empty()) return false;
+struct CalculationEvaluation {
+    std::string result;
+    std::string display_expression;
+};
 
-    if (executable.find('/') != std::string::npos) {
-        std::error_code error;
-        const fs::path path(executable);
-        return fs::is_regular_file(path, error) && !error;
+class LauncherExpressionParser {
+public:
+    explicit LauncherExpressionParser(std::string_view input) : input_(input) {}
+
+    std::optional<double> parse() {
+        if (input_.empty() || input_.size() > 256) return std::nullopt;
+
+        const auto value = parse_expression();
+        skip_spaces();
+        if (!value.has_value() || position_ != input_.size() || operator_count_ == 0 ||
+            !std::isfinite(*value)) {
+            return std::nullopt;
+        }
+        return value;
     }
-    return realmheart::core::command_exists(executable);
+
+private:
+    std::optional<double> parse_expression() {
+        auto left = parse_term();
+        if (!left.has_value()) return std::nullopt;
+
+        while (true) {
+            skip_spaces();
+            if (consume('+')) {
+                auto right = parse_term();
+                if (!right.has_value()) return std::nullopt;
+                ++operator_count_;
+                left = checked(*left + *right);
+            } else if (consume('-')) {
+                auto right = parse_term();
+                if (!right.has_value()) return std::nullopt;
+                ++operator_count_;
+                left = checked(*left - *right);
+            } else {
+                return left;
+            }
+            if (!left.has_value()) return std::nullopt;
+        }
+    }
+
+    std::optional<double> parse_term() {
+        auto left = parse_unary();
+        if (!left.has_value()) return std::nullopt;
+
+        while (true) {
+            skip_spaces();
+            if (consume('*')) {
+                auto right = parse_unary();
+                if (!right.has_value()) return std::nullopt;
+                ++operator_count_;
+                left = checked(*left * *right);
+            } else if (consume('/')) {
+                auto right = parse_unary();
+                if (!right.has_value() || *right == 0.0) return std::nullopt;
+                ++operator_count_;
+                left = checked(*left / *right);
+            } else if (consume('%')) {
+                auto right = parse_unary();
+                if (!right.has_value() || *right == 0.0) return std::nullopt;
+                ++operator_count_;
+                left = checked(std::fmod(*left, *right));
+            } else {
+                return left;
+            }
+            if (!left.has_value()) return std::nullopt;
+        }
+    }
+
+    std::optional<double> parse_unary() {
+        skip_spaces();
+        if (consume('+')) {
+            ++operator_count_;
+            return parse_unary();
+        }
+        if (consume('-')) {
+            ++operator_count_;
+            const auto value = parse_unary();
+            return value.has_value() ? checked(-*value) : std::nullopt;
+        }
+        return parse_power();
+    }
+
+    std::optional<double> parse_power() {
+        auto base = parse_primary();
+        if (!base.has_value()) return std::nullopt;
+
+        skip_spaces();
+        if (!consume('^')) return base;
+
+        ++operator_count_;
+        const auto exponent = parse_unary();
+        if (!exponent.has_value()) return std::nullopt;
+        return checked(std::pow(*base, *exponent));
+    }
+
+    std::optional<double> parse_primary() {
+        skip_spaces();
+        if (consume('(')) {
+            auto value = parse_expression();
+            skip_spaces();
+            if (!value.has_value() || !consume(')')) return std::nullopt;
+            return value;
+        }
+        return parse_number();
+    }
+
+    std::optional<double> parse_number() {
+        skip_spaces();
+        if (position_ >= input_.size()) return std::nullopt;
+
+        double value = 0.0;
+        const char* const first = input_.data() + position_;
+        const char* const last = input_.data() + input_.size();
+        const auto [parsed_end, error] = std::from_chars(
+            first,
+            last,
+            value,
+            std::chars_format::general
+        );
+        if (error != std::errc{} || parsed_end == first || !std::isfinite(value)) {
+            return std::nullopt;
+        }
+        position_ = static_cast<std::size_t>(parsed_end - input_.data());
+        return value;
+    }
+
+    static std::optional<double> checked(double value) {
+        return std::isfinite(value) ? std::optional<double>(value) : std::nullopt;
+    }
+
+    void skip_spaces() {
+        while (position_ < input_.size() &&
+               std::isspace(static_cast<unsigned char>(input_[position_])) != 0) {
+            ++position_;
+        }
+    }
+
+    bool consume(char character) {
+        if (position_ >= input_.size() || input_[position_] != character) return false;
+        ++position_;
+        return true;
+    }
+
+    std::string_view input_;
+    std::size_t position_ = 0;
+    std::size_t operator_count_ = 0;
+};
+
+std::string format_calculation_result(double value) {
+    if (value == 0.0) value = 0.0; // Normalize negative zero.
+
+    std::array<char, 96> buffer{};
+    const auto [end, error] = std::to_chars(
+        buffer.data(),
+        buffer.data() + buffer.size(),
+        value,
+        std::chars_format::general,
+        15
+    );
+    if (error != std::errc{}) return {};
+    return std::string(buffer.data(), end);
+}
+
+std::string calculation_display_expression(std::string_view expression) {
+    std::string display;
+    display.reserve(expression.size() + 8);
+    for (const char character : expression) {
+        if (character == '*') {
+            display += "×";
+        } else if (character == '/') {
+            display += "÷";
+        } else {
+            display.push_back(character);
+        }
+    }
+    return display;
+}
+
+std::optional<CalculationEvaluation> evaluate_calculation(std::string_view expression) {
+    LauncherExpressionParser parser(expression);
+    const auto value = parser.parse();
+    if (!value.has_value()) return std::nullopt;
+
+    std::string result = format_calculation_result(*value);
+    if (result.empty()) return std::nullopt;
+    return CalculationEvaluation{
+        .result = std::move(result),
+        .display_expression = calculation_display_expression(expression),
+    };
+}
+
+std::string clipboard_image_mime(std::string_view preview) {
+    const std::string lowered = lowercase_copy(preview);
+    constexpr std::array<std::string_view, 8> supported{
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/webp",
+        "image/bmp",
+        "image/gif",
+        "image/tiff",
+        "image/x-icon",
+    };
+    for (const auto mime : supported) {
+        if (lowered.find(mime) == std::string::npos) continue;
+        return mime == "image/jpg" ? "image/jpeg" : std::string(mime);
+    }
+
+    // Cliphist normally prints a compact binary marker with an image format token.
+    if (lowered.find("binary") == std::string::npos) return {};
+    constexpr std::array<std::pair<std::string_view, std::string_view>, 8> extensions{{
+        {"png", "image/png"},
+        {"jpeg", "image/jpeg"},
+        {"jpg", "image/jpeg"},
+        {"webp", "image/webp"},
+        {"bmp", "image/bmp"},
+        {"gif", "image/gif"},
+        {"tiff", "image/tiff"},
+        {"ico", "image/x-icon"},
+    }};
+    for (const auto& [extension, mime] : extensions) {
+        if (lowered.find(extension) != std::string::npos) return std::string(mime);
+    }
+    return {};
+}
+
+bool clipboard_binary_preview(std::string_view preview) {
+    const std::string lowered = lowercase_copy(preview);
+    return lowered.find("[[ binary data ") != std::string::npos;
+}
+
+std::string clipboard_format_label(std::string_view mime) {
+    if (mime == "image/jpeg" || mime == "image/jpg") return "JPEG";
+    if (mime == "image/png") return "PNG";
+    if (mime == "image/webp") return "WEBP";
+    if (mime == "image/bmp") return "BMP";
+    if (mime == "image/gif") return "GIF";
+    if (mime == "image/tiff") return "TIFF";
+    if (mime == "image/x-icon") return "ICO";
+    return "IMAGE";
+}
+
+bool clipboard_filter_matches(const LauncherResult& result, std::string_view filter) {
+    const std::string normalized_filter = normalized_copy(filter);
+    if (normalized_filter.empty()) return true;
+
+    if (normalized_copy(result.title).find(normalized_filter) != std::string::npos ||
+        normalized_copy(result.subtitle).find(normalized_filter) != std::string::npos ||
+        normalized_copy(result.description).find(normalized_filter) != std::string::npos ||
+        normalized_copy(result.clipboard_mime).find(normalized_filter) != std::string::npos) {
+        return true;
+    }
+    return std::ranges::any_of(result.search_terms, [&normalized_filter](const auto& term) {
+        return normalized_copy(term).find(normalized_filter) != std::string::npos;
+    });
 }
 
 std::string recommendation_identity(const LauncherResult& result) {
@@ -338,6 +617,259 @@ std::vector<std::string> launcher_scoped_argv(const std::vector<std::string>& ar
     };
     scoped.insert(scoped.end(), argv.begin(), argv.end());
     return scoped;
+}
+
+std::vector<std::string> launcher_clipboard_delete_argv(
+    std::string_view id,
+    std::string_view preview
+) {
+    if (id.empty()) return {};
+    return {
+        "sh",
+        "-c",
+        "printf '%s\\t%s\\n' \"$1\" \"$2\" | cliphist delete",
+        "realmheart-clipboard-delete",
+        std::string(id),
+        std::string(preview),
+    };
+}
+
+std::vector<LauncherResult> launcher_clipboard_results(
+    std::string_view cliphist_output,
+    std::string_view filter,
+    std::size_t limit
+) {
+    std::vector<LauncherResult> results;
+    if (limit == 0) return results;
+
+    std::size_t line_start = 0;
+    while (line_start < cliphist_output.size() && results.size() < limit) {
+        const std::size_t line_end = cliphist_output.find('\n', line_start);
+        std::string_view line = cliphist_output.substr(
+            line_start,
+            line_end == std::string_view::npos
+                ? cliphist_output.size() - line_start
+                : line_end - line_start
+        );
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+
+        const std::size_t separator = line.find('\t');
+        if (separator != std::string_view::npos && separator > 0) {
+            const std::string_view id = line.substr(0, separator);
+            const bool numeric_id = std::ranges::all_of(id, [](char character) {
+                return std::isdigit(static_cast<unsigned char>(character)) != 0;
+            });
+            if (numeric_id) {
+                const std::string_view raw_preview = line.substr(separator + 1);
+                LauncherResult result;
+                result.kind = LauncherResultKind::Clipboard;
+                result.id = std::string(id);
+                result.icon_name = "Realmheart-Icons/clip-history.svg";
+                result.description = std::string(raw_preview);
+                result.clipboard_mime = clipboard_image_mime(raw_preview);
+                result.clipboard_image = !result.clipboard_mime.empty();
+
+                if (result.clipboard_image) {
+                    const std::string format = clipboard_format_label(result.clipboard_mime);
+                    result.title = result.clipboard_mime == "image/png"
+                        ? "Screenshot or copied image"
+                        : "Copied image";
+                    result.subtitle = "Clipboard image · " + format;
+                    result.search_terms = {
+                        "image", "screenshot", "picture", format, result.clipboard_mime
+                    };
+                } else if (clipboard_binary_preview(raw_preview)) {
+                    result.title = "Binary clipboard entry";
+                    result.subtitle = "Clipboard data";
+                    result.search_terms = {"binary", "data", std::string(raw_preview)};
+                } else {
+                    result.title = realmheart::core::sanitize_command_detail(
+                        raw_preview,
+                        150
+                    );
+                    if (result.title.empty()) result.title = "Empty clipboard text";
+                    result.subtitle = "Clipboard text";
+                    result.search_terms = {std::string(raw_preview), "text"};
+                }
+
+                if (clipboard_filter_matches(result, filter)) {
+                    results.push_back(std::move(result));
+                }
+            }
+        }
+
+        if (line_end == std::string_view::npos) break;
+        line_start = line_end + 1;
+    }
+    return results;
+}
+
+std::vector<LauncherResult> launcher_emoji_results(
+    std::string_view emoji_script,
+    std::string_view filter,
+    std::size_t limit
+) {
+    std::vector<LauncherResult> results;
+    if (limit == 0) return results;
+
+    constexpr std::string_view marker = "### DATA ###";
+    const std::size_t data_start = data_start_after_standalone_marker(
+        emoji_script,
+        marker
+    );
+    if (data_start == std::string_view::npos) return results;
+
+    const std::string raw_filter = trim_copy(filter);
+    std::string normalized_filter = normalized_copy(raw_filter);
+    std::vector<std::string> filter_terms;
+    std::size_t filter_start = 0;
+    while (filter_start < normalized_filter.size()) {
+        const std::size_t filter_end = normalized_filter.find(' ', filter_start);
+        const std::string_view term = std::string_view(normalized_filter).substr(
+            filter_start,
+            filter_end == std::string::npos
+                ? normalized_filter.size() - filter_start
+                : filter_end - filter_start
+        );
+        if (!term.empty()) filter_terms.emplace_back(term);
+        if (filter_end == std::string::npos) break;
+        filter_start = filter_end + 1;
+    }
+
+    std::size_t line_start = data_start;
+
+    while (line_start < emoji_script.size() && results.size() < limit) {
+        const std::size_t line_end = emoji_script.find('\n', line_start);
+        std::string_view line = emoji_script.substr(
+            line_start,
+            line_end == std::string_view::npos
+                ? emoji_script.size() - line_start
+                : line_end - line_start
+        );
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+
+        const std::size_t first = line.find_first_not_of(" \t");
+        if (first != std::string_view::npos) {
+            line.remove_prefix(first);
+            const std::size_t separator = line.find_first_of(" \t");
+            const std::string_view glyph = line.substr(0, separator);
+            std::string_view keywords;
+            if (separator != std::string_view::npos) {
+                const std::size_t keyword_start = line.find_first_not_of(
+                    " \t",
+                    separator
+                );
+                if (keyword_start != std::string_view::npos) {
+                    keywords = line.substr(keyword_start);
+                }
+            }
+
+            if (!glyph.empty()) {
+                const std::string normalized_keywords = normalized_copy(keywords);
+                const bool matches = raw_filter.empty() ||
+                    (filter_terms.empty()
+                        ? glyph == raw_filter
+                        : std::ranges::all_of(
+                            filter_terms,
+                            [&normalized_keywords](const std::string& term) {
+                                return normalized_keywords.find(term) !=
+                                    std::string::npos;
+                            }
+                        ));
+                if (matches) {
+                    LauncherResult result;
+                    result.kind = LauncherResultKind::Emoji;
+                    result.id = std::string(glyph);
+                    result.title = keywords.empty()
+                        ? std::string("Emoji")
+                        : realmheart::core::sanitize_command_detail(keywords, 90);
+                    result.subtitle = "Copy " + std::string(glyph) + " to clipboard";
+                    result.icon_name = "Realmheart-Icons/emoji-picker.svg";
+                    result.description = std::string(keywords);
+                    result.search_terms = {
+                        std::string(glyph),
+                        std::string(keywords),
+                    };
+                    results.push_back(std::move(result));
+                }
+            }
+        }
+
+        if (line_end == std::string_view::npos) break;
+        line_start = line_end + 1;
+    }
+    return results;
+}
+
+LauncherResult launcher_clipboard_clear_result(bool confirmation_armed) {
+    LauncherResult result;
+    result.kind = LauncherResultKind::ClipboardAction;
+    result.id = "clear-history";
+    result.title = confirmation_armed
+        ? "Press Enter again to clear clipboard history"
+        : "Clear clipboard history";
+    result.subtitle = confirmation_armed
+        ? "This permanently deletes every saved cliphist entry"
+        : "Delete every saved clipboard entry";
+    result.icon_name = "Realmheart-Icons/clip-history.svg";
+    result.description = "Run cliphist wipe after explicit confirmation";
+    return result;
+}
+
+std::vector<LauncherResult> launcher_command_suggestions(std::string_view query) {
+    const std::string trimmed = trim_copy(query);
+    if (trimmed.empty() || trimmed.front() != '>') return {};
+
+    const std::string typed = lowercase_copy(trim_copy(
+        std::string_view(trimmed).substr(1)
+    ));
+    if (typed.find_first_of(" \t\n\r") != std::string::npos) return {};
+
+    struct CommandDefinition {
+        std::string_view name;
+        std::string_view subtitle;
+        std::string_view description;
+        std::string_view icon_name;
+    };
+    constexpr std::array<CommandDefinition, 3> commands{{
+        {
+            "clip",
+            "Browse clipboard history",
+            "Open Realmheart clipboard history",
+            "Realmheart-Icons/clip-history.svg",
+        },
+        {
+            "clear",
+            "Clear clipboard history",
+            "Delete every saved cliphist entry",
+            "Realmheart-Icons/clip-history.svg",
+        },
+        {
+            "emoji",
+            "Search and copy emoji",
+            "Open Realmheart emoji picker",
+            "Realmheart-Icons/emoji-picker.svg",
+        },
+    }};
+
+    std::vector<LauncherResult> results;
+    for (const auto& command : commands) {
+        if (!typed.empty() && !command.name.starts_with(typed)) continue;
+
+        LauncherResult result;
+        result.kind = LauncherResultKind::LauncherCommand;
+        result.id = std::string(command.name);
+        result.title = ">" + std::string(command.name);
+        result.subtitle = std::string(command.subtitle);
+        result.icon_name = std::string(command.icon_name);
+        result.description = std::string(command.description);
+        result.search_terms = {
+            std::string(command.name),
+            std::string(command.subtitle),
+        };
+        results.push_back(std::move(result));
+    }
+    return results;
 }
 
 bool SystemLauncherProcessExecutor::run(const std::vector<std::string>& argv) {
@@ -707,43 +1239,66 @@ std::vector<LauncherResult> LauncherService::search(
         if (searchable.empty()) return results;
     }
 
-    std::vector<ScoredResult> scored;
-    if (!explicit_command) {
-        for (std::size_t index = 0; index < index_.size(); ++index) {
-            const int score = calculate_score(index_[index], searchable);
-            if (score > 0) scored.push_back({index, score});
-        }
-        std::stable_sort(scored.begin(), scored.end(), [this](const auto& left, const auto& right) {
-            if (left.score != right.score) return left.score > right.score;
-            const auto& left_result = index_[left.index];
-            const auto& right_result = index_[right.index];
-            const std::string left_title = lowercase_copy(left_result.title);
-            const std::string right_title = lowercase_copy(right_result.title);
-            if (left_title != right_title) return left_title < right_title;
-            return left_result.id < right_result.id;
-        });
-    }
-
     LauncherResult command_result;
     command_result.kind = LauncherResultKind::Command;
     command_result.id = searchable;
     command_result.title = explicit_command ? "Run explicit command" : "Run command";
     command_result.subtitle = searchable;
-    command_result.icon_name = "utilities-terminal";
-    command_result.description = "Execute this command through fish";
+    command_result.icon_name = "Realmheart-Icons/run-command.svg";
+    command_result.description = "Execute this input through fish";
     command_result.executable = first_command_token(searchable);
 
-    if (explicit_command) results.push_back(command_result);
+    if (explicit_command) {
+        results.push_back(std::move(command_result));
+        return results;
+    }
+
+    const auto calculation = evaluate_calculation(searchable);
+
+    std::vector<ScoredResult> scored;
+    for (std::size_t index = 0; index < index_.size(); ++index) {
+        const int score = calculate_score(index_[index], searchable);
+        if (score > 0) scored.push_back({index, score});
+    }
+    std::stable_sort(scored.begin(), scored.end(), [this](const auto& left, const auto& right) {
+        if (left.score != right.score) return left.score > right.score;
+        const auto& left_result = index_[left.index];
+        const auto& right_result = index_[right.index];
+        const std::string left_title = lowercase_copy(left_result.title);
+        const std::string right_title = lowercase_copy(right_result.title);
+        if (left_title != right_title) return left_title < right_title;
+        return left_result.id < right_result.id;
+    });
+
+    std::size_t utility_slots = 0;
+    if (calculation.has_value()) {
+        utility_slots = std::min<std::size_t>(limit, 2);
+    } else if (limit >= 2 || scored.empty()) {
+        utility_slots = 1;
+    }
+    const std::size_t searchable_slots = limit - utility_slots;
 
     std::unordered_set<std::string> seen;
     for (const auto& item : scored) {
-        if (results.size() >= limit) break;
+        if (results.size() >= searchable_slots) break;
         const LauncherResult& result = index_[item.index];
         if (!seen.insert(recommendation_identity(result)).second) continue;
         results.push_back(result);
     }
 
-    if (!explicit_command && results.size() < limit && is_valid_plain_command(searchable)) {
+    if (calculation.has_value() && results.size() < limit) {
+        LauncherResult calculation_result;
+        calculation_result.kind = LauncherResultKind::Calculation;
+        calculation_result.id = calculation->result;
+        calculation_result.title = "Calculate";
+        calculation_result.subtitle = calculation->display_expression +
+            " = " + calculation->result;
+        calculation_result.icon_name = "Realmheart-Icons/calculate.svg";
+        calculation_result.description = "Copy the result to the clipboard";
+        results.push_back(std::move(calculation_result));
+    }
+
+    if (results.size() < limit) {
         results.push_back(std::move(command_result));
     }
     return results;
@@ -757,6 +1312,9 @@ bool LauncherService::activate(const LauncherResult& result) {
     } else if (result.kind == LauncherResultKind::Command) {
         if (result.id.find_first_not_of(" \t\n\r") == std::string::npos) return false;
         activated = command_executor_->run_command(result.id);
+    } else if (result.kind == LauncherResultKind::Calculation) {
+        if (result.id.empty()) return false;
+        activated = process_executor_->run({"wl-copy", result.id});
     } else if (result.kind == LauncherResultKind::Action) {
         if (result.id.empty()) return false;
         activated = process_executor_->run({"/bin/bash", result.id});
@@ -765,9 +1323,24 @@ bool LauncherService::activate(const LauncherResult& result) {
         activated = process_executor_->run({"wl-copy", result.id});
     } else if (result.kind == LauncherResultKind::Clipboard) {
         if (result.id.empty()) return false;
-        activated = process_executor_->run({
-            "sh", "-c", "cliphist decode \"$1\" | wl-copy", "realmheart-clipboard", result.id
-        });
+        if (result.clipboard_image && !result.clipboard_mime.empty()) {
+            activated = process_executor_->run({
+                "sh",
+                "-c",
+                "cliphist decode \"$1\" | wl-copy --type \"$2\"",
+                "realmheart-clipboard",
+                result.id,
+                result.clipboard_mime,
+            });
+        } else {
+            activated = process_executor_->run({
+                "sh",
+                "-c",
+                "cliphist decode \"$1\" | wl-copy",
+                "realmheart-clipboard",
+                result.id,
+            });
+        }
     }
 
     if (activated && (result.kind == LauncherResultKind::Application ||

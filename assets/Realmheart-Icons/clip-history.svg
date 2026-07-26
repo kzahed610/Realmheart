@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+  <!-- clipboard tab -->
+  <path d="M9.85 4.1H14.15L15 4.95V6.1H9V4.95L9.85 4.1Z" fill="currentColor"/>
+  <!-- board -->
+  <path d="M7.15 5.8H16.85L18.2 7.15V18.05L16.85 19.4H7.15L5.8 18.05V7.15L7.15 5.8Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+  <!-- history lines -->
+  <path d="M9.1 9.1H14.85" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+  <path d="M9.1 12H14.05" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+  <path d="M9.1 14.9H13.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+  <!-- small copied-item marks -->
+  <path d="M15.5 8.1L16.65 9.25L15.5 10.4L14.35 9.25L15.5 8.1Z" fill="currentColor"/>
+  <path d="M14.8 11.05L15.95 12.2L14.8 13.35L13.65 12.2L14.8 11.05Z" fill="currentColor"/>
+  <path d="M14.15 13.95L15.3 15.1L14.15 16.25L13 15.1L14.15 13.95Z" fill="currentColor"/>
+</svg>

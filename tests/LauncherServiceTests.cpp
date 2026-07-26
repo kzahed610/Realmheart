@@ -134,3 +134,47 @@ TEST_F(LauncherServiceTest, FuzzySearchFindsApplication) {
     ASSERT_FALSE(results.empty());
     EXPECT_EQ(results.front().id, "gravity");
 }
+
+TEST(LauncherServiceHelpersTest, ParsesAndFiltersEmbeddedEmojiData) {
+    constexpr std::string_view script = R"EMOJI(#!/usr/bin/env bash
+emoji="$(sed '1,/^### DATA ###$/d' "$0" | fuzzel --dmenu)"
+case "$MODE" in
+    copy) wl-copy "$emoji" ;;
+esac
+### DATA ###
+😭 loudly crying face cry tears sad
+⚔️ crossed swords weapon battle
+📋 clipboard stationery documents
+)EMOJI";
+
+    const auto all = launcher_emoji_results(script, "", 10);
+    ASSERT_EQ(all.size(), 3U);
+    EXPECT_EQ(all.front().kind, LauncherResultKind::Emoji);
+    EXPECT_EQ(all.front().id, "😭");
+    EXPECT_EQ(all.front().icon_name, "Realmheart-Icons/emoji-picker.svg");
+
+    const auto filtered = launcher_emoji_results(script, "cry tears", 10);
+    ASSERT_EQ(filtered.size(), 1U);
+    EXPECT_EQ(filtered.front().id, "😭");
+
+    const auto limited = launcher_emoji_results(script, "", 2);
+    EXPECT_EQ(limited.size(), 2U);
+}
+
+TEST(LauncherServiceHelpersTest, SuggestsEmojiLauncherCommand) {
+    const auto results = launcher_command_suggestions(">em");
+    ASSERT_EQ(results.size(), 1U);
+    EXPECT_EQ(results.front().id, "emoji");
+    EXPECT_EQ(results.front().icon_name, "Realmheart-Icons/emoji-picker.svg");
+}
+
+TEST(LauncherServiceHelpersTest, BuildsExactClipboardDeleteCommand) {
+    const auto argv = launcher_clipboard_delete_argv("42", "copied text");
+    ASSERT_EQ(argv.size(), 6U);
+    EXPECT_EQ(argv[0], "sh");
+    EXPECT_EQ(argv[1], "-c");
+    EXPECT_EQ(argv[2], "printf '%s\\t%s\\n' \"$1\" \"$2\" | cliphist delete");
+    EXPECT_EQ(argv[3], "realmheart-clipboard-delete");
+    EXPECT_EQ(argv[4], "42");
+    EXPECT_EQ(argv[5], "copied text");
+}

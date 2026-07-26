@@ -303,6 +303,12 @@ popover.realmheart-launcher-constellation-menu > contents {
   font-size: 0.62em;
 }
 
+.realmheart-launcher-emoji-glyph {
+  min-width: 42px;
+  min-height: 42px;
+  font-size: 1.72em;
+}
+
 .realmheart-launcher-empty {
   color: @rh_text_muted;
   font-size: 0.86em;
@@ -365,4 +371,110 @@ popover.realmheart-launcher-constellation-menu > contents {
     0 0 0 1px alpha(@rh_primary, 0.09),
     0 0 18px alpha(@rh_primary, 0.10),
     inset 0 1px alpha(@rh_text, 0.04);
+}
+
+/* Clipboard image rows decode only a tiny visible thumbnail. The slot clips the
+ * image to the same compact rounded geometry while the original cliphist bytes
+ * remain untouched for restoration. */
+.realmheart-launcher-clipboard-thumbnail {
+  min-width: 104px;
+  min-height: 66px;
+  color: @rh_text_muted;
+  background-color: alpha(@rh_surface_variant, 0.28);
+  border: 1px solid alpha(@rh_outline, 0.42);
+  border-radius: 12px;
+  box-shadow:
+    inset 0 1px alpha(@rh_text, 0.04),
+    inset 0 -8px 18px alpha(#000000, 0.18);
+}
+
+.realmheart-launcher-clipboard-thumbnail-image {
+  border-radius: 11px;
+}
+
+.realmheart-launcher-result-row.destructive .realmheart-launcher-row-title,
+.realmheart-launcher-result-kind.destructive {
+  color: @rh_error;
+}
+
+.realmheart-launcher-result-row.destructive:selected .realmheart-launcher-result-kind {
+  color: @rh_error;
+}
+
+/* Clipboard mode opens immediately, before cliphist has finished reading its
+ * database. The spinner and stable row-shaped placeholders let the result
+ * sheet unfold with the launcher instead of appearing to freeze and then pop
+ * into existence. */
+.realmheart-launcher-clipboard-loading-row,
+.realmheart-launcher-clipboard-skeleton-row,
+.realmheart-launcher-emoji-loading-row,
+.realmheart-launcher-emoji-skeleton-row {
+  color: @rh_text;
+  background-color: transparent;
+  border: none;
+}
+
+.realmheart-launcher-clipboard-loading-spinner {
+  color: @rh_primary;
+}
+
+.realmheart-launcher-clipboard-skeleton-icon,
+.realmheart-launcher-clipboard-skeleton-bar {
+  background-color: alpha(@rh_surface_variant, 0.52);
+  background-image: linear-gradient(
+    to right,
+    alpha(@rh_surface_variant, 0.34),
+    alpha(@rh_primary, 0.10),
+    alpha(@rh_surface_variant, 0.34)
+  );
+  border: 1px solid alpha(@rh_outline, 0.20);
+  border-radius: 999px;
+  box-shadow: inset 0 1px alpha(@rh_text, 0.025);
+}
+
+.realmheart-launcher-clipboard-skeleton-icon {
+  border-radius: 11px;
+}
+
+.realmheart-launcher-clipboard-skeleton-bar.secondary {
+  opacity: 0.62;
+}
+
+/* Clipboard rows use their right-hand metadata slot for a compact delete
+ * affordance. It stays quiet until the row is hovered or keyboard-selected,
+ * then turns into an unmistakable destructive action. */
+.realmheart-launcher-clipboard-delete,
+.realmheart-launcher-clipboard-delete:hover,
+.realmheart-launcher-clipboard-delete:active,
+.realmheart-launcher-clipboard-delete:focus,
+.realmheart-launcher-clipboard-delete:focus-visible {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  opacity: 0.38;
+  color: alpha(@rh_text_muted, 0.76);
+  background-color: transparent;
+  background-image: none;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  box-shadow: none;
+}
+
+.realmheart-launcher-result-row:hover .realmheart-launcher-clipboard-delete,
+.realmheart-launcher-result-row:selected .realmheart-launcher-clipboard-delete {
+  opacity: 1;
+  color: @rh_error;
+  background-color: alpha(@rh_error, 0.10);
+  border-color: alpha(@rh_error, 0.22);
+}
+
+.realmheart-launcher-clipboard-delete:hover {
+  background-color: alpha(@rh_error, 0.16);
+  border-color: alpha(@rh_error, 0.36);
+  box-shadow: 0 0 15px alpha(@rh_error, 0.12);
+}
+
+.realmheart-launcher-clipboard-delete:active {
+  background-color: alpha(@rh_error, 0.24);
+  border-color: alpha(@rh_error, 0.52);
 }

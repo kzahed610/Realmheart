@@ -525,6 +525,11 @@ public:
         launcher_overlay_->toggle();
     }
 
+    void launch_launcher_query(const std::string& query) {
+        ensure_launcher_initialized();
+        launcher_overlay_->show_with_query(query);
+    }
+
     void set_wallpaper(const std::string& path = {}) {
         ensure_core_initialized();
         if (path.empty()) {
@@ -1303,6 +1308,17 @@ void launch_launcher_action(GSimpleAction*, GVariant*, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->launch_launcher();
 }
 
+void launch_launcher_query_action(
+    GSimpleAction*,
+    GVariant* parameter,
+    gpointer user_data
+) {
+    if (parameter == nullptr) return;
+    static_cast<ShellRuntime*>(user_data)->launch_launcher_query(
+        g_variant_get_string(parameter, nullptr)
+    );
+}
+
 void set_wallpaper_action(GSimpleAction*, GVariant*, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->set_wallpaper();
 }
@@ -1374,6 +1390,7 @@ constexpr GActionEntry kShellActions[] = {
     {"set-wallpaper-backend", set_wallpaper_backend_action, "s", nullptr, nullptr, {}},
     {"generate-theme", generate_theme_action, nullptr, nullptr, nullptr, {}},
     {"launch-launcher", launch_launcher_action, nullptr, nullptr, nullptr, {}},
+    {"launch-launcher-query", launch_launcher_query_action, "s", nullptr, nullptr, {}},
     {"quit", quit_action, nullptr, nullptr, nullptr, {}},
 };
 

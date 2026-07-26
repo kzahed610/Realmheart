@@ -20,9 +20,12 @@ struct HyprlandApplicationEvent;
 enum class LauncherResultKind {
     Application,
     Command,
+    Calculation,
     Action,
     Emoji,
-    Clipboard
+    Clipboard,
+    ClipboardAction,
+    LauncherCommand
 };
 
 struct LauncherResult {
@@ -39,6 +42,8 @@ struct LauncherResult {
     std::string description;
     std::string executable;
     std::vector<std::string> search_terms;
+    bool clipboard_image = false;
+    std::string clipboard_mime;
 
     LauncherResult() = default;
     LauncherResult(
@@ -50,7 +55,9 @@ struct LauncherResult {
         std::vector<std::string> result_argv,
         std::string result_description = {},
         std::string result_executable = {},
-        std::vector<std::string> result_search_terms = {}
+        std::vector<std::string> result_search_terms = {},
+        bool result_clipboard_image = false,
+        std::string result_clipboard_mime = {}
     ) : kind(result_kind),
         id(std::move(result_id)),
         title(std::move(result_title)),
@@ -59,7 +66,9 @@ struct LauncherResult {
         argv(std::move(result_argv)),
         description(std::move(result_description)),
         executable(std::move(result_executable)),
-        search_terms(std::move(result_search_terms)) {}
+        search_terms(std::move(result_search_terms)),
+        clipboard_image(result_clipboard_image),
+        clipboard_mime(std::move(result_clipboard_mime)) {}
 };
 
 struct LauncherSessionWindow {
@@ -101,6 +110,23 @@ public:
 std::vector<std::string> launcher_command_argv(std::string_view command);
 std::vector<std::string> launcher_application_argv(std::string_view desktop_id);
 std::vector<std::string> launcher_scoped_argv(const std::vector<std::string>& argv);
+std::vector<std::string> launcher_clipboard_delete_argv(
+    std::string_view id,
+    std::string_view preview
+);
+
+std::vector<LauncherResult> launcher_clipboard_results(
+    std::string_view cliphist_output,
+    std::string_view filter,
+    std::size_t limit = 10
+);
+std::vector<LauncherResult> launcher_emoji_results(
+    std::string_view emoji_script,
+    std::string_view filter,
+    std::size_t limit = 10
+);
+LauncherResult launcher_clipboard_clear_result(bool confirmation_armed);
+std::vector<LauncherResult> launcher_command_suggestions(std::string_view query);
 
 class LauncherService {
 public:

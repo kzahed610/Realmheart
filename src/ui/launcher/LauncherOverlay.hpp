@@ -5,7 +5,9 @@
 
 #include <gtk/gtk.h>
 
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -30,9 +32,17 @@ public:
 
     void toggle();
     void show();
+    void show_with_query(std::string query);
     void hide();
 
 private:
+    enum class SearchMode {
+        Normal,
+        Clipboard,
+        ClipboardClear,
+        Emoji,
+    };
+
     enum class SpatialDirection {
         Left,
         Right,
@@ -51,6 +61,34 @@ private:
         GtkWidget* content = nullptr;
         double lift = 0.0;
         double velocity = 0.0;
+
+        ResultRowMotion() = default;
+        ResultRowMotion(const ResultRowMotion&) = delete;
+        ResultRowMotion& operator=(const ResultRowMotion&) = delete;
+        ResultRowMotion(ResultRowMotion&&) = delete;
+        ResultRowMotion& operator=(ResultRowMotion&&) = delete;
+        ~ResultRowMotion();
+
+        void bind(GtkListBoxRow* new_row, GtkWidget* new_content);
+    };
+
+
+    struct ClipboardAsyncState;
+    struct EmojiAsyncState;
+
+    struct ClipboardThumbnail {
+        GdkTexture* texture = nullptr;
+        int source_width = 0;
+        int source_height = 0;
+        std::string format;
+    };
+
+    struct ClipboardRowWidgets {
+        GtkWidget* row = nullptr;
+        GtkWidget* icon_slot = nullptr;
+        GtkWidget* subtitle = nullptr;
+        std::uint64_t view_generation = 0;
+        bool thumbnail_visible = false;
     };
 
     struct ConstellationNode {
@@ -92,7 +130,44 @@ private:
         int logical_pixels
     );
     void rebuild_results();
+    GtkListBoxRow* append_result_row(const services::LauncherResult& result);
     void on_search_changed();
+    [[nodiscard]] bool parse_clipboard_query(
+        std::string_view query,
+        std::string& filter
+    ) const;
+    [[nodiscard]] bool parse_clipboard_clear_query(std::string_view query) const;
+    [[nodiscard]] bool parse_emoji_query(
+        std::string_view query,
+        std::string& filter
+    ) const;
+    void enter_clipboard_mode(std::string filter);
+    void enter_clipboard_clear_mode();
+    void leave_clipboard_mode();
+    void request_clipboard_history();
+    void request_clipboard_wipe();
+    void request_clipboard_delete(std::string id);
+    void rebuild_clipboard_results();
+    bool append_next_clipboard_page(std::size_t minimum_result_count = 0);
+    void schedule_clipboard_page_growth();
+    void request_clipboard_thumbnail(const services::LauncherResult& result);
+    void schedule_visible_clipboard_thumbnails();
+    void request_visible_clipboard_thumbnails();
+    void ensure_result_row_visible(GtkListBoxRow* row);
+    void apply_clipboard_thumbnail(std::string_view id);
+    void cache_clipboard_thumbnail(
+        std::string id,
+        ClipboardThumbnail thumbnail
+    );
+    void clear_clipboard_thumbnail_cache();
+    void activate_clipboard_action(const services::LauncherResult& result);
+    void enter_emoji_mode(std::string filter);
+    void leave_emoji_mode();
+    void request_emoji_database();
+    void rebuild_emoji_results();
+    bool append_next_emoji_page(std::size_t minimum_result_count = 0);
+    void schedule_emoji_page_growth();
+    [[nodiscard]] std::string empty_results_message() const;
     void on_result_selected(GtkListBoxRow* row);
     void set_selected_result(const services::LauncherResult* result);
     void retarget_result_selection(GtkListBoxRow* row);
@@ -173,8 +248,38 @@ private:
     GtkWidget* selection_indicator_ = nullptr;
     GtkWidget* results_revealer_ = nullptr;
     GtkWidget* results_overlay_ = nullptr;
+    GtkWidget* results_scroller_ = nullptr;
     GtkWidget* results_list_ = nullptr;
     GtkWidget* result_selection_indicator_ = nullptr;
+
+    SearchMode search_mode_ = SearchMode::Normal;
+    std::shared_ptr<ClipboardAsyncState> clipboard_async_state_;
+    std::string clipboard_history_output_;
+    std::string clipboard_filter_;
+    std::string clipboard_status_message_;
+    std::vector<services::LauncherResult> clipboard_all_results_;
+    bool clipboard_history_loaded_ = false;
+    bool clipboard_loading_ = false;
+    bool clipboard_clear_armed_ = false;
+    std::size_t clipboard_rendered_count_ = 0;
+    std::uint64_t clipboard_view_generation_ = 0;
+    std::unordered_map<std::string, ClipboardRowWidgets> clipboard_rows_;
+    std::unordered_map<std::string, ClipboardThumbnail> clipboard_thumbnail_cache_;
+    std::vector<std::string> clipboard_thumbnail_lru_;
+    std::unordered_map<std::string, std::uint64_t> clipboard_thumbnail_inflight_;
+    std::size_t clipboard_thumbnail_active_jobs_ = 0;
+    guint clipboard_thumbnail_visibility_idle_id_ = 0;
+    guint clipboard_page_growth_idle_id_ = 0;
+
+    std::shared_ptr<EmojiAsyncState> emoji_async_state_;
+    std::string emoji_database_text_;
+    std::string emoji_filter_;
+    std::string emoji_status_message_;
+    std::vector<services::LauncherResult> emoji_all_results_;
+    bool emoji_database_loaded_ = false;
+    bool emoji_loading_ = false;
+    std::size_t emoji_rendered_count_ = 0;
+    guint emoji_page_growth_idle_id_ = 0;
 
     services::LauncherService& service_;
     services::WallpaperService& wallpaper_service_;

@@ -32,6 +32,8 @@ void parses_supported_shell_commands() {
             "set-wallpaper-path should parse");
     require(parse_shell_command("set-wallpaper-backend") == ShellCommand::SetWallpaperBackend,
             "set-wallpaper-backend should parse");
+    require(parse_shell_command("launch-launcher-query") == ShellCommand::LaunchLauncherQuery,
+            "launch-launcher-query should parse");
     require(parse_shell_command("restart") == ShellCommand::Restart,
             "restart should parse");
     require(parse_shell_command("quit") == ShellCommand::Quit,
@@ -60,6 +62,8 @@ void maps_commands_to_stable_action_names() {
             "direct wallpaper action name should be stable");
     require(shell_action_name(ShellCommand::SetWallpaperBackend) == "set-wallpaper-backend",
             "wallpaper backend action name should be stable");
+    require(shell_action_name(ShellCommand::LaunchLauncherQuery) == "launch-launcher-query",
+            "launcher query action name should be stable");
     require(shell_action_name(ShellCommand::Restart) == "restart",
             "restart action name should be stable");
     require(shell_action_name(ShellCommand::Quit) == "quit",
@@ -76,6 +80,8 @@ void identifies_commands_that_require_arguments() {
             "set-wallpaper-path should require a path argument");
     require(shell_command_requires_argument(ShellCommand::SetWallpaperBackend),
             "set-wallpaper-backend should require a backend argument");
+    require(shell_command_requires_argument(ShellCommand::LaunchLauncherQuery),
+            "launch-launcher-query should require a query argument");
     require(!shell_command_requires_argument(ShellCommand::SetWallpaper),
             "interactive set-wallpaper should remain parameterless");
     require(!shell_command_requires_argument(ShellCommand::ToggleBar),

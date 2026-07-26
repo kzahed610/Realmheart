@@ -25,6 +25,7 @@ enum class ShellCommand {
     SetWallpaperBackend,
     GenerateTheme,
     LaunchLauncher,
+    LaunchLauncherQuery,
     Restart,
     Quit,
 };

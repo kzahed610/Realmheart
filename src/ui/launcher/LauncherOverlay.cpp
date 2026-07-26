@@ -1,5 +1,7 @@
 #include "ui/launcher/LauncherOverlay.hpp"
 
+#include "core/Command.hpp"
+#include "core/TaskExecutor.hpp"
 #include "ui/LayerSurface.hpp"
 #include "ui/launcher/CommandReceiptOverlay.hpp"
 #include "ui/bar/widgets/ThemedSvgIcon.hpp"
@@ -7,7 +9,11 @@
 #include <gtk4-layer-shell.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 
+#include <atomic>
+#include <chrono>
+#include <cctype>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <jpeglib.h>
 #include <setjmp.h>
@@ -19,18 +25,41 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <numbers>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace realmheart::ui {
+
+struct LauncherOverlay::ClipboardAsyncState {
+    std::atomic<LauncherOverlay*> owner{nullptr};
+    std::atomic<std::uint64_t> generation{0};
+};
+
+struct LauncherOverlay::EmojiAsyncState {
+    std::atomic<LauncherOverlay*> owner{nullptr};
+    std::atomic<std::uint64_t> generation{0};
+};
+
 namespace {
 
 namespace fs = std::filesystem;
 
 constexpr int kSeedApplicationCount = 4;
 constexpr int kResultCount = 6;
+constexpr std::size_t kClipboardBrowseResultCount = 100;
+constexpr std::size_t kClipboardInitialResultCount = 14;
+constexpr std::size_t kClipboardResultBatchCount = 14;
+constexpr std::size_t kEmojiBrowseResultCount = 2048;
+constexpr std::size_t kEmojiInitialResultCount = 18;
+constexpr std::size_t kEmojiResultBatchCount = 24;
+constexpr int kNormalResultsMaximumHeight = 336;
+constexpr int kClipboardResultsMaximumHeight = 540;
+constexpr int kEmojiResultsMaximumHeight = 540;
 constexpr int kMaximumConstellationApplications = 12;
 constexpr int kConstellationNodeWidth = 88;
 constexpr int kConstellationNodeHeight = 74;
@@ -94,6 +123,11 @@ constexpr int kApertureStartHeight = 58;
 constexpr int kSearchFinalWidth = 360;
 constexpr int kSearchStartWidth = 326;
 constexpr std::size_t kLauncherIconCacheLimit = 64;
+constexpr int kClipboardThumbnailWidth = 104;
+constexpr int kClipboardThumbnailHeight = 66;
+constexpr std::size_t kClipboardThumbnailCacheLimit = 16;
+constexpr std::size_t kClipboardThumbnailMaximumJobs = 2;
+constexpr std::size_t kClipboardMaximumDecodedBytes = 6U * 1024U * 1024U;
 
 [[nodiscard]] double clamp_unit(double value) {
     return std::clamp(value, 0.0, 1.0);
@@ -118,6 +152,29 @@ constexpr std::size_t kLauncherIconCacheLimit = 64;
     return start + (end - start) * clamp_unit(progress);
 }
 
+bool erase_cliphist_entry_line(std::string& listing, std::string_view id) {
+    if (listing.empty() || id.empty()) return false;
+
+    std::size_t line_start = 0;
+    while (line_start < listing.size()) {
+        const std::size_t line_end = listing.find('\n', line_start);
+        const std::size_t content_end = line_end == std::string::npos
+            ? listing.size()
+            : line_end;
+        const std::string_view line(listing.data() + line_start, content_end - line_start);
+        if (line.size() > id.size() && line.starts_with(id) && line[id.size()] == '\t') {
+            const std::size_t erase_end = line_end == std::string::npos
+                ? listing.size()
+                : line_end + 1;
+            listing.erase(line_start, erase_end - line_start);
+            return true;
+        }
+        if (line_end == std::string::npos) break;
+        line_start = line_end + 1;
+    }
+    return false;
+}
+
 fs::path xdg_state_home() {
     if (const char* configured = std::getenv("XDG_STATE_HOME");
         configured != nullptr && *configured != '\0') {
@@ -127,6 +184,25 @@ fs::path xdg_state_home() {
         return fs::path(home) / ".local/state";
     }
     return fs::temp_directory_path() / "realmheart-state";
+}
+
+fs::path xdg_config_home() {
+    if (const char* configured = std::getenv("XDG_CONFIG_HOME");
+        configured != nullptr && *configured != '\0') {
+        return fs::path(configured);
+    }
+    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+        return fs::path(home) / ".config";
+    }
+    return fs::temp_directory_path() / "realmheart-config";
+}
+
+fs::path emoji_script_path() {
+    if (const char* configured = std::getenv("REALMHEART_EMOJI_DATA");
+        configured != nullptr && *configured != '\0') {
+        return fs::path(configured);
+    }
+    return xdg_config_home() / "hypr/hyprland/scripts/fuzzel-emoji.sh";
 }
 
 fs::path constellation_layout_path() {
@@ -530,18 +606,145 @@ extern "C" void launcher_jpeg_error_exit(j_common_ptr common) {
     return texture;
 }
 
+struct DecodedClipboardThumbnail {
+    std::vector<guchar> pixels;
+    int width = 0;
+    int height = 0;
+    int rowstride = 0;
+    int source_width = 0;
+    int source_height = 0;
+    bool has_alpha = false;
+    std::string format;
+};
+
+struct ClipboardLoaderSizing {
+    int source_width = 0;
+    int source_height = 0;
+};
+
+void prepare_clipboard_thumbnail_size(
+    GdkPixbufLoader* loader,
+    int width,
+    int height,
+    gpointer user_data
+) {
+    auto* sizing = static_cast<ClipboardLoaderSizing*>(user_data);
+    sizing->source_width = width;
+    sizing->source_height = height;
+    if (width <= 0 || height <= 0) return;
+
+    const double scale = std::min({
+        1.0,
+        static_cast<double>(kClipboardThumbnailWidth) / static_cast<double>(width),
+        static_cast<double>(kClipboardThumbnailHeight) / static_cast<double>(height),
+    });
+    const int target_width = std::max(
+        1,
+        static_cast<int>(std::lround(static_cast<double>(width) * scale))
+    );
+    const int target_height = std::max(
+        1,
+        static_cast<int>(std::lround(static_cast<double>(height) * scale))
+    );
+    gdk_pixbuf_loader_set_size(loader, target_width, target_height);
+}
+
+std::optional<DecodedClipboardThumbnail> decode_clipboard_thumbnail(
+    std::string_view bytes
+) {
+    if (bytes.empty() || bytes.size() > kClipboardMaximumDecodedBytes) {
+        return std::nullopt;
+    }
+
+    GdkPixbufLoader* loader = gdk_pixbuf_loader_new();
+    ClipboardLoaderSizing sizing;
+    g_signal_connect(
+        loader,
+        "size-prepared",
+        G_CALLBACK(prepare_clipboard_thumbnail_size),
+        &sizing
+    );
+
+    GError* error = nullptr;
+    const bool wrote = gdk_pixbuf_loader_write(
+        loader,
+        reinterpret_cast<const guchar*>(bytes.data()),
+        bytes.size(),
+        &error
+    );
+    const bool closed = wrote && gdk_pixbuf_loader_close(loader, &error);
+    if (!closed) {
+        g_clear_error(&error);
+        g_object_unref(loader);
+        return std::nullopt;
+    }
+
+    GdkPixbuf* pixbuf = gdk_pixbuf_loader_get_pixbuf(loader);
+    if (pixbuf == nullptr) {
+        g_object_unref(loader);
+        return std::nullopt;
+    }
+    g_object_ref(pixbuf);
+
+    DecodedClipboardThumbnail decoded;
+    decoded.width = gdk_pixbuf_get_width(pixbuf);
+    decoded.height = gdk_pixbuf_get_height(pixbuf);
+    decoded.rowstride = gdk_pixbuf_get_rowstride(pixbuf);
+    decoded.source_width = sizing.source_width > 0 ? sizing.source_width : decoded.width;
+    decoded.source_height = sizing.source_height > 0 ? sizing.source_height : decoded.height;
+    decoded.has_alpha = gdk_pixbuf_get_has_alpha(pixbuf);
+
+    if (GdkPixbufFormat* format = gdk_pixbuf_loader_get_format(loader); format != nullptr) {
+        if (gchar* name = gdk_pixbuf_format_get_name(format); name != nullptr) {
+            decoded.format = name;
+            g_free(name);
+        }
+    }
+
+    if (decoded.width <= 0 || decoded.height <= 0 || decoded.rowstride <= 0) {
+        g_object_unref(pixbuf);
+        g_object_unref(loader);
+        return std::nullopt;
+    }
+
+    const gsize byte_count = static_cast<gsize>(decoded.rowstride) *
+        static_cast<gsize>(decoded.height);
+    decoded.pixels.assign(
+        gdk_pixbuf_get_pixels(pixbuf),
+        gdk_pixbuf_get_pixels(pixbuf) + byte_count
+    );
+
+    g_object_unref(pixbuf);
+    g_object_unref(loader);
+    return decoded;
+}
+
+std::string uppercase_ascii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](char character) {
+        return static_cast<char>(std::toupper(static_cast<unsigned char>(character)));
+    });
+    if (value == "JPG") return "JPEG";
+    return value;
+}
+
 const char* result_kind_label(services::LauncherResultKind kind) {
     switch (kind) {
     case services::LauncherResultKind::Application:
         return "APPLICATION";
     case services::LauncherResultKind::Command:
         return "COMMAND";
+    case services::LauncherResultKind::Calculation:
+        return "CALCULATION";
     case services::LauncherResultKind::Action:
         return "REALMHEART ACTION";
     case services::LauncherResultKind::Emoji:
         return "EMOJI";
     case services::LauncherResultKind::Clipboard:
         return "CLIPBOARD";
+    case services::LauncherResultKind::ClipboardAction:
+        return "CLIPBOARD ACTION";
+    case services::LauncherResultKind::LauncherCommand:
+        return "LAUNCHER COMMAND";
     }
     return "TARGET";
 }
@@ -566,6 +769,41 @@ void clear_fixed(GtkWidget* fixed) {
 
 } // namespace
 
+LauncherOverlay::ResultRowMotion::~ResultRowMotion() {
+    if (row != nullptr) {
+        g_object_remove_weak_pointer(
+            G_OBJECT(row),
+            reinterpret_cast<gpointer*>(&row)
+        );
+    }
+    if (content != nullptr) {
+        g_object_remove_weak_pointer(
+            G_OBJECT(content),
+            reinterpret_cast<gpointer*>(&content)
+        );
+    }
+}
+
+void LauncherOverlay::ResultRowMotion::bind(
+    GtkListBoxRow* new_row,
+    GtkWidget* new_content
+) {
+    row = new_row;
+    content = new_content;
+    if (row != nullptr) {
+        g_object_add_weak_pointer(
+            G_OBJECT(row),
+            reinterpret_cast<gpointer*>(&row)
+        );
+    }
+    if (content != nullptr) {
+        g_object_add_weak_pointer(
+            G_OBJECT(content),
+            reinterpret_cast<gpointer*>(&content)
+        );
+    }
+}
+
 LauncherOverlay::LauncherOverlay(
     GtkApplication* app,
     services::LauncherService& service,
@@ -574,6 +812,11 @@ LauncherOverlay::LauncherOverlay(
 ) : service_(service),
     wallpaper_service_(wallpaper_service),
     command_receipts_(command_receipts) {
+    clipboard_async_state_ = std::make_shared<ClipboardAsyncState>();
+    clipboard_async_state_->owner.store(this, std::memory_order_release);
+    emoji_async_state_ = std::make_shared<EmojiAsyncState>();
+    emoji_async_state_->owner.store(this, std::memory_order_release);
+
     window_ = GTK_WINDOW(gtk_application_window_new(app));
     gtk_window_set_decorated(window_, FALSE);
     gtk_window_set_resizable(window_, TRUE);
@@ -585,6 +828,28 @@ LauncherOverlay::LauncherOverlay(
 }
 
 LauncherOverlay::~LauncherOverlay() {
+    if (clipboard_async_state_) {
+        clipboard_async_state_->owner.store(nullptr, std::memory_order_release);
+        clipboard_async_state_->generation.fetch_add(1, std::memory_order_acq_rel);
+    }
+    if (clipboard_thumbnail_visibility_idle_id_ != 0) {
+        g_source_remove(clipboard_thumbnail_visibility_idle_id_);
+        clipboard_thumbnail_visibility_idle_id_ = 0;
+    }
+    if (clipboard_page_growth_idle_id_ != 0) {
+        g_source_remove(clipboard_page_growth_idle_id_);
+        clipboard_page_growth_idle_id_ = 0;
+    }
+    if (emoji_async_state_) {
+        emoji_async_state_->owner.store(nullptr, std::memory_order_release);
+        emoji_async_state_->generation.fetch_add(1, std::memory_order_acq_rel);
+    }
+    if (emoji_page_growth_idle_id_ != 0) {
+        g_source_remove(emoji_page_growth_idle_id_);
+        emoji_page_growth_idle_id_ = 0;
+    }
+    clear_clipboard_thumbnail_cache();
+
     if (central_tick_id_ != 0 && root_ != nullptr) {
         gtk_widget_remove_tick_callback(root_, central_tick_id_);
         central_tick_id_ = 0;
@@ -762,7 +1027,7 @@ void LauncherOverlay::setup_ui() {
     search_entry_ = gtk_entry_new();
     gtk_entry_set_placeholder_text(
         GTK_ENTRY(search_entry_),
-        "Search applications or enter a command"
+        "Search apps, calculate, or run a command"
     );
     gtk_widget_set_size_request(search_entry_, 360, 50);
     gtk_widget_set_halign(search_entry_, GTK_ALIGN_CENTER);
@@ -835,26 +1100,53 @@ void LauncherOverlay::setup_ui() {
         }
     }), this);
 
-    GtkWidget* results_scroller = gtk_scrolled_window_new();
+    results_scroller_ = gtk_scrolled_window_new();
     gtk_scrolled_window_set_policy(
-        GTK_SCROLLED_WINDOW(results_scroller),
+        GTK_SCROLLED_WINDOW(results_scroller_),
         GTK_POLICY_NEVER,
         GTK_POLICY_AUTOMATIC
     );
     gtk_scrolled_window_set_propagate_natural_height(
-        GTK_SCROLLED_WINDOW(results_scroller),
+        GTK_SCROLLED_WINDOW(results_scroller_),
         TRUE
     );
     gtk_scrolled_window_set_max_content_height(
-        GTK_SCROLLED_WINDOW(results_scroller),
-        336
+        GTK_SCROLLED_WINDOW(results_scroller_),
+        kNormalResultsMaximumHeight
     );
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(results_scroller), results_list_);
+    gtk_scrolled_window_set_child(
+        GTK_SCROLLED_WINDOW(results_scroller_),
+        results_list_
+    );
+    GtkAdjustment* results_adjustment = gtk_scrolled_window_get_vadjustment(
+        GTK_SCROLLED_WINDOW(results_scroller_)
+    );
+    const auto on_results_adjustment_changed = +[](GtkAdjustment*, gpointer data) {
+        auto* overlay = static_cast<LauncherOverlay*>(data);
+        overlay->schedule_visible_clipboard_thumbnails();
+        overlay->schedule_clipboard_page_growth();
+        overlay->schedule_emoji_page_growth();
+        if (overlay->selected_result_row_ != nullptr) {
+            overlay->retarget_result_selection(overlay->selected_result_row_);
+        }
+    };
+    g_signal_connect(
+        results_adjustment,
+        "value-changed",
+        G_CALLBACK(on_results_adjustment_changed),
+        this
+    );
+    g_signal_connect(
+        results_adjustment,
+        "changed",
+        G_CALLBACK(on_results_adjustment_changed),
+        this
+    );
 
     results_overlay_ = gtk_overlay_new();
     gtk_widget_set_hexpand(results_overlay_, TRUE);
     gtk_widget_set_vexpand(results_overlay_, FALSE);
-    gtk_overlay_set_child(GTK_OVERLAY(results_overlay_), results_scroller);
+    gtk_overlay_set_child(GTK_OVERLAY(results_overlay_), results_scroller_);
 
     result_selection_indicator_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_set_halign(result_selection_indicator_, GTK_ALIGN_START);
@@ -1075,6 +1367,20 @@ GtkWidget* LauncherOverlay::make_launcher_icon(
     std::string_view icon_name,
     int logical_pixels
 ) {
+    // Realmheart-owned SVGs preserve their semantic primary/accent colors.
+    // Route them through ThemedSvgIcon instead of flattening them through the
+    // desktop icon theme and generic image loader.
+    if (icon_name.ends_with(".svg") && icon_name.find('/') != std::string_view::npos) {
+        bar::widgets::ThemedSvgIcon themed_icon(
+            std::string(icon_name),
+            logical_pixels
+        );
+        GtkWidget* widget = themed_icon.widget();
+        gtk_widget_set_can_target(widget, FALSE);
+        gtk_widget_add_css_class(widget, "realmheart-launcher-app-icon");
+        return widget;
+    }
+
     GdkTexture* texture = launcher_icon_texture(icon_name, logical_pixels);
     if (texture != nullptr) {
         GtkWidget* picture = gtk_picture_new_for_paintable(GDK_PAINTABLE(texture));
@@ -2429,137 +2735,1492 @@ void LauncherOverlay::show_constellation_menu(ConstellationNode& node, double x,
     gtk_popover_popup(GTK_POPOVER(node.menu));
 }
 
+bool LauncherOverlay::parse_clipboard_query(
+    std::string_view query,
+    std::string& filter
+) const {
+    const std::size_t first = query.find_first_not_of(" \t\n\r");
+    if (first == std::string_view::npos) return false;
+    query.remove_prefix(first);
+
+    constexpr std::string_view prefix = ">clip";
+    if (!query.starts_with(prefix)) return false;
+    if (query.size() > prefix.size() &&
+        std::isspace(static_cast<unsigned char>(query[prefix.size()])) == 0) {
+        return false;
+    }
+
+    query.remove_prefix(prefix.size());
+    const std::size_t filter_start = query.find_first_not_of(" \t\n\r");
+    if (filter_start == std::string_view::npos) {
+        filter.clear();
+        return true;
+    }
+    query.remove_prefix(filter_start);
+    const std::size_t filter_end = query.find_last_not_of(" \t\n\r");
+    filter = std::string(query.substr(0, filter_end + 1));
+    return true;
+}
+
+bool LauncherOverlay::parse_clipboard_clear_query(std::string_view query) const {
+    const std::size_t first = query.find_first_not_of(" \t\n\r");
+    if (first == std::string_view::npos) return false;
+    query.remove_prefix(first);
+    const std::size_t last = query.find_last_not_of(" \t\n\r");
+    query = query.substr(0, last + 1);
+    return query == ">clear";
+}
+
+bool LauncherOverlay::parse_emoji_query(
+    std::string_view query,
+    std::string& filter
+) const {
+    const std::size_t first = query.find_first_not_of(" \t\n\r");
+    if (first == std::string_view::npos) return false;
+    query.remove_prefix(first);
+
+    constexpr std::string_view prefix = ">emoji";
+    if (!query.starts_with(prefix)) return false;
+    if (query.size() > prefix.size() &&
+        std::isspace(static_cast<unsigned char>(query[prefix.size()])) == 0) {
+        return false;
+    }
+
+    query.remove_prefix(prefix.size());
+    const std::size_t filter_start = query.find_first_not_of(" \t\n\r");
+    if (filter_start == std::string_view::npos) {
+        filter.clear();
+        return true;
+    }
+    query.remove_prefix(filter_start);
+    const std::size_t filter_end = query.find_last_not_of(" \t\n\r");
+    filter = std::string(query.substr(0, filter_end + 1));
+    return true;
+}
+
+std::string LauncherOverlay::empty_results_message() const {
+    if (search_mode_ == SearchMode::ClipboardClear &&
+        !clipboard_status_message_.empty()) {
+        return clipboard_status_message_;
+    }
+    if (search_mode_ != SearchMode::Clipboard) {
+        if (search_mode_ != SearchMode::Emoji) {
+            return "No matching application or action";
+        }
+        if (!emoji_status_message_.empty()) return emoji_status_message_;
+        if (emoji_loading_ && !emoji_database_loaded_) {
+            return "Loading emoji index…";
+        }
+        if (!emoji_database_loaded_) return "Emoji index is unavailable";
+        if (emoji_database_text_.empty()) return "Emoji index is empty";
+        return "No matching emoji";
+    }
+    if (!clipboard_status_message_.empty()) return clipboard_status_message_;
+    if (clipboard_loading_ && !clipboard_history_loaded_) {
+        return "Loading clipboard history…";
+    }
+    if (!clipboard_history_loaded_) return "Clipboard history is unavailable";
+    if (clipboard_history_output_.empty()) return "Clipboard history is empty";
+    return "No matching clipboard entry";
+}
+
+void LauncherOverlay::clear_clipboard_thumbnail_cache() {
+    for (auto& [id, thumbnail] : clipboard_thumbnail_cache_) {
+        static_cast<void>(id);
+        if (thumbnail.texture != nullptr) g_object_unref(thumbnail.texture);
+    }
+    clipboard_thumbnail_cache_.clear();
+    clipboard_thumbnail_lru_.clear();
+    clipboard_rows_.clear();
+}
+
+void LauncherOverlay::leave_clipboard_mode() {
+    if (search_mode_ != SearchMode::Clipboard &&
+        search_mode_ != SearchMode::ClipboardClear) {
+        return;
+    }
+
+    search_mode_ = SearchMode::Normal;
+    clipboard_async_state_->generation.fetch_add(1, std::memory_order_acq_rel);
+    clipboard_filter_.clear();
+    clipboard_status_message_.clear();
+    clipboard_all_results_.clear();
+    clipboard_rendered_count_ = 0;
+    clipboard_loading_ = false;
+    clipboard_clear_armed_ = false;
+    if (clipboard_page_growth_idle_id_ != 0) {
+        g_source_remove(clipboard_page_growth_idle_id_);
+        clipboard_page_growth_idle_id_ = 0;
+    }
+    clear_clipboard_thumbnail_cache();
+    gtk_revealer_set_transition_duration(GTK_REVEALER(results_revealer_), 170);
+    gtk_scrolled_window_set_max_content_height(
+        GTK_SCROLLED_WINDOW(results_scroller_),
+        kNormalResultsMaximumHeight
+    );
+    gtk_entry_set_placeholder_text(
+        GTK_ENTRY(search_entry_),
+        "Search apps, calculate, or run a command"
+    );
+}
+
+void LauncherOverlay::enter_clipboard_mode(std::string filter) {
+    leave_emoji_mode();
+    const bool mode_changed = search_mode_ != SearchMode::Clipboard;
+    if (mode_changed) leave_clipboard_mode();
+
+    const bool filter_changed = filter != clipboard_filter_;
+    search_mode_ = SearchMode::Clipboard;
+    clipboard_filter_ = std::move(filter);
+    clipboard_status_message_.clear();
+    clipboard_clear_armed_ = false;
+    gtk_revealer_set_transition_duration(GTK_REVEALER(results_revealer_), 220);
+    gtk_scrolled_window_set_max_content_height(
+        GTK_SCROLLED_WINDOW(results_scroller_),
+        kClipboardResultsMaximumHeight
+    );
+    gtk_entry_set_placeholder_text(
+        GTK_ENTRY(search_entry_),
+        "Clipboard › Search copied items"
+    );
+
+    if (filter_changed) {
+        clipboard_all_results_.clear();
+        clipboard_rendered_count_ = 0;
+    }
+
+    // Reuse the last lightweight cliphist listing immediately. SUPER+V now
+    // feels instant after the first visit, while a background refresh still
+    // picks up anything copied since the previous opening.
+    if (clipboard_history_loaded_) {
+        rebuild_clipboard_results();
+    } else if (!clipboard_loading_) {
+        clipboard_status_message_ = "Loading clipboard history…";
+        current_results_.clear();
+        rebuild_results();
+    }
+
+    if (mode_changed && !clipboard_loading_) request_clipboard_history();
+}
+
+void LauncherOverlay::enter_clipboard_clear_mode() {
+    leave_emoji_mode();
+    const bool mode_changed = search_mode_ != SearchMode::ClipboardClear;
+    if (mode_changed) leave_clipboard_mode();
+
+    search_mode_ = SearchMode::ClipboardClear;
+    clipboard_status_message_.clear();
+    if (mode_changed) clipboard_clear_armed_ = false;
+    gtk_scrolled_window_set_max_content_height(
+        GTK_SCROLLED_WINDOW(results_scroller_),
+        kNormalResultsMaximumHeight
+    );
+    current_results_ = {
+        services::launcher_clipboard_clear_result(clipboard_clear_armed_)
+    };
+    rebuild_results();
+}
+
+void LauncherOverlay::leave_emoji_mode() {
+    if (search_mode_ != SearchMode::Emoji) return;
+
+    search_mode_ = SearchMode::Normal;
+    emoji_async_state_->generation.fetch_add(1, std::memory_order_acq_rel);
+    emoji_filter_.clear();
+    emoji_status_message_.clear();
+    emoji_all_results_.clear();
+    emoji_rendered_count_ = 0;
+    emoji_loading_ = false;
+    if (emoji_page_growth_idle_id_ != 0) {
+        g_source_remove(emoji_page_growth_idle_id_);
+        emoji_page_growth_idle_id_ = 0;
+    }
+    gtk_revealer_set_transition_duration(GTK_REVEALER(results_revealer_), 170);
+    gtk_scrolled_window_set_max_content_height(
+        GTK_SCROLLED_WINDOW(results_scroller_),
+        kNormalResultsMaximumHeight
+    );
+    gtk_entry_set_placeholder_text(
+        GTK_ENTRY(search_entry_),
+        "Search apps, calculate, or run a command"
+    );
+}
+
+void LauncherOverlay::enter_emoji_mode(std::string filter) {
+    leave_clipboard_mode();
+    const bool mode_changed = search_mode_ != SearchMode::Emoji;
+
+    const bool filter_changed = filter != emoji_filter_;
+    search_mode_ = SearchMode::Emoji;
+    emoji_filter_ = std::move(filter);
+    emoji_status_message_.clear();
+    gtk_revealer_set_transition_duration(GTK_REVEALER(results_revealer_), 220);
+    gtk_scrolled_window_set_max_content_height(
+        GTK_SCROLLED_WINDOW(results_scroller_),
+        kEmojiResultsMaximumHeight
+    );
+    gtk_entry_set_placeholder_text(
+        GTK_ENTRY(search_entry_),
+        "Emoji › Search by name or keyword"
+    );
+
+    if (filter_changed) {
+        emoji_all_results_.clear();
+        emoji_rendered_count_ = 0;
+    }
+
+    if (emoji_database_loaded_) {
+        rebuild_emoji_results();
+    } else if (!emoji_loading_) {
+        emoji_status_message_ = "Loading emoji index…";
+        current_results_.clear();
+        rebuild_results();
+    }
+
+    if (mode_changed && !emoji_loading_ && !emoji_database_loaded_) {
+        request_emoji_database();
+    }
+}
+
+void LauncherOverlay::request_emoji_database() {
+    auto state = emoji_async_state_;
+    const std::uint64_t generation =
+        state->generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+    emoji_loading_ = true;
+    emoji_status_message_ = "Loading emoji index…";
+    current_results_.clear();
+    rebuild_results();
+
+    struct Completion {
+        std::shared_ptr<EmojiAsyncState> state;
+        std::uint64_t generation = 0;
+        bool succeeded = false;
+        std::string contents;
+    };
+
+    const auto callback = +[](gpointer data) -> gboolean {
+        std::unique_ptr<Completion> completion(static_cast<Completion*>(data));
+        LauncherOverlay* owner = completion->state->owner.load(
+            std::memory_order_acquire
+        );
+        if (owner == nullptr ||
+            completion->generation != completion->state->generation.load(
+                std::memory_order_acquire
+            ) || owner->search_mode_ != SearchMode::Emoji) {
+            return G_SOURCE_REMOVE;
+        }
+
+        owner->emoji_loading_ = false;
+        if (!completion->succeeded) {
+            owner->emoji_database_loaded_ = false;
+            owner->emoji_database_text_.clear();
+            owner->emoji_status_message_ = "Unable to read fuzzel emoji data";
+            owner->current_results_.clear();
+            owner->rebuild_results();
+            return G_SOURCE_REMOVE;
+        }
+
+        owner->emoji_database_text_ = std::move(completion->contents);
+        owner->emoji_database_loaded_ = true;
+        owner->emoji_status_message_.clear();
+        owner->rebuild_emoji_results();
+        return G_SOURCE_REMOVE;
+    };
+
+    const bool posted = realmheart::core::shared_task_executor().post(
+        [state, generation, callback] {
+            constexpr std::uintmax_t maximum_size = 2U * 1024U * 1024U;
+            const fs::path path = emoji_script_path();
+            std::error_code error;
+            const std::uintmax_t size = fs::file_size(path, error);
+            bool succeeded = !error && size <= maximum_size;
+            std::string contents;
+
+            if (succeeded) {
+                std::ifstream stream(path, std::ios::binary);
+                if (stream) {
+                    contents.assign(
+                        std::istreambuf_iterator<char>(stream),
+                        std::istreambuf_iterator<char>()
+                    );
+                    succeeded = (stream.eof() || stream.good()) &&
+                        contents.find("### DATA ###") != std::string::npos;
+                } else {
+                    succeeded = false;
+                }
+            }
+
+            auto* completion = new Completion{
+                state,
+                generation,
+                succeeded,
+                std::move(contents),
+            };
+            g_main_context_invoke(nullptr, callback, completion);
+        }
+    );
+
+    if (!posted) {
+        state->generation.fetch_add(1, std::memory_order_acq_rel);
+        emoji_loading_ = false;
+        emoji_status_message_ = "Unable to start emoji index loader";
+        rebuild_results();
+    }
+}
+
+void LauncherOverlay::rebuild_emoji_results() {
+    if (search_mode_ != SearchMode::Emoji) return;
+
+    if (emoji_loading_ && !emoji_database_loaded_) {
+        current_results_.clear();
+        emoji_status_message_ = "Loading emoji index…";
+        rebuild_results();
+        return;
+    }
+
+    emoji_status_message_.clear();
+    if (emoji_page_growth_idle_id_ != 0) {
+        g_source_remove(emoji_page_growth_idle_id_);
+        emoji_page_growth_idle_id_ = 0;
+    }
+    emoji_all_results_ = services::launcher_emoji_results(
+        emoji_database_text_,
+        emoji_filter_,
+        kEmojiBrowseResultCount
+    );
+    emoji_rendered_count_ = std::min(
+        kEmojiInitialResultCount,
+        emoji_all_results_.size()
+    );
+    current_results_.assign(
+        emoji_all_results_.begin(),
+        emoji_all_results_.begin() +
+            static_cast<std::ptrdiff_t>(emoji_rendered_count_)
+    );
+    current_results_.reserve(emoji_all_results_.size());
+    gtk_adjustment_set_value(
+        gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(results_scroller_)),
+        0.0
+    );
+    rebuild_results();
+    schedule_emoji_page_growth();
+}
+
+bool LauncherOverlay::append_next_emoji_page(
+    std::size_t minimum_result_count
+) {
+    if (search_mode_ != SearchMode::Emoji ||
+        (emoji_loading_ && !emoji_database_loaded_) ||
+        emoji_rendered_count_ >= emoji_all_results_.size()) {
+        return false;
+    }
+
+    const std::size_t target_count = std::min(
+        emoji_all_results_.size(),
+        std::max(
+            emoji_rendered_count_ + kEmojiResultBatchCount,
+            minimum_result_count
+        )
+    );
+    const std::size_t old_count = emoji_rendered_count_;
+    current_results_.reserve(target_count);
+    for (std::size_t index = old_count; index < target_count; ++index) {
+        current_results_.push_back(emoji_all_results_[index]);
+        append_result_row(current_results_.back());
+    }
+    emoji_rendered_count_ = target_count;
+    return emoji_rendered_count_ > old_count;
+}
+
+void LauncherOverlay::schedule_emoji_page_growth() {
+    if (search_mode_ != SearchMode::Emoji ||
+        (emoji_loading_ && !emoji_database_loaded_) ||
+        emoji_rendered_count_ >= emoji_all_results_.size() ||
+        emoji_page_growth_idle_id_ != 0 || results_scroller_ == nullptr) {
+        return;
+    }
+
+    GtkAdjustment* adjustment = gtk_scrolled_window_get_vadjustment(
+        GTK_SCROLLED_WINDOW(results_scroller_)
+    );
+    const double page_size = gtk_adjustment_get_page_size(adjustment);
+    const double upper = gtk_adjustment_get_upper(adjustment);
+    const double value = gtk_adjustment_get_value(adjustment);
+    constexpr double load_ahead_distance = 180.0;
+    if (page_size <= 1.0 || value + page_size + load_ahead_distance < upper) {
+        return;
+    }
+
+    emoji_page_growth_idle_id_ = g_idle_add_full(
+        G_PRIORITY_DEFAULT_IDLE,
+        +[](gpointer data) -> gboolean {
+            auto* overlay = static_cast<LauncherOverlay*>(data);
+            overlay->emoji_page_growth_idle_id_ = 0;
+            if (overlay->append_next_emoji_page()) {
+                overlay->schedule_emoji_page_growth();
+            }
+            return G_SOURCE_REMOVE;
+        },
+        this,
+        nullptr
+    );
+}
+
+void LauncherOverlay::request_clipboard_history() {
+    auto state = clipboard_async_state_;
+    const std::uint64_t generation =
+        state->generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+    const bool had_cached_history = clipboard_history_loaded_;
+
+    clipboard_loading_ = true;
+    if (!had_cached_history) {
+        clipboard_history_loaded_ = false;
+        clipboard_status_message_ = "Loading clipboard history…";
+        clipboard_all_results_.clear();
+        clipboard_rendered_count_ = 0;
+        current_results_.clear();
+        rebuild_results();
+    }
+
+    struct Completion {
+        std::shared_ptr<ClipboardAsyncState> state;
+        std::uint64_t generation = 0;
+        bool had_cached_history = false;
+        realmheart::core::CommandResult result;
+    };
+
+    const auto callback = +[](gpointer data) -> gboolean {
+        std::unique_ptr<Completion> completion(static_cast<Completion*>(data));
+        LauncherOverlay* owner = completion->state->owner.load(
+            std::memory_order_acquire
+        );
+        if (owner == nullptr ||
+            completion->generation != completion->state->generation.load(
+                std::memory_order_acquire
+            ) || owner->search_mode_ != SearchMode::Clipboard) {
+            return G_SOURCE_REMOVE;
+        }
+
+        owner->clipboard_loading_ = false;
+        if (!completion->result.succeeded()) {
+            if (!completion->had_cached_history) {
+                owner->clipboard_history_output_.clear();
+                owner->clipboard_history_loaded_ = false;
+                owner->clipboard_status_message_ = "Unable to read clipboard history";
+                owner->current_results_.clear();
+                owner->rebuild_results();
+            }
+            return G_SOURCE_REMOVE;
+        }
+
+        const bool changed = owner->clipboard_history_output_ != completion->result.output;
+        owner->clipboard_history_output_ = std::move(completion->result.output);
+        owner->clipboard_history_loaded_ = true;
+        owner->clipboard_status_message_.clear();
+        if (changed || !completion->had_cached_history) {
+            owner->rebuild_clipboard_results();
+        }
+        return G_SOURCE_REMOVE;
+    };
+
+    const bool posted = realmheart::core::shared_task_executor().post(
+        [state, generation, had_cached_history, callback] {
+            realmheart::core::CommandOptions options;
+            options.deadline = std::chrono::milliseconds(1800);
+            options.max_output_bytes = 256U * 1024U;
+            auto* completion = new Completion{
+                state,
+                generation,
+                had_cached_history,
+                realmheart::core::run_capture({"cliphist", "list"}, options),
+            };
+            g_main_context_invoke(nullptr, callback, completion);
+        }
+    );
+
+    if (!posted) {
+        state->generation.fetch_add(1, std::memory_order_acq_rel);
+        clipboard_loading_ = false;
+        if (!had_cached_history) {
+            clipboard_status_message_ = "Unable to start clipboard history loader";
+            rebuild_results();
+        }
+    }
+}
+
+void LauncherOverlay::rebuild_clipboard_results() {
+    if (search_mode_ != SearchMode::Clipboard) return;
+
+    if (clipboard_loading_ && !clipboard_history_loaded_) {
+        current_results_.clear();
+        clipboard_status_message_ = "Loading clipboard history…";
+        rebuild_results();
+        return;
+    }
+
+    clipboard_status_message_.clear();
+    if (clipboard_page_growth_idle_id_ != 0) {
+        g_source_remove(clipboard_page_growth_idle_id_);
+        clipboard_page_growth_idle_id_ = 0;
+    }
+    clipboard_all_results_ = services::launcher_clipboard_results(
+        clipboard_history_output_,
+        clipboard_filter_,
+        kClipboardBrowseResultCount
+    );
+    clipboard_rendered_count_ = std::min(
+        kClipboardInitialResultCount,
+        clipboard_all_results_.size()
+    );
+    current_results_.assign(
+        clipboard_all_results_.begin(),
+        clipboard_all_results_.begin() +
+            static_cast<std::ptrdiff_t>(clipboard_rendered_count_)
+    );
+    current_results_.reserve(clipboard_all_results_.size());
+    gtk_adjustment_set_value(
+        gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(results_scroller_)),
+        0.0
+    );
+    rebuild_results();
+    schedule_clipboard_page_growth();
+}
+
+bool LauncherOverlay::append_next_clipboard_page(
+    std::size_t minimum_result_count
+) {
+    if (search_mode_ != SearchMode::Clipboard ||
+        (clipboard_loading_ && !clipboard_history_loaded_) ||
+        clipboard_rendered_count_ >= clipboard_all_results_.size()) {
+        return false;
+    }
+
+    const std::size_t target_count = std::min(
+        clipboard_all_results_.size(),
+        std::max(
+            clipboard_rendered_count_ + kClipboardResultBatchCount,
+            minimum_result_count
+        )
+    );
+    const std::size_t old_count = clipboard_rendered_count_;
+    current_results_.reserve(target_count);
+    for (std::size_t index = old_count; index < target_count; ++index) {
+        current_results_.push_back(clipboard_all_results_[index]);
+        append_result_row(current_results_.back());
+    }
+    clipboard_rendered_count_ = target_count;
+    schedule_visible_clipboard_thumbnails();
+    return clipboard_rendered_count_ > old_count;
+}
+
+void LauncherOverlay::schedule_clipboard_page_growth() {
+    if (search_mode_ != SearchMode::Clipboard ||
+        (clipboard_loading_ && !clipboard_history_loaded_) ||
+        clipboard_rendered_count_ >= clipboard_all_results_.size() ||
+        clipboard_page_growth_idle_id_ != 0 || results_scroller_ == nullptr) {
+        return;
+    }
+
+    GtkAdjustment* adjustment = gtk_scrolled_window_get_vadjustment(
+        GTK_SCROLLED_WINDOW(results_scroller_)
+    );
+    const double page_size = gtk_adjustment_get_page_size(adjustment);
+    const double upper = gtk_adjustment_get_upper(adjustment);
+    const double value = gtk_adjustment_get_value(adjustment);
+    constexpr double load_ahead_distance = 180.0;
+    if (page_size <= 1.0 || value + page_size + load_ahead_distance < upper) {
+        return;
+    }
+
+    clipboard_page_growth_idle_id_ = g_idle_add_full(
+        G_PRIORITY_DEFAULT_IDLE,
+        +[](gpointer data) -> gboolean {
+            auto* overlay = static_cast<LauncherOverlay*>(data);
+            overlay->clipboard_page_growth_idle_id_ = 0;
+            if (overlay->append_next_clipboard_page()) {
+                overlay->schedule_clipboard_page_growth();
+            }
+            return G_SOURCE_REMOVE;
+        },
+        this,
+        nullptr
+    );
+}
+
+void LauncherOverlay::cache_clipboard_thumbnail(
+    std::string id,
+    ClipboardThumbnail thumbnail
+) {
+    if (thumbnail.texture == nullptr || id.empty()) return;
+
+    if (const auto existing = clipboard_thumbnail_cache_.find(id);
+        existing != clipboard_thumbnail_cache_.end()) {
+        if (existing->second.texture != nullptr) g_object_unref(existing->second.texture);
+        clipboard_thumbnail_cache_.erase(existing);
+        std::erase(clipboard_thumbnail_lru_, id);
+    }
+
+    while (clipboard_thumbnail_cache_.size() >= kClipboardThumbnailCacheLimit &&
+           !clipboard_thumbnail_lru_.empty()) {
+        const std::string evicted = std::move(clipboard_thumbnail_lru_.front());
+        clipboard_thumbnail_lru_.erase(clipboard_thumbnail_lru_.begin());
+        const auto found = clipboard_thumbnail_cache_.find(evicted);
+        if (found == clipboard_thumbnail_cache_.end()) continue;
+        if (found->second.texture != nullptr) g_object_unref(found->second.texture);
+        clipboard_thumbnail_cache_.erase(found);
+    }
+
+    clipboard_thumbnail_lru_.push_back(id);
+    clipboard_thumbnail_cache_.emplace(std::move(id), std::move(thumbnail));
+}
+
+void LauncherOverlay::apply_clipboard_thumbnail(std::string_view id) {
+    const auto row = clipboard_rows_.find(std::string(id));
+    const auto cached = clipboard_thumbnail_cache_.find(std::string(id));
+    if (row == clipboard_rows_.end() || cached == clipboard_thumbnail_cache_.end() ||
+        row->second.view_generation != clipboard_view_generation_ ||
+        row->second.icon_slot == nullptr || cached->second.texture == nullptr) {
+        return;
+    }
+
+    gtk_overlay_set_child(GTK_OVERLAY(row->second.icon_slot), nullptr);
+
+    GtkWidget* picture = gtk_picture_new_for_paintable(
+        GDK_PAINTABLE(cached->second.texture)
+    );
+    gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_COVER);
+    gtk_picture_set_can_shrink(GTK_PICTURE(picture), TRUE);
+    gtk_widget_set_size_request(
+        picture,
+        kClipboardThumbnailWidth,
+        kClipboardThumbnailHeight
+    );
+    gtk_widget_set_hexpand(picture, TRUE);
+    gtk_widget_set_vexpand(picture, TRUE);
+    gtk_widget_set_halign(picture, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(picture, GTK_ALIGN_FILL);
+    gtk_widget_set_can_target(picture, FALSE);
+    gtk_widget_add_css_class(picture, "realmheart-launcher-clipboard-thumbnail-image");
+    gtk_overlay_set_child(GTK_OVERLAY(row->second.icon_slot), picture);
+    row->second.thumbnail_visible = true;
+
+    if (row->second.subtitle != nullptr) {
+        std::string subtitle = "Image · " +
+            std::to_string(cached->second.source_width) + "×" +
+            std::to_string(cached->second.source_height);
+        if (!cached->second.format.empty()) subtitle += " · " + cached->second.format;
+        gtk_label_set_text(GTK_LABEL(row->second.subtitle), subtitle.c_str());
+    }
+
+    if (selected_result_row_ != nullptr) {
+        retarget_result_selection(selected_result_row_);
+    }
+}
+
+void LauncherOverlay::schedule_visible_clipboard_thumbnails() {
+    if (search_mode_ != SearchMode::Clipboard ||
+        clipboard_thumbnail_visibility_idle_id_ != 0) {
+        return;
+    }
+
+    clipboard_thumbnail_visibility_idle_id_ = g_idle_add_full(
+        G_PRIORITY_DEFAULT_IDLE,
+        +[](gpointer data) -> gboolean {
+            auto* overlay = static_cast<LauncherOverlay*>(data);
+            overlay->clipboard_thumbnail_visibility_idle_id_ = 0;
+            overlay->request_visible_clipboard_thumbnails();
+            return G_SOURCE_REMOVE;
+        },
+        this,
+        nullptr
+    );
+}
+
+void LauncherOverlay::request_visible_clipboard_thumbnails() {
+    if (search_mode_ != SearchMode::Clipboard || results_scroller_ == nullptr ||
+        results_list_ == nullptr) {
+        return;
+    }
+
+    GtkAdjustment* adjustment = gtk_scrolled_window_get_vadjustment(
+        GTK_SCROLLED_WINDOW(results_scroller_)
+    );
+    const double viewport_top = gtk_adjustment_get_value(adjustment);
+    const double page_size = std::max(1.0, gtk_adjustment_get_page_size(adjustment));
+    constexpr double prefetch_margin = 140.0;
+    const double visible_top = std::max(0.0, viewport_top - prefetch_margin);
+    const double visible_bottom = viewport_top + page_size + prefetch_margin;
+
+    // First release pictures that have moved well outside the viewport. The
+    // small texture cache keeps recent previews reusable, but offscreen rows do
+    // not retain their own paintable references indefinitely.
+    for (auto& [id, widgets] : clipboard_rows_) {
+        static_cast<void>(id);
+        if (widgets.view_generation != clipboard_view_generation_ ||
+            widgets.row == nullptr) {
+            continue;
+        }
+
+        graphene_rect_t bounds{};
+        if (!gtk_widget_compute_bounds(widgets.row, results_list_, &bounds)) continue;
+        const double row_top = bounds.origin.y;
+        const double row_bottom = row_top + bounds.size.height;
+        const bool visible = row_bottom >= visible_top && row_top <= visible_bottom;
+        if (visible || !widgets.thumbnail_visible || widgets.icon_slot == nullptr) {
+            continue;
+        }
+
+        gtk_overlay_set_child(GTK_OVERLAY(widgets.icon_slot), nullptr);
+        GtkWidget* placeholder = make_launcher_icon(
+            "Realmheart-Icons/clip-history.svg",
+            30
+        );
+        gtk_widget_set_halign(placeholder, GTK_ALIGN_CENTER);
+        gtk_widget_set_valign(placeholder, GTK_ALIGN_CENTER);
+        gtk_overlay_set_child(GTK_OVERLAY(widgets.icon_slot), placeholder);
+        widgets.thumbnail_visible = false;
+    }
+
+    // Never let frantic scrolling enqueue an unbounded tail of cliphist
+    // subprocesses. Two jobs match the shared executor's worker count; each
+    // completion schedules the next visible row.
+    if (clipboard_thumbnail_active_jobs_ >= kClipboardThumbnailMaximumJobs) return;
+
+    for (const auto& result : current_results_) {
+        if (!result.clipboard_image) continue;
+        const auto found = clipboard_rows_.find(result.id);
+        if (found == clipboard_rows_.end() ||
+            found->second.view_generation != clipboard_view_generation_ ||
+            found->second.row == nullptr) {
+            continue;
+        }
+
+        graphene_rect_t bounds{};
+        if (!gtk_widget_compute_bounds(found->second.row, results_list_, &bounds)) {
+            continue;
+        }
+        const double row_top = bounds.origin.y;
+        const double row_bottom = row_top + bounds.size.height;
+        if (row_bottom < visible_top || row_top > visible_bottom) continue;
+
+        request_clipboard_thumbnail(result);
+        if (clipboard_thumbnail_active_jobs_ >= kClipboardThumbnailMaximumJobs) break;
+    }
+}
+
+void LauncherOverlay::ensure_result_row_visible(GtkListBoxRow* row) {
+    if (row == nullptr || results_scroller_ == nullptr || results_list_ == nullptr) {
+        return;
+    }
+
+    graphene_rect_t bounds{};
+    if (!gtk_widget_compute_bounds(GTK_WIDGET(row), results_list_, &bounds)) return;
+
+    GtkAdjustment* adjustment = gtk_scrolled_window_get_vadjustment(
+        GTK_SCROLLED_WINDOW(results_scroller_)
+    );
+    const double page_size = gtk_adjustment_get_page_size(adjustment);
+    if (page_size <= 1.0) return;
+
+    const double current = gtk_adjustment_get_value(adjustment);
+    const double row_top = bounds.origin.y;
+    const double row_bottom = row_top + bounds.size.height;
+    double target = current;
+    if (row_top < current) {
+        target = row_top;
+    } else if (row_bottom > current + page_size) {
+        target = row_bottom - page_size;
+    }
+
+    const double lower = gtk_adjustment_get_lower(adjustment);
+    const double upper = std::max(
+        lower,
+        gtk_adjustment_get_upper(adjustment) - page_size
+    );
+    target = std::clamp(target, lower, upper);
+    if (std::abs(target - current) > 0.5) gtk_adjustment_set_value(adjustment, target);
+
+    retarget_result_selection(row);
+    schedule_visible_clipboard_thumbnails();
+}
+
+void LauncherOverlay::request_clipboard_thumbnail(
+    const services::LauncherResult& result
+) {
+    if (!result.clipboard_image || result.id.empty() ||
+        search_mode_ != SearchMode::Clipboard) {
+        return;
+    }
+    if (clipboard_thumbnail_cache_.contains(result.id)) {
+        apply_clipboard_thumbnail(result.id);
+        return;
+    }
+
+    auto state = clipboard_async_state_;
+    const std::uint64_t generation = state->generation.load(std::memory_order_acquire);
+    if (const auto existing = clipboard_thumbnail_inflight_.find(result.id);
+        existing != clipboard_thumbnail_inflight_.end() &&
+        existing->second == generation) {
+        return;
+    }
+    if (clipboard_thumbnail_active_jobs_ >= kClipboardThumbnailMaximumJobs) return;
+
+    const std::string id = result.id;
+    const std::string fallback_format = result.clipboard_mime;
+    clipboard_thumbnail_inflight_[id] = generation;
+    ++clipboard_thumbnail_active_jobs_;
+
+    struct Completion {
+        std::shared_ptr<ClipboardAsyncState> state;
+        std::uint64_t generation = 0;
+        std::string id;
+        std::string fallback_format;
+        std::optional<DecodedClipboardThumbnail> decoded;
+    };
+
+    const auto callback = +[](gpointer data) -> gboolean {
+        std::unique_ptr<Completion> completion(static_cast<Completion*>(data));
+        LauncherOverlay* owner = completion->state->owner.load(
+            std::memory_order_acquire
+        );
+        if (owner == nullptr) return G_SOURCE_REMOVE;
+
+        if (owner->clipboard_thumbnail_active_jobs_ > 0) {
+            --owner->clipboard_thumbnail_active_jobs_;
+        }
+        if (const auto inflight = owner->clipboard_thumbnail_inflight_.find(
+                completion->id
+            ); inflight != owner->clipboard_thumbnail_inflight_.end() &&
+            inflight->second == completion->generation) {
+            owner->clipboard_thumbnail_inflight_.erase(inflight);
+        }
+
+        const bool request_is_current =
+            completion->generation == completion->state->generation.load(
+                std::memory_order_acquire
+            ) && owner->search_mode_ == SearchMode::Clipboard;
+        if (request_is_current && completion->decoded.has_value()) {
+            auto& decoded = *completion->decoded;
+            const gsize byte_count = static_cast<gsize>(decoded.rowstride) *
+                static_cast<gsize>(decoded.height);
+            GBytes* bytes = g_bytes_new(decoded.pixels.data(), byte_count);
+            GdkTexture* texture = gdk_memory_texture_new(
+                decoded.width,
+                decoded.height,
+                decoded.has_alpha ? GDK_MEMORY_R8G8B8A8 : GDK_MEMORY_R8G8B8,
+                bytes,
+                static_cast<gsize>(decoded.rowstride)
+            );
+            g_bytes_unref(bytes);
+
+            if (texture != nullptr) {
+                std::string format = uppercase_ascii(decoded.format);
+                if (format.empty()) {
+                    const std::size_t slash = completion->fallback_format.find('/');
+                    format = uppercase_ascii(
+                        slash == std::string::npos
+                            ? completion->fallback_format
+                            : completion->fallback_format.substr(slash + 1)
+                    );
+                }
+
+                owner->cache_clipboard_thumbnail(
+                    completion->id,
+                    ClipboardThumbnail{
+                        texture,
+                        decoded.source_width,
+                        decoded.source_height,
+                        std::move(format),
+                    }
+                );
+                owner->apply_clipboard_thumbnail(completion->id);
+            }
+        }
+
+        // Whether the completed request was current or stale, a worker slot is
+        // free now. Continue filling only the rows visible in the current view.
+        owner->schedule_visible_clipboard_thumbnails();
+        return G_SOURCE_REMOVE;
+    };
+
+    const bool posted = realmheart::core::shared_task_executor().post(
+        [state, generation, id, fallback_format, callback] {
+            realmheart::core::CommandOptions options;
+            options.deadline = std::chrono::milliseconds(2500);
+            options.max_output_bytes = kClipboardMaximumDecodedBytes;
+            const auto decoded_bytes = realmheart::core::run_capture(
+                {"cliphist", "decode", id},
+                options
+            );
+
+            std::optional<DecodedClipboardThumbnail> decoded;
+            if (decoded_bytes.succeeded() && !decoded_bytes.truncated) {
+                decoded = decode_clipboard_thumbnail(decoded_bytes.output);
+            }
+            auto* completion = new Completion{
+                state,
+                generation,
+                id,
+                fallback_format,
+                std::move(decoded),
+            };
+            g_main_context_invoke(nullptr, callback, completion);
+        }
+    );
+
+    if (!posted) {
+        if (clipboard_thumbnail_active_jobs_ > 0) --clipboard_thumbnail_active_jobs_;
+        if (const auto inflight = clipboard_thumbnail_inflight_.find(id);
+            inflight != clipboard_thumbnail_inflight_.end() &&
+            inflight->second == generation) {
+            clipboard_thumbnail_inflight_.erase(inflight);
+        }
+    }
+}
+
+void LauncherOverlay::request_clipboard_wipe() {
+    auto state = clipboard_async_state_;
+    const std::uint64_t generation =
+        state->generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+    clipboard_loading_ = true;
+    clipboard_clear_armed_ = false;
+    clipboard_status_message_ = "Clearing clipboard history…";
+    clipboard_all_results_.clear();
+    clipboard_rendered_count_ = 0;
+    current_results_.clear();
+    clear_clipboard_thumbnail_cache();
+    rebuild_results();
+
+    struct Completion {
+        std::shared_ptr<ClipboardAsyncState> state;
+        std::uint64_t generation = 0;
+        realmheart::core::CommandResult result;
+    };
+
+    const auto callback = +[](gpointer data) -> gboolean {
+        std::unique_ptr<Completion> completion(static_cast<Completion*>(data));
+        LauncherOverlay* owner = completion->state->owner.load(
+            std::memory_order_acquire
+        );
+        if (owner == nullptr ||
+            completion->generation != completion->state->generation.load(
+                std::memory_order_acquire
+            ) || owner->search_mode_ != SearchMode::ClipboardClear) {
+            return G_SOURCE_REMOVE;
+        }
+
+        owner->clipboard_loading_ = false;
+        owner->clipboard_history_output_.clear();
+        owner->clipboard_history_loaded_ = false;
+        owner->clipboard_all_results_.clear();
+        owner->clipboard_rendered_count_ = 0;
+        if (!completion->result.succeeded()) {
+            owner->clipboard_status_message_ = "Unable to clear clipboard history";
+            owner->clipboard_clear_armed_ = false;
+            auto retry = services::launcher_clipboard_clear_result(false);
+            retry.subtitle = "Unable to clear history · Press Enter to retry";
+            owner->current_results_ = {std::move(retry)};
+            owner->rebuild_results();
+            return G_SOURCE_REMOVE;
+        }
+
+        gtk_editable_set_text(GTK_EDITABLE(owner->search_entry_), ">clip ");
+        gtk_editable_set_position(GTK_EDITABLE(owner->search_entry_), -1);
+        return G_SOURCE_REMOVE;
+    };
+
+    const bool posted = realmheart::core::shared_task_executor().post(
+        [state, generation, callback] {
+            realmheart::core::CommandOptions options;
+            options.deadline = std::chrono::milliseconds(1800);
+            options.max_output_bytes = 32U * 1024U;
+            auto* completion = new Completion{
+                state,
+                generation,
+                realmheart::core::run_capture({"cliphist", "wipe"}, options),
+            };
+            g_main_context_invoke(nullptr, callback, completion);
+        }
+    );
+
+    if (!posted) {
+        state->generation.fetch_add(1, std::memory_order_acq_rel);
+        clipboard_loading_ = false;
+        clipboard_status_message_ = "Unable to start clipboard history clear";
+        auto retry = services::launcher_clipboard_clear_result(false);
+        retry.subtitle = "Unable to start clear operation · Press Enter to retry";
+        current_results_ = {std::move(retry)};
+        rebuild_results();
+    }
+}
+
+void LauncherOverlay::request_clipboard_delete(std::string id) {
+    if (search_mode_ != SearchMode::Clipboard || id.empty()) return;
+
+    const auto found = std::ranges::find_if(
+        clipboard_all_results_,
+        [&id](const services::LauncherResult& result) {
+            return result.kind == services::LauncherResultKind::Clipboard &&
+                result.id == id;
+        }
+    );
+    if (found == clipboard_all_results_.end()) return;
+
+    const services::LauncherResult deleted = *found;
+    const auto argv = services::launcher_clipboard_delete_argv(
+        deleted.id,
+        deleted.description
+    );
+    if (argv.empty()) return;
+
+    auto state = clipboard_async_state_;
+    const std::uint64_t generation =
+        state->generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+
+    std::size_t deleted_index = 0;
+    if (const auto visible = std::ranges::find_if(
+            current_results_,
+            [&id](const services::LauncherResult& result) {
+                return result.kind == services::LauncherResultKind::Clipboard &&
+                    result.id == id;
+            }
+        ); visible != current_results_.end()) {
+        deleted_index = static_cast<std::size_t>(std::distance(
+            current_results_.begin(),
+            visible
+        ));
+    }
+
+    static_cast<void>(erase_cliphist_entry_line(clipboard_history_output_, id));
+    std::erase_if(
+        clipboard_all_results_,
+        [&id](const services::LauncherResult& result) { return result.id == id; }
+    );
+
+    if (const auto cached = clipboard_thumbnail_cache_.find(id);
+        cached != clipboard_thumbnail_cache_.end()) {
+        if (cached->second.texture != nullptr) g_object_unref(cached->second.texture);
+        clipboard_thumbnail_cache_.erase(cached);
+    }
+    std::erase(clipboard_thumbnail_lru_, id);
+
+    clipboard_rendered_count_ = std::min(
+        clipboard_rendered_count_,
+        clipboard_all_results_.size()
+    );
+    current_results_.assign(
+        clipboard_all_results_.begin(),
+        clipboard_all_results_.begin() +
+            static_cast<std::ptrdiff_t>(clipboard_rendered_count_)
+    );
+    current_results_.reserve(clipboard_all_results_.size());
+    rebuild_results();
+
+    if (!current_results_.empty()) {
+        const int next_index = static_cast<int>(std::min(
+            deleted_index,
+            current_results_.size() - 1
+        ));
+        if (GtkListBoxRow* next = gtk_list_box_get_row_at_index(
+                GTK_LIST_BOX(results_list_),
+                next_index
+            ); next != nullptr) {
+            gtk_list_box_select_row(GTK_LIST_BOX(results_list_), next);
+            ensure_result_row_visible(next);
+        }
+    }
+    schedule_clipboard_page_growth();
+
+    struct Completion {
+        std::shared_ptr<ClipboardAsyncState> state;
+        std::uint64_t generation = 0;
+        realmheart::core::CommandResult result;
+    };
+
+    const auto callback = +[](gpointer data) -> gboolean {
+        std::unique_ptr<Completion> completion(static_cast<Completion*>(data));
+        LauncherOverlay* owner = completion->state->owner.load(
+            std::memory_order_acquire
+        );
+        if (owner == nullptr ||
+            completion->generation != completion->state->generation.load(
+                std::memory_order_acquire
+            ) || owner->search_mode_ != SearchMode::Clipboard) {
+            return G_SOURCE_REMOVE;
+        }
+
+        if (!completion->result.succeeded()) {
+            // The row disappeared optimistically. Reload the authoritative
+            // database so a failed deletion restores it instead of lying.
+            owner->request_clipboard_history();
+        }
+        return G_SOURCE_REMOVE;
+    };
+
+    const bool posted = realmheart::core::shared_task_executor().post(
+        [state, generation, argv, callback] {
+            realmheart::core::CommandOptions options;
+            options.deadline = std::chrono::milliseconds(1800);
+            options.max_output_bytes = 32U * 1024U;
+            auto* completion = new Completion{
+                state,
+                generation,
+                realmheart::core::run_capture(argv, options),
+            };
+            g_main_context_invoke(nullptr, callback, completion);
+        }
+    );
+
+    if (!posted) request_clipboard_history();
+}
+
+void LauncherOverlay::activate_clipboard_action(
+    const services::LauncherResult& result
+) {
+    if (result.id != "clear-history") return;
+    if (!clipboard_clear_armed_) {
+        clipboard_clear_armed_ = true;
+        current_results_ = {services::launcher_clipboard_clear_result(true)};
+        rebuild_results();
+        return;
+    }
+    request_clipboard_wipe();
+}
+
+
+GtkListBoxRow* LauncherOverlay::append_result_row(
+    const services::LauncherResult& result
+) {
+    GtkWidget* row = gtk_list_box_row_new();
+    gtk_widget_add_css_class(row, "realmheart-launcher-result-row");
+
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
+    gtk_widget_set_margin_start(box, 16);
+    gtk_widget_set_margin_end(box, 12);
+    gtk_widget_set_margin_top(box, 10);
+    gtk_widget_set_margin_bottom(box, 10);
+
+    GtkWidget* icon = nullptr;
+    GtkWidget* clipboard_icon_slot = nullptr;
+    if (result.kind == services::LauncherResultKind::Emoji) {
+        icon = gtk_label_new(result.id.c_str());
+        gtk_widget_set_size_request(icon, 42, 42);
+        gtk_widget_set_halign(icon, GTK_ALIGN_CENTER);
+        gtk_widget_set_valign(icon, GTK_ALIGN_CENTER);
+        gtk_widget_add_css_class(icon, "realmheart-launcher-emoji-glyph");
+    } else if (result.kind == services::LauncherResultKind::Clipboard &&
+        result.clipboard_image) {
+        clipboard_icon_slot = gtk_overlay_new();
+        gtk_widget_set_size_request(
+            clipboard_icon_slot,
+            kClipboardThumbnailWidth,
+            kClipboardThumbnailHeight
+        );
+        gtk_widget_set_halign(clipboard_icon_slot, GTK_ALIGN_CENTER);
+        gtk_widget_set_valign(clipboard_icon_slot, GTK_ALIGN_CENTER);
+        gtk_widget_set_overflow(clipboard_icon_slot, GTK_OVERFLOW_HIDDEN);
+        gtk_widget_add_css_class(
+            clipboard_icon_slot,
+            "realmheart-launcher-clipboard-thumbnail"
+        );
+        GtkWidget* placeholder = make_launcher_icon(result.icon_name, 30);
+        gtk_widget_set_halign(placeholder, GTK_ALIGN_CENTER);
+        gtk_widget_set_valign(placeholder, GTK_ALIGN_CENTER);
+        gtk_overlay_set_child(GTK_OVERLAY(clipboard_icon_slot), placeholder);
+        icon = clipboard_icon_slot;
+    } else {
+        icon = make_launcher_icon(result.icon_name, 36);
+    }
+
+    GtkWidget* labels = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
+    gtk_widget_set_hexpand(labels, TRUE);
+
+    GtkWidget* title = gtk_label_new(result.title.c_str());
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0F);
+    gtk_label_set_ellipsize(GTK_LABEL(title), PANGO_ELLIPSIZE_END);
+    gtk_widget_add_css_class(title, "realmheart-launcher-row-title");
+
+    GtkWidget* subtitle = gtk_label_new(result.subtitle.c_str());
+    gtk_label_set_xalign(GTK_LABEL(subtitle), 0.0F);
+    gtk_label_set_ellipsize(GTK_LABEL(subtitle), PANGO_ELLIPSIZE_END);
+    gtk_widget_add_css_class(subtitle, "realmheart-launcher-row-subtitle");
+    gtk_widget_set_visible(subtitle, !result.subtitle.empty());
+
+    GtkWidget* trailing = nullptr;
+    if (result.kind == services::LauncherResultKind::Clipboard) {
+        GtkWidget* remove = gtk_button_new();
+        gtk_button_set_has_frame(GTK_BUTTON(remove), FALSE);
+        gtk_widget_set_focusable(remove, FALSE);
+        gtk_widget_set_valign(remove, GTK_ALIGN_CENTER);
+        gtk_widget_add_css_class(remove, "realmheart-launcher-clipboard-delete");
+        gtk_widget_set_tooltip_text(remove, "Delete this clipboard entry");
+
+        auto* remove_icon = new bar::widgets::ThemedSvgIcon(
+            "Realmheart-Icons/trash.svg",
+            18
+        );
+        gtk_button_set_child(GTK_BUTTON(remove), remove_icon->widget());
+        g_object_set_data_full(
+            G_OBJECT(remove),
+            "realmheart-delete-icon",
+            remove_icon,
+            +[](gpointer data) {
+                delete static_cast<bar::widgets::ThemedSvgIcon*>(data);
+            }
+        );
+        g_object_set_data_full(
+            G_OBJECT(remove),
+            "realmheart-clipboard-id",
+            g_strdup(result.id.c_str()),
+            g_free
+        );
+        g_signal_connect(remove, "clicked", G_CALLBACK(+[](
+            GtkButton* source,
+            gpointer data
+        ) {
+            auto* overlay = static_cast<LauncherOverlay*>(data);
+            const char* id = static_cast<const char*>(g_object_get_data(
+                G_OBJECT(source),
+                "realmheart-clipboard-id"
+            ));
+            if (id != nullptr) overlay->request_clipboard_delete(id);
+        }), this);
+        trailing = remove;
+    } else {
+        GtkWidget* kind = gtk_label_new(result_kind_label(result.kind));
+        gtk_widget_set_valign(kind, GTK_ALIGN_CENTER);
+        gtk_widget_add_css_class(kind, "realmheart-launcher-result-kind");
+        if (result.kind == services::LauncherResultKind::ClipboardAction) {
+            gtk_widget_add_css_class(row, "destructive");
+            gtk_widget_add_css_class(kind, "destructive");
+        }
+        trailing = kind;
+    }
+
+    gtk_box_append(GTK_BOX(labels), title);
+    gtk_box_append(GTK_BOX(labels), subtitle);
+    gtk_box_append(GTK_BOX(box), icon);
+    gtk_box_append(GTK_BOX(box), labels);
+    gtk_box_append(GTK_BOX(box), trailing);
+
+    if (result.kind == services::LauncherResultKind::Application) {
+        const bool pinned = constellation_contains(result.id);
+        GtkWidget* pin = gtk_button_new();
+        gtk_button_set_has_frame(GTK_BUTTON(pin), FALSE);
+        auto* pin_icon = new bar::widgets::ThemedSvgIcon(
+            pinned
+                ? "Realmheart-Icons/subtract.svg"
+                : "Realmheart-Icons/add.svg",
+            18
+        );
+        gtk_button_set_child(GTK_BUTTON(pin), pin_icon->widget());
+        g_object_set_data_full(
+            G_OBJECT(pin),
+            "realmheart-pin-icon",
+            pin_icon,
+            +[](gpointer data) {
+                delete static_cast<bar::widgets::ThemedSvgIcon*>(data);
+            }
+        );
+        gtk_widget_set_valign(pin, GTK_ALIGN_CENTER);
+        gtk_widget_add_css_class(pin, "realmheart-launcher-result-pin");
+        gtk_widget_set_tooltip_text(
+            pin,
+            pinned ? "Unpin from launcher" : "Pin to launcher"
+        );
+        g_object_set_data_full(
+            G_OBJECT(pin),
+            "realmheart-application-id",
+            g_strdup(result.id.c_str()),
+            g_free
+        );
+        g_signal_connect(pin, "clicked", G_CALLBACK(+[](GtkButton* source, gpointer data) {
+            auto* overlay = static_cast<LauncherOverlay*>(data);
+            const char* application_id = static_cast<const char*>(g_object_get_data(
+                G_OBJECT(source),
+                "realmheart-application-id"
+            ));
+            if (application_id == nullptr) return;
+
+            overlay->toggle_constellation_application(application_id);
+            const bool now_pinned = overlay->constellation_contains(application_id);
+            auto* themed_icon = static_cast<bar::widgets::ThemedSvgIcon*>(
+                g_object_get_data(G_OBJECT(source), "realmheart-pin-icon")
+            );
+            if (themed_icon != nullptr) {
+                static_cast<void>(themed_icon->set_icon(
+                    now_pinned
+                        ? "Realmheart-Icons/subtract.svg"
+                        : "Realmheart-Icons/add.svg"
+                ));
+            }
+            gtk_widget_set_tooltip_text(
+                GTK_WIDGET(source),
+                now_pinned ? "Unpin from launcher" : "Pin to launcher"
+            );
+        }), this);
+        gtk_box_append(GTK_BOX(box), pin);
+    }
+
+    gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
+
+    auto motion = std::make_unique<ResultRowMotion>();
+    motion->bind(GTK_LIST_BOX_ROW(row), box);
+    result_row_motions_.push_back(std::move(motion));
+
+    GtkEventController* hover = gtk_event_controller_motion_new();
+    g_signal_connect(hover, "motion", G_CALLBACK(+[](
+        GtkEventController* controller, double, double, gpointer data
+    ) {
+        GtkWidget* widget = gtk_event_controller_get_widget(controller);
+        auto* hovered_row = GTK_LIST_BOX_ROW(widget);
+        auto* overlay = static_cast<LauncherOverlay*>(data);
+        gtk_list_box_select_row(GTK_LIST_BOX(overlay->results_list_), hovered_row);
+    }), this);
+    gtk_widget_add_controller(row, hover);
+
+    gtk_list_box_append(GTK_LIST_BOX(results_list_), row);
+    if (result.kind == services::LauncherResultKind::Clipboard &&
+        result.clipboard_image && clipboard_icon_slot != nullptr) {
+        clipboard_rows_[result.id] = ClipboardRowWidgets{
+            row,
+            clipboard_icon_slot,
+            subtitle,
+            clipboard_view_generation_,
+        };
+    }
+    return GTK_LIST_BOX_ROW(row);
+}
+
 void LauncherOverlay::rebuild_results() {
     selected_result_row_ = nullptr;
     result_selection_target_visible_ = false;
     result_row_motions_.clear();
+    clipboard_rows_.clear();
+    ++clipboard_view_generation_;
     clear_list(results_list_);
 
-    for (const auto& result : current_results_) {
-        GtkWidget* row = gtk_list_box_row_new();
-        gtk_widget_add_css_class(row, "realmheart-launcher-result-row");
-
-        GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
-        gtk_widget_set_margin_start(box, 16);
-        gtk_widget_set_margin_end(box, 12);
-        gtk_widget_set_margin_top(box, 10);
-        gtk_widget_set_margin_bottom(box, 10);
-
-        GtkWidget* icon = make_launcher_icon(result.icon_name, 36);
-
-        GtkWidget* labels = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
-        gtk_widget_set_hexpand(labels, TRUE);
-
-        GtkWidget* title = gtk_label_new(result.title.c_str());
-        gtk_label_set_xalign(GTK_LABEL(title), 0.0F);
-        gtk_label_set_ellipsize(GTK_LABEL(title), PANGO_ELLIPSIZE_END);
-        gtk_widget_add_css_class(title, "realmheart-launcher-row-title");
-
-        GtkWidget* subtitle = gtk_label_new(result.subtitle.c_str());
-        gtk_label_set_xalign(GTK_LABEL(subtitle), 0.0F);
-        gtk_label_set_ellipsize(GTK_LABEL(subtitle), PANGO_ELLIPSIZE_END);
-        gtk_widget_add_css_class(subtitle, "realmheart-launcher-row-subtitle");
-        gtk_widget_set_visible(subtitle, !result.subtitle.empty());
-
-        GtkWidget* kind = gtk_label_new(result_kind_label(result.kind));
-        gtk_widget_set_valign(kind, GTK_ALIGN_CENTER);
-        gtk_widget_add_css_class(kind, "realmheart-launcher-result-kind");
-
-        gtk_box_append(GTK_BOX(labels), title);
-        gtk_box_append(GTK_BOX(labels), subtitle);
-        gtk_box_append(GTK_BOX(box), icon);
-        gtk_box_append(GTK_BOX(box), labels);
-        gtk_box_append(GTK_BOX(box), kind);
-
-        if (result.kind == services::LauncherResultKind::Application) {
-            const bool pinned = constellation_contains(result.id);
-            GtkWidget* pin = gtk_button_new();
-            gtk_button_set_has_frame(GTK_BUTTON(pin), FALSE);
-            auto* pin_icon = new bar::widgets::ThemedSvgIcon(
-                pinned
-                    ? "Realmheart-Icons/subtract.svg"
-                    : "Realmheart-Icons/add.svg",
-                18
-            );
-            gtk_button_set_child(GTK_BUTTON(pin), pin_icon->widget());
-            g_object_set_data_full(
-                G_OBJECT(pin),
-                "realmheart-pin-icon",
-                pin_icon,
-                +[](gpointer data) {
-                    delete static_cast<bar::widgets::ThemedSvgIcon*>(data);
-                }
-            );
-            gtk_widget_set_valign(pin, GTK_ALIGN_CENTER);
-            gtk_widget_add_css_class(pin, "realmheart-launcher-result-pin");
-            gtk_widget_set_tooltip_text(
-                pin,
-                pinned ? "Unpin from launcher" : "Pin to launcher"
-            );
-            g_object_set_data_full(
-                G_OBJECT(pin),
-                "realmheart-application-id",
-                g_strdup(result.id.c_str()),
-                g_free
-            );
-            g_signal_connect(pin, "clicked", G_CALLBACK(+[](GtkButton* source, gpointer data) {
-                auto* overlay = static_cast<LauncherOverlay*>(data);
-                const char* application_id = static_cast<const char*>(g_object_get_data(
-                    G_OBJECT(source),
-                    "realmheart-application-id"
-                ));
-                if (application_id == nullptr) return;
-
-                overlay->toggle_constellation_application(application_id);
-                const bool now_pinned = overlay->constellation_contains(application_id);
-                auto* icon = static_cast<bar::widgets::ThemedSvgIcon*>(
-                    g_object_get_data(G_OBJECT(source), "realmheart-pin-icon")
-                );
-                if (icon != nullptr) {
-                    static_cast<void>(icon->set_icon(
-                        now_pinned
-                            ? "Realmheart-Icons/subtract.svg"
-                            : "Realmheart-Icons/add.svg"
-                    ));
-                }
-                gtk_widget_set_tooltip_text(
-                    GTK_WIDGET(source),
-                    now_pinned ? "Unpin from launcher" : "Pin to launcher"
-                );
-            }), this);
-            gtk_box_append(GTK_BOX(box), pin);
-        }
-
-        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), box);
-
-        auto motion = std::make_unique<ResultRowMotion>();
-        motion->row = GTK_LIST_BOX_ROW(row);
-        motion->content = box;
-        result_row_motions_.push_back(std::move(motion));
-
-        GtkEventController* hover = gtk_event_controller_motion_new();
-        g_signal_connect(hover, "enter", G_CALLBACK(+[](
-            GtkEventController* controller, double, double, gpointer data
-        ) {
-            GtkWidget* widget = gtk_event_controller_get_widget(controller);
-            auto* row = GTK_LIST_BOX_ROW(widget);
-            auto* overlay = static_cast<LauncherOverlay*>(data);
-            gtk_list_box_select_row(GTK_LIST_BOX(overlay->results_list_), row);
-        }), this);
-        gtk_widget_add_controller(row, hover);
-
-        gtk_list_box_append(GTK_LIST_BOX(results_list_), row);
-    }
+    for (const auto& result : current_results_) append_result_row(result);
 
     if (current_results_.empty()) {
-        GtkWidget* row = gtk_list_box_row_new();
-        gtk_widget_set_sensitive(row, FALSE);
-        GtkWidget* empty = gtk_label_new("No application or valid command found");
-        gtk_widget_set_margin_top(empty, 28);
-        gtk_widget_set_margin_bottom(empty, 28);
-        gtk_widget_add_css_class(empty, "realmheart-launcher-empty");
-        gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), empty);
-        gtk_list_box_append(GTK_LIST_BOX(results_list_), row);
+        const bool loading_clipboard = search_mode_ == SearchMode::Clipboard &&
+            clipboard_loading_ && !clipboard_history_loaded_;
+        const bool loading_emoji = search_mode_ == SearchMode::Emoji &&
+            emoji_loading_ && !emoji_database_loaded_;
+        if (loading_clipboard || loading_emoji) {
+            GtkWidget* row = gtk_list_box_row_new();
+            gtk_widget_set_sensitive(row, FALSE);
+            gtk_widget_add_css_class(
+                row,
+                loading_emoji
+                    ? "realmheart-launcher-emoji-loading-row"
+                    : "realmheart-launcher-clipboard-loading-row"
+            );
+
+            GtkWidget* loading_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
+            gtk_widget_set_margin_start(loading_box, 18);
+            gtk_widget_set_margin_end(loading_box, 18);
+            gtk_widget_set_margin_top(loading_box, 18);
+            gtk_widget_set_margin_bottom(loading_box, 18);
+
+            GtkWidget* spinner = gtk_spinner_new();
+            gtk_spinner_set_spinning(GTK_SPINNER(spinner), TRUE);
+            gtk_widget_set_size_request(spinner, 28, 28);
+            gtk_widget_set_valign(spinner, GTK_ALIGN_CENTER);
+            gtk_widget_add_css_class(
+                spinner,
+                "realmheart-launcher-clipboard-loading-spinner"
+            );
+
+            GtkWidget* labels = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+            gtk_widget_set_hexpand(labels, TRUE);
+            GtkWidget* title = gtk_label_new(
+                loading_emoji
+                    ? "Preparing emoji index…"
+                    : "Preparing clipboard history…"
+            );
+            gtk_label_set_xalign(GTK_LABEL(title), 0.0F);
+            gtk_widget_add_css_class(title, "realmheart-launcher-row-title");
+            GtkWidget* subtitle = gtk_label_new(
+                loading_emoji
+                    ? "Emoji will flow in as soon as the local index is ready"
+                    : "Recent entries will flow in as soon as cliphist responds"
+            );
+            gtk_label_set_xalign(GTK_LABEL(subtitle), 0.0F);
+            gtk_widget_add_css_class(
+                subtitle,
+                "realmheart-launcher-row-subtitle"
+            );
+            gtk_box_append(GTK_BOX(labels), title);
+            gtk_box_append(GTK_BOX(labels), subtitle);
+            gtk_box_append(GTK_BOX(loading_box), spinner);
+            gtk_box_append(GTK_BOX(loading_box), labels);
+            gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), loading_box);
+            gtk_list_box_append(GTK_LIST_BOX(results_list_), row);
+
+            for (int index = 0; index < 3; ++index) {
+                GtkWidget* skeleton_row = gtk_list_box_row_new();
+                gtk_widget_set_sensitive(skeleton_row, FALSE);
+                gtk_widget_add_css_class(
+                    skeleton_row,
+                    loading_emoji
+                        ? "realmheart-launcher-emoji-skeleton-row"
+                        : "realmheart-launcher-clipboard-skeleton-row"
+                );
+                GtkWidget* skeleton = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
+                gtk_widget_set_margin_start(skeleton, 18);
+                gtk_widget_set_margin_end(skeleton, 18);
+                gtk_widget_set_margin_top(skeleton, 10);
+                gtk_widget_set_margin_bottom(skeleton, 10);
+                GtkWidget* icon = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+                gtk_widget_set_size_request(icon, 36, 36);
+                gtk_widget_add_css_class(
+                    icon,
+                    "realmheart-launcher-clipboard-skeleton-icon"
+                );
+                GtkWidget* bars = gtk_box_new(GTK_ORIENTATION_VERTICAL, 7);
+                gtk_widget_set_hexpand(bars, TRUE);
+                GtkWidget* primary = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+                gtk_widget_set_size_request(primary, 230 - index * 24, 9);
+                gtk_widget_set_halign(primary, GTK_ALIGN_START);
+                gtk_widget_add_css_class(
+                    primary,
+                    "realmheart-launcher-clipboard-skeleton-bar"
+                );
+                GtkWidget* secondary = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+                gtk_widget_set_size_request(secondary, 150 + index * 18, 7);
+                gtk_widget_set_halign(secondary, GTK_ALIGN_START);
+                gtk_widget_add_css_class(
+                    secondary,
+                    "realmheart-launcher-clipboard-skeleton-bar"
+                );
+                gtk_widget_add_css_class(
+                    secondary,
+                    "secondary"
+                );
+                gtk_box_append(GTK_BOX(bars), primary);
+                gtk_box_append(GTK_BOX(bars), secondary);
+                gtk_box_append(GTK_BOX(skeleton), icon);
+                gtk_box_append(GTK_BOX(skeleton), bars);
+                gtk_list_box_row_set_child(
+                    GTK_LIST_BOX_ROW(skeleton_row),
+                    skeleton
+                );
+                gtk_list_box_append(GTK_LIST_BOX(results_list_), skeleton_row);
+            }
+        } else {
+            GtkWidget* row = gtk_list_box_row_new();
+            gtk_widget_set_sensitive(row, FALSE);
+            const std::string message = empty_results_message();
+            GtkWidget* empty = gtk_label_new(message.c_str());
+            gtk_widget_set_margin_top(empty, 28);
+            gtk_widget_set_margin_bottom(empty, 28);
+            gtk_widget_add_css_class(empty, "realmheart-launcher-empty");
+            gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), empty);
+            gtk_list_box_append(GTK_LIST_BOX(results_list_), row);
+        }
         set_selected_result(nullptr);
         retarget_result_selection(nullptr);
         return;
@@ -2567,6 +4228,7 @@ void LauncherOverlay::rebuild_results() {
 
     GtkListBoxRow* first = gtk_list_box_get_row_at_index(GTK_LIST_BOX(results_list_), 0);
     gtk_list_box_select_row(GTK_LIST_BOX(results_list_), first);
+    schedule_visible_clipboard_thumbnails();
 }
 
 void LauncherOverlay::on_search_changed() {
@@ -2589,15 +4251,41 @@ void LauncherOverlay::on_search_changed() {
     gtk_revealer_set_reveal_child(GTK_REVEALER(results_revealer_), searching);
 
     if (!searching) {
+        leave_clipboard_mode();
+        leave_emoji_mode();
         current_results_.clear();
         selected_result_row_ = nullptr;
+        result_selection_target_visible_ = false;
+        result_row_motions_.clear();
+        clipboard_rows_.clear();
+        ++clipboard_view_generation_;
         clear_list(results_list_);
         set_selected_result(nullptr);
         retarget_result_selection(nullptr);
         return;
     }
 
-    current_results_ = service_.search(query, kResultCount);
+    std::string clipboard_filter;
+    if (parse_clipboard_query(query, clipboard_filter)) {
+        enter_clipboard_mode(std::move(clipboard_filter));
+        return;
+    }
+    if (parse_clipboard_clear_query(query)) {
+        enter_clipboard_clear_mode();
+        return;
+    }
+    std::string emoji_filter;
+    if (parse_emoji_query(query, emoji_filter)) {
+        enter_emoji_mode(std::move(emoji_filter));
+        return;
+    }
+
+    leave_clipboard_mode();
+    leave_emoji_mode();
+    current_results_ = services::launcher_command_suggestions(query);
+    if (current_results_.empty()) {
+        current_results_ = service_.search(query, kResultCount);
+    }
     rebuild_results();
 }
 
@@ -2632,7 +4320,9 @@ LauncherOverlay::ResultRowMotion* LauncherOverlay::result_row_motion(
     const auto found = std::find_if(
         result_row_motions_.begin(),
         result_row_motions_.end(),
-        [row](const auto& motion) { return motion->row == row; }
+        [row](const auto& motion) {
+            return motion->row != nullptr && motion->row == row;
+        }
     );
     return found != result_row_motions_.end() ? found->get() : nullptr;
 }
@@ -2807,6 +4497,9 @@ bool LauncherOverlay::advance_result_selection_frame(GdkFrameClock* frame_clock)
         static_cast<int>(std::ceil(elapsed / (1.0 / 120.0)))
     );
     const double row_step = elapsed / static_cast<double>(row_step_count);
+    std::erase_if(result_row_motions_, [](const auto& motion) {
+        return motion->row == nullptr || motion->content == nullptr;
+    });
     for (const auto& motion : result_row_motions_) {
         const double target_lift =
             result_selection_target_visible_ && motion->row == selected_result_row_
@@ -2909,6 +4602,22 @@ void LauncherOverlay::activate_selected() {
         return;
     }
     if (!selected_result_.has_value()) return;
+    if (selected_result_->kind == services::LauncherResultKind::LauncherCommand) {
+        const std::string query = selected_result_->id == "clip"
+            ? ">clip "
+            : selected_result_->id == "clear"
+                ? ">clear"
+                : selected_result_->id == "emoji" ? ">emoji " : std::string{};
+        if (!query.empty()) {
+            gtk_editable_set_text(GTK_EDITABLE(search_entry_), query.c_str());
+            gtk_editable_set_position(GTK_EDITABLE(search_entry_), -1);
+        }
+        return;
+    }
+    if (selected_result_->kind == services::LauncherResultKind::ClipboardAction) {
+        activate_clipboard_action(*selected_result_);
+        return;
+    }
     if ((selected_result_->kind == services::LauncherResultKind::Command ||
          selected_result_->kind == services::LauncherResultKind::Action) &&
         command_receipts_.execute(*selected_result_)) {
@@ -2970,16 +4679,36 @@ bool LauncherOverlay::handle_key(guint keyval, GdkModifierType modifiers) {
         return true;
     }
 
-    if ((keyval == GDK_KEY_Down || keyval == GDK_KEY_Up) && !current_results_.empty()) {
+    const bool result_navigation_key = keyval == GDK_KEY_Down ||
+        keyval == GDK_KEY_Up || keyval == GDK_KEY_Page_Down ||
+        keyval == GDK_KEY_Page_Up;
+    if (result_navigation_key && !current_results_.empty()) {
         GtkListBoxRow* selected = gtk_list_box_get_selected_row(GTK_LIST_BOX(results_list_));
         int index = selected != nullptr ? gtk_list_box_row_get_index(selected) : 0;
-        index += keyval == GDK_KEY_Down ? 1 : -1;
+        if (keyval == GDK_KEY_Down) ++index;
+        else if (keyval == GDK_KEY_Up) --index;
+        else if (keyval == GDK_KEY_Page_Down) index += 7;
+        else index -= 7;
+
+        if (search_mode_ == SearchMode::Clipboard && index >= 0 &&
+            static_cast<std::size_t>(index) >= current_results_.size()) {
+            static_cast<void>(append_next_clipboard_page(
+                static_cast<std::size_t>(index) + 1
+            ));
+        } else if (search_mode_ == SearchMode::Emoji && index >= 0 &&
+            static_cast<std::size_t>(index) >= current_results_.size()) {
+            static_cast<void>(append_next_emoji_page(
+                static_cast<std::size_t>(index) + 1
+            ));
+        }
+
         index = std::clamp(index, 0, static_cast<int>(current_results_.size()) - 1);
         GtkListBoxRow* target = gtk_list_box_get_row_at_index(
             GTK_LIST_BOX(results_list_),
             index
         );
         gtk_list_box_select_row(GTK_LIST_BOX(results_list_), target);
+        ensure_result_row_visible(target);
         return true;
     }
 
@@ -3169,6 +4898,8 @@ void LauncherOverlay::finish_central_hide() {
         gtk_widget_set_visible(activation_sweep_, FALSE);
     }
     gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
+    leave_clipboard_mode();
+    leave_emoji_mode();
 }
 
 void LauncherOverlay::toggle() {
@@ -3202,6 +4933,51 @@ void LauncherOverlay::show() {
     }
 
     schedule_central_frame();
+}
+
+void LauncherOverlay::show_with_query(std::string query) {
+    std::string clipboard_filter;
+    if (search_mode_ == SearchMode::Clipboard &&
+        parse_clipboard_query(query, clipboard_filter)) {
+        // A repeated SUPER+V should re-read cliphist even when the entry text is
+        // already exactly ">clip ", which would otherwise emit no changed signal.
+        leave_clipboard_mode();
+    }
+
+    show();
+    gtk_editable_set_text(GTK_EDITABLE(search_entry_), query.c_str());
+    gtk_widget_grab_focus(search_entry_);
+
+    const auto collapse_selection_at_end = [](GtkEditable* editable) {
+        if (!GTK_IS_EDITABLE(editable)) return;
+        const char* text = gtk_editable_get_text(editable);
+        const auto length = static_cast<int>(g_utf8_strlen(text != nullptr ? text : "", -1));
+        gtk_editable_select_region(editable, length, length);
+        gtk_editable_set_position(editable, length);
+    };
+
+    // GtkEntry may select all text while the newly presented launcher receives
+    // focus. Collapse that selection immediately, then once more from the idle
+    // queue after the Wayland focus/presentation round-trip has completed.
+    collapse_selection_at_end(GTK_EDITABLE(search_entry_));
+    g_idle_add_full(
+        G_PRIORITY_DEFAULT_IDLE,
+        +[](gpointer data) -> gboolean {
+            auto* editable = GTK_EDITABLE(data);
+            if (GTK_IS_EDITABLE(editable)) {
+                const char* text = gtk_editable_get_text(editable);
+                const auto length = static_cast<int>(
+                    g_utf8_strlen(text != nullptr ? text : "", -1)
+                );
+                gtk_editable_select_region(editable, length, length);
+                gtk_editable_set_position(editable, length);
+            }
+            return G_SOURCE_REMOVE;
+        },
+        g_object_ref(search_entry_),
+        g_object_unref
+    );
+    on_search_changed();
 }
 
 void LauncherOverlay::hide() {

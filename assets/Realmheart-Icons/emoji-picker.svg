@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+  <!-- outer picker tile -->
+  <path d="M6.35 5.15H17.65L18.85 6.35V17.65L17.65 18.85H6.35L5.15 17.65V6.35L6.35 5.15Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+  <!-- face circle -->
+  <path d="M12 7.7L15.05 8.7L16.75 11.25L16.3 14.35L13.95 16.35H10.05L7.7 14.35L7.25 11.25L8.95 8.7L12 7.7Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+  <!-- eyes -->
+  <path d="M10 10L11.1 11.1L10 12.2L8.9 11.1L10 10Z" fill="currentColor"/>
+  <path d="M14 10L15.1 11.1L14 12.2L12.9 11.1L14 10Z" fill="currentColor"/>
+  <!-- smile -->
+  <path d="M9.65 13.4C10.35 14.2 11.1 14.6 12 14.6C12.9 14.6 13.65 14.2 14.35 13.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+  <!-- small sparkle accent -->
+  <path d="M16.45 7.1L17.55 8.2L16.45 9.3L15.35 8.2L16.45 7.1Z" fill="currentColor"/>
+</svg>
