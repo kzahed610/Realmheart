@@ -319,6 +319,9 @@ private:
     double result_selection_opacity_ = 0.0;
     bool result_selection_initialized_ = false;
     bool result_selection_target_visible_ = false;
+    double result_pointer_window_x_ = 0.0;
+    double result_pointer_window_y_ = 0.0;
+    bool result_pointer_position_valid_ = false;
     guint central_tick_id_ = 0;
     gint64 central_last_frame_time_ = 0;
     double central_progress_ = 0.0;

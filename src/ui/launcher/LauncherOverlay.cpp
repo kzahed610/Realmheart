@@ -4072,11 +4072,49 @@ GtkListBoxRow* LauncherOverlay::append_result_row(
 
     GtkEventController* hover = gtk_event_controller_motion_new();
     g_signal_connect(hover, "motion", G_CALLBACK(+[](
-        GtkEventController* controller, double, double, gpointer data
+        GtkEventController* controller, double x, double y, gpointer data
     ) {
-        GtkWidget* widget = gtk_event_controller_get_widget(controller);
-        auto* hovered_row = GTK_LIST_BOX_ROW(widget);
         auto* overlay = static_cast<LauncherOverlay*>(data);
+        GtkWidget* widget = gtk_event_controller_get_widget(controller);
+        if (widget == nullptr || overlay->window_ == nullptr) return;
+
+        // Row lift/scroll animations can generate synthetic motion while the
+        // physical pointer has not moved. Comparing in window coordinates
+        // keeps keyboard selection from being immediately reclaimed by the
+        // stationary row beneath the cursor.
+        graphene_point_t row_point{};
+        graphene_point_t window_point{};
+        graphene_point_init(
+            &row_point,
+            static_cast<float>(x),
+            static_cast<float>(y)
+        );
+        if (!gtk_widget_compute_point(
+                widget,
+                GTK_WIDGET(overlay->window_),
+                &row_point,
+                &window_point
+            )) {
+            return;
+        }
+
+        constexpr double kPointerMotionEpsilon = 0.5;
+        const bool pointer_moved = !overlay->result_pointer_position_valid_ ||
+            std::abs(
+                static_cast<double>(window_point.x) -
+                overlay->result_pointer_window_x_
+            ) > kPointerMotionEpsilon ||
+            std::abs(
+                static_cast<double>(window_point.y) -
+                overlay->result_pointer_window_y_
+            ) > kPointerMotionEpsilon;
+
+        overlay->result_pointer_window_x_ = window_point.x;
+        overlay->result_pointer_window_y_ = window_point.y;
+        overlay->result_pointer_position_valid_ = true;
+        if (!pointer_moved) return;
+
+        auto* hovered_row = GTK_LIST_BOX_ROW(widget);
         gtk_list_box_select_row(GTK_LIST_BOX(overlay->results_list_), hovered_row);
     }), this);
     gtk_widget_add_controller(row, hover);
@@ -4095,6 +4133,7 @@ GtkListBoxRow* LauncherOverlay::append_result_row(
 }
 
 void LauncherOverlay::rebuild_results() {
+    result_pointer_position_valid_ = false;
     selected_result_row_ = nullptr;
     result_selection_target_visible_ = false;
     result_row_motions_.clear();

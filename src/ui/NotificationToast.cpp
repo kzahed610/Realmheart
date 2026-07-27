@@ -48,6 +48,12 @@ constexpr double kStripFormationEnd = 0.82;
 constexpr double kChildFadeStart = 0.66;
 constexpr double kCloseButtonTargetStart = 0.88;
 
+// The toast reveal must measure as a fixed-size surface. GtkWidget size
+// requests are minimums, so forwarding the card's natural height allows a
+// long notification body to enlarge the layer surface.
+constexpr int kFixedToastWidth = 396;
+constexpr int kFixedToastHeight = 96;
+
 inline double clamp01(double value) {
     return std::clamp(value, 0.0, 1.0);
 }
@@ -285,34 +291,22 @@ void stop_animation(RealmheartNotificationReveal* self) {
 }
 
 void reveal_measure(
-    GtkWidget* widget,
+    GtkWidget*,
     GtkOrientation orientation,
-    int for_size,
+    int,
     int* minimum,
     int* natural,
     int* minimum_baseline,
     int* natural_baseline
 ) {
-    auto* self = static_cast<RealmheartNotificationReveal*>(
-        reinterpret_cast<void*>(widget)
-    );
-    if (self->child == nullptr) {
-        if (minimum != nullptr) *minimum = 0;
-        if (natural != nullptr) *natural = 0;
-        if (minimum_baseline != nullptr) *minimum_baseline = -1;
-        if (natural_baseline != nullptr) *natural_baseline = -1;
-        return;
-    }
+    const int fixed_size = orientation == GTK_ORIENTATION_HORIZONTAL
+        ? kFixedToastWidth
+        : kFixedToastHeight;
 
-    gtk_widget_measure(
-        self->child,
-        orientation,
-        for_size,
-        minimum,
-        natural,
-        minimum_baseline,
-        natural_baseline
-    );
+    if (minimum != nullptr) *minimum = fixed_size;
+    if (natural != nullptr) *natural = fixed_size;
+    if (minimum_baseline != nullptr) *minimum_baseline = -1;
+    if (natural_baseline != nullptr) *natural_baseline = -1;
 }
 
 void reveal_size_allocate(
@@ -540,6 +534,7 @@ NotificationToast::NotificationToast(GtkApplication* app) : app_(app) {
     gtk_widget_set_size_request(card, kToastWidth, kToastHeight);
     gtk_widget_set_halign(card, GTK_ALIGN_FILL);
     gtk_widget_set_valign(card, GTK_ALIGN_FILL);
+    gtk_widget_set_overflow(card, GTK_OVERFLOW_HIDDEN);
     gtk_widget_add_css_class(card, "realmheart-notification-card");
 
     icon_ = std::make_unique<bar::widgets::ThemedSvgIcon>(
@@ -554,6 +549,7 @@ NotificationToast::NotificationToast(GtkApplication* app) : app_(app) {
     GtkWidget* content = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     gtk_widget_set_hexpand(content, TRUE);
     gtk_widget_set_valign(content, GTK_ALIGN_CENTER);
+    gtk_widget_set_overflow(content, GTK_OVERFLOW_HIDDEN);
     gtk_widget_set_can_target(content, FALSE);
 
     label_app_ = gtk_label_new("Notification");
