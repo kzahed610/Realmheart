@@ -18,12 +18,14 @@ int main() {
     const auto* none = find_effect(EffectId::None);
     assert(none != nullptr);
     assert(none->name == "none");
+    assert(none->display_name == "None");
     assert(none->backend == EffectBackend::None);
     assert(supports_target(*none, EffectTargetType::Window));
 
     const auto* fade_scale = find_effect(std::string_view{"fade-scale"});
     assert(fade_scale != nullptr);
     assert(fade_scale->id == EffectId::FadeScale);
+    assert(fade_scale->display_name == "Fade Scale");
     assert(fade_scale->backend == EffectBackend::SnapshotTransform);
     assert(supports_target(*fade_scale, EffectTargetType::Launcher));
     assert(supports_target(*fade_scale, EffectTargetType::Sidebar));
@@ -35,6 +37,7 @@ int main() {
     const auto* void_effect = find_effect(EffectId::Void);
     assert(void_effect != nullptr);
     assert(void_effect->name == "void");
+    assert(void_effect->display_name == "Realmheart Void");
     assert(void_effect->backend == EffectBackend::Shader);
     assert(void_effect->fragment_shader_asset == "void/void.frag");
     assert(void_effect->requires_source_texture);

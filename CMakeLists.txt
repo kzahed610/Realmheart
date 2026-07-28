@@ -15,6 +15,7 @@ find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4>=4.12)
+pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
 pkg_check_modules(GTK4_LAYER_SHELL REQUIRED IMPORTED_TARGET gtk4-layer-shell-0)
 pkg_check_modules(GDK_PIXBUF REQUIRED IMPORTED_TARGET gdk-pixbuf-2.0)
 pkg_check_modules(JPEG REQUIRED IMPORTED_TARGET libjpeg)
@@ -52,6 +53,23 @@ set(REALMHEART_RUNTIME_SOURCES
     src/services/MediaService.cpp
     src/services/ThemeService.cpp
     src/services/MatugenParser.cpp
+)
+
+
+add_executable(realmheart_gl_probe
+    tools/effects/GlAreaProbe.cpp
+)
+set_target_properties(realmheart_gl_probe PROPERTIES
+    OUTPUT_NAME "realmheart-gl-probe"
+)
+target_compile_options(realmheart_gl_probe PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_compile_definitions(realmheart_gl_probe PRIVATE
+    REALMHEART_SOURCE_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects"
+)
+target_link_libraries(realmheart_gl_probe PRIVATE
+    PkgConfig::GTK4
+    PkgConfig::GTK4_LAYER_SHELL
+    PkgConfig::EPOXY
 )
 
 add_executable(realmheart

@@ -28,6 +28,7 @@ constexpr std::array<EffectSpec, 3> kEffectSpecs{{
     {
         .id = EffectId::None,
         .name = "none",
+        .display_name = "None",
         .backend = EffectBackend::None,
         .supported_targets = kAllTargets,
         .supports_open = true,
@@ -41,6 +42,7 @@ constexpr std::array<EffectSpec, 3> kEffectSpecs{{
     {
         .id = EffectId::FadeScale,
         .name = "fade-scale",
+        .display_name = "Fade Scale",
         .backend = EffectBackend::SnapshotTransform,
         .supported_targets = kShellSurfaceTargets,
         .supports_open = true,
@@ -54,6 +56,7 @@ constexpr std::array<EffectSpec, 3> kEffectSpecs{{
     {
         .id = EffectId::Void,
         .name = "void",
+        .display_name = "Realmheart Void",
         .backend = EffectBackend::Shader,
         .supported_targets =
             effect_target_bit(EffectTargetType::Launcher) |

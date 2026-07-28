@@ -37,6 +37,7 @@ using EffectTargetMask = std::uint32_t;
 struct EffectSpec {
     EffectId id = EffectId::None;
     std::string_view name = "none";
+    std::string_view display_name = "None";
     EffectBackend backend = EffectBackend::None;
     EffectTargetMask supported_targets = 0;
     bool supports_open = true;
