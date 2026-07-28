@@ -13,7 +13,7 @@ using realmheart::effects::supports_target;
 
 int main() {
     const auto specs = effect_specs();
-    assert(specs.size() == 2);
+    assert(specs.size() == 3);
 
     const auto* none = find_effect(EffectId::None);
     assert(none != nullptr);
@@ -30,6 +30,18 @@ int main() {
     assert(!supports_target(*fade_scale, EffectTargetType::Window));
     assert(fade_scale->default_open_duration_seconds >
         fade_scale->default_close_duration_seconds);
+
+
+    const auto* void_effect = find_effect(EffectId::Void);
+    assert(void_effect != nullptr);
+    assert(void_effect->name == "void");
+    assert(void_effect->backend == EffectBackend::Shader);
+    assert(void_effect->fragment_shader_asset == "void/void.frag");
+    assert(void_effect->requires_source_texture);
+    assert(void_effect->outputs_transparency);
+    assert(supports_target(*void_effect, EffectTargetType::Launcher));
+    assert(supports_target(*void_effect, EffectTargetType::Sidebar));
+    assert(!supports_target(*void_effect, EffectTargetType::Window));
 
     assert(find_effect(std::string_view{"missing-effect"}) == nullptr);
 

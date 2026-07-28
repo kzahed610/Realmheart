@@ -37,6 +37,9 @@ EffectFrame sample_effect(EffectId effect, double progress) noexcept {
             .translate_y = 0.0,
         };
     }
+    case EffectId::Void:
+        // Shader-backed effects do not modify the GTK snapshot frame.
+        return {};
     }
 
     return {};

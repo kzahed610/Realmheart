@@ -65,6 +65,7 @@ add_library(realmheart_ui STATIC
     src/core/TaskExecutor.cpp
     src/effects/core/EffectFrame.cpp
     src/effects/core/EffectRegistry.cpp
+    src/effects/core/ShaderSource.cpp
     src/effects/core/TransitionTimeline.cpp
     src/effects/shell/ShellEffectView.cpp
     src/animation/character/CharacterAnimator.cpp
@@ -130,6 +131,8 @@ target_compile_definitions(realmheart_ui PRIVATE
     REALMHEART_SOURCE_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
     REALMHEART_INSTALL_STYLE_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/styles"
     REALMHEART_SOURCE_STYLE_DIR="${CMAKE_SOURCE_DIR}/styles"
+    REALMHEART_INSTALL_EFFECT_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/effects"
+    REALMHEART_SOURCE_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects"
 )
 target_compile_options(realmheart_ui PRIVATE ${REALMHEART_WARNING_FLAGS})
 target_link_libraries(realmheart_ui PRIVATE
@@ -238,6 +241,7 @@ if(REALMHEART_NATIVE_WALLPAPER_BUILT)
 endif()
 install(DIRECTORY assets/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/assets)
 install(DIRECTORY styles/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/styles)
+install(DIRECTORY effects/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/effects)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -289,6 +293,21 @@ if(BUILD_TESTING)
         src/effects/core/EffectRegistry.cpp
     )
     realmheart_register_test(realmheart_effect_registry_tests)
+
+    add_executable(
+        realmheart_shader_source_tests
+        tests/ShaderSourceTests.cpp
+        src/effects/core/ShaderSource.cpp
+    )
+    target_compile_definitions(realmheart_shader_source_tests PRIVATE
+        REALMHEART_INSTALL_EFFECT_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/effects"
+        REALMHEART_SOURCE_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects"
+    )
+    target_link_libraries(
+        realmheart_shader_source_tests
+        PRIVATE GTest::gtest GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_shader_source_tests)
 
     add_executable(realmheart_shell_command_tests tests/ShellCommandTests.cpp src/core/ShellCommand.cpp)
     realmheart_register_test(realmheart_shell_command_tests)

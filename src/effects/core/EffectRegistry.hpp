@@ -43,6 +43,9 @@ struct EffectSpec {
     bool supports_close = true;
     double default_open_duration_seconds = 0.0;
     double default_close_duration_seconds = 0.0;
+    std::string_view fragment_shader_asset{};
+    bool requires_source_texture = false;
+    bool outputs_transparency = false;
 };
 
 [[nodiscard]] std::span<const EffectSpec> effect_specs() noexcept;

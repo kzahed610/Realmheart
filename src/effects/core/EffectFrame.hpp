@@ -5,6 +5,7 @@ namespace realmheart::effects {
 enum class EffectId {
     None,
     FadeScale,
+    Void,
 };
 
 struct EffectFrame {

@@ -24,7 +24,7 @@ constexpr EffectTargetMask kShellSurfaceTargets =
     effect_target_bit(EffectTargetType::EmojiPicker) |
     effect_target_bit(EffectTargetType::Popover);
 
-constexpr std::array<EffectSpec, 2> kEffectSpecs{{
+constexpr std::array<EffectSpec, 3> kEffectSpecs{{
     {
         .id = EffectId::None,
         .name = "none",
@@ -34,6 +34,9 @@ constexpr std::array<EffectSpec, 2> kEffectSpecs{{
         .supports_close = true,
         .default_open_duration_seconds = 0.0,
         .default_close_duration_seconds = 0.0,
+        .fragment_shader_asset = {},
+        .requires_source_texture = false,
+        .outputs_transparency = false,
     },
     {
         .id = EffectId::FadeScale,
@@ -44,6 +47,24 @@ constexpr std::array<EffectSpec, 2> kEffectSpecs{{
         .supports_close = true,
         .default_open_duration_seconds = 0.22,
         .default_close_duration_seconds = 0.16,
+        .fragment_shader_asset = {},
+        .requires_source_texture = false,
+        .outputs_transparency = false,
+    },
+    {
+        .id = EffectId::Void,
+        .name = "void",
+        .backend = EffectBackend::Shader,
+        .supported_targets =
+            effect_target_bit(EffectTargetType::Launcher) |
+            effect_target_bit(EffectTargetType::Sidebar),
+        .supports_open = true,
+        .supports_close = true,
+        .default_open_duration_seconds = 0.48,
+        .default_close_duration_seconds = 0.40,
+        .fragment_shader_asset = "void/void.frag",
+        .requires_source_texture = true,
+        .outputs_transparency = true,
     },
 }};
 
