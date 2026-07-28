@@ -2,6 +2,7 @@
 
 #include "core/ShellControl.hpp"
 #include "core/TaskExecutor.hpp"
+#include "effects/core/EffectRegistry.hpp"
 #include "effects/core/TransitionTimeline.hpp"
 #include "services/Audio.hpp"
 #include "services/AudioMonitor.hpp"
@@ -91,7 +92,10 @@ void sidebar_input_debug(Args&&... args) {
 
 constexpr int kHotspotInputCommitFrames = 30;
 constexpr int kSidebarRightMargin = 2;
-constexpr effects::EffectId kSidebarSurfaceEffect = effects::EffectId::FadeScale;
+const effects::EffectId kSidebarSurfaceEffect = effects::resolve_effect(
+    effects::EffectId::FadeScale,
+    effects::EffectTargetType::Sidebar
+);
 
 struct HotspotInputSetup {
     int frames_remaining = kHotspotInputCommitFrames;

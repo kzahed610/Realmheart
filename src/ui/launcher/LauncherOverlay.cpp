@@ -1,6 +1,7 @@
 #include "ui/launcher/LauncherOverlay.hpp"
 
 #include "effects/core/EffectFrame.hpp"
+#include "effects/core/EffectRegistry.hpp"
 #include "effects/shell/ShellEffectView.hpp"
 
 #include "core/Command.hpp"
@@ -51,6 +52,11 @@ struct LauncherOverlay::EmojiAsyncState {
 namespace {
 
 namespace fs = std::filesystem;
+
+const effects::EffectId kLauncherSurfaceEffect = effects::resolve_effect(
+    effects::EffectId::FadeScale,
+    effects::EffectTargetType::Launcher
+);
 
 constexpr int kSeedApplicationCount = 4;
 constexpr int kResultCount = 6;
@@ -4840,7 +4846,7 @@ void LauncherOverlay::apply_central_motion() {
     gtk_widget_set_opacity(dismiss_, backdrop);
     effects::shell::set_frame(
         REALMHEART_SHELL_EFFECT_VIEW(centre_effect_view_),
-        effects::sample_effect(effects::EffectId::FadeScale, frame)
+        effects::sample_effect(kLauncherSurfaceEffect, frame)
     );
     gtk_widget_set_margin_top(
         centre_effect_view_,
