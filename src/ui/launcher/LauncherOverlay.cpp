@@ -1,5 +1,8 @@
 #include "ui/launcher/LauncherOverlay.hpp"
 
+#include "effects/core/EffectFrame.hpp"
+#include "effects/shell/ShellEffectView.hpp"
+
 #include "core/Command.hpp"
 #include "core/TaskExecutor.hpp"
 #include "ui/LayerSurface.hpp"
@@ -953,11 +956,10 @@ void LauncherOverlay::setup_ui() {
     // idle shell. Search results still unfold in their narrower lower surface.
     centre_column_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 16);
     gtk_widget_set_size_request(centre_column_, kCentreFinalWidth, -1);
-    gtk_widget_set_halign(centre_column_, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(centre_column_, GTK_ALIGN_START);
-    gtk_widget_set_hexpand(centre_column_, FALSE);
-    gtk_widget_set_vexpand(centre_column_, FALSE);
-    gtk_widget_set_margin_top(centre_column_, kCentreFinalTopMargin);
+    gtk_widget_set_halign(centre_column_, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(centre_column_, GTK_ALIGN_FILL);
+    gtk_widget_set_hexpand(centre_column_, TRUE);
+    gtk_widget_set_vexpand(centre_column_, TRUE);
     gtk_widget_add_css_class(centre_column_, "realmheart-launcher-centre-column");
 
     // Keep the outer instrument at its final height while the wallpaper itself
@@ -1169,10 +1171,27 @@ void LauncherOverlay::setup_ui() {
     gtk_revealer_set_child(GTK_REVEALER(results_revealer_), results_shell);
     gtk_box_append(GTK_BOX(centre_column_), results_revealer_);
 
+    // The effect view keeps the centre at final layout size and applies only
+    // snapshot-time transforms. The existing aperture choreography therefore
+    // remains intact while the same reusable fade-scale recipe can also drive
+    // other Realmheart surfaces.
+    centre_effect_view_ = realmheart_shell_effect_view_new(centre_column_);
+    gtk_widget_set_size_request(centre_effect_view_, kCentreFinalWidth, -1);
+    gtk_widget_set_halign(centre_effect_view_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(centre_effect_view_, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(centre_effect_view_, FALSE);
+    gtk_widget_set_vexpand(centre_effect_view_, FALSE);
+    gtk_widget_set_margin_top(centre_effect_view_, kCentreFinalTopMargin);
+    effects::shell::set_origin(
+        REALMHEART_SHELL_EFFECT_VIEW(centre_effect_view_),
+        0.5,
+        0.5
+    );
+
     // The centre is layered above the constellation. Nodes are constrained to
     // the lower interaction region, but this also protects the search surface
     // from a malformed or hand-edited saved position.
-    gtk_overlay_add_overlay(GTK_OVERLAY(root_), centre_column_);
+    gtk_overlay_add_overlay(GTK_OVERLAY(root_), centre_effect_view_);
 
     // Command feedback belongs to the same fullscreen launcher surface. It is
     // layered above the centre/constellation and never creates a notification-
@@ -4804,7 +4823,8 @@ void LauncherOverlay::schedule_central_frame() {
 }
 
 void LauncherOverlay::apply_central_motion() {
-    if (dismiss_ == nullptr || centre_column_ == nullptr || centre_shell_ == nullptr ||
+    if (dismiss_ == nullptr || centre_column_ == nullptr ||
+        centre_effect_view_ == nullptr || centre_shell_ == nullptr ||
         wallpaper_frame_ == nullptr || search_entry_ == nullptr) {
         return;
     }
@@ -4818,9 +4838,12 @@ void LauncherOverlay::apply_central_motion() {
     const double search = smooth_step(interval_progress(progress, 0.46, 1.0));
 
     gtk_widget_set_opacity(dismiss_, backdrop);
-    gtk_widget_set_opacity(centre_column_, frame);
+    effects::shell::set_frame(
+        REALMHEART_SHELL_EFFECT_VIEW(centre_effect_view_),
+        effects::sample_effect(effects::EffectId::FadeScale, frame)
+    );
     gtk_widget_set_margin_top(
-        centre_column_,
+        centre_effect_view_,
         static_cast<int>(std::lround(interpolate(
             kCentreStartTopMargin,
             kCentreFinalTopMargin,

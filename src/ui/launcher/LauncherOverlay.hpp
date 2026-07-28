@@ -242,6 +242,7 @@ private:
     GtkWidget* search_entry_ = nullptr;
     GtkWidget* wallpaper_picture_ = nullptr;
     GtkWidget* centre_column_ = nullptr;
+    GtkWidget* centre_effect_view_ = nullptr;
     GtkWidget* centre_shell_ = nullptr;
     GtkWidget* wallpaper_frame_ = nullptr;
     GtkWidget* activation_sweep_ = nullptr;

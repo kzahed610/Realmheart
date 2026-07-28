@@ -1,5 +1,7 @@
 #include "ui/sidebar/RightSidebar.hpp"
 
+#include "effects/shell/ShellEffectView.hpp"
+
 #include "animation/character/CharacterCompositor.hpp"
 #include "ui/sidebar/ConnectivityPanel.hpp"
 #include "ui/sidebar/NightLightPanel.hpp"
@@ -483,7 +485,15 @@ void RightSidebar::setup_layout() {
     gtk_overlay_set_child(GTK_OVERLAY(content_overlay_), container_);
 
     frame_->set_child(content_overlay_);
-    gtk_window_set_child(GTK_WINDOW(window_), frame_->widget());
+    effect_view_ = realmheart_shell_effect_view_new(frame_->widget());
+    gtk_widget_set_hexpand(effect_view_, TRUE);
+    gtk_widget_set_vexpand(effect_view_, TRUE);
+    effects::shell::set_origin(
+        REALMHEART_SHELL_EFFECT_VIEW(effect_view_),
+        1.0,
+        0.5
+    );
+    gtk_window_set_child(GTK_WINDOW(window_), effect_view_);
 
     if (character_enabled_) initialize_character_compositor();
 }
@@ -572,6 +582,17 @@ void RightSidebar::animate_character_in() {
 
     initialize_character_compositor();
     if (character_compositor_) character_compositor_->start_enter();
+}
+
+void RightSidebar::set_surface_effect(
+    effects::EffectId effect,
+    double progress
+) {
+    if (effect_view_ == nullptr) return;
+    effects::shell::set_frame(
+        REALMHEART_SHELL_EFFECT_VIEW(effect_view_),
+        effects::sample_effect(effect, progress)
+    );
 }
 
 bool RightSidebar::animate_character_out(std::function<void()> completion) {

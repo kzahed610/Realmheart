@@ -2,6 +2,7 @@
 
 #include "animation/character/CharacterHairMode.hpp"
 #include "animation/character/CharacterQualityPreset.hpp"
+#include "effects/core/EffectFrame.hpp"
 #include "services/KeepAwake.hpp"
 #include "services/Notifications.hpp"
 #include "ui/components/BaseWidget.hpp"
@@ -65,6 +66,7 @@ public:
         realmheart::animation::character::CharacterQualityPreset preset
     );
     void animate_character_in();
+    void set_surface_effect(effects::EffectId effect, double progress);
     [[nodiscard]] bool animate_character_out(std::function<void()> completion);
     [[nodiscard]] bool character_enabled() const noexcept { return character_enabled_; }
     GtkWidget* get_window() const { return window_; }
@@ -116,6 +118,7 @@ private:
     GtkApplication* app_ = nullptr;
     GtkWidget* window_ = nullptr;
     GtkWidget* content_overlay_ = nullptr;
+    GtkWidget* effect_view_ = nullptr;
     GtkWidget* container_ = nullptr;
     std::unique_ptr<SidebarFrame> frame_;
     std::unique_ptr<realmheart::animation::character::CharacterCompositor> character_compositor_;

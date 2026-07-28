@@ -91,6 +91,7 @@ void sidebar_input_debug(Args&&... args) {
 
 constexpr int kHotspotInputCommitFrames = 30;
 constexpr int kSidebarRightMargin = 2;
+constexpr effects::EffectId kSidebarSurfaceEffect = effects::EffectId::FadeScale;
 
 struct HotspotInputSetup {
     int frames_remaining = kHotspotInputCommitFrames;
@@ -368,6 +369,11 @@ public:
         osd_.reset();
         now_playing_.reset();
 
+        if (sidebar_tick_id_ != 0 && sidebar_ != nullptr) {
+            gtk_widget_remove_tick_callback(sidebar_->get_window(), sidebar_tick_id_);
+            sidebar_tick_id_ = 0;
+            sidebar_last_frame_time_ = 0;
+        }
         sidebar_.reset();
         bar_.reset();
 
@@ -1173,6 +1179,55 @@ private:
         }
     }
 
+    void apply_right_sidebar_surface_effect() {
+        if (sidebar_ == nullptr) return;
+        sidebar_->set_surface_effect(
+            kSidebarSurfaceEffect,
+            sidebar_transition_.progress()
+        );
+    }
+
+    [[nodiscard]] bool advance_right_sidebar_frame(GdkFrameClock* frame_clock) {
+        const gint64 frame_time = gdk_frame_clock_get_frame_time(frame_clock);
+        double elapsed = 1.0 / 60.0;
+        if (sidebar_last_frame_time_ != 0) {
+            elapsed = static_cast<double>(frame_time - sidebar_last_frame_time_) /
+                1'000'000.0;
+        }
+        sidebar_last_frame_time_ = frame_time;
+        elapsed = std::clamp(elapsed, 1.0 / 240.0, 0.05);
+
+        const bool still_running = sidebar_transition_.advance(elapsed);
+        apply_right_sidebar_surface_effect();
+        if (!still_running &&
+            sidebar_transition_.state() == effects::TransitionState::Hidden) {
+            finish_right_sidebar_hide_if_ready();
+        }
+        return still_running;
+    }
+
+    void schedule_right_sidebar_frame() {
+        if (sidebar_ == nullptr || sidebar_tick_id_ != 0 ||
+            !sidebar_transition_.active()) {
+            return;
+        }
+
+        sidebar_tick_id_ = gtk_widget_add_tick_callback(
+            sidebar_->get_window(),
+            +[](GtkWidget*, GdkFrameClock* frame_clock, gpointer data) -> gboolean {
+                auto* runtime = static_cast<ShellRuntime*>(data);
+                if (runtime->advance_right_sidebar_frame(frame_clock)) {
+                    return G_SOURCE_CONTINUE;
+                }
+                runtime->sidebar_tick_id_ = 0;
+                runtime->sidebar_last_frame_time_ = 0;
+                return G_SOURCE_REMOVE;
+            },
+            this,
+            nullptr
+        );
+    }
+
     void finish_right_sidebar_hide_if_ready() {
         if (state_.right_sidebar_visible() ||
             sidebar_transition_.state() != effects::TransitionState::Hidden ||
@@ -1188,6 +1243,8 @@ private:
         if (sidebar_transition_.target_visible()) {
             sidebar_input_debug("visibility: presenting backdrop then sidebar");
             sidebar_character_exit_complete_ = false;
+            gtk_widget_set_sensitive(window, TRUE);
+            apply_right_sidebar_surface_effect();
 
             // Use an Overlay backdrop with a carved input region instead of
             // relying on cross-layer stacking. Only clicks outside the sidebar
@@ -1204,11 +1261,13 @@ private:
             sidebar_->refresh();
             gtk_window_present(GTK_WINDOW(window));
             sidebar_->animate_character_in();
+            schedule_right_sidebar_frame();
             return;
         }
 
         sidebar_input_debug("visibility: animating character out, then hiding sidebar");
         gtk_widget_set_visible(GTK_WIDGET(sidebar_backdrop_), FALSE);
+        gtk_widget_set_sensitive(window, FALSE);
         sidebar_character_exit_complete_ = false;
 
         // The surface transition and Tessia's exit are independent. The none
@@ -1221,6 +1280,7 @@ private:
             })) {
             sidebar_character_exit_complete_ = true;
         }
+        schedule_right_sidebar_frame();
         finish_right_sidebar_hide_if_ready();
     }
 
@@ -1269,7 +1329,9 @@ private:
     GtkWindow* hotspot_ = nullptr;
     GtkWindow* sidebar_backdrop_ = nullptr;
     std::unique_ptr<sidebar::RightSidebar> sidebar_;
-    effects::TransitionTimeline sidebar_transition_{{0.0, 0.0}};
+    effects::TransitionTimeline sidebar_transition_{{0.22, 0.16}};
+    guint sidebar_tick_id_ = 0;
+    gint64 sidebar_last_frame_time_ = 0;
     bool sidebar_character_exit_complete_ = true;
     std::unique_ptr<CommandReceiptOverlay> command_receipts_;
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
