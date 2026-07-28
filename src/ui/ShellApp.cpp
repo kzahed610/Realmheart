@@ -2,6 +2,7 @@
 
 #include "core/ShellControl.hpp"
 #include "core/TaskExecutor.hpp"
+#include "effects/core/TransitionTimeline.hpp"
 #include "services/Audio.hpp"
 #include "services/AudioMonitor.hpp"
 #include "services/BatteryService.hpp"
@@ -409,6 +410,11 @@ public:
         ensure_sidebar_initialized();
         const bool before = state_.right_sidebar_visible();
         state_.toggle_right_sidebar();
+        if (state_.right_sidebar_visible()) {
+            sidebar_transition_.open();
+        } else {
+            sidebar_transition_.close();
+        }
         sidebar_input_debug(
             "toggle_right_sidebar: ",
             before ? "open" : "closed",
@@ -1167,10 +1173,22 @@ private:
         }
     }
 
+    void finish_right_sidebar_hide_if_ready() {
+        if (state_.right_sidebar_visible() ||
+            sidebar_transition_.state() != effects::TransitionState::Hidden ||
+            !sidebar_character_exit_complete_) {
+            return;
+        }
+
+        gtk_widget_set_visible(sidebar_->get_window(), FALSE);
+    }
+
     void apply_right_sidebar_visibility() {
         GtkWidget* window = sidebar_->get_window();
-        if (state_.right_sidebar_visible()) {
+        if (sidebar_transition_.target_visible()) {
             sidebar_input_debug("visibility: presenting backdrop then sidebar");
+            sidebar_character_exit_complete_ = false;
+
             // Use an Overlay backdrop with a carved input region instead of
             // relying on cross-layer stacking. Only clicks outside the sidebar
             // are accepted by this surface.
@@ -1186,21 +1204,24 @@ private:
             sidebar_->refresh();
             gtk_window_present(GTK_WINDOW(window));
             sidebar_->animate_character_in();
-        } else {
-            sidebar_input_debug("visibility: animating character out, then hiding sidebar");
-            gtk_widget_set_visible(GTK_WIDGET(sidebar_backdrop_), FALSE);
-
-            // Keep the layer surface mapped for the short character exit only.
-            // Reopening cancels this completion, so rapid toggles cannot hide a
-            // newly-presented sidebar from underneath the user.
-            if (!sidebar_->animate_character_out([this, window] {
-                    if (!state_.right_sidebar_visible()) {
-                        gtk_widget_set_visible(window, FALSE);
-                    }
-                })) {
-                gtk_widget_set_visible(window, FALSE);
-            }
+            return;
         }
+
+        sidebar_input_debug("visibility: animating character out, then hiding sidebar");
+        gtk_widget_set_visible(GTK_WIDGET(sidebar_backdrop_), FALSE);
+        sidebar_character_exit_complete_ = false;
+
+        // The surface transition and Tessia's exit are independent. The none
+        // effect reaches Hidden immediately today, while this completion gate
+        // also supports a future animated surface without allowing either side
+        // to hide a sidebar that has already been reopened.
+        if (!sidebar_->animate_character_out([this] {
+                sidebar_character_exit_complete_ = true;
+                finish_right_sidebar_hide_if_ready();
+            })) {
+            sidebar_character_exit_complete_ = true;
+        }
+        finish_right_sidebar_hide_if_ready();
     }
 
     void apply_bar_visibility() {
@@ -1248,6 +1269,8 @@ private:
     GtkWindow* hotspot_ = nullptr;
     GtkWindow* sidebar_backdrop_ = nullptr;
     std::unique_ptr<sidebar::RightSidebar> sidebar_;
+    effects::TransitionTimeline sidebar_transition_{{0.0, 0.0}};
+    bool sidebar_character_exit_complete_ = true;
     std::unique_ptr<CommandReceiptOverlay> command_receipts_;
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
     std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;

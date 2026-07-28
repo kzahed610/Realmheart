@@ -63,6 +63,7 @@ target_compile_options(realmheart PRIVATE ${REALMHEART_WARNING_FLAGS})
 
 add_library(realmheart_ui STATIC
     src/core/TaskExecutor.cpp
+    src/effects/core/TransitionTimeline.cpp
     src/animation/character/CharacterAnimator.cpp
     src/animation/character/CharacterExpressionAnimator.cpp
     src/animation/character/CharacterHairMode.cpp
@@ -264,6 +265,13 @@ if(BUILD_TESTING)
 
     add_executable(realmheart_command_tests tests/CommandTests.cpp src/core/Command.cpp)
     realmheart_register_test(realmheart_command_tests)
+
+    add_executable(
+        realmheart_transition_timeline_tests
+        tests/TransitionTimelineTests.cpp
+        src/effects/core/TransitionTimeline.cpp
+    )
+    realmheart_register_test(realmheart_transition_timeline_tests)
 
     add_executable(realmheart_shell_command_tests tests/ShellCommandTests.cpp src/core/ShellCommand.cpp)
     realmheart_register_test(realmheart_shell_command_tests)

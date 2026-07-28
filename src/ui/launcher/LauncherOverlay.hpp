@@ -1,5 +1,6 @@
 #pragma once
 
+#include "effects/core/TransitionTimeline.hpp"
 #include "services/LauncherService.hpp"
 #include "services/WallpaperService.hpp"
 
@@ -324,8 +325,7 @@ private:
     bool result_pointer_position_valid_ = false;
     guint central_tick_id_ = 0;
     gint64 central_last_frame_time_ = 0;
-    double central_progress_ = 0.0;
-    bool central_target_visible_ = false;
+    effects::TransitionTimeline central_transition_{{0.30, 0.18}};
     bool constellation_layout_loaded_ = false;
     bool constellation_target_visible_ = true;
 };

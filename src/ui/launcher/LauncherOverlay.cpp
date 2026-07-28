@@ -108,8 +108,6 @@ constexpr double kEmergencePeek = 8.0;
 constexpr double kEmergenceArc = 18.0;
 constexpr double kPositionEpsilon = 0.08;
 constexpr double kVelocityEpsilon = 2.0;
-constexpr double kCentralOpenRate = 1.0 / 0.30;
-constexpr double kCentralCloseRate = 1.0 / 0.18;
 constexpr double kConstellationRevealThreshold = 0.68;
 constexpr int kCentreFinalTopMargin = 166;
 constexpr int kCentreStartTopMargin = 150;
@@ -2160,7 +2158,7 @@ std::pair<double, double> LauncherOverlay::constellation_emergence_position(
         ? static_cast<double>(gtk_widget_get_width(root_))
         : 0.0;
     const double frame = ease_out_cubic(interval_progress(
-        central_progress_,
+        central_transition_.progress(),
         0.0,
         0.72
     ));
@@ -4275,8 +4273,9 @@ void LauncherOverlay::on_search_changed() {
     const std::string query = raw != nullptr ? raw : "";
     const bool searching = query.find_first_not_of(" \t\n\r") != std::string::npos;
 
-    const bool show_constellation = !searching && central_target_visible_ &&
-        central_progress_ >= kConstellationRevealThreshold;
+    const bool show_constellation = !searching &&
+        central_transition_.target_visible() &&
+        central_transition_.progress() >= kConstellationRevealThreshold;
     set_constellation_visible(show_constellation);
 
     // The idle centre owns a strong lower shadow, but keeping that shadow while
@@ -4810,12 +4809,13 @@ void LauncherOverlay::apply_central_motion() {
         return;
     }
 
-    const double backdrop = smooth_step(interval_progress(central_progress_, 0.0, 0.44));
-    const double frame = smooth_step(interval_progress(central_progress_, 0.04, 0.68));
+    const double progress = central_transition_.progress();
+    const double backdrop = smooth_step(interval_progress(progress, 0.0, 0.44));
+    const double frame = smooth_step(interval_progress(progress, 0.04, 0.68));
     const double aperture = ease_out_cubic(
-        interval_progress(central_progress_, 0.12, 0.92)
+        interval_progress(progress, 0.12, 0.92)
     );
-    const double search = smooth_step(interval_progress(central_progress_, 0.46, 1.0));
+    const double search = smooth_step(interval_progress(progress, 0.46, 1.0));
 
     gtk_widget_set_opacity(dismiss_, backdrop);
     gtk_widget_set_opacity(centre_column_, frame);
@@ -4869,8 +4869,8 @@ void LauncherOverlay::apply_central_motion() {
     );
 
     if (activation_sweep_ != nullptr) {
-        const double sweep = interval_progress(central_progress_, 0.56, 0.96);
-        const double sweep_opacity = central_target_visible_
+        const double sweep = interval_progress(progress, 0.56, 0.96);
+        const double sweep_opacity = central_transition_.target_visible()
             ? std::sin(sweep * std::numbers::pi) * (sweep > 0.0 && sweep < 1.0)
             : 0.0;
         gtk_widget_set_visible(activation_sweep_, sweep_opacity > 0.01);
@@ -4893,26 +4893,22 @@ bool LauncherOverlay::advance_central_frame(GdkFrameClock* frame_clock) {
     central_last_frame_time_ = frame_time;
     elapsed = std::clamp(elapsed, 1.0 / 240.0, 0.05);
 
-    const double target = central_target_visible_ ? 1.0 : 0.0;
-    const double rate = central_target_visible_ ? kCentralOpenRate : kCentralCloseRate;
-    if (central_progress_ < target) {
-        central_progress_ = std::min(target, central_progress_ + elapsed * rate);
-    } else if (central_progress_ > target) {
-        central_progress_ = std::max(target, central_progress_ - elapsed * rate);
-    }
+    const bool still_running = central_transition_.advance(elapsed);
 
     apply_central_motion();
 
-    if (central_target_visible_ &&
-        central_progress_ >= kConstellationRevealThreshold &&
+    if (central_transition_.target_visible() &&
+        central_transition_.progress() >= kConstellationRevealThreshold &&
         !search_query_active()) {
         set_constellation_visible(true);
-    } else if (!central_target_visible_) {
+    } else if (!central_transition_.target_visible()) {
         set_constellation_visible(false);
     }
 
-    if (std::abs(central_progress_ - target) > 0.0001) return true;
-    if (!central_target_visible_) finish_central_hide();
+    if (still_running) return true;
+    if (central_transition_.state() == effects::TransitionState::Hidden) {
+        finish_central_hide();
+    }
     return false;
 }
 
@@ -4942,7 +4938,8 @@ void LauncherOverlay::finish_central_hide() {
 }
 
 void LauncherOverlay::toggle() {
-    if (gtk_widget_get_visible(GTK_WIDGET(window_)) && central_target_visible_) {
+    if (gtk_widget_get_visible(GTK_WIDGET(window_)) &&
+        central_transition_.target_visible()) {
         hide();
     } else {
         show();
@@ -4951,17 +4948,17 @@ void LauncherOverlay::toggle() {
 
 void LauncherOverlay::show() {
     const bool already_presented = gtk_widget_get_visible(GTK_WIDGET(window_));
-    central_target_visible_ = true;
     gtk_widget_set_sensitive(root_, TRUE);
 
     if (!already_presented) {
-        central_progress_ = 0.0;
+        central_transition_.snap_hidden();
         central_last_frame_time_ = 0;
         constellation_target_visible_ = false;
         refresh_wallpaper();
         refresh_idle_content();
         gtk_editable_set_text(GTK_EDITABLE(search_entry_), "");
         on_search_changed();
+        central_transition_.open();
         apply_central_motion();
         gtk_window_present(window_);
         gtk_widget_grab_focus(search_entry_);
@@ -4969,6 +4966,8 @@ void LauncherOverlay::show() {
             static_cast<LauncherOverlay*>(data)->layout_constellation();
             return G_SOURCE_REMOVE;
         }, this);
+    } else {
+        central_transition_.open();
     }
 
     schedule_central_frame();
@@ -5020,11 +5019,12 @@ void LauncherOverlay::show_with_query(std::string query) {
 }
 
 void LauncherOverlay::hide() {
-    if (!gtk_widget_get_visible(GTK_WIDGET(window_)) || !central_target_visible_) {
+    if (!gtk_widget_get_visible(GTK_WIDGET(window_)) ||
+        !central_transition_.target_visible()) {
         return;
     }
 
-    central_target_visible_ = false;
+    central_transition_.close();
     clear_constellation_selection();
     set_constellation_visible(false);
     gtk_widget_set_sensitive(root_, FALSE);
