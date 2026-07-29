@@ -567,7 +567,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "Realmheart FX",
         .description = "Realmheart transitions through Hyprland's visible render pass",
         .author = "Zahed; render-pass plumbing adapted from  hyprfx/xhos hyprfx",
-        .version = "0.2.0-render-pass",
+        .version = "0.2.3--void-base",
     };
 }
 

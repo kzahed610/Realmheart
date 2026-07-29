@@ -13,10 +13,10 @@ using namespace Render::GL;
 
 namespace {
 
-constexpr float kGold[3] = {0.886F, 0.769F, 0.427F};
-constexpr float kStarlight[3] = {0.745F, 0.890F, 1.0F};
-constexpr float kAstral[3] = {0.353F, 0.290F, 0.612F};
-constexpr float kVoid[3] = {0.024F, 0.031F, 0.094F};
+constexpr float kGold[3] = {0.886F, 0.725F, 0.416F};
+constexpr float kStarlight[3] = {0.790F, 0.845F, 1.0F};
+constexpr float kAstral[3] = {0.405F, 0.255F, 0.705F};
+constexpr float kVoid[3] = {0.016F, 0.020F, 0.060F};
 
 } // namespace
 
