@@ -3,6 +3,7 @@
 #include "effects/core/EffectFrame.hpp"
 #include "effects/core/EffectRegistry.hpp"
 #include "effects/shell/ShellEffectView.hpp"
+#include "effects/shell/ShellShaderRenderer.hpp"
 
 #include "core/Command.hpp"
 #include "core/TaskExecutor.hpp"
@@ -29,6 +30,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <iterator>
 #include <limits>
 #include <numbers>
@@ -54,6 +56,12 @@ namespace {
 namespace fs = std::filesystem;
 
 const effects::EffectId kLauncherSurfaceEffect = effects::resolve_effect(
+    effects::EffectId::Void,
+    effects::EffectTargetType::Launcher,
+    effects::EffectId::FadeScale
+);
+
+const effects::EffectId kLauncherFallbackEffect = effects::resolve_effect(
     effects::EffectId::FadeScale,
     effects::EffectTargetType::Launcher
 );
@@ -857,6 +865,13 @@ LauncherOverlay::~LauncherOverlay() {
     }
     clear_clipboard_thumbnail_cache();
 
+    if (central_shader_prepare_tick_id_ != 0 && root_ != nullptr) {
+        gtk_widget_remove_tick_callback(root_, central_shader_prepare_tick_id_);
+        central_shader_prepare_tick_id_ = 0;
+    }
+    if (centre_shader_renderer_ != nullptr) {
+        centre_shader_renderer_->finish();
+    }
     if (central_tick_id_ != 0 && root_ != nullptr) {
         gtk_widget_remove_tick_callback(root_, central_tick_id_);
         central_tick_id_ = 0;
@@ -1177,27 +1192,83 @@ void LauncherOverlay::setup_ui() {
     gtk_revealer_set_child(GTK_REVEALER(results_revealer_), results_shell);
     gtk_box_append(GTK_BOX(centre_column_), results_revealer_);
 
-    // The effect view keeps the centre at final layout size and applies only
-    // snapshot-time transforms. The existing aperture choreography therefore
-    // remains intact while the same reusable fade-scale recipe can also drive
-    // other Realmheart surfaces.
+    // The live GTK centre and the pre-created GtkGLArea share a normal
+    // GtkOverlay. The GL child exists before the launcher window is mapped;
+    // transitions only toggle/render it, avoiding the failed lazy-child path.
     centre_effect_view_ = realmheart_shell_effect_view_new(centre_column_);
-    gtk_widget_set_size_request(centre_effect_view_, kCentreFinalWidth, -1);
-    gtk_widget_set_halign(centre_effect_view_, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(centre_effect_view_, GTK_ALIGN_START);
-    gtk_widget_set_hexpand(centre_effect_view_, FALSE);
-    gtk_widget_set_vexpand(centre_effect_view_, FALSE);
-    gtk_widget_set_margin_top(centre_effect_view_, kCentreFinalTopMargin);
+    gtk_widget_set_hexpand(centre_effect_view_, TRUE);
+    gtk_widget_set_vexpand(centre_effect_view_, TRUE);
+    gtk_widget_set_halign(centre_effect_view_, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(centre_effect_view_, GTK_ALIGN_FILL);
     effects::shell::set_origin(
         REALMHEART_SHELL_EFFECT_VIEW(centre_effect_view_),
         0.5,
         0.5
     );
 
+    centre_shader_renderer_ =
+        std::make_unique<effects::shell::ShellShaderRenderer>();
+    centre_shader_host_ = gtk_overlay_new();
+    gtk_widget_set_size_request(centre_shader_host_, kCentreFinalWidth, -1);
+    gtk_widget_set_halign(centre_shader_host_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(centre_shader_host_, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(centre_shader_host_, FALSE);
+    gtk_widget_set_vexpand(centre_shader_host_, FALSE);
+    gtk_widget_set_margin_top(
+        centre_shader_host_,
+        kCentreFinalTopMargin
+    );
+    gtk_overlay_set_child(
+        GTK_OVERLAY(centre_shader_host_),
+        centre_effect_view_
+    );
+
+    // Keep the external depth shadow independent from both the live GTK child
+    // and the shader texture. CSS shadows extend beyond a widget's allocated
+    // snapshot, so restoring the live child after a shader transition used to
+    // make the left/right shadow appear in one abrupt frame. This overlay is
+    // driven by the same transition progress and therefore survives the
+    // live-to-GL handoff smoothly.
+    centre_shadow_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_size_request(
+        centre_shadow_,
+        kCentreFinalWidth,
+        kCentreHeight
+    );
+    gtk_widget_set_halign(centre_shadow_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(centre_shadow_, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(centre_shadow_, FALSE);
+    gtk_widget_set_vexpand(centre_shadow_, FALSE);
+    gtk_widget_set_can_target(centre_shadow_, FALSE);
+    gtk_widget_set_opacity(centre_shadow_, 0.0);
+    gtk_widget_add_css_class(
+        centre_shadow_,
+        "realmheart-launcher-centre-shadow"
+    );
+    gtk_overlay_add_overlay(
+        GTK_OVERLAY(centre_shader_host_),
+        centre_shadow_
+    );
+    gtk_overlay_set_clip_overlay(
+        GTK_OVERLAY(centre_shader_host_),
+        centre_shadow_,
+        FALSE
+    );
+
+    gtk_overlay_add_overlay(
+        GTK_OVERLAY(centre_shader_host_),
+        centre_shader_renderer_->widget()
+    );
+    gtk_overlay_set_clip_overlay(
+        GTK_OVERLAY(centre_shader_host_),
+        centre_shader_renderer_->widget(),
+        TRUE
+    );
+
     // The centre is layered above the constellation. Nodes are constrained to
     // the lower interaction region, but this also protects the search surface
     // from a malformed or hand-edited saved position.
-    gtk_overlay_add_overlay(GTK_OVERLAY(root_), centre_effect_view_);
+    gtk_overlay_add_overlay(GTK_OVERLAY(root_), centre_shader_host_);
 
     // Command feedback belongs to the same fullscreen launcher surface. It is
     // layered above the centre/constellation and never creates a notification-
@@ -4308,10 +4379,25 @@ void LauncherOverlay::on_search_changed() {
     // Search mode deliberately hands depth to the lower sheet instead.
     if (searching) {
         gtk_widget_add_css_class(centre_shell_, "searching");
+        if (centre_shadow_ != nullptr) {
+            gtk_widget_add_css_class(centre_shadow_, "searching");
+        }
     } else {
         gtk_widget_remove_css_class(centre_shell_, "searching");
+        if (centre_shadow_ != nullptr) {
+            gtk_widget_remove_css_class(centre_shadow_, "searching");
+        }
     }
-    gtk_revealer_set_reveal_child(GTK_REVEALER(results_revealer_), searching);
+    // Do not mutate the shader host's height while the central surface is
+    // still opening. Realmheart Void is rendering a fixed capture of the
+    // launcher body; revealing the result sheet early would reallocate its
+    // parent to launcher+results height and stretch that capture vertically.
+    const bool centre_fully_open =
+        central_transition_.state() == effects::TransitionState::Visible;
+    gtk_revealer_set_reveal_child(
+        GTK_REVEALER(results_revealer_),
+        searching && centre_fully_open
+    );
 
     if (!searching) {
         leave_clipboard_mode();
@@ -4828,41 +4914,120 @@ void LauncherOverlay::schedule_central_frame() {
     );
 }
 
+void LauncherOverlay::apply_central_final_geometry() {
+    if (centre_effect_view_ == nullptr || centre_shader_host_ == nullptr ||
+        centre_shadow_ == nullptr || centre_shell_ == nullptr ||
+        wallpaper_frame_ == nullptr || search_entry_ == nullptr) {
+        return;
+    }
+
+    effects::shell::set_frame(
+        REALMHEART_SHELL_EFFECT_VIEW(centre_effect_view_),
+        effects::EffectFrame{}
+    );
+    gtk_widget_set_margin_top(
+        centre_shader_host_,
+        kCentreFinalTopMargin
+    );
+    gtk_widget_set_size_request(
+        centre_shader_host_,
+        kCentreFinalWidth,
+        -1
+    );
+    gtk_widget_set_size_request(
+        centre_shadow_,
+        kCentreFinalWidth,
+        kCentreHeight
+    );
+    gtk_widget_set_size_request(
+        centre_shell_,
+        kCentreFinalWidth,
+        kCentreHeight
+    );
+    gtk_widget_set_size_request(
+        wallpaper_frame_,
+        kApertureFinalWidth,
+        kApertureFinalHeight
+    );
+    gtk_widget_set_opacity(wallpaper_picture_, 1.0);
+    gtk_widget_set_size_request(search_entry_, kSearchFinalWidth, 50);
+    gtk_widget_set_opacity(search_entry_, 1.0);
+    gtk_widget_set_margin_bottom(search_entry_, 0);
+
+    if (activation_sweep_ != nullptr) {
+        gtk_widget_set_visible(activation_sweep_, FALSE);
+    }
+}
+
 void LauncherOverlay::apply_central_motion() {
     if (dismiss_ == nullptr || centre_column_ == nullptr ||
-        centre_effect_view_ == nullptr || centre_shell_ == nullptr ||
+        centre_effect_view_ == nullptr || centre_shader_host_ == nullptr ||
+        centre_shadow_ == nullptr || centre_shell_ == nullptr ||
         wallpaper_frame_ == nullptr || search_entry_ == nullptr) {
         return;
     }
 
     const double progress = central_transition_.progress();
     const double backdrop = smooth_step(interval_progress(progress, 0.0, 0.44));
+    gtk_widget_set_opacity(dismiss_, backdrop);
+
+    // The outer shadow is not part of the captured shader texture. Fade it as
+    // an independent depth layer so the GL/live-child handoff cannot make it
+    // pop into existence at the transition endpoint. Using timeline progress
+    // also makes the same curve reverse naturally during a rapid close/open.
+    const double shadow = smooth_step(interval_progress(progress, 0.08, 0.90));
+    gtk_widget_set_opacity(centre_shadow_, shadow);
+
+    const bool shader_active = centre_shader_renderer_ != nullptr &&
+        centre_shader_renderer_->active();
+    const bool shader_mode = central_shader_preparing_ || shader_active;
+
+    if (shader_mode) {
+        apply_central_final_geometry();
+        if (shader_active) {
+            centre_shader_renderer_->update(
+                progress,
+                central_transition_.target_visible()
+            );
+            if (centre_shader_renderer_->frame_ready()) {
+                gtk_widget_set_opacity(centre_shader_host_, 1.0);
+            }
+        }
+        return;
+    }
+
     const double frame = smooth_step(interval_progress(progress, 0.04, 0.68));
     const double aperture = ease_out_cubic(
         interval_progress(progress, 0.12, 0.92)
     );
     const double search = smooth_step(interval_progress(progress, 0.46, 1.0));
 
-    gtk_widget_set_opacity(dismiss_, backdrop);
+    gtk_widget_set_opacity(centre_shader_host_, 1.0);
     effects::shell::set_frame(
         REALMHEART_SHELL_EFFECT_VIEW(centre_effect_view_),
-        effects::sample_effect(kLauncherSurfaceEffect, frame)
+        effects::sample_effect(kLauncherFallbackEffect, frame)
     );
     gtk_widget_set_margin_top(
-        centre_effect_view_,
+        centre_shader_host_,
         static_cast<int>(std::lround(interpolate(
             kCentreStartTopMargin,
             kCentreFinalTopMargin,
             frame
         )))
     );
+    const int centre_width = static_cast<int>(std::lround(interpolate(
+        kCentreStartWidth,
+        kCentreFinalWidth,
+        frame
+    )));
+    gtk_widget_set_size_request(
+        centre_shadow_,
+        centre_width,
+        kCentreHeight
+    );
     gtk_widget_set_size_request(
         centre_shell_,
-        static_cast<int>(std::lround(interpolate(
-            kCentreStartWidth,
-            kCentreFinalWidth,
-            frame
-        ))),
+        centre_width,
         kCentreHeight
     );
     gtk_widget_set_size_request(
@@ -4912,6 +5077,155 @@ void LauncherOverlay::apply_central_motion() {
     }
 }
 
+bool LauncherOverlay::begin_central_shader(
+    bool opening,
+    std::string* error
+) {
+    if (centre_shader_renderer_ == nullptr || centre_shader_host_ == nullptr ||
+        centre_effect_view_ == nullptr || kLauncherSurfaceEffect != effects::EffectId::Void) {
+        if (error != nullptr) {
+            *error = "Realmheart Void renderer is unavailable";
+        }
+        return false;
+    }
+
+    std::string begin_error;
+    const bool started = centre_shader_renderer_->begin(
+        centre_shader_host_,
+        centre_effect_view_,
+        kLauncherSurfaceEffect,
+        opening,
+        0.0, // GTK capture alpha already contains the exact launcher silhouette.
+        effects::shell::ShaderPalette{},
+        &begin_error
+    );
+    if (!started) {
+        if (error != nullptr) {
+            *error = std::move(begin_error);
+        } else {
+            std::cerr << "Unable to begin Realmheart Void: "
+                      << begin_error << '\n';
+        }
+    } else if (error != nullptr) {
+        error->clear();
+    }
+    return started;
+}
+
+void LauncherOverlay::schedule_central_shader_open() {
+    if (central_shader_prepare_tick_id_ != 0 || root_ == nullptr) return;
+
+    constexpr unsigned int kMaximumCaptureAttempts = 12;
+    constexpr unsigned int kMaximumFirstFrameWaits = 30;
+    central_shader_prepare_attempts_ = 0;
+    central_shader_prepare_tick_id_ = gtk_widget_add_tick_callback(
+        root_,
+        +[](GtkWidget*, GdkFrameClock*, gpointer data) -> gboolean {
+            auto* overlay = static_cast<LauncherOverlay*>(data);
+
+            if (!gtk_widget_get_visible(GTK_WIDGET(overlay->window_)) ||
+                !overlay->central_transition_.target_visible()) {
+                overlay->central_shader_prepare_tick_id_ = 0;
+                overlay->central_shader_prepare_attempts_ = 0;
+                overlay->central_shader_preparing_ = false;
+                overlay->finish_central_shader();
+                return G_SOURCE_REMOVE;
+            }
+
+            // Capture and GL startup are separate phases. The opening timeline
+            // must remain parked at zero until GtkGLArea has actually rendered
+            // the intentionally transparent first Void frame. Advancing before
+            // then lets the 480 ms transition finish invisibly and makes the
+            // live launcher appear abruptly at the end.
+            if (overlay->centre_shader_renderer_ != nullptr &&
+                overlay->centre_shader_renderer_->active()) {
+                overlay->centre_shader_renderer_->update(0.0, true);
+                gtk_widget_set_opacity(overlay->centre_shader_host_, 1.0);
+                overlay->apply_central_final_geometry();
+
+                if (overlay->centre_shader_renderer_->frame_ready()) {
+                    overlay->central_shader_prepare_tick_id_ = 0;
+                    overlay->central_shader_prepare_attempts_ = 0;
+                    overlay->central_shader_preparing_ = false;
+                    overlay->central_shader_fallback_ = false;
+                    overlay->central_last_frame_time_ = 0;
+                    overlay->apply_central_motion();
+                    overlay->schedule_central_frame();
+                    return G_SOURCE_REMOVE;
+                }
+
+                ++overlay->central_shader_prepare_attempts_;
+                if (overlay->central_shader_prepare_attempts_ <
+                    kMaximumFirstFrameWaits) {
+                    return G_SOURCE_CONTINUE;
+                }
+
+                overlay->central_shader_prepare_tick_id_ = 0;
+                overlay->central_shader_prepare_attempts_ = 0;
+                overlay->central_shader_preparing_ = false;
+                overlay->central_shader_fallback_ = true;
+                overlay->finish_central_shader();
+                std::cerr << "Unable to begin Realmheart Void open: "
+                          << "GtkGLArea did not produce its first frame" << '\n';
+                overlay->apply_central_motion();
+                overlay->schedule_central_frame();
+                return G_SOURCE_REMOVE;
+            }
+
+            ++overlay->central_shader_prepare_attempts_;
+            std::string error;
+            if (overlay->begin_central_shader(true, &error)) {
+                // The source is captured now. Expose the host so its pre-created
+                // GtkGLArea participates in GTK drawing, but keep the timeline
+                // frozen until frame_ready() is observed on a later frame.
+                overlay->central_shader_prepare_attempts_ = 0;
+                gtk_widget_set_opacity(overlay->centre_shader_host_, 1.0);
+                overlay->apply_central_final_geometry();
+                overlay->centre_shader_renderer_->update(0.0, true);
+                gtk_widget_queue_draw(overlay->centre_shader_host_);
+                return G_SOURCE_CONTINUE;
+            }
+
+            const bool capture_may_become_ready =
+                error == "source widget has not been allocated yet" ||
+                error == "source widget has no active GTK renderer" ||
+                error == "source widget produced an empty snapshot" ||
+                error == "GTK could not render the source snapshot to a texture" ||
+                error == "captured source snapshot is fully transparent";
+
+            if (capture_may_become_ready &&
+                overlay->central_shader_prepare_attempts_ <
+                    kMaximumCaptureAttempts) {
+                return G_SOURCE_CONTINUE;
+            }
+
+            overlay->central_shader_prepare_tick_id_ = 0;
+            overlay->central_shader_prepare_attempts_ = 0;
+            overlay->central_shader_preparing_ = false;
+            overlay->central_shader_fallback_ = true;
+            overlay->finish_central_shader();
+            gtk_widget_set_opacity(overlay->centre_shader_host_, 1.0);
+            std::cerr << "Unable to begin Realmheart Void open: "
+                      << error << '\n';
+            overlay->apply_central_motion();
+            overlay->schedule_central_frame();
+            return G_SOURCE_REMOVE;
+        },
+        this,
+        nullptr
+    );
+}
+
+void LauncherOverlay::finish_central_shader() {
+    central_shader_preparing_ = false;
+    if (centre_shader_renderer_ != nullptr) {
+        centre_shader_renderer_->finish();
+    }
+    if (centre_shader_host_ != nullptr) {
+        gtk_widget_set_opacity(centre_shader_host_, 1.0);
+    }
+}
+
 bool LauncherOverlay::advance_central_frame(GdkFrameClock* frame_clock) {
     const gint64 frame_time = gdk_frame_clock_get_frame_time(frame_clock);
     double elapsed = 1.0 / 60.0;
@@ -4935,7 +5249,18 @@ bool LauncherOverlay::advance_central_frame(GdkFrameClock* frame_clock) {
     }
 
     if (still_running) return true;
-    if (central_transition_.state() == effects::TransitionState::Hidden) {
+
+    finish_central_shader();
+    apply_central_motion();
+    if (central_transition_.state() == effects::TransitionState::Visible) {
+        // A query may have arrived while the opening shader was still active.
+        // The results were prepared immediately but intentionally withheld
+        // until the fixed-size central transition had completed.
+        gtk_revealer_set_reveal_child(
+            GTK_REVEALER(results_revealer_),
+            search_query_active()
+        );
+    } else if (central_transition_.state() == effects::TransitionState::Hidden) {
         finish_central_hide();
     }
     return false;
@@ -4961,6 +5286,9 @@ void LauncherOverlay::finish_central_hide() {
     if (activation_sweep_ != nullptr) {
         gtk_widget_set_visible(activation_sweep_, FALSE);
     }
+    if (centre_shadow_ != nullptr) {
+        gtk_widget_set_opacity(centre_shadow_, 0.0);
+    }
     gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
     leave_clipboard_mode();
     leave_emoji_mode();
@@ -4980,6 +5308,8 @@ void LauncherOverlay::show() {
     gtk_widget_set_sensitive(root_, TRUE);
 
     if (!already_presented) {
+        finish_central_shader();
+        central_shader_fallback_ = false;
         central_transition_.snap_hidden();
         central_last_frame_time_ = 0;
         constellation_target_visible_ = false;
@@ -4987,18 +5317,35 @@ void LauncherOverlay::show() {
         refresh_idle_content();
         gtk_editable_set_text(GTK_EDITABLE(search_entry_), "");
         on_search_changed();
+
         central_transition_.open();
+        central_shader_preparing_ =
+            kLauncherSurfaceEffect == effects::EffectId::Void;
         apply_central_motion();
+        if (central_shader_preparing_) {
+            // Present an allocated final GTK surface without flashing it. The
+            // high-idle callback captures that live child after the layer-shell
+            // window and its pre-created GtkGLArea have entered normal GTK
+            // lifecycle.
+            gtk_widget_set_opacity(centre_shader_host_, 0.0);
+        }
+
         gtk_window_present(window_);
         gtk_widget_grab_focus(search_entry_);
         g_idle_add(+[](gpointer data) -> gboolean {
             static_cast<LauncherOverlay*>(data)->layout_constellation();
             return G_SOURCE_REMOVE;
         }, this);
-    } else {
-        central_transition_.open();
+
+        if (central_shader_preparing_) {
+            schedule_central_shader_open();
+        } else {
+            schedule_central_frame();
+        }
+        return;
     }
 
+    central_transition_.open();
     schedule_central_frame();
 }
 
@@ -5053,10 +5400,35 @@ void LauncherOverlay::hide() {
         return;
     }
 
+    if (central_shader_preparing_) {
+        if (central_shader_prepare_tick_id_ != 0 && root_ != nullptr) {
+            gtk_widget_remove_tick_callback(
+                root_,
+                central_shader_prepare_tick_id_
+            );
+            central_shader_prepare_tick_id_ = 0;
+        }
+        central_shader_prepare_attempts_ = 0;
+        central_shader_preparing_ = false;
+        central_transition_.snap_hidden();
+        finish_central_shader();
+        apply_central_motion();
+        finish_central_hide();
+        return;
+    }
+
+    central_shader_fallback_ = false;
+    if (kLauncherSurfaceEffect == effects::EffectId::Void &&
+        centre_shader_renderer_ != nullptr &&
+        !centre_shader_renderer_->active()) {
+        central_shader_fallback_ = !begin_central_shader(false);
+    }
+
     central_transition_.close();
     clear_constellation_selection();
     set_constellation_visible(false);
     gtk_widget_set_sensitive(root_, FALSE);
+    apply_central_motion();
     schedule_central_frame();
 }
 

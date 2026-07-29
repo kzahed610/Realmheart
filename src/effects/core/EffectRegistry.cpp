@@ -60,7 +60,8 @@ constexpr std::array<EffectSpec, 3> kEffectSpecs{{
         .backend = EffectBackend::Shader,
         .supported_targets =
             effect_target_bit(EffectTargetType::Launcher) |
-            effect_target_bit(EffectTargetType::Sidebar),
+            effect_target_bit(EffectTargetType::Sidebar) |
+            effect_target_bit(EffectTargetType::Window),
         .supports_open = true,
         .supports_close = true,
         .default_open_duration_seconds = 0.48,

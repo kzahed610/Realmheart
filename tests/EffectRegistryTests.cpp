@@ -44,7 +44,7 @@ int main() {
     assert(void_effect->outputs_transparency);
     assert(supports_target(*void_effect, EffectTargetType::Launcher));
     assert(supports_target(*void_effect, EffectTargetType::Sidebar));
-    assert(!supports_target(*void_effect, EffectTargetType::Window));
+    assert(supports_target(*void_effect, EffectTargetType::Window));
 
     assert(find_effect(std::string_view{"missing-effect"}) == nullptr);
 
@@ -61,6 +61,10 @@ int main() {
         EffectTargetType::Window,
         EffectId::FadeScale
     ) == EffectId::None);
+    assert(resolve_effect(
+        EffectId::Void,
+        EffectTargetType::Window
+    ) == EffectId::Void);
 
     return 0;
 }

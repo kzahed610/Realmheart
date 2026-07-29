@@ -17,6 +17,10 @@
 #include <utility>
 #include <vector>
 
+namespace realmheart::effects::shell {
+class ShellShaderRenderer;
+}
+
 namespace realmheart::ui {
 
 class CommandReceiptOverlay;
@@ -206,6 +210,13 @@ private:
     void schedule_central_frame();
     [[nodiscard]] bool advance_central_frame(GdkFrameClock* frame_clock);
     void apply_central_motion();
+    void apply_central_final_geometry();
+    void schedule_central_shader_open();
+    [[nodiscard]] bool begin_central_shader(
+        bool opening,
+        std::string* error = nullptr
+    );
+    void finish_central_shader();
     void finish_central_hide();
     [[nodiscard]] bool search_query_active() const;
     [[nodiscard]] std::pair<double, double> search_centre_in_constellation() const;
@@ -242,6 +253,8 @@ private:
     GtkWidget* search_entry_ = nullptr;
     GtkWidget* wallpaper_picture_ = nullptr;
     GtkWidget* centre_column_ = nullptr;
+    GtkWidget* centre_shader_host_ = nullptr;
+    GtkWidget* centre_shadow_ = nullptr;
     GtkWidget* centre_effect_view_ = nullptr;
     GtkWidget* centre_shell_ = nullptr;
     GtkWidget* wallpaper_frame_ = nullptr;
@@ -325,8 +338,13 @@ private:
     double result_pointer_window_y_ = 0.0;
     bool result_pointer_position_valid_ = false;
     guint central_tick_id_ = 0;
+    guint central_shader_prepare_tick_id_ = 0;
+    unsigned int central_shader_prepare_attempts_ = 0;
     gint64 central_last_frame_time_ = 0;
-    effects::TransitionTimeline central_transition_{{0.30, 0.18}};
+    bool central_shader_preparing_ = false;
+    bool central_shader_fallback_ = false;
+    std::unique_ptr<effects::shell::ShellShaderRenderer> centre_shader_renderer_;
+    effects::TransitionTimeline central_transition_{{0.48, 0.40}};
     bool constellation_layout_loaded_ = false;
     bool constellation_target_visible_ = true;
 };

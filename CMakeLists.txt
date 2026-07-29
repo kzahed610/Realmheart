@@ -83,9 +83,11 @@ add_library(realmheart_ui STATIC
     src/core/TaskExecutor.cpp
     src/effects/core/EffectFrame.cpp
     src/effects/core/EffectRegistry.cpp
+    src/effects/core/ShaderPlayback.cpp
     src/effects/core/ShaderSource.cpp
     src/effects/core/TransitionTimeline.cpp
     src/effects/shell/ShellEffectView.cpp
+    src/effects/shell/ShellShaderRenderer.cpp
     src/animation/character/CharacterAnimator.cpp
     src/animation/character/CharacterExpressionAnimator.cpp
     src/animation/character/CharacterHairMode.cpp
@@ -159,6 +161,7 @@ target_link_libraries(realmheart_ui PRIVATE
     PkgConfig::GTK4_LAYER_SHELL
     PkgConfig::GDK_PIXBUF
     PkgConfig::JPEG
+    PkgConfig::EPOXY
     Threads::Threads
 )
 
@@ -311,6 +314,13 @@ if(BUILD_TESTING)
         src/effects/core/EffectRegistry.cpp
     )
     realmheart_register_test(realmheart_effect_registry_tests)
+
+    add_executable(
+        realmheart_shader_playback_tests
+        tests/ShaderPlaybackTests.cpp
+        src/effects/core/ShaderPlayback.cpp
+    )
+    realmheart_register_test(realmheart_shader_playback_tests)
 
     add_executable(
         realmheart_shader_source_tests

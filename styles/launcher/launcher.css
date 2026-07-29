@@ -38,20 +38,30 @@ window.realmheart-launcher-window > *,
   );
   border: 1px solid alpha(@rh_icon_accent, 0.72);
   border-radius: 25px;
-  /* Keep this shadow compact. A very wide blur intersects the freely placed
-   * constellation nodes and GTK rasterises the overlap as a serrated edge. */
-  box-shadow:
-    0 14px 26px alpha(#000000, 0.46),
-    inset 0 1px alpha(@rh_text, 0.06);
+  /* External depth is rendered by a separate transition-controlled layer.
+   * Keeping only the inset here prevents the live GTK child from reintroducing
+   * a drop shadow in one abrupt frame after a shader transition. */
+  box-shadow: inset 0 1px alpha(@rh_text, 0.06);
 }
 
+.realmheart-launcher-centre-shadow {
+  /* Keep this shadow compact. A very wide blur intersects the freely placed
+   * constellation nodes and GTK rasterises the overlap as a serrated edge. */
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  border-radius: 25px;
+  box-shadow: 0 14px 26px alpha(#000000, 0.46);
+}
 
 .realmheart-launcher-centre-shell.searching {
+  box-shadow: inset 0 1px alpha(@rh_text, 0.06);
+}
+
+.realmheart-launcher-centre-shadow.searching {
   /* Avoid two blurred layers intersecting above the results sheet. The gold
    * frame and opaque surface already preserve separation in this state. */
-  box-shadow:
-    0 4px 10px alpha(#000000, 0.20),
-    inset 0 1px alpha(@rh_text, 0.06);
+  box-shadow: 0 4px 10px alpha(#000000, 0.20);
 }
 
 .realmheart-launcher-wallpaper-frame {

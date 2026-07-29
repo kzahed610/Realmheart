@@ -69,6 +69,12 @@ void main() {
     vec2 uv = v_texcoord;
     vec4 source = texture(tex, uv);
 
+    // The captured texture's alpha is the authoritative surface silhouette.
+    // This preserves arbitrary GTK shapes and their anti-aliased corners rather
+    // than imposing one global radius on every target. `radius` remains an
+    // optional fallback for compositor textures whose corner clipping is not
+    // already baked into alpha.
+    float surfaceMask = clamp(source.a, 0.0, 1.0);
     if (radius > 0.0) {
         vec2 pixel = uv * safeResolution;
         float clipDistance = roundedBoxSdf(
@@ -76,7 +82,9 @@ void main() {
             safeResolution * 0.5,
             radius
         );
-        source *= 1.0 - smoothstep(-1.0, 1.0, clipDistance);
+        float radiusMask = 1.0 - smoothstep(-1.0, 1.0, clipDistance);
+        source *= radiusMask;
+        surfaceMask *= radiusMask;
     }
 
     float phase = mix(progress, 1.0 - progress, reverse);
@@ -122,5 +130,9 @@ void main() {
         horizonAlpha * endpointFade
     );
 
+    // Procedural smoke and rim light must never spill into transparent corners
+    // outside the captured target. Only the generated layer is masked here;
+    // masking `survivingSource` again would square anti-aliased edge alpha.
+    eventHorizon *= surfaceMask;
     fragColor = premultipliedOver(survivingSource, eventHorizon);
 }
