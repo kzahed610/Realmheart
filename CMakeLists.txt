@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(REALMHEART_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(REALMHEART_ENABLE_NATIVE_WALLPAPER "Build the Wayland/EGL wallpaper renderer when dependencies are available" ON)
+option(REALMHEART_BUILD_HYPRLAND_PLUGIN "Build the optional Realmheart FX Hyprland plugin when matching headers are available" ON)
 set(REALMHEART_WLR_LAYER_SHELL_XML "" CACHE FILEPATH "Path to wlr-layer-shell-unstable-v1.xml")
 
 find_package(PkgConfig REQUIRED)
@@ -16,9 +17,11 @@ find_package(Threads REQUIRED)
 pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4>=4.12)
 pkg_check_modules(EPOXY REQUIRED IMPORTED_TARGET epoxy)
+pkg_check_modules(GLESV2 QUIET IMPORTED_TARGET glesv2)
 pkg_check_modules(GTK4_LAYER_SHELL REQUIRED IMPORTED_TARGET gtk4-layer-shell-0)
 pkg_check_modules(GDK_PIXBUF REQUIRED IMPORTED_TARGET gdk-pixbuf-2.0)
 pkg_check_modules(JPEG REQUIRED IMPORTED_TARGET libjpeg)
+pkg_check_modules(HYPRLAND QUIET IMPORTED_TARGET hyprland)
 
 set(REALMHEART_WARNING_FLAGS
     -Wall -Wextra -Wpedantic
@@ -55,6 +58,33 @@ set(REALMHEART_RUNTIME_SOURCES
     src/services/MatugenParser.cpp
 )
 
+
+
+if(REALMHEART_BUILD_HYPRLAND_PLUGIN AND HYPRLAND_FOUND AND GLESV2_FOUND)
+    add_library(realmheart_fx MODULE
+        plugins/realmheart-fx/Plugin.cpp
+        plugins/realmheart-fx/RealmheartVoidPassElement.cpp
+    )
+    set_target_properties(realmheart_fx PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME "realmheart-fx"
+        CXX_STANDARD 26
+        CXX_STANDARD_REQUIRED ON
+    )
+    target_compile_definitions(realmheart_fx PRIVATE
+        REALMHEART_VOID_SHADER_FILE="${CMAKE_SOURCE_DIR}/effects/void/void.frag"
+    )
+    target_compile_options(realmheart_fx PRIVATE ${REALMHEART_WARNING_FLAGS})
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(realmheart_fx PRIVATE -fno-gnu-unique)
+    endif()
+    target_link_libraries(realmheart_fx PRIVATE
+        PkgConfig::HYPRLAND
+        PkgConfig::GLESV2
+    )
+else()
+    message(STATUS "Realmheart FX plugin disabled: matching Hyprland or GLES development files were not found")
+endif()
 
 add_executable(realmheart_gl_probe
     tools/effects/GlAreaProbe.cpp
@@ -254,6 +284,10 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
     else()
         message(STATUS "Native wallpaper renderer disabled: one or more optional Wayland/EGL dependencies are unavailable")
     endif()
+endif()
+
+if(TARGET realmheart_fx)
+    install(TARGETS realmheart_fx LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/realmheart)
 endif()
 
 install(TARGETS realmheart RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
