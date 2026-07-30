@@ -14,7 +14,7 @@
 #define GL_TEXTURE_EXTERNAL_OES 0x8D65
 #endif
 
-enum class ERealmheartVoidUniform : std::size_t {
+enum class ERealmheartEffectUniform : std::size_t {
     Projection = 0,
     Position,
     Progress,
@@ -29,18 +29,25 @@ enum class ERealmheartVoidUniform : std::size_t {
     Count,
 };
 
-struct SRealmheartVoidShader {
+struct SRealmheartEffectShader {
     GLuint program = 0;
-    std::array<GLint, static_cast<std::size_t>(ERealmheartVoidUniform::Count)> locations{};
+    std::array<GLint, static_cast<std::size_t>(ERealmheartEffectUniform::Count)> locations{};
 
-    [[nodiscard]] GLint location(ERealmheartVoidUniform uniform) const {
+    [[nodiscard]] GLint location(ERealmheartEffectUniform uniform) const {
         return locations.at(static_cast<std::size_t>(uniform));
     }
 
     void destroy();
 };
 
-class CRealmheartVoidPassElement final : public IPassElement {
+struct SRealmheartEffectPalette {
+    std::array<float, 3> gold{0.886F, 0.725F, 0.416F};
+    std::array<float, 3> starlight{0.790F, 0.845F, 1.0F};
+    std::array<float, 3> astral{0.405F, 0.255F, 0.705F};
+    std::array<float, 3> voidColour{0.016F, 0.020F, 0.060F};
+};
+
+class CRealmheartEffectPassElement final : public IPassElement {
   public:
     struct SData {
         CBox box;
@@ -49,11 +56,12 @@ class CRealmheartVoidPassElement final : public IPassElement {
         GLenum textureTarget = GL_TEXTURE_2D;
         float rounding = 0.0F;
         bool reverse = false;
-        const SRealmheartVoidShader* shader = nullptr;
+        const SRealmheartEffectShader* shader = nullptr;
+        SRealmheartEffectPalette palette{};
     };
 
-    explicit CRealmheartVoidPassElement(SData data);
-    ~CRealmheartVoidPassElement() override = default;
+    explicit CRealmheartEffectPassElement(SData data);
+    ~CRealmheartEffectPassElement() override = default;
 
     std::vector<UP<IPassElement>> draw() override;
     bool needsLiveBlur() override;
@@ -62,7 +70,7 @@ class CRealmheartVoidPassElement final : public IPassElement {
     bool disableSimplification() override;
 
     const char* passName() override {
-        return "CRealmheartVoidPassElement";
+        return "CRealmheartEffectPassElement";
     }
 
     ePassElementType type() override {

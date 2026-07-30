@@ -4,7 +4,8 @@
 
 #define WLR_USE_UNSTABLE
 
-#include "RealmheartVoidPassElement.hpp"
+#include "RealmheartEffectPassElement.hpp"
+#include "WindowEffectRegistry.hpp"
 
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/SharedDefs.hpp>
@@ -22,11 +23,14 @@
 #include <hyprland/src/xwayland/XSurface.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -34,8 +38,6 @@ using namespace Render::GL;
 
 namespace {
 
-constexpr float kHalfDurationSeconds = 0.85F;
-constexpr float kCycleDurationSeconds = kHalfDurationSeconds * 2.0F;
 constexpr float kTextureWaitTimeoutSeconds = 0.60F;
 constexpr const char* kDiagnosticLog = "/tmp/realmheart-fx.log";
 constexpr const char* kCommandName = "realmheart-fx";
@@ -52,15 +54,26 @@ void main() {
 }
 )GLSL";
 
+struct SCompiledWindowEffect {
+    const SWindowEffectSpec* spec = nullptr;
+    std::array<SRealmheartEffectShader, 2> shaders{};
+
+    void destroy() {
+        for (auto& shader : shaders)
+            shader.destroy();
+    }
+};
+
 struct STestAnimation {
     PHLWINDOWREF window;
+    EWindowEffectId effect = EWindowEffectId::None;
     std::chrono::steady_clock::time_point startTime{};
     bool active = false;
     bool sawPass = false;
 };
 
 struct SPluginState {
-    SRealmheartVoidShader shaders[2];
+    std::vector<SCompiledWindowEffect> effects;
     STestAnimation test;
     wl_event_source* tick = nullptr;
     SP<SHyprCtlCommand> command;
@@ -122,12 +135,16 @@ GLuint createProgram(const std::string& vertex, const std::string& fragment) {
     throw std::runtime_error("Realmheart FX program linking failed: " + log);
 }
 
-std::string readVoidShader() {
-    std::ifstream stream(REALMHEART_VOID_SHADER_FILE, std::ios::binary);
-    if (!stream)
+std::string readEffectShader(const SWindowEffectSpec& effect) {
+    const std::filesystem::path shaderPath =
+        std::filesystem::path{REALMHEART_EFFECT_ASSET_DIR} / effect.fragmentShaderAsset;
+    std::ifstream stream(shaderPath, std::ios::binary);
+    if (!stream) {
         throw std::runtime_error(
-            "could not read Realmheart Void shader at " REALMHEART_VOID_SHADER_FILE
+            "could not read " + std::string(effect.displayName) +
+            " shader at " + shaderPath.string()
         );
+    }
 
     std::ostringstream buffer;
     buffer << stream.rdbuf();
@@ -155,40 +172,66 @@ std::string externalVariant(std::string fragment) {
     return fragment;
 }
 
-void fillLocations(SRealmheartVoidShader& shader) {
-    shader.locations.at(static_cast<std::size_t>(ERealmheartVoidUniform::Projection)) =
+void fillLocations(SRealmheartEffectShader& shader) {
+    shader.locations.at(static_cast<std::size_t>(ERealmheartEffectUniform::Projection)) =
         glGetUniformLocation(shader.program, "proj");
-    shader.locations.at(static_cast<std::size_t>(ERealmheartVoidUniform::Position)) =
+    shader.locations.at(static_cast<std::size_t>(ERealmheartEffectUniform::Position)) =
         glGetAttribLocation(shader.program, "pos");
-    shader.locations.at(static_cast<std::size_t>(ERealmheartVoidUniform::Progress)) =
+    shader.locations.at(static_cast<std::size_t>(ERealmheartEffectUniform::Progress)) =
         glGetUniformLocation(shader.program, "progress");
-    shader.locations.at(static_cast<std::size_t>(ERealmheartVoidUniform::Resolution)) =
+    shader.locations.at(static_cast<std::size_t>(ERealmheartEffectUniform::Resolution)) =
         glGetUniformLocation(shader.program, "resolution");
-    shader.locations.at(static_cast<std::size_t>(ERealmheartVoidUniform::Texture)) =
+    shader.locations.at(static_cast<std::size_t>(ERealmheartEffectUniform::Texture)) =
         glGetUniformLocation(shader.program, "tex");
-    shader.locations.at(static_cast<std::size_t>(ERealmheartVoidUniform::Radius)) =
+    shader.locations.at(static_cast<std::size_t>(ERealmheartEffectUniform::Radius)) =
         glGetUniformLocation(shader.program, "radius");
-    shader.locations.at(static_cast<std::size_t>(ERealmheartVoidUniform::Reverse)) =
+    shader.locations.at(static_cast<std::size_t>(ERealmheartEffectUniform::Reverse)) =
         glGetUniformLocation(shader.program, "reverse");
-    shader.locations.at(static_cast<std::size_t>(ERealmheartVoidUniform::Gold)) =
+    shader.locations.at(static_cast<std::size_t>(ERealmheartEffectUniform::Gold)) =
         glGetUniformLocation(shader.program, "uGold");
-    shader.locations.at(static_cast<std::size_t>(ERealmheartVoidUniform::Starlight)) =
+    shader.locations.at(static_cast<std::size_t>(ERealmheartEffectUniform::Starlight)) =
         glGetUniformLocation(shader.program, "uStarlight");
-    shader.locations.at(static_cast<std::size_t>(ERealmheartVoidUniform::Astral)) =
+    shader.locations.at(static_cast<std::size_t>(ERealmheartEffectUniform::Astral)) =
         glGetUniformLocation(shader.program, "uAstral");
-    shader.locations.at(static_cast<std::size_t>(ERealmheartVoidUniform::Void)) =
+    shader.locations.at(static_cast<std::size_t>(ERealmheartEffectUniform::Void)) =
         glGetUniformLocation(shader.program, "uVoid");
 }
 
-void initialiseShaders() {
+SCompiledWindowEffect* compiledEffect(EWindowEffectId id) {
+    if (!g_state)
+        return nullptr;
+
+    for (auto& effect : g_state->effects) {
+        if (effect.spec != nullptr && effect.spec->id == id)
+            return &effect;
+    }
+    return nullptr;
+}
+
+void initialiseEffects() {
     g_pHyprOpenGL->makeEGLCurrent();
 
-    const std::string fragment = readVoidShader();
-    g_state->shaders[0].program = createProgram(kVertexShader, fragment);
-    fillLocations(g_state->shaders[0]);
+    for (const auto& spec : windowEffectSpecs()) {
+        if (spec.id == EWindowEffectId::None || spec.fragmentShaderAsset.empty())
+            continue;
 
-    g_state->shaders[1].program = createProgram(kVertexShader, externalVariant(fragment));
-    fillLocations(g_state->shaders[1]);
+        const std::string fragment = readEffectShader(spec);
+        SCompiledWindowEffect compiled{
+            .spec = &spec,
+        };
+        compiled.shaders[0].program = createProgram(kVertexShader, fragment);
+        fillLocations(compiled.shaders[0]);
+
+        if (windowEffectSupports(spec, EWindowEffectCapability::ExternalTexture)) {
+            compiled.shaders[1].program = createProgram(
+                kVertexShader,
+                externalVariant(fragment)
+            );
+            fillLocations(compiled.shaders[1]);
+        }
+
+        g_state->effects.push_back(std::move(compiled));
+    }
 }
 
 SP<Render::ITexture> stateTexture(const SP<CWLSurfaceResource>& surface) {
@@ -309,11 +352,27 @@ void cancelTest(const std::string& reason) {
     const auto window = g_state->test.window.lock();
     clearWindowHidden(window);
     g_state->test = {};
-    g_pHyprRenderer->m_renderPass.removeAllOfType("CRealmheartVoidPassElement");
+    g_pHyprRenderer->m_renderPass.removeAllOfType("CRealmheartEffectPassElement");
     appendDiagnostic("test ended: " + reason);
 }
 
-std::string armFocusedWindow() {
+std::string armFocusedWindow(std::string_view effectName = "void") {
+    const SWindowEffectSpec* effect = findWindowEffect(effectName);
+    if (effect == nullptr)
+        return "unknown effect: " + std::string(effectName);
+
+    if (effect->id == EWindowEffectId::None) {
+        cancelTest("effect set to none");
+        appendDiagnostic("manual test bypassed: effect=none");
+        return "ok";
+    }
+
+    if (!effect->reversible)
+        return "effect does not support the manual close-then-open cycle";
+
+    if (compiledEffect(effect->id) == nullptr)
+        return "effect is registered but its shader is unavailable";
+
     const PHLWINDOW window = Desktop::focusState()->window();
     if (!window || !window->m_isMapped)
         return "focus a mapped application window first";
@@ -330,20 +389,22 @@ std::string armFocusedWindow() {
     setWindowHidden(window);
     g_state->test = {
         .window = window,
+        .effect = effect->id,
         .startTime = std::chrono::steady_clock::now(),
         .active = true,
         .sawPass = false,
     };
 
     appendDiagnostic(
-        "armed render-pass test: class=" + window->m_class +
-        " title=" + window->m_title
+        "armed render-pass test: effect=" + std::string(effect->name) +
+        " class=" + window->m_class + " title=" + window->m_title
     );
 
     if (g_handle) {
         HyprlandAPI::addNotification(
             g_handle,
-            "[Realmheart FX] render-pass test armed on " + window->m_class,
+            "[Realmheart FX] " + std::string(effect->displayName) +
+                " test armed on " + window->m_class,
             CHyprColor{0.55F, 0.38F, 0.95F, 1.0F},
             3000.0F
         );
@@ -356,6 +417,13 @@ std::string armFocusedWindow() {
 void onRenderStage(eRenderStage stage) {
     if (stage != RENDER_POST_WINDOWS || !g_state || !g_state->test.active)
         return;
+
+    const SWindowEffectSpec* effect = findWindowEffect(g_state->test.effect);
+    SCompiledWindowEffect* compiled = compiledEffect(g_state->test.effect);
+    if (effect == nullptr || compiled == nullptr) {
+        cancelTest("selected effect became unavailable");
+        return;
+    }
 
     const auto window = g_state->test.window.lock();
     if (!window || !window->m_isMapped) {
@@ -373,8 +441,18 @@ void onRenderStage(eRenderStage stage) {
         return;
 
     const GLenum target = textureTarget(texture);
-    if (target == 0) {
-        cancelTest("unsupported source texture type");
+    const bool supportsTarget =
+        (target == GL_TEXTURE_2D &&
+         windowEffectSupports(*effect, EWindowEffectCapability::Texture2D)) ||
+        (target == GL_TEXTURE_EXTERNAL_OES &&
+         windowEffectSupports(*effect, EWindowEffectCapability::ExternalTexture));
+    if (target == 0 || !supportsTarget) {
+        cancelTest("unsupported source texture type for selected effect");
+        return;
+    }
+
+    if (effect->closeDurationSeconds <= 0.0F || effect->openDurationSeconds <= 0.0F) {
+        cancelTest("selected effect has invalid manual-cycle durations");
         return;
     }
 
@@ -384,21 +462,31 @@ void onRenderStage(eRenderStage stage) {
 
     float progress = 0.0F;
     bool reverse = false;
-    if (elapsed < kHalfDurationSeconds) {
-        progress = std::clamp(elapsed / kHalfDurationSeconds, 0.0F, 1.0F);
+    if (elapsed < effect->closeDurationSeconds) {
+        progress = std::clamp(
+            elapsed / effect->closeDurationSeconds,
+            0.0F,
+            1.0F
+        );
     } else {
         progress = std::clamp(
-            (elapsed - kHalfDurationSeconds) / kHalfDurationSeconds,
+            (elapsed - effect->closeDurationSeconds) / effect->openDurationSeconds,
             0.0F,
             1.0F
         );
         reverse = true;
     }
 
-    const auto& shader = g_state->shaders[target == GL_TEXTURE_EXTERNAL_OES ? 1 : 0];
+    const std::size_t shaderIndex = target == GL_TEXTURE_EXTERNAL_OES ? 1U : 0U;
+    const auto& shader = compiled->shaders[shaderIndex];
+    if (shader.program == 0) {
+        cancelTest("selected effect has no shader for source texture type");
+        return;
+    }
+
     g_pHyprRenderer->m_renderPass.add(
-        makeUnique<CRealmheartVoidPassElement>(
-            CRealmheartVoidPassElement::SData{
+        makeUnique<CRealmheartEffectPassElement>(
+            CRealmheartEffectPassElement::SData{
                 .box = CBox{
                     window->m_position.x,
                     window->m_position.y,
@@ -418,7 +506,8 @@ void onRenderStage(eRenderStage stage) {
     if (!g_state->test.sawPass) {
         g_state->test.sawPass = true;
         appendDiagnostic(
-            "visible render pass queued: texture=" + std::to_string(texture->m_texID) +
+            "visible render pass queued: effect=" + std::string(effect->name) +
+            " texture=" + std::to_string(texture->m_texID) +
             " target=" + std::to_string(target) +
             " box=" + std::to_string(static_cast<int>(window->m_size.x)) + "x" +
             std::to_string(static_cast<int>(window->m_size.y))
@@ -445,17 +534,22 @@ int onTick(void* data) {
         return 0;
     }
 
+    const SWindowEffectSpec* effect = findWindowEffect(g_state->test.effect);
     const auto window = g_state->test.window.lock();
-    if (!window || !window->m_isMapped) {
+    if (effect == nullptr) {
+        cancelTest("selected effect disappeared during tick");
+    } else if (!window || !window->m_isMapped) {
         cancelTest("window disappeared during tick");
     } else {
         const float elapsed = std::chrono::duration<float>(
             std::chrono::steady_clock::now() - g_state->test.startTime
         ).count();
+        const float cycleDuration =
+            effect->closeDurationSeconds + effect->openDurationSeconds;
 
         if (!g_state->test.sawPass && elapsed >= kTextureWaitTimeoutSeconds) {
             cancelTest("no usable window texture reached the render pass");
-        } else if (elapsed >= kCycleDurationSeconds) {
+        } else if (elapsed >= cycleDuration) {
             cancelTest("cycle complete");
         } else {
             g_pHyprRenderer->damageBox(CBox{
@@ -494,8 +588,11 @@ std::string controlCommand(eHyprCtlOutputFormat format, std::string request) {
     std::string subcommand;
     stream >> command >> subcommand;
 
-    if (subcommand == "test")
-        return armFocusedWindow();
+    if (subcommand == "test") {
+        std::string effectName = "void";
+        stream >> effectName;
+        return armFocusedWindow(effectName);
+    }
     if (subcommand == "status")
         return g_state && g_state->test.active ? "active" : "idle";
     if (subcommand == "cancel") {
@@ -503,7 +600,7 @@ std::string controlCommand(eHyprCtlOutputFormat format, std::string request) {
         return "ok";
     }
 
-    return "usage: realmheart-fx test|status|cancel";
+    return "usage: realmheart-fx test [effect]|status|cancel";
 }
 
 } // namespace
@@ -530,7 +627,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     }
 
     g_state = makeUnique<SPluginState>();
-    initialiseShaders();
+    initialiseEffects();
 
     auto& events = Event::bus()->m_events;
     g_listeners.push_back(events.window.close.listen(onWindowClose));
@@ -553,7 +650,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         throw std::runtime_error("failed to create Realmheart FX frame timer");
     wl_event_source_timer_update(g_state->tick, 1);
 
-    const std::string result = armFocusedWindow();
+    const std::string result = armFocusedWindow("void");
     if (result != "ok") {
         HyprlandAPI::addNotification(
             handle,
@@ -567,7 +664,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "Realmheart FX",
         .description = "Realmheart transitions through Hyprland's visible render pass",
         .author = "Zahed; render-pass plumbing adapted from  hyprfx/xhos hyprfx",
-        .version = "0.2.3--void-base",
+        .version = "0.3.0-effect-registry",
     };
 }
 
@@ -582,10 +679,11 @@ APICALL EXPORT void PLUGIN_EXIT() {
         if (g_state->tick)
             wl_event_source_remove(g_state->tick);
 
-        g_pHyprRenderer->m_renderPass.removeAllOfType("CRealmheartVoidPassElement");
+        g_pHyprRenderer->m_renderPass.removeAllOfType("CRealmheartEffectPassElement");
         g_pHyprOpenGL->makeEGLCurrent();
-        g_state->shaders[0].destroy();
-        g_state->shaders[1].destroy();
+        for (auto& effect : g_state->effects)
+            effect.destroy();
+        g_state->effects.clear();
         g_state.reset();
     }
 

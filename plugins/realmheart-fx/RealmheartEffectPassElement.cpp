@@ -2,7 +2,7 @@
 // Render-pass structure adapted from  hyprfx (commit
 // d680dabdd2d9362626ecedcad9bd396508163468), itself derived from xhos/hyprfx.
 
-#include "RealmheartVoidPassElement.hpp"
+#include "RealmheartEffectPassElement.hpp"
 
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
@@ -11,26 +11,17 @@
 
 using namespace Render::GL;
 
-namespace {
-
-constexpr float kGold[3] = {0.886F, 0.725F, 0.416F};
-constexpr float kStarlight[3] = {0.790F, 0.845F, 1.0F};
-constexpr float kAstral[3] = {0.405F, 0.255F, 0.705F};
-constexpr float kVoid[3] = {0.016F, 0.020F, 0.060F};
-
-} // namespace
-
-void SRealmheartVoidShader::destroy() {
+void SRealmheartEffectShader::destroy() {
     if (program != 0) {
         glDeleteProgram(program);
         program = 0;
     }
 }
 
-CRealmheartVoidPassElement::CRealmheartVoidPassElement(SData data)
+CRealmheartEffectPassElement::CRealmheartEffectPassElement(SData data)
     : m_data(std::move(data)) {}
 
-std::vector<UP<IPassElement>> CRealmheartVoidPassElement::draw() {
+std::vector<UP<IPassElement>> CRealmheartEffectPassElement::draw() {
     if (m_data.box.width <= 0 || m_data.box.height <= 0 || m_data.texture == 0 ||
         m_data.shader == nullptr || m_data.shader->program == 0) {
         return {};
@@ -53,32 +44,48 @@ std::vector<UP<IPassElement>> CRealmheartVoidPassElement::draw() {
     glUseProgram(shader.program);
 
     glUniformMatrix3fv(
-        shader.location(ERealmheartVoidUniform::Projection),
+        shader.location(ERealmheartEffectUniform::Projection),
         1,
         GL_TRUE,
         projection.getMatrix().data()
     );
-    glUniform1f(shader.location(ERealmheartVoidUniform::Progress), m_data.progress);
+    glUniform1f(shader.location(ERealmheartEffectUniform::Progress), m_data.progress);
     glUniform2f(
-        shader.location(ERealmheartVoidUniform::Resolution),
+        shader.location(ERealmheartEffectUniform::Resolution),
         static_cast<float>(m_data.box.width),
         static_cast<float>(m_data.box.height)
     );
-    glUniform1f(shader.location(ERealmheartVoidUniform::Radius), m_data.rounding);
+    glUniform1f(shader.location(ERealmheartEffectUniform::Radius), m_data.rounding);
     glUniform1f(
-        shader.location(ERealmheartVoidUniform::Reverse),
+        shader.location(ERealmheartEffectUniform::Reverse),
         m_data.reverse ? 1.0F : 0.0F
     );
-    glUniform3fv(shader.location(ERealmheartVoidUniform::Gold), 1, kGold);
-    glUniform3fv(shader.location(ERealmheartVoidUniform::Starlight), 1, kStarlight);
-    glUniform3fv(shader.location(ERealmheartVoidUniform::Astral), 1, kAstral);
-    glUniform3fv(shader.location(ERealmheartVoidUniform::Void), 1, kVoid);
+    glUniform3fv(
+        shader.location(ERealmheartEffectUniform::Gold),
+        1,
+        m_data.palette.gold.data()
+    );
+    glUniform3fv(
+        shader.location(ERealmheartEffectUniform::Starlight),
+        1,
+        m_data.palette.starlight.data()
+    );
+    glUniform3fv(
+        shader.location(ERealmheartEffectUniform::Astral),
+        1,
+        m_data.palette.astral.data()
+    );
+    glUniform3fv(
+        shader.location(ERealmheartEffectUniform::Void),
+        1,
+        m_data.palette.voidColour.data()
+    );
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(m_data.textureTarget, m_data.texture);
     glTexParameteri(m_data.textureTarget, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(m_data.textureTarget, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glUniform1i(shader.location(ERealmheartVoidUniform::Texture), 0);
+    glUniform1i(shader.location(ERealmheartEffectUniform::Texture), 0);
 
     static const float positions[] = {
         0.0F, 0.0F,
@@ -87,7 +94,7 @@ std::vector<UP<IPassElement>> CRealmheartVoidPassElement::draw() {
         1.0F, 1.0F,
     };
 
-    const GLint positionLocation = shader.location(ERealmheartVoidUniform::Position);
+    const GLint positionLocation = shader.location(ERealmheartEffectUniform::Position);
     glVertexAttribPointer(positionLocation, 2, GL_FLOAT, GL_FALSE, 0, positions);
     glEnableVertexAttribArray(positionLocation);
 
@@ -107,15 +114,15 @@ std::vector<UP<IPassElement>> CRealmheartVoidPassElement::draw() {
     return {};
 }
 
-bool CRealmheartVoidPassElement::needsLiveBlur() {
+bool CRealmheartEffectPassElement::needsLiveBlur() {
     return false;
 }
 
-bool CRealmheartVoidPassElement::needsPrecomputeBlur() {
+bool CRealmheartEffectPassElement::needsPrecomputeBlur() {
     return false;
 }
 
-std::optional<CBox> CRealmheartVoidPassElement::boundingBox() {
+std::optional<CBox> CRealmheartEffectPassElement::boundingBox() {
     const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
     if (!monitor)
         return std::nullopt;
@@ -124,6 +131,6 @@ std::optional<CBox> CRealmheartVoidPassElement::boundingBox() {
     return box.translate(-monitor->m_position).expand(2);
 }
 
-bool CRealmheartVoidPassElement::disableSimplification() {
+bool CRealmheartEffectPassElement::disableSimplification() {
     return true;
 }

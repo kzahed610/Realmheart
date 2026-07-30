@@ -43,7 +43,7 @@ int main() {
     assert(void_effect->requires_source_texture);
     assert(void_effect->outputs_transparency);
     assert(supports_target(*void_effect, EffectTargetType::Launcher));
-    assert(supports_target(*void_effect, EffectTargetType::Sidebar));
+    assert(!supports_target(*void_effect, EffectTargetType::Sidebar));
     assert(supports_target(*void_effect, EffectTargetType::Window));
 
     assert(find_effect(std::string_view{"missing-effect"}) == nullptr);
@@ -65,6 +65,10 @@ int main() {
         EffectId::Void,
         EffectTargetType::Window
     ) == EffectId::Void);
+    assert(resolve_effect(
+        EffectId::Void,
+        EffectTargetType::Sidebar
+    ) == EffectId::None);
 
     return 0;
 }

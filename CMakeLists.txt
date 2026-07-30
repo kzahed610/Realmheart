@@ -63,7 +63,8 @@ set(REALMHEART_RUNTIME_SOURCES
 if(REALMHEART_BUILD_HYPRLAND_PLUGIN AND HYPRLAND_FOUND AND GLESV2_FOUND)
     add_library(realmheart_fx MODULE
         plugins/realmheart-fx/Plugin.cpp
-        plugins/realmheart-fx/RealmheartVoidPassElement.cpp
+        plugins/realmheart-fx/RealmheartEffectPassElement.cpp
+        plugins/realmheart-fx/WindowEffectRegistry.cpp
     )
     set_target_properties(realmheart_fx PROPERTIES
         PREFIX ""
@@ -72,7 +73,7 @@ if(REALMHEART_BUILD_HYPRLAND_PLUGIN AND HYPRLAND_FOUND AND GLESV2_FOUND)
         CXX_STANDARD_REQUIRED ON
     )
     target_compile_definitions(realmheart_fx PRIVATE
-        REALMHEART_VOID_SHADER_FILE="${CMAKE_SOURCE_DIR}/effects/void/void.frag"
+        REALMHEART_EFFECT_ASSET_DIR="${CMAKE_SOURCE_DIR}/effects"
     )
     target_compile_options(realmheart_fx PRIVATE ${REALMHEART_WARNING_FLAGS})
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -348,6 +349,17 @@ if(BUILD_TESTING)
         src/effects/core/EffectRegistry.cpp
     )
     realmheart_register_test(realmheart_effect_registry_tests)
+
+    add_executable(
+        realmheart_window_effect_registry_tests
+        tests/WindowEffectRegistryTests.cpp
+        plugins/realmheart-fx/WindowEffectRegistry.cpp
+    )
+    target_include_directories(
+        realmheart_window_effect_registry_tests
+        PRIVATE plugins/realmheart-fx
+    )
+    realmheart_register_test(realmheart_window_effect_registry_tests)
 
     add_executable(
         realmheart_shader_playback_tests
