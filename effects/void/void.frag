@@ -62,6 +62,14 @@ void main() {
         windowColor.a *= 1.0 - smoothstep(-1.0, 1.0, sd);
     }
 
+    // The open endpoint must be an exact copy of the source window. Without
+    // this terminal frame, the radial SDF leaves a tiny transparent core at
+    // r == 0 and the real window visibly snaps in one frame later.
+    if (reverse > 0.5 && progress >= 1.0) {
+        fragColor = windowColor;
+        return;
+    }
+
     // radial field from the window centre, aspect-corrected so the void is round
     float aspect = resolution.x / max(resolution.y, 1.0);
     vec2  c    = (uv - 0.5) * vec2(aspect, 1.0);

@@ -32,7 +32,7 @@ std::vector<UP<IPassElement>> CRealmheartEffectPassElement::draw() {
         return {};
 
     CBox renderBox = m_data.box;
-    renderBox.translate(-monitor->m_position).scale(monitor->m_scale);
+    renderBox.translate(-monitor->m_position).scale(monitor->m_scale).round();
 
     const Mat3x3 projection = g_pHyprRenderer->projectBoxToTarget(renderBox);
     const auto& shader = *m_data.shader;

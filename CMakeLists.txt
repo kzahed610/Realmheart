@@ -64,6 +64,7 @@ if(REALMHEART_BUILD_HYPRLAND_PLUGIN AND HYPRLAND_FOUND AND GLESV2_FOUND)
     add_library(realmheart_fx MODULE
         plugins/realmheart-fx/Plugin.cpp
         plugins/realmheart-fx/RealmheartEffectPassElement.cpp
+        plugins/realmheart-fx/WindowEffectPolicy.cpp
         plugins/realmheart-fx/WindowEffectRegistry.cpp
     )
     set_target_properties(realmheart_fx PROPERTIES
@@ -360,6 +361,17 @@ if(BUILD_TESTING)
         PRIVATE plugins/realmheart-fx
     )
     realmheart_register_test(realmheart_window_effect_registry_tests)
+
+    add_executable(
+        realmheart_window_effect_policy_tests
+        tests/WindowEffectPolicyTests.cpp
+        plugins/realmheart-fx/WindowEffectPolicy.cpp
+    )
+    target_include_directories(
+        realmheart_window_effect_policy_tests
+        PRIVATE plugins/realmheart-fx
+    )
+    realmheart_register_test(realmheart_window_effect_policy_tests)
 
     add_executable(
         realmheart_shader_playback_tests
