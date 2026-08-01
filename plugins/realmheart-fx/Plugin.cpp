@@ -1347,6 +1347,7 @@ void onRenderStage(eRenderStage stage) {
     auto& animation = g_state->animation;
     if (stage == RENDER_PRE_WINDOWS) {
         if (animation.mode != EWindowAnimationMode::AutomaticClose ||
+            !animation.freezeTiledScene ||
             animation.backdropFrame.texture != 0 ||
             animation.backdropCaptureQueued ||
             animation.backdropCaptureFailed) {
@@ -1399,11 +1400,11 @@ void onRenderStage(eRenderStage stage) {
     float rounding = 0.0F;
 
     if (animation.mode == EWindowAnimationMode::AutomaticClose) {
-        if (animation.backdropCaptureFailed) {
+        if (animation.freezeTiledScene && animation.backdropCaptureFailed) {
             cancelAnimation("failed to capture the pre-window backdrop");
             return;
         }
-        if (animation.backdropFrame.texture == 0)
+        if (animation.freezeTiledScene && animation.backdropFrame.texture == 0)
             return;
 
         if (!animation.started) {
@@ -1519,7 +1520,8 @@ void onRenderStage(eRenderStage stage) {
         ? animation.closeFrame.texture
         : texture->m_texID;
 
-    if (animation.mode == EWindowAnimationMode::AutomaticClose) {
+    if (animation.mode == EWindowAnimationMode::AutomaticClose &&
+        animation.freezeTiledScene) {
         if (g_state->sceneBlitShader.program == 0) {
             cancelAnimation("close-scene blit shader is unavailable");
             return;
@@ -1621,7 +1623,8 @@ int onTick(void* data) {
     } else if (animation.mode == EWindowAnimationMode::AutomaticOpen &&
                window->m_workspace && !window->m_workspace->isVisible()) {
         cancelAnimation("window moved to a non-visible workspace during opening");
-    } else if (closing && animation.backdropCaptureFailed) {
+    } else if (closing && animation.freezeTiledScene &&
+               animation.backdropCaptureFailed) {
         cancelAnimation("failed to capture the pre-window backdrop");
     } else {
         const auto now = std::chrono::steady_clock::now();
@@ -1638,9 +1641,11 @@ int onTick(void* data) {
                 );
             } else if (armedElapsed >= kTextureWaitTimeoutSeconds) {
                 cancelAnimation(
-                    closing
+                    closing && animation.freezeTiledScene
                         ? "no usable closing backdrop and snapshot became available"
-                        : "no usable window texture became available"
+                        : closing
+                            ? "no usable closing snapshot became available"
+                            : "no usable window texture became available"
                 );
             } else if (closing) {
                 damageCloseAnimationRegion(animation);
@@ -1943,7 +1948,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "Realmheart FX",
         .description = "Realmheart transitions through Hyprland's visible render pass",
         .author = "Zahed; render-pass plumbing adapted from  hyprfx/xhos hyprfx",
-        .version = "0.9.1-random-effect-pools",
+        .version = "0.9.2-close-live-underlay",
     };
 }
 

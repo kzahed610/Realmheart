@@ -180,6 +180,12 @@ than Realmheart stretching a frozen screenshot or cutting directly to the final
 layout. Every retained texture is released immediately when the transition
 completes or is cancelled.
 
+Floating and stacked windows use a different close path: Realmheart draws only
+the retained closing-window texture over Hyprland's live post-window scene. It
+does not replay the tiled pre-window backdrop, so transparent areas in Void,
+Aether Sunder, and future effects reveal the actual window directly underneath
+instead of temporarily exposing the wallpaper.
+
 Only one compositor transition is allowed at a time. If several windows open or
 close nearly simultaneously, the first eligible transition animates and the
 others proceed normally. Concurrent transition support remains a separate
