@@ -5,16 +5,16 @@
 
 namespace {
 
-void expectEffects(
+void expectPools(
     const SWindowEffectConfig& config,
     std::string_view windowClass,
     std::string_view windowTitle,
-    std::string_view open,
-    std::string_view close
+    const WindowEffectPool& open,
+    const WindowEffectPool& close
 ) {
     assert(!automaticWindowClassIsExcluded(windowClass));
-    assert(automaticOpenEffectForWindow(config, windowClass, windowTitle) == open);
-    assert(automaticCloseEffectForWindow(config, windowClass, windowTitle) == close);
+    assert(automaticOpenEffectsForWindow(config, windowClass, windowTitle) == open);
+    assert(automaticCloseEffectsForWindow(config, windowClass, windowTitle) == close);
 }
 
 void expectExcluded(
@@ -23,12 +23,12 @@ void expectExcluded(
 ) {
     assert(automaticWindowClassIsExcluded(windowClass));
     assert(
-        automaticOpenEffectForWindow(config, windowClass, "title") ==
-        std::string{"none"}
+        automaticOpenEffectsForWindow(config, windowClass, "title") ==
+        WindowEffectPool({"none"})
     );
     assert(
-        automaticCloseEffectForWindow(config, windowClass, "title") ==
-        std::string{"none"}
+        automaticCloseEffectsForWindow(config, windowClass, "title") ==
+        WindowEffectPool({"none"})
     );
 }
 
@@ -39,78 +39,71 @@ int main() {
     assert(registry.success);
 
     const auto builtIn = builtInWindowEffectConfig();
-    expectEffects(
+    expectPools(
         builtIn,
         "kitty",
         "fish",
-        std::string{"aether-sunder"},
-        std::string{"aether-sunder"}
+        builtIn.defaultOpenEffects,
+        builtIn.defaultCloseEffects
     );
-    expectEffects(
-        builtIn,
-        "Kitty",
-        "fish",
-        std::string{"aether-sunder"},
-        std::string{"aether-sunder"}
-    );
-    expectEffects(
+    expectPools(
         builtIn,
         "org.kde.dolphin",
         "Downloads — Dolphin",
-        std::string{"void"},
-        std::string{"void"}
-    );
-    expectEffects(
-        builtIn,
-        "org.kde.kate",
-        "notes.txt — Kate",
-        std::string{"void"},
-        std::string{"void"}
+        builtIn.defaultOpenEffects,
+        builtIn.defaultCloseEffects
     );
 
     SWindowEffectConfig custom;
-    custom.defaultOpenEffect = std::string{"aether-sunder"};
-    custom.defaultCloseEffect = std::string{"void"};
+    custom.defaultOpenEffects = {"aether-sunder", "void"};
+    custom.defaultCloseEffects = {"void", "aether-sunder"};
     custom.rules = {
         {
             .windowClass = std::string{"org.kde."},
             .classMatch = EWindowEffectTextMatch::Prefix,
             .windowTitle = std::nullopt,
             .titleMatch = EWindowEffectTextMatch::Contains,
-            .openEffect = std::string{"void"},
-            .closeEffect = std::string{"none"},
+            .openEffects = WindowEffectPool{"void"},
+            .closeEffects = WindowEffectPool{"none", "aether-sunder"},
         },
         {
             .windowClass = std::nullopt,
             .classMatch = EWindowEffectTextMatch::Exact,
             .windowTitle = std::string{"Picture-in-Picture"},
             .titleMatch = EWindowEffectTextMatch::Contains,
-            .openEffect = std::string{"none"},
-            .closeEffect = std::string{"none"},
+            .openEffects = WindowEffectPool{"none"},
+            .closeEffects = WindowEffectPool{"none"},
         },
     };
 
-    expectEffects(
+    expectPools(
         custom,
         "org.kde.dolphin",
         "Downloads — Dolphin",
-        std::string{"void"},
-        std::string{"none"}
+        WindowEffectPool{"void"},
+        WindowEffectPool{"none", "aether-sunder"}
     );
-    expectEffects(
+    expectPools(
         custom,
         "firefox",
         "Picture-in-Picture",
-        std::string{"none"},
-        std::string{"none"}
+        WindowEffectPool{"none"},
+        WindowEffectPool{"none"}
     );
-    expectEffects(
+    expectPools(
         custom,
         "firefox",
         "Realmheart docs",
-        std::string{"aether-sunder"},
-        std::string{"void"}
+        WindowEffectPool({"aether-sunder", "void"}),
+        WindowEffectPool({"void", "aether-sunder"})
     );
+
+    const WindowEffectPool randomPool{"void", "aether-sunder", "none"};
+    assert(chooseWindowEffect(randomPool, 0U) == "void");
+    assert(chooseWindowEffect(randomPool, 1U) == "aether-sunder");
+    assert(chooseWindowEffect(randomPool, 2U) == "none");
+    assert(chooseWindowEffect(randomPool, 3U) == "void");
+    assert(chooseWindowEffect({}, 99U) == "none");
 
     expectExcluded(builtIn, "");
     expectExcluded(builtIn, "realmheart");

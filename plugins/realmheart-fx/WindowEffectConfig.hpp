@@ -14,18 +14,20 @@ enum class EWindowEffectTextMatch {
     Contains,
 };
 
+using WindowEffectPool = std::vector<std::string>;
+
 struct SWindowEffectRule {
     std::optional<std::string> windowClass;
     EWindowEffectTextMatch classMatch = EWindowEffectTextMatch::Exact;
     std::optional<std::string> windowTitle;
     EWindowEffectTextMatch titleMatch = EWindowEffectTextMatch::Contains;
-    std::optional<std::string> openEffect;
-    std::optional<std::string> closeEffect;
+    std::optional<WindowEffectPool> openEffects;
+    std::optional<WindowEffectPool> closeEffects;
 };
 
 struct SWindowEffectConfig {
-    std::string defaultOpenEffect = "void";
-    std::string defaultCloseEffect = "void";
+    WindowEffectPool defaultOpenEffects{"void"};
+    WindowEffectPool defaultCloseEffects{"void"};
     std::vector<SWindowEffectRule> rules;
     std::filesystem::path sourcePath;
     bool loadedFromFile = false;
@@ -41,6 +43,9 @@ struct SWindowEffectConfigLoadResult {
 [[nodiscard]] std::filesystem::path defaultWindowEffectConfigPath();
 [[nodiscard]] SWindowEffectConfigLoadResult loadWindowEffectConfig(
     const std::filesystem::path& path
+);
+[[nodiscard]] std::string windowEffectPoolSummary(
+    const WindowEffectPool& pool
 );
 [[nodiscard]] std::string windowEffectConfigSummary(
     const SWindowEffectConfig& config,

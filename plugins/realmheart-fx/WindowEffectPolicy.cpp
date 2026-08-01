@@ -5,6 +5,8 @@
 
 namespace {
 
+const WindowEffectPool kNoEffectPool{std::string{kNoWindowEffect}};
+
 enum class EWindowClassMatch {
     Exact,
     Prefix,
@@ -157,25 +159,25 @@ bool matchesRule(
     return true;
 }
 
-std::string_view automaticEffectForWindow(
+const WindowEffectPool& automaticEffectsForWindow(
     const SWindowEffectConfig& config,
     std::string_view windowClass,
     std::string_view windowTitle,
     bool opening
 ) noexcept {
     if (automaticWindowClassIsExcluded(windowClass))
-        return kNoWindowEffect;
+        return kNoEffectPool;
 
     for (const auto& rule : config.rules) {
         if (!matchesRule(rule, windowClass, windowTitle))
             continue;
 
-        const auto& assigned = opening ? rule.openEffect : rule.closeEffect;
+        const auto& assigned = opening ? rule.openEffects : rule.closeEffects;
         if (assigned)
             return *assigned;
     }
 
-    return opening ? config.defaultOpenEffect : config.defaultCloseEffect;
+    return opening ? config.defaultOpenEffects : config.defaultCloseEffects;
 }
 
 } // namespace
@@ -192,18 +194,28 @@ bool automaticWindowClassIsExcluded(std::string_view windowClass) noexcept {
     return false;
 }
 
-std::string_view automaticOpenEffectForWindow(
+const WindowEffectPool& automaticOpenEffectsForWindow(
     const SWindowEffectConfig& config,
     std::string_view windowClass,
     std::string_view windowTitle
 ) noexcept {
-    return automaticEffectForWindow(config, windowClass, windowTitle, true);
+    return automaticEffectsForWindow(config, windowClass, windowTitle, true);
 }
 
-std::string_view automaticCloseEffectForWindow(
+const WindowEffectPool& automaticCloseEffectsForWindow(
     const SWindowEffectConfig& config,
     std::string_view windowClass,
     std::string_view windowTitle
 ) noexcept {
-    return automaticEffectForWindow(config, windowClass, windowTitle, false);
+    return automaticEffectsForWindow(config, windowClass, windowTitle, false);
+}
+
+std::string_view chooseWindowEffect(
+    const WindowEffectPool& pool,
+    std::uint64_t randomValue
+) noexcept {
+    if (pool.empty())
+        return kNoWindowEffect;
+
+    return pool[static_cast<std::size_t>(randomValue % pool.size())];
 }

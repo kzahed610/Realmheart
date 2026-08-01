@@ -32,6 +32,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -142,6 +143,13 @@ struct SPluginState {
     SRealmheartEffectShader sceneBlitShader;
     SWindowAnimation animation;
     SWindowEffectConfig effectConfig = builtInWindowEffectConfig();
+    std::mt19937_64 effectRandom{
+        static_cast<std::mt19937_64::result_type>(
+            std::chrono::steady_clock::now().time_since_epoch().count()
+        ) ^ static_cast<std::mt19937_64::result_type>(
+            std::chrono::system_clock::now().time_since_epoch().count()
+        )
+    };
     std::filesystem::path effectConfigPath;
     std::string effectConfigStatus = "not loaded";
     bool automaticOpenEnabled = true;
@@ -1258,10 +1266,14 @@ void onWindowOpen(PHLWINDOW window) {
         return;
 
     const std::string_view windowClass = effectiveWindowClass(window);
-    const std::string_view effectName = automaticOpenEffectForWindow(
+    const auto& effectPool = automaticOpenEffectsForWindow(
         g_state->effectConfig,
         windowClass,
         window->m_title
+    );
+    const std::string_view effectName = chooseWindowEffect(
+        effectPool,
+        g_state->effectRandom()
     );
     if (effectName == kNoWindowEffect) {
         appendDiagnostic(
@@ -1682,10 +1694,14 @@ void onWindowClose(PHLWINDOW window) {
         return;
 
     const std::string_view windowClass = effectiveWindowClass(window);
-    const std::string_view effectName = automaticCloseEffectForWindow(
+    const auto& effectPool = automaticCloseEffectsForWindow(
         g_state->effectConfig,
         windowClass,
         window->m_title
+    );
+    const std::string_view effectName = chooseWindowEffect(
+        effectPool,
+        g_state->effectRandom()
     );
     if (effectName == kNoWindowEffect) {
         appendDiagnostic(
@@ -1927,7 +1943,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "Realmheart FX",
         .description = "Realmheart transitions through Hyprland's visible render pass",
         .author = "Zahed; render-pass plumbing adapted from  hyprfx/xhos hyprfx",
-        .version = "0.9.0-effect-manifests",
+        .version = "0.9.1-random-effect-pools",
     };
 }
 

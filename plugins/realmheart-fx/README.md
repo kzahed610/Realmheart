@@ -81,32 +81,51 @@ or, when `XDG_CONFIG_HOME` is unset:
 ```
 
 `REALMHEART_FX_CONFIG=/absolute/path.toml` can override the location. Missing
-configuration preserves the built-in policy: Realmheart Void for ordinary
-eligible windows and Aether Sunder for Kitty. An invalid startup file also falls
-back safely; an invalid manual reload preserves the previous valid policy.
+configuration preserves the built-in policy: every registered non-none effect
+forms the random default pool for eligible windows. An invalid startup file also
+falls back safely; an invalid manual reload preserves the previous valid policy.
 
-Example:
+Randomize every eligible lifecycle event across every registered effect:
 
 ```toml
 [windows]
-open = "void"
-close = "void"
+open = "@all"
+close = "@all"
+```
 
+`@all` expands when the config is loaded, so a compatible future manifest joins
+the pool automatically after the plugin is rebuilt/reloaded. An explicit array
+creates a controlled random pool instead:
+
+```toml
+[windows]
+open = ["void", "aether-sunder"]
+close = ["void", "aether-sunder"]
+```
+
+A single quoted effect remains a fixed assignment. Rules support the same three
+forms:
+
+```toml
 [[windows.rules]]
 class = "kitty"
 class_match = "exact"
-open = "aether-sunder"
+open = ["aether-sunder", "void"]
 close = "aether-sunder"
 ```
 
-Rules are evaluated top-to-bottom and matching is case-insensitive. A rule may
-match `class`, `title`, or both. `class_match` and `title_match` accept `exact`,
+Each eligible open or close event chooses independently and uniformly from its
+resolved pool; repeated selections are valid random outcomes. Rules are
+evaluated top-to-bottom and matching is case-insensitive. A rule may match
+`class`, `title`, or both. `class_match` and `title_match` accept `exact`,
 `prefix`, or `contains`. A rule may assign only `open`, only `close`, or both.
-The registered effect name `none` disables that direction for matching windows.
+The registered effect name `none` disables that direction; including `none` in
+an array gives the event a chance to run without an effect.
 
 The parser intentionally supports this small, strict TOML assignment schema
-rather than arbitrary TOML values. Unknown tables, keys, match modes, or effect
-names reject the reload with a line-numbered error.
+rather than arbitrary TOML values. Arrays must be one-line quoted-string arrays.
+Empty pools, duplicates, `@all` inside an array, unknown tables, keys, match
+modes, or effect names reject the reload with a line-numbered error.
 
 Install the included baseline:
 
@@ -120,8 +139,8 @@ hyprctl realmheart-fx config reload
 ## Automatic open and close policy
 
 Automatic lifecycle effects use a default-allow policy for ordinary application
-windows. The TOML defaults and ordered rules select the registered effect after
-the conservative safety exclusions are applied.
+windows. The TOML defaults and ordered rules resolve a fixed effect or random effect pool
+after the conservative safety exclusions are applied.
 
 Current class exclusions cover:
 
@@ -142,13 +161,13 @@ override-redirect windows, windows on invisible workspaces, and windows
 transitioning while another Realmheart effect is active. A skipped opening
 remains normally visible; a skipped close proceeds normally.
 
-An eligible opening window receives only the reconstruction/open half of
-Realmheart Void. The animation clock begins when a usable live texture reaches
+An eligible opening window receives only the reconstruction/open half of its
+randomly or explicitly selected effect. The animation clock begins when a usable live texture reaches
 the render pass, not merely when the window-open event fires. If no texture is
 available within the safety timeout, the plugin immediately restores the real
 window.
 
-An eligible closing window receives only the consume/close half. Hyprland's
+An eligible closing window receives only the consume/close half of its selected effect. Hyprland's
 last-frame snapshot is cropped into a plugin-owned texture before the effect
 begins. For a tiled close, Realmheart also snapshots the other tiled windows on
 the workspace before Hyprland removes the target from the layout. During the

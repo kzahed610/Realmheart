@@ -1,5 +1,6 @@
 #include "WindowEffectConfig.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -120,19 +121,152 @@ bool parseQuotedString(
     return true;
 }
 
-std::optional<std::string> parseEffect(
+WindowEffectPool allRegisteredEffects() {
+    WindowEffectPool effects;
+    for (const auto& effect : windowEffectSpecs()) {
+        if (!windowEffectIsNone(effect))
+            effects.push_back(effect.name);
+    }
+    return effects;
+}
+
+bool appendEffect(
+    std::string effectName,
+    WindowEffectPool& effects,
+    std::string& error
+) {
+    if (effectName == "@all") {
+        error = "@all must be used by itself, not inside an effect array";
+        return false;
+    }
+    if (findWindowEffect(effectName) == nullptr) {
+        error = "unknown registered effect: " + effectName;
+        return false;
+    }
+    if (std::find(effects.begin(), effects.end(), effectName) != effects.end()) {
+        error = "duplicate effect in pool: " + effectName;
+        return false;
+    }
+
+    effects.push_back(std::move(effectName));
+    return true;
+}
+
+std::optional<WindowEffectPool> parseEffectPool(
     std::string_view value,
     std::string& error
 ) {
-    std::string effectName;
-    if (!parseQuotedString(value, effectName, error))
-        return std::nullopt;
-
-    if (findWindowEffect(effectName) == nullptr) {
-        error = "unknown registered effect: " + effectName;
+    value = trim(value);
+    if (value.empty()) {
+        error = "expected an effect string or array";
         return std::nullopt;
     }
-    return effectName;
+
+    if (value.front() == '"' || value.front() == '\'') {
+        std::string effectName;
+        if (!parseQuotedString(value, effectName, error))
+            return std::nullopt;
+
+        if (effectName == "@all") {
+            auto effects = allRegisteredEffects();
+            if (effects.empty()) {
+                error = "@all resolved to no renderable effects";
+                return std::nullopt;
+            }
+            return effects;
+        }
+
+        WindowEffectPool effects;
+        if (!appendEffect(std::move(effectName), effects, error))
+            return std::nullopt;
+        return effects;
+    }
+
+    if (value.front() != '[' || value.back() != ']') {
+        error = "expected a quoted effect, @all, or a one-line TOML string array";
+        return std::nullopt;
+    }
+
+    value = trim(value.substr(1U, value.size() - 2U));
+    if (value.empty()) {
+        error = "effect pool cannot be empty";
+        return std::nullopt;
+    }
+
+    WindowEffectPool effects;
+    std::size_t offset = 0U;
+    while (offset < value.size()) {
+        while (offset < value.size() &&
+               (value[offset] == ' ' || value[offset] == '\t')) {
+            ++offset;
+        }
+        if (offset >= value.size())
+            break;
+
+        const char quote = value[offset];
+        if (quote != '"' && quote != '\'') {
+            error = "effect arrays may contain only quoted strings";
+            return std::nullopt;
+        }
+
+        const std::size_t tokenStart = offset;
+        ++offset;
+        bool escaped = false;
+        bool closed = false;
+        while (offset < value.size()) {
+            const char current = value[offset++];
+            if (quote == '"' && !escaped && current == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (!escaped && current == quote) {
+                closed = true;
+                break;
+            }
+            escaped = false;
+        }
+
+        if (!closed) {
+            error = "unterminated quoted effect in array";
+            return std::nullopt;
+        }
+
+        std::string effectName;
+        if (!parseQuotedString(
+                value.substr(tokenStart, offset - tokenStart),
+                effectName,
+                error
+            )) {
+            return std::nullopt;
+        }
+        if (!appendEffect(std::move(effectName), effects, error))
+            return std::nullopt;
+
+        while (offset < value.size() &&
+               (value[offset] == ' ' || value[offset] == '\t')) {
+            ++offset;
+        }
+        if (offset >= value.size())
+            break;
+        if (value[offset] != ',') {
+            error = "expected a comma between effects";
+            return std::nullopt;
+        }
+        ++offset;
+
+        while (offset < value.size() &&
+               (value[offset] == ' ' || value[offset] == '\t')) {
+            ++offset;
+        }
+        if (offset >= value.size())
+            break; // TOML permits a trailing comma.
+    }
+
+    if (effects.empty()) {
+        error = "effect pool cannot be empty";
+        return std::nullopt;
+    }
+    return effects;
 }
 
 std::optional<EWindowEffectTextMatch> parseMatchMode(
@@ -159,7 +293,7 @@ bool validateRule(const SWindowEffectRule& rule, std::string& error) {
         error = "a [[windows.rules]] entry needs class and/or title";
         return false;
     }
-    if (!rule.openEffect && !rule.closeEffect) {
+    if (!rule.openEffects && !rule.closeEffects) {
         error = "a [[windows.rules]] entry needs open and/or close";
         return false;
     }
@@ -177,32 +311,12 @@ std::string loadError(
 
 SWindowEffectConfig builtInWindowEffectConfig() {
     SWindowEffectConfig config;
+    auto effects = allRegisteredEffects();
+    if (effects.empty())
+        effects.push_back(std::string{kNoWindowEffect});
 
-    const SWindowEffectSpec* defaultEffect = findWindowEffect("void");
-    if (defaultEffect == nullptr) {
-        for (const auto& effect : windowEffectSpecs()) {
-            if (!windowEffectIsNone(effect)) {
-                defaultEffect = &effect;
-                break;
-            }
-        }
-    }
-
-    config.defaultOpenEffect = defaultEffect != nullptr
-        ? defaultEffect->name
-        : std::string{kNoWindowEffect};
-    config.defaultCloseEffect = config.defaultOpenEffect;
-
-    if (findWindowEffect("aether-sunder") != nullptr) {
-        config.rules.push_back({
-            .windowClass = std::string{"kitty"},
-            .classMatch = EWindowEffectTextMatch::Exact,
-            .windowTitle = std::nullopt,
-            .titleMatch = EWindowEffectTextMatch::Contains,
-            .openEffect = std::string{"aether-sunder"},
-            .closeEffect = std::string{"aether-sunder"},
-        });
-    }
+    config.defaultOpenEffects = effects;
+    config.defaultCloseEffects = std::move(effects);
     return config;
 }
 
@@ -310,19 +424,19 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
         std::string parseError;
         if (section == EConfigSection::Windows) {
             if (key == "open") {
-                const auto effect = parseEffect(value, parseError);
-                if (!effect) {
+                const auto effects = parseEffectPool(value, parseError);
+                if (!effects) {
                     result.error = loadError(lineNumber, parseError);
                     return result;
                 }
-                parsed.defaultOpenEffect = *effect;
+                parsed.defaultOpenEffects = *effects;
             } else if (key == "close") {
-                const auto effect = parseEffect(value, parseError);
-                if (!effect) {
+                const auto effects = parseEffectPool(value, parseError);
+                if (!effects) {
                     result.error = loadError(lineNumber, parseError);
                     return result;
                 }
-                parsed.defaultCloseEffect = *effect;
+                parsed.defaultCloseEffects = *effects;
             } else {
                 result.error = loadError(lineNumber, "unsupported [windows] key: " + key);
                 return result;
@@ -368,19 +482,19 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
                 }
                 currentRule->titleMatch = *match;
             } else if (key == "open") {
-                const auto effect = parseEffect(value, parseError);
-                if (!effect) {
+                const auto effects = parseEffectPool(value, parseError);
+                if (!effects) {
                     result.error = loadError(lineNumber, parseError);
                     return result;
                 }
-                currentRule->openEffect = *effect;
+                currentRule->openEffects = *effects;
             } else if (key == "close") {
-                const auto effect = parseEffect(value, parseError);
-                if (!effect) {
+                const auto effects = parseEffectPool(value, parseError);
+                if (!effects) {
                     result.error = loadError(lineNumber, parseError);
                     return result;
                 }
-                currentRule->closeEffect = *effect;
+                currentRule->closeEffects = *effects;
             } else {
                 result.error = loadError(lineNumber, "unsupported [[windows.rules]] key: " + key);
                 return result;
@@ -405,6 +519,23 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
     return result;
 }
 
+std::string windowEffectPoolSummary(const WindowEffectPool& pool) {
+    if (pool.empty())
+        return "none";
+    if (pool.size() == 1U)
+        return pool.front();
+
+    std::ostringstream summary;
+    summary << '[';
+    for (std::size_t index = 0U; index < pool.size(); ++index) {
+        if (index != 0U)
+            summary << ',';
+        summary << pool[index];
+    }
+    summary << ']';
+    return summary.str();
+}
+
 std::string windowEffectConfigSummary(
     const SWindowEffectConfig& config,
     const std::filesystem::path& requestedPath
@@ -412,8 +543,8 @@ std::string windowEffectConfigSummary(
     std::ostringstream summary;
     summary << "source=" << (config.loadedFromFile ? "file" : "built-in")
             << " path=" << (requestedPath.empty() ? "<unavailable>" : requestedPath.string())
-            << " open=" << config.defaultOpenEffect
-            << " close=" << config.defaultCloseEffect
+            << " open=" << windowEffectPoolSummary(config.defaultOpenEffects)
+            << " close=" << windowEffectPoolSummary(config.defaultCloseEffects)
             << " rules=" << config.rules.size();
     return summary.str();
 }
