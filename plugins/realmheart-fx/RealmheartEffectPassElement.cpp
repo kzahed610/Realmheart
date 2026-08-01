@@ -7,6 +7,7 @@
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 
+#include <algorithm>
 #include <utility>
 
 using namespace Render::GL;
@@ -59,6 +60,10 @@ std::vector<UP<IPassElement>> CRealmheartEffectPassElement::draw() {
     glUniform1f(
         shader.location(ERealmheartEffectUniform::Reverse),
         m_data.reverse ? 1.0F : 0.0F
+    );
+    glUniform1f(
+        shader.location(ERealmheartEffectUniform::Opacity),
+        std::clamp(m_data.opacity, 0.0F, 1.0F)
     );
     glUniform3fv(
         shader.location(ERealmheartEffectUniform::Gold),

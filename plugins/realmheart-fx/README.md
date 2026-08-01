@@ -45,9 +45,16 @@ window.
 
 An eligible closing window receives only the consume/close half. Hyprland's
 last-frame snapshot is cropped into a plugin-owned texture before the effect
-begins. The application can therefore finish unmapping and destroy its live
-surface without invalidating the closing animation. The retained texture is
-released immediately when the transition completes or is cancelled.
+begins. For a tiled close, Realmheart also snapshots the other tiled windows on
+the workspace before Hyprland removes the target from the layout. During the
+transition it redraws the complete retained old scene at its original geometry,
+including the compositor gaps between tiles. Once Void has fully consumed the
+closing window, Realmheart restores each surviving live window to its old tile
+geometry and reassigns Hyprland's already-calculated final geometry. Hyprland
+then performs the genuine tiled resize animation after the closing effect, rather
+than Realmheart stretching a frozen screenshot or cutting directly to the final
+layout. Every retained texture is released immediately when the transition
+completes or is cancelled.
 
 Only one compositor transition is allowed at a time. If several windows open or
 close nearly simultaneously, the first eligible transition animates and the

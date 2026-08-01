@@ -60,6 +60,18 @@ void main() {
 }
 )GLSL";
 
+constexpr const char* kSceneBlitFragmentShader = R"GLSL(#version 300 es
+precision highp float;
+in vec2 v_texcoord;
+uniform sampler2D tex;
+uniform float opacity;
+layout(location = 0) out vec4 fragColor;
+
+void main() {
+    fragColor = texture(tex, v_texcoord) * clamp(opacity, 0.0, 1.0);
+}
+)GLSL";
+
 struct SCompiledWindowEffect {
     const SWindowEffectSpec* spec = nullptr;
     std::array<SRealmheartEffectShader, 2> shaders{};
@@ -94,6 +106,13 @@ struct SRetainedCloseFrame {
     }
 };
 
+struct SFrozenSceneWindow {
+    PHLWINDOWREF window;
+    CBox box{};
+    float rounding = 0.0F;
+    SRetainedCloseFrame frame{};
+};
+
 struct SWindowAnimation {
     PHLWINDOWREF window;
     PHLMONITORREF monitor;
@@ -105,14 +124,21 @@ struct SWindowAnimation {
     std::chrono::steady_clock::time_point armedTime{};
     std::chrono::steady_clock::time_point startTime{};
     SRetainedCloseFrame closeFrame{};
+    SRetainedCloseFrame backdropFrame{};
+    CBox sceneBackdropBox{};
+    std::vector<SFrozenSceneWindow> frozenSceneWindows{};
+    bool freezeTiledScene = false;
     bool active = false;
     bool started = false;
     bool sawPass = false;
     bool terminalFrameQueued = false;
+    bool backdropCaptureQueued = false;
+    bool backdropCaptureFailed = false;
 };
 
 struct SPluginState {
     std::vector<SCompiledWindowEffect> effects;
+    SRealmheartEffectShader sceneBlitShader;
     SWindowAnimation animation;
     bool automaticOpenEnabled = true;
     bool automaticCloseEnabled = true;
@@ -141,6 +167,177 @@ void appendDiagnostic(const std::string& message) {
     if (stream)
         stream << message << '\n';
 }
+
+class CRealmheartBackdropCapturePassElement final : public IPassElement {
+  public:
+    struct SData {
+        CBox box;
+        SRetainedCloseFrame* destination = nullptr;
+        bool* failed = nullptr;
+    };
+
+    explicit CRealmheartBackdropCapturePassElement(SData data)
+        : m_data(std::move(data)) {}
+
+    std::vector<UP<IPassElement>> draw() override {
+        if (m_data.destination == nullptr || m_data.failed == nullptr ||
+            m_data.box.width <= 0.0 || m_data.box.height <= 0.0) {
+            return {};
+        }
+        if (m_data.destination->texture != 0)
+            return {};
+
+        const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+        if (!monitor) {
+            *m_data.failed = true;
+            return {};
+        }
+
+        CBox renderBox = m_data.box;
+        renderBox.translate(-monitor->m_position).scale(monitor->m_scale).round();
+
+        GLint viewport[4]{};
+        GLint previousReadFramebuffer = 0;
+        GLint previousDrawFramebuffer = 0;
+        GLint previousActiveTexture = 0;
+        GLint previousTexture2D = 0;
+        GLint previousScissorBox[4]{};
+        const GLboolean scissorEnabled = glIsEnabled(GL_SCISSOR_TEST);
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previousReadFramebuffer);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previousDrawFramebuffer);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &previousActiveTexture);
+        glGetIntegerv(GL_SCISSOR_BOX, previousScissorBox);
+        glActiveTexture(GL_TEXTURE0);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &previousTexture2D);
+
+        const int sourceX = static_cast<int>(std::lround(renderBox.x));
+        const int sourceTop = static_cast<int>(std::lround(renderBox.y));
+        const int sourceWidth = static_cast<int>(std::lround(renderBox.width));
+        const int sourceHeight = static_cast<int>(std::lround(renderBox.height));
+        const int sourceBottom = viewport[3] - (sourceTop + sourceHeight);
+
+        if (sourceWidth <= 0 || sourceHeight <= 0 || sourceX < 0 ||
+            sourceBottom < 0 || sourceX + sourceWidth > viewport[2] ||
+            sourceBottom + sourceHeight > viewport[3]) {
+            *m_data.failed = true;
+            return {};
+        }
+
+        glDisable(GL_SCISSOR_TEST);
+
+        SRetainedCloseFrame retained;
+        glGenTextures(1, &retained.texture);
+        glBindTexture(GL_TEXTURE_2D, retained.texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA,
+            sourceWidth,
+            sourceHeight,
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            nullptr
+        );
+
+        glGenFramebuffers(1, &retained.framebuffer);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, retained.framebuffer);
+        glFramebufferTexture2D(
+            GL_DRAW_FRAMEBUFFER,
+            GL_COLOR_ATTACHMENT0,
+            GL_TEXTURE_2D,
+            retained.texture,
+            0
+        );
+
+        bool captured =
+            glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        if (captured) {
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, previousDrawFramebuffer);
+            while (glGetError() != GL_NO_ERROR) {
+            }
+            glBlitFramebuffer(
+                sourceX,
+                sourceBottom,
+                sourceX + sourceWidth,
+                sourceBottom + sourceHeight,
+                0,
+                0,
+                sourceWidth,
+                sourceHeight,
+                GL_COLOR_BUFFER_BIT,
+                GL_NEAREST
+            );
+            captured = glGetError() == GL_NO_ERROR;
+        }
+
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, previousReadFramebuffer);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, previousDrawFramebuffer);
+        glScissor(
+            previousScissorBox[0],
+            previousScissorBox[1],
+            previousScissorBox[2],
+            previousScissorBox[3]
+        );
+        if (scissorEnabled)
+            glEnable(GL_SCISSOR_TEST);
+        else
+            glDisable(GL_SCISSOR_TEST);
+        glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(previousTexture2D));
+        glActiveTexture(static_cast<GLenum>(previousActiveTexture));
+
+        if (!captured) {
+            retained.destroy();
+            *m_data.failed = true;
+            return {};
+        }
+
+        m_data.destination->destroy();
+        *m_data.destination = retained;
+        appendDiagnostic(
+            "closing backdrop captured: box=" + std::to_string(sourceWidth) + "x" +
+            std::to_string(sourceHeight)
+        );
+        return {};
+    }
+
+    bool needsLiveBlur() override {
+        return false;
+    }
+
+    bool needsPrecomputeBlur() override {
+        return false;
+    }
+
+    std::optional<CBox> boundingBox() override {
+        const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+        if (!monitor)
+            return std::nullopt;
+
+        CBox box = m_data.box;
+        return box.translate(-monitor->m_position).expand(2);
+    }
+
+    bool disableSimplification() override {
+        return true;
+    }
+
+    const char* passName() override {
+        return "CRealmheartBackdropCapturePassElement";
+    }
+
+    ePassElementType type() override {
+        return EK_CUSTOM;
+    }
+
+  private:
+    SData m_data;
+};
 
 GLuint compileShader(GLenum type, const std::string& source) {
     const GLuint shader = glCreateShader(type);
@@ -248,6 +445,8 @@ void fillLocations(SRealmheartEffectShader& shader) {
         glGetUniformLocation(shader.program, "uAstral");
     shader.locations.at(static_cast<std::size_t>(ERealmheartEffectUniform::Void)) =
         glGetUniformLocation(shader.program, "uVoid");
+    shader.locations.at(static_cast<std::size_t>(ERealmheartEffectUniform::Opacity)) =
+        glGetUniformLocation(shader.program, "opacity");
 }
 
 SCompiledWindowEffect* compiledEffect(EWindowEffectId id) {
@@ -285,6 +484,12 @@ void initialiseEffects() {
 
         g_state->effects.push_back(std::move(compiled));
     }
+
+    g_state->sceneBlitShader.program = createProgram(
+        kVertexShader,
+        kSceneBlitFragmentShader
+    );
+    fillLocations(g_state->sceneBlitShader);
 }
 
 SP<Render::ITexture> stateTexture(const SP<CWLSurfaceResource>& surface) {
@@ -382,24 +587,25 @@ void settleWindowGeometry(const PHLWINDOW& window) {
     window->m_realSize->warp();
 }
 
-bool captureCloseFrame(
-    const PHLWINDOW& window,
-    SWindowAnimation& animation,
+bool copySnapshotCrop(
+    const auto& snapshot,
+    const PHLMONITOR& monitor,
+    const CBox& box,
+    SRetainedCloseFrame& destination,
     std::string& reason
 ) {
-    if (!window || !window->m_snapshotFB) {
-        reason = "Hyprland snapshot is not ready";
+    if (!snapshot || !monitor) {
+        reason = "snapshot or monitor is unavailable";
         return false;
     }
 
-    const auto monitor = window->m_monitor.lock();
-    const auto sourceTexture = window->m_snapshotFB->getTexture();
-    if (!monitor || !sourceTexture || sourceTexture->m_texID == 0) {
-        reason = "Hyprland snapshot has no usable texture";
+    const auto sourceTexture = snapshot->getTexture();
+    if (!sourceTexture || sourceTexture->m_texID == 0) {
+        reason = "snapshot has no usable texture";
         return false;
     }
     if (textureTarget(sourceTexture) != GL_TEXTURE_2D) {
-        reason = "Hyprland snapshot is not a 2D texture";
+        reason = "snapshot is not a 2D texture";
         return false;
     }
 
@@ -407,25 +613,25 @@ bool captureCloseFrame(
     const int framebufferHeight = static_cast<int>(sourceTexture->m_size.y);
     if (framebufferWidth <= 0 || framebufferHeight <= 0 ||
         monitor->m_size.x <= 0.0 || monitor->m_size.y <= 0.0) {
-        reason = "Hyprland snapshot has invalid dimensions";
+        reason = "snapshot has invalid dimensions";
         return false;
     }
 
     const double scaleX = static_cast<double>(framebufferWidth) / monitor->m_size.x;
     const double scaleY = static_cast<double>(framebufferHeight) / monitor->m_size.y;
     const int sourceX = static_cast<int>(std::lround(
-        (animation.box.x - monitor->m_position.x) * scaleX
+        (box.x - monitor->m_position.x) * scaleX
     ));
     const int sourceTop = static_cast<int>(std::lround(
-        (animation.box.y - monitor->m_position.y) * scaleY
+        (box.y - monitor->m_position.y) * scaleY
     ));
-    const int sourceWidth = static_cast<int>(std::lround(animation.box.width * scaleX));
-    const int sourceHeight = static_cast<int>(std::lround(animation.box.height * scaleY));
+    const int sourceWidth = static_cast<int>(std::lround(box.width * scaleX));
+    const int sourceHeight = static_cast<int>(std::lround(box.height * scaleY));
 
     if (sourceWidth <= 0 || sourceHeight <= 0 || sourceX < 0 || sourceTop < 0 ||
         sourceX + sourceWidth > framebufferWidth ||
         sourceTop + sourceHeight > framebufferHeight) {
-        reason = "window snapshot crop is outside the monitor framebuffer";
+        reason = "snapshot crop is outside the monitor framebuffer";
         return false;
     }
 
@@ -476,7 +682,7 @@ bool captureCloseFrame(
 
     bool captured = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
     if (captured) {
-        window->m_snapshotFB->bind();
+        snapshot->bind();
         GLint sourceFramebuffer = 0;
         glGetIntegerv(GL_FRAMEBUFFER_BINDING, &sourceFramebuffer);
         glBindFramebuffer(GL_READ_FRAMEBUFFER, sourceFramebuffer);
@@ -523,12 +729,115 @@ bool captureCloseFrame(
 
     if (!captured) {
         retained.destroy();
-        reason = "failed to copy Hyprland's closing snapshot";
+        reason = "failed to copy snapshot texture";
         return false;
     }
 
-    animation.closeFrame.destroy();
-    animation.closeFrame = retained;
+    destination.destroy();
+    destination = retained;
+    return true;
+}
+
+void destroyFrozenSceneWindows(std::vector<SFrozenSceneWindow>& windows) {
+    for (auto& window : windows)
+        window.frame.destroy();
+    windows.clear();
+}
+
+bool captureFrozenSceneWindows(
+    const PHLWINDOW& closingWindow,
+    const PHLMONITOR& monitor,
+    std::vector<SFrozenSceneWindow>& destination,
+    std::string& reason
+) {
+    if (!closingWindow || !monitor) {
+        reason = "closing window or monitor is unavailable";
+        return false;
+    }
+
+    std::vector<PHLWINDOW> tiledWindows;
+    PHLWINDOW focusedTiledWindow;
+    const auto focusedWindow = Desktop::focusState()->window();
+
+    for (const auto& candidate : g_pCompositor->m_windows) {
+        if (!candidate || candidate == closingWindow || !candidate->m_isMapped ||
+            candidate->isHidden() || candidate->m_isFloating ||
+            candidate->m_workspace != closingWindow->m_workspace ||
+            candidate->m_monitor.lock() != monitor ||
+            !g_pHyprRenderer->shouldRenderWindow(candidate, monitor)) {
+            continue;
+        }
+
+        if (candidate == focusedWindow)
+            focusedTiledWindow = candidate;
+        else
+            tiledWindows.push_back(candidate);
+    }
+
+    if (focusedTiledWindow)
+        tiledWindows.push_back(focusedTiledWindow);
+
+    g_pHyprOpenGL->makeEGLCurrent();
+    for (const auto& candidate : tiledWindows) {
+        const auto previousSnapshot = candidate->m_snapshotFB;
+        candidate->m_snapshotFB = {};
+        g_pHyprRenderer->makeSnapshot(candidate);
+        const auto snapshot = candidate->m_snapshotFB;
+        candidate->m_snapshotFB = previousSnapshot;
+
+        if (!snapshot || !snapshot->getTexture()) {
+            reason = "failed to create a pre-reflow snapshot for " +
+                std::string(effectiveWindowClass(candidate));
+            destroyFrozenSceneWindows(destination);
+            return false;
+        }
+
+        SFrozenSceneWindow frozen{
+            .window = candidate,
+            .box = currentWindowRenderBox(candidate),
+            .rounding = candidate->rounding(),
+            .frame = {},
+        };
+        if (!copySnapshotCrop(snapshot, monitor, frozen.box, frozen.frame, reason)) {
+            reason = "failed to retain pre-reflow window " +
+                std::string(effectiveWindowClass(candidate)) + ": " + reason;
+            destroyFrozenSceneWindows(destination);
+            return false;
+        }
+
+        destination.push_back(std::move(frozen));
+    }
+
+    return true;
+}
+
+bool captureCloseFrame(
+    const PHLWINDOW& window,
+    SWindowAnimation& animation,
+    std::string& reason
+) {
+    if (!window || !window->m_snapshotFB) {
+        reason = "Hyprland snapshot is not ready";
+        return false;
+    }
+
+    const auto monitor = window->m_monitor.lock();
+    if (!monitor) {
+        reason = "closing window monitor disappeared";
+        return false;
+    }
+
+    if (!copySnapshotCrop(
+            window->m_snapshotFB,
+            monitor,
+            animation.box,
+            animation.closeFrame,
+            reason
+        )) {
+        reason = "failed to retain Hyprland's closing snapshot: " + reason;
+        return false;
+    }
+
     animation.monitor = monitor;
     return true;
 }
@@ -582,6 +891,81 @@ void damageExpandedBox(CBox box) {
     g_pHyprRenderer->damageBox(box);
 }
 
+CBox closeSceneBackdropBox(
+    const CBox& closingBox,
+    const std::vector<SFrozenSceneWindow>& frozenWindows
+) {
+    double left = closingBox.x;
+    double top = closingBox.y;
+    double right = closingBox.x + closingBox.width;
+    double bottom = closingBox.y + closingBox.height;
+
+    for (const auto& frozen : frozenWindows) {
+        left = std::min(left, frozen.box.x);
+        top = std::min(top, frozen.box.y);
+        right = std::max(right, frozen.box.x + frozen.box.width);
+        bottom = std::max(bottom, frozen.box.y + frozen.box.height);
+    }
+
+    return CBox{
+        left,
+        top,
+        std::max(right - left, 1.0),
+        std::max(bottom - top, 1.0),
+    };
+}
+
+void damageCloseAnimationRegion(const SWindowAnimation& animation) {
+    damageExpandedBox(
+        animation.sceneBackdropBox.width > 0.0 &&
+                animation.sceneBackdropBox.height > 0.0
+            ? animation.sceneBackdropBox
+            : animation.box
+    );
+}
+
+void restartFrozenSceneReflow(SWindowAnimation& animation) {
+    if (!animation.freezeTiledScene)
+        return;
+
+    const auto monitor = animation.monitor.lock();
+    std::size_t restarted = 0;
+    for (const auto& frozen : animation.frozenSceneWindows) {
+        const auto window = frozen.window.lock();
+        if (!window || !window->m_isMapped || window->isHidden() ||
+            window->m_isFloating || window->isFullscreen() ||
+            window->m_monitor.lock() != monitor ||
+            !window->m_realPosition || !window->m_realSize) {
+            continue;
+        }
+
+        // Hyprland has already recalculated the final tiled geometry while the
+        // retained old scene covered it. Preserve those final goals, return the
+        // live window to its old tile, then assign the goals again so Hyprland's
+        // own window animation performs the real resize after Void completes.
+        const Vector2D finalPosition = window->m_realPosition->goal();
+        const Vector2D finalSize = window->m_realSize->goal();
+        if (finalSize.x < 5.0 || finalSize.y < 5.0)
+            continue;
+
+        const Vector2D oldPosition{frozen.box.x, frozen.box.y};
+        const Vector2D oldSize{frozen.box.width, frozen.box.height};
+
+        window->m_realPosition->setValueAndWarp(oldPosition);
+        window->m_realSize->setValueAndWarp(oldSize);
+        *window->m_realPosition = finalPosition;
+        *window->m_realSize = finalSize;
+
+        g_pHyprRenderer->damageBox(frozen.box);
+        g_pHyprRenderer->damageBox(CBox{finalPosition, finalSize});
+        ++restarted;
+    }
+
+    appendDiagnostic(
+        "close reflow restarted: windows=" + std::to_string(restarted)
+    );
+}
+
 std::string_view animationModeName(EWindowAnimationMode mode) noexcept {
     switch (mode) {
         case EWindowAnimationMode::ManualCycle:
@@ -600,17 +984,17 @@ void cancelAnimation(const std::string& reason) {
         return;
 
     const auto mode = g_state->animation.mode;
-    const auto box = g_state->animation.box;
     const auto window = g_state->animation.window.lock();
     if (mode != EWindowAnimationMode::AutomaticClose)
         clearWindowHidden(window);
+    else
+        damageCloseAnimationRegion(g_state->animation);
+    g_pHyprRenderer->m_renderPass.removeAllOfType("CRealmheartBackdropCapturePassElement");
     g_pHyprRenderer->m_renderPass.removeAllOfType("CRealmheartEffectPassElement");
     g_state->animation.closeFrame.destroy();
+    g_state->animation.backdropFrame.destroy();
+    destroyFrozenSceneWindows(g_state->animation.frozenSceneWindows);
     g_state->animation = {};
-    if (mode == EWindowAnimationMode::AutomaticClose &&
-        box.width > 0.0 && box.height > 0.0) {
-        damageExpandedBox(box);
-    }
     appendDiagnostic(
         "animation ended: mode=" + std::string(animationModeName(mode)) +
         " reason=" + reason
@@ -658,6 +1042,11 @@ std::string armFocusedWindow(std::string_view effectName = "void") {
         .windowClass = std::string(windowClass),
         .armedTime = now,
         .startTime = now,
+        .closeFrame = {},
+        .backdropFrame = {},
+        .sceneBackdropBox = {},
+        .frozenSceneWindows = {},
+        .freezeTiledScene = false,
         .active = true,
         .started = true,
         .sawPass = false,
@@ -822,6 +1211,11 @@ void onWindowOpen(PHLWINDOW window) {
         .windowClass = std::string(windowClass),
         .armedTime = now,
         .startTime = {},
+        .closeFrame = {},
+        .backdropFrame = {},
+        .sceneBackdropBox = {},
+        .frozenSceneWindows = {},
+        .freezeTiledScene = false,
         .active = true,
         .started = false,
         .sawPass = false,
@@ -836,10 +1230,37 @@ void onWindowOpen(PHLWINDOW window) {
 }
 
 void onRenderStage(eRenderStage stage) {
-    if (stage != RENDER_POST_WINDOWS || !g_state || !g_state->animation.active)
+    if (!g_state || !g_state->animation.active)
         return;
 
     auto& animation = g_state->animation;
+    if (stage == RENDER_PRE_WINDOWS) {
+        if (animation.mode != EWindowAnimationMode::AutomaticClose ||
+            animation.backdropFrame.texture != 0 ||
+            animation.backdropCaptureQueued ||
+            animation.backdropCaptureFailed) {
+            return;
+        }
+
+        const auto currentMonitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+        const auto targetMonitor = animation.monitor.lock();
+        if (currentMonitor && targetMonitor && currentMonitor == targetMonitor) {
+            g_pHyprRenderer->m_renderPass.add(
+                makeUnique<CRealmheartBackdropCapturePassElement>(
+                    CRealmheartBackdropCapturePassElement::SData{
+                        .box = animation.sceneBackdropBox,
+                        .destination = &animation.backdropFrame,
+                        .failed = &animation.backdropCaptureFailed,
+                    }
+                )
+            );
+            animation.backdropCaptureQueued = true;
+        }
+        return;
+    }
+
+    if (stage != RENDER_POST_WINDOWS)
+        return;
     const SWindowEffectSpec* effect = findWindowEffect(animation.effect);
     SCompiledWindowEffect* compiled = compiledEffect(animation.effect);
     if (effect == nullptr || compiled == nullptr) {
@@ -867,6 +1288,13 @@ void onRenderStage(eRenderStage stage) {
     float rounding = 0.0F;
 
     if (animation.mode == EWindowAnimationMode::AutomaticClose) {
+        if (animation.backdropCaptureFailed) {
+            cancelAnimation("failed to capture the pre-window backdrop");
+            return;
+        }
+        if (animation.backdropFrame.texture == 0)
+            return;
+
         if (!animation.started) {
             if (!window) {
                 cancelAnimation("closing window disappeared before snapshot capture");
@@ -980,6 +1408,42 @@ void onRenderStage(eRenderStage stage) {
         ? animation.closeFrame.texture
         : texture->m_texID;
 
+    if (animation.mode == EWindowAnimationMode::AutomaticClose) {
+        if (g_state->sceneBlitShader.program == 0) {
+            cancelAnimation("close-scene blit shader is unavailable");
+            return;
+        }
+
+        const auto queueSceneFrame = [&](
+            const CBox& box,
+            float frameRounding,
+            GLuint frameTexture
+        ) {
+            g_pHyprRenderer->m_renderPass.add(
+                makeUnique<CRealmheartEffectPassElement>(
+                    CRealmheartEffectPassElement::SData{
+                        .box = box,
+                        .texture = frameTexture,
+                        .textureTarget = GL_TEXTURE_2D,
+                        .rounding = frameRounding,
+                        .opacity = 1.0F,
+                        .shader = &g_state->sceneBlitShader,
+                    }
+                )
+            );
+        };
+
+        queueSceneFrame(
+            animation.sceneBackdropBox,
+            0.0F,
+            animation.backdropFrame.texture
+        );
+        if (animation.freezeTiledScene) {
+            for (const auto& frozen : animation.frozenSceneWindows)
+                queueSceneFrame(frozen.box, frozen.rounding, frozen.frame.texture);
+        }
+    }
+
     g_pHyprRenderer->m_renderPass.add(
         makeUnique<CRealmheartEffectPassElement>(
             CRealmheartEffectPassElement::SData{
@@ -989,6 +1453,7 @@ void onRenderStage(eRenderStage stage) {
                 .textureTarget = target,
                 .rounding = rounding,
                 .reverse = reverse,
+                .opacity = 1.0F,
                 .shader = &shader,
             }
         )
@@ -1045,6 +1510,8 @@ int onTick(void* data) {
     } else if (animation.mode == EWindowAnimationMode::AutomaticOpen &&
                window->m_workspace && !window->m_workspace->isVisible()) {
         cancelAnimation("window moved to a non-visible workspace during opening");
+    } else if (closing && animation.backdropCaptureFailed) {
+        cancelAnimation("failed to capture the pre-window backdrop");
     } else {
         const auto now = std::chrono::steady_clock::now();
         const float armedElapsed = std::chrono::duration<float>(
@@ -1061,11 +1528,11 @@ int onTick(void* data) {
             } else if (armedElapsed >= kTextureWaitTimeoutSeconds) {
                 cancelAnimation(
                     closing
-                        ? "no usable closing snapshot became available"
+                        ? "no usable closing backdrop and snapshot became available"
                         : "no usable window texture became available"
                 );
             } else if (closing) {
-                damageExpandedBox(animation.box);
+                damageCloseAnimationRegion(animation);
             } else {
                 g_pHyprRenderer->damageWindow(window, true);
             }
@@ -1083,14 +1550,15 @@ int onTick(void* data) {
                         cancelAnimation("open complete after terminal frame");
                         break;
                     case EWindowAnimationMode::AutomaticClose:
-                        cancelAnimation("close complete after terminal frame");
+                        restartFrozenSceneReflow(animation);
+                        cancelAnimation("close complete; native tiled reflow restarted");
                         break;
                     case EWindowAnimationMode::ManualCycle:
                         cancelAnimation("cycle complete after terminal frame");
                         break;
                 }
             } else if (closing) {
-                damageExpandedBox(animation.box);
+                damageCloseAnimationRegion(animation);
             } else {
                 damageExpandedBox(currentWindowRenderBox(window));
             }
@@ -1153,28 +1621,54 @@ void onWindowClose(PHLWINDOW window) {
     }
 
     const auto monitor = window->m_monitor.lock();
+    const bool freezeTiledScene = !window->m_isFloating;
+    std::vector<SFrozenSceneWindow> frozenSceneWindows;
+    if (freezeTiledScene &&
+        !captureFrozenSceneWindows(window, monitor, frozenSceneWindows, reason)) {
+        appendDiagnostic(
+            "automatic close skipped: class=" + std::string(windowClass) +
+            " reason=pre-reflow scene capture failed: " + reason
+        );
+        return;
+    }
+
+    const CBox closingBox = currentWindowRenderBox(window);
+    const CBox sceneBackdropBox =
+        closeSceneBackdropBox(closingBox, frozenSceneWindows);
     const auto now = std::chrono::steady_clock::now();
     g_state->animation = {
         .window = window,
         .monitor = monitor,
         .effect = effect->id,
         .mode = EWindowAnimationMode::AutomaticClose,
-        .box = currentWindowRenderBox(window),
+        .box = closingBox,
         .rounding = window->rounding(),
         .windowClass = std::string(windowClass),
         .armedTime = now,
         .startTime = {},
+        .closeFrame = {},
+        .backdropFrame = {},
+        .sceneBackdropBox = sceneBackdropBox,
+        .frozenSceneWindows = std::move(frozenSceneWindows),
+        .freezeTiledScene = freezeTiledScene,
         .active = true,
         .started = false,
         .sawPass = false,
         .terminalFrameQueued = false,
+        .backdropCaptureQueued = false,
+        .backdropCaptureFailed = false,
     };
 
     appendDiagnostic(
         "automatic close armed: effect=" + std::string(effect->name) +
-        " class=" + std::string(windowClass) + " title=" + window->m_title
+        " class=" + std::string(windowClass) + " title=" + window->m_title +
+        " frozenWindows=" +
+        std::to_string(g_state->animation.frozenSceneWindows.size()) +
+        " sceneBackdrop=" +
+        std::to_string(static_cast<int>(sceneBackdropBox.width)) + "x" +
+        std::to_string(static_cast<int>(sceneBackdropBox.height))
     );
-    damageExpandedBox(g_state->animation.box);
+    damageCloseAnimationRegion(g_state->animation);
 }
 
 void onWorkspace(PHLWORKSPACE) {
@@ -1307,7 +1801,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "Realmheart FX",
         .description = "Realmheart transitions through Hyprland's visible render pass",
         .author = "Zahed; render-pass plumbing adapted from  hyprfx/xhos hyprfx",
-        .version = "0.6.1-terminal-handoff-kde",
+        .version = "0.6.8-close-native-reflow",
     };
 }
 
@@ -1322,11 +1816,13 @@ APICALL EXPORT void PLUGIN_EXIT() {
         if (g_state->tick)
             wl_event_source_remove(g_state->tick);
 
+        g_pHyprRenderer->m_renderPass.removeAllOfType("CRealmheartBackdropCapturePassElement");
         g_pHyprRenderer->m_renderPass.removeAllOfType("CRealmheartEffectPassElement");
         g_pHyprOpenGL->makeEGLCurrent();
         for (auto& effect : g_state->effects)
             effect.destroy();
         g_state->effects.clear();
+        g_state->sceneBlitShader.destroy();
         g_state.reset();
     }
 

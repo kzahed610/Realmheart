@@ -26,6 +26,7 @@ enum class ERealmheartEffectUniform : std::size_t {
     Starlight,
     Astral,
     Void,
+    Opacity,
     Count,
 };
 
@@ -56,6 +57,7 @@ class CRealmheartEffectPassElement final : public IPassElement {
         GLenum textureTarget = GL_TEXTURE_2D;
         float rounding = 0.0F;
         bool reverse = false;
+        float opacity = 1.0F;
         const SRealmheartEffectShader* shader = nullptr;
         SRealmheartEffectPalette palette{};
     };
