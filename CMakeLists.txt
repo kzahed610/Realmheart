@@ -361,6 +361,10 @@ if(BUILD_TESTING)
         realmheart_window_effect_registry_tests
         PRIVATE plugins/realmheart-fx
     )
+    target_compile_definitions(
+        realmheart_window_effect_registry_tests
+        PRIVATE REALMHEART_TEST_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects"
+    )
     realmheart_register_test(realmheart_window_effect_registry_tests)
 
     add_executable(
@@ -372,6 +376,10 @@ if(BUILD_TESTING)
     target_include_directories(
         realmheart_window_effect_config_tests
         PRIVATE plugins/realmheart-fx
+    )
+    target_compile_definitions(
+        realmheart_window_effect_config_tests
+        PRIVATE REALMHEART_TEST_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects"
     )
     realmheart_register_test(realmheart_window_effect_config_tests)
 
@@ -385,6 +393,10 @@ if(BUILD_TESTING)
     target_include_directories(
         realmheart_window_effect_policy_tests
         PRIVATE plugins/realmheart-fx
+    )
+    target_compile_definitions(
+        realmheart_window_effect_policy_tests
+        PRIVATE REALMHEART_TEST_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects"
     )
     realmheart_register_test(realmheart_window_effect_policy_tests)
 

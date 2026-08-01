@@ -23,13 +23,16 @@ std::filesystem::path writeConfig(
 } // namespace
 
 int main() {
+    const auto registry = loadWindowEffectRegistry(REALMHEART_TEST_EFFECT_DIR);
+    assert(registry.success);
+
     const auto builtIn = builtInWindowEffectConfig();
-    assert(builtIn.defaultOpenEffect == EWindowEffectId::Void);
-    assert(builtIn.defaultCloseEffect == EWindowEffectId::Void);
+    assert(builtIn.defaultOpenEffect == std::string{"void"});
+    assert(builtIn.defaultCloseEffect == std::string{"void"});
     assert(builtIn.rules.size() == 1U);
     assert(builtIn.rules.front().windowClass == "kitty");
-    assert(builtIn.rules.front().openEffect == EWindowEffectId::AetherSunder);
-    assert(builtIn.rules.front().closeEffect == EWindowEffectId::AetherSunder);
+    assert(builtIn.rules.front().openEffect == std::string{"aether-sunder"});
+    assert(builtIn.rules.front().closeEffect == std::string{"aether-sunder"});
     assert(!builtIn.loadedFromFile);
 
     const auto directory = std::filesystem::temp_directory_path() /
@@ -64,16 +67,16 @@ open = "none"
     assert(valid.error.empty());
     assert(valid.config.loadedFromFile);
     assert(valid.config.sourcePath == validPath);
-    assert(valid.config.defaultOpenEffect == EWindowEffectId::AetherSunder);
-    assert(valid.config.defaultCloseEffect == EWindowEffectId::Void);
+    assert(valid.config.defaultOpenEffect == std::string{"aether-sunder"});
+    assert(valid.config.defaultCloseEffect == std::string{"void"});
     assert(valid.config.rules.size() == 2U);
     assert(valid.config.rules[0].windowClass == "org.kde.");
     assert(valid.config.rules[0].classMatch == EWindowEffectTextMatch::Prefix);
-    assert(valid.config.rules[0].openEffect == EWindowEffectId::Void);
-    assert(valid.config.rules[0].closeEffect == EWindowEffectId::None);
+    assert(valid.config.rules[0].openEffect == std::string{"void"});
+    assert(valid.config.rules[0].closeEffect == std::string{"none"});
     assert(valid.config.rules[1].windowTitle == "Picture-in-Picture");
     assert(valid.config.rules[1].titleMatch == EWindowEffectTextMatch::Contains);
-    assert(valid.config.rules[1].openEffect == EWindowEffectId::None);
+    assert(valid.config.rules[1].openEffect == std::string{"none"});
     assert(!valid.config.rules[1].closeEffect);
 
     const auto unknownEffectPath = writeConfig(

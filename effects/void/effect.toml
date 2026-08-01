@@ -1,0 +1,15 @@
+[effect]
+id = "void"
+display_name = "Realmheart Void"
+shader = "void.frag"
+open_duration = 0.85
+close_duration = 0.85
+reversible = true
+
+# These default to true for the current single-texture renderer. Keep the
+# table explicit so an effect author can see the supported contract.
+[capabilities]
+source_texture = true
+texture_2d = true
+external_texture = true
+rounded_source = true

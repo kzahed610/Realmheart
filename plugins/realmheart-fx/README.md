@@ -8,10 +8,63 @@ content through the selected registered effect at `RENDER_POST_WINDOWS`, then
 restores or releases resources when the transition finishes or any safety check
 fails.
 
-The compositor backend currently registers `none`, `void`, and
-`aether-sunder`. Realmheart Void remains the default effect. Aether Sunder is a
-second, deliberately simple shader used to prove that the same compositor
-lifecycle can compile, select, and play more than one visual effect.
+The compositor backend discovers effect manifests from the Realmheart `effects/`
+directory at plugin startup. `none` remains a built-in bypass effect; Realmheart
+Void and Aether Sunder are ordinary manifest-defined effects using the same
+renderer and lifecycle machinery.
+
+## Effect manifests
+
+Every compatible effect lives in one direct child directory of `effects/`:
+
+```text
+effects/
+└── mana-shatter/
+    ├── effect.toml
+    └── mana-shatter.frag
+```
+
+A minimal manifest is:
+
+```toml
+[effect]
+id = "mana-shatter"
+display_name = "Mana Shatter"
+shader = "mana-shatter.frag"
+open_duration = 0.70
+close_duration = 0.75
+reversible = true
+```
+
+The current renderer defaults the common capabilities to enabled. They may be
+made explicit or selectively disabled:
+
+```toml
+[capabilities]
+source_texture = true
+texture_2d = true
+external_texture = true
+rounded_source = true
+```
+
+Effect IDs use lowercase letters, digits, and hyphens. `none` is reserved. The
+shader path must remain relative to its effect directory. Duplicate IDs,
+missing shaders, malformed manifests, unsafe paths, and unsupported keys abort
+plugin startup safely instead of producing a partially compiled registry.
+
+After adding a folder, rebuild and reload the plugin. No C++ registry enum,
+registry table, policy code, or compositor lifecycle code needs to change. The
+new ID becomes available to `test` and to `window-effects.toml` automatically.
+
+```sh
+hyprctl realmheart-fx effects
+hyprctl realmheart-fx test mana-shatter
+```
+
+The initial manifest contract is intentionally limited to compatible
+single-texture fragment shaders using the established Realmheart uniforms. A
+future effect requiring extra textures, custom render passes, or unrelated
+uniform contracts still requires a renderer extension.
 
 ## TOML effect assignments
 
@@ -118,6 +171,7 @@ hardening milestone.
 ```sh
 hyprctl realmheart-fx status
 hyprctl realmheart-fx cancel
+hyprctl realmheart-fx effects
 
 hyprctl realmheart-fx config status
 hyprctl realmheart-fx config path
@@ -151,8 +205,9 @@ cat /tmp/realmheart-fx.log
 ```
 
 Automatic lifecycle transitions log whether they were armed, started,
-completed, or skipped for a safety reason. Configuration startup and reload
-results are logged with the active defaults, rule count, and source path.
+completed, or skipped for a safety reason. Plugin startup logs the discovered
+manifest count and IDs. Configuration startup and reload results are logged with
+the active defaults, rule count, and source path.
 
 ## Licensing
 

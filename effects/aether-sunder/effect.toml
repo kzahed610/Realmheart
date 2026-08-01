@@ -1,0 +1,13 @@
+[effect]
+id = "aether-sunder"
+display_name = "Aether Sunder"
+shader = "aether-sunder.frag"
+open_duration = 0.78
+close_duration = 0.78
+reversible = true
+
+[capabilities]
+source_texture = true
+texture_2d = true
+external_texture = true
+rounded_source = true

@@ -157,14 +157,14 @@ bool matchesRule(
     return true;
 }
 
-EWindowEffectId automaticEffectForWindow(
+std::string_view automaticEffectForWindow(
     const SWindowEffectConfig& config,
     std::string_view windowClass,
     std::string_view windowTitle,
     bool opening
 ) noexcept {
     if (automaticWindowClassIsExcluded(windowClass))
-        return EWindowEffectId::None;
+        return kNoWindowEffect;
 
     for (const auto& rule : config.rules) {
         if (!matchesRule(rule, windowClass, windowTitle))
@@ -192,7 +192,7 @@ bool automaticWindowClassIsExcluded(std::string_view windowClass) noexcept {
     return false;
 }
 
-EWindowEffectId automaticOpenEffectForWindow(
+std::string_view automaticOpenEffectForWindow(
     const SWindowEffectConfig& config,
     std::string_view windowClass,
     std::string_view windowTitle
@@ -200,7 +200,7 @@ EWindowEffectId automaticOpenEffectForWindow(
     return automaticEffectForWindow(config, windowClass, windowTitle, true);
 }
 
-EWindowEffectId automaticCloseEffectForWindow(
+std::string_view automaticCloseEffectForWindow(
     const SWindowEffectConfig& config,
     std::string_view windowClass,
     std::string_view windowTitle

@@ -9,8 +9,8 @@ void expectEffects(
     const SWindowEffectConfig& config,
     std::string_view windowClass,
     std::string_view windowTitle,
-    EWindowEffectId open,
-    EWindowEffectId close
+    std::string_view open,
+    std::string_view close
 ) {
     assert(!automaticWindowClassIsExcluded(windowClass));
     assert(automaticOpenEffectForWindow(config, windowClass, windowTitle) == open);
@@ -24,66 +24,69 @@ void expectExcluded(
     assert(automaticWindowClassIsExcluded(windowClass));
     assert(
         automaticOpenEffectForWindow(config, windowClass, "title") ==
-        EWindowEffectId::None
+        std::string{"none"}
     );
     assert(
         automaticCloseEffectForWindow(config, windowClass, "title") ==
-        EWindowEffectId::None
+        std::string{"none"}
     );
 }
 
 } // namespace
 
 int main() {
+    const auto registry = loadWindowEffectRegistry(REALMHEART_TEST_EFFECT_DIR);
+    assert(registry.success);
+
     const auto builtIn = builtInWindowEffectConfig();
     expectEffects(
         builtIn,
         "kitty",
         "fish",
-        EWindowEffectId::AetherSunder,
-        EWindowEffectId::AetherSunder
+        std::string{"aether-sunder"},
+        std::string{"aether-sunder"}
     );
     expectEffects(
         builtIn,
         "Kitty",
         "fish",
-        EWindowEffectId::AetherSunder,
-        EWindowEffectId::AetherSunder
+        std::string{"aether-sunder"},
+        std::string{"aether-sunder"}
     );
     expectEffects(
         builtIn,
         "org.kde.dolphin",
         "Downloads — Dolphin",
-        EWindowEffectId::Void,
-        EWindowEffectId::Void
+        std::string{"void"},
+        std::string{"void"}
     );
     expectEffects(
         builtIn,
         "org.kde.kate",
         "notes.txt — Kate",
-        EWindowEffectId::Void,
-        EWindowEffectId::Void
+        std::string{"void"},
+        std::string{"void"}
     );
 
     SWindowEffectConfig custom;
-    custom.defaultOpenEffect = EWindowEffectId::AetherSunder;
-    custom.defaultCloseEffect = EWindowEffectId::Void;
+    custom.defaultOpenEffect = std::string{"aether-sunder"};
+    custom.defaultCloseEffect = std::string{"void"};
     custom.rules = {
         {
             .windowClass = std::string{"org.kde."},
             .classMatch = EWindowEffectTextMatch::Prefix,
             .windowTitle = std::nullopt,
             .titleMatch = EWindowEffectTextMatch::Contains,
-            .openEffect = EWindowEffectId::Void,
-            .closeEffect = EWindowEffectId::None,
+            .openEffect = std::string{"void"},
+            .closeEffect = std::string{"none"},
         },
         {
             .windowClass = std::nullopt,
             .classMatch = EWindowEffectTextMatch::Exact,
             .windowTitle = std::string{"Picture-in-Picture"},
             .titleMatch = EWindowEffectTextMatch::Contains,
-            .openEffect = EWindowEffectId::None,
-            .closeEffect = EWindowEffectId::None,
+            .openEffect = std::string{"none"},
+            .closeEffect = std::string{"none"},
         },
     };
 
@@ -91,22 +94,22 @@ int main() {
         custom,
         "org.kde.dolphin",
         "Downloads — Dolphin",
-        EWindowEffectId::Void,
-        EWindowEffectId::None
+        std::string{"void"},
+        std::string{"none"}
     );
     expectEffects(
         custom,
         "firefox",
         "Picture-in-Picture",
-        EWindowEffectId::None,
-        EWindowEffectId::None
+        std::string{"none"},
+        std::string{"none"}
     );
     expectEffects(
         custom,
         "firefox",
         "Realmheart docs",
-        EWindowEffectId::AetherSunder,
-        EWindowEffectId::Void
+        std::string{"aether-sunder"},
+        std::string{"void"}
     );
 
     expectExcluded(builtIn, "");

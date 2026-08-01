@@ -120,18 +120,19 @@ bool parseQuotedString(
     return true;
 }
 
-const SWindowEffectSpec* parseEffect(
+std::optional<std::string> parseEffect(
     std::string_view value,
     std::string& error
 ) {
     std::string effectName;
     if (!parseQuotedString(value, effectName, error))
-        return nullptr;
+        return std::nullopt;
 
-    const auto* effect = findWindowEffect(effectName);
-    if (effect == nullptr)
+    if (findWindowEffect(effectName) == nullptr) {
         error = "unknown registered effect: " + effectName;
-    return effect;
+        return std::nullopt;
+    }
+    return effectName;
 }
 
 std::optional<EWindowEffectTextMatch> parseMatchMode(
@@ -176,14 +177,32 @@ std::string loadError(
 
 SWindowEffectConfig builtInWindowEffectConfig() {
     SWindowEffectConfig config;
-    config.rules.push_back({
-        .windowClass = std::string{"kitty"},
-        .classMatch = EWindowEffectTextMatch::Exact,
-        .windowTitle = std::nullopt,
-        .titleMatch = EWindowEffectTextMatch::Contains,
-        .openEffect = EWindowEffectId::AetherSunder,
-        .closeEffect = EWindowEffectId::AetherSunder,
-    });
+
+    const SWindowEffectSpec* defaultEffect = findWindowEffect("void");
+    if (defaultEffect == nullptr) {
+        for (const auto& effect : windowEffectSpecs()) {
+            if (!windowEffectIsNone(effect)) {
+                defaultEffect = &effect;
+                break;
+            }
+        }
+    }
+
+    config.defaultOpenEffect = defaultEffect != nullptr
+        ? defaultEffect->name
+        : std::string{kNoWindowEffect};
+    config.defaultCloseEffect = config.defaultOpenEffect;
+
+    if (findWindowEffect("aether-sunder") != nullptr) {
+        config.rules.push_back({
+            .windowClass = std::string{"kitty"},
+            .classMatch = EWindowEffectTextMatch::Exact,
+            .windowTitle = std::nullopt,
+            .titleMatch = EWindowEffectTextMatch::Contains,
+            .openEffect = std::string{"aether-sunder"},
+            .closeEffect = std::string{"aether-sunder"},
+        });
+    }
     return config;
 }
 
@@ -220,7 +239,8 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
         return result;
     }
 
-    SWindowEffectConfig parsed;
+    SWindowEffectConfig parsed = builtInWindowEffectConfig();
+    parsed.rules.clear();
     parsed.sourcePath = path;
     parsed.loadedFromFile = true;
 
@@ -290,19 +310,19 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
         std::string parseError;
         if (section == EConfigSection::Windows) {
             if (key == "open") {
-                const auto* effect = parseEffect(value, parseError);
-                if (effect == nullptr) {
+                const auto effect = parseEffect(value, parseError);
+                if (!effect) {
                     result.error = loadError(lineNumber, parseError);
                     return result;
                 }
-                parsed.defaultOpenEffect = effect->id;
+                parsed.defaultOpenEffect = *effect;
             } else if (key == "close") {
-                const auto* effect = parseEffect(value, parseError);
-                if (effect == nullptr) {
+                const auto effect = parseEffect(value, parseError);
+                if (!effect) {
                     result.error = loadError(lineNumber, parseError);
                     return result;
                 }
-                parsed.defaultCloseEffect = effect->id;
+                parsed.defaultCloseEffect = *effect;
             } else {
                 result.error = loadError(lineNumber, "unsupported [windows] key: " + key);
                 return result;
@@ -348,19 +368,19 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
                 }
                 currentRule->titleMatch = *match;
             } else if (key == "open") {
-                const auto* effect = parseEffect(value, parseError);
-                if (effect == nullptr) {
+                const auto effect = parseEffect(value, parseError);
+                if (!effect) {
                     result.error = loadError(lineNumber, parseError);
                     return result;
                 }
-                currentRule->openEffect = effect->id;
+                currentRule->openEffect = *effect;
             } else if (key == "close") {
-                const auto* effect = parseEffect(value, parseError);
-                if (effect == nullptr) {
+                const auto effect = parseEffect(value, parseError);
+                if (!effect) {
                     result.error = loadError(lineNumber, parseError);
                     return result;
                 }
-                currentRule->closeEffect = effect->id;
+                currentRule->closeEffect = *effect;
             } else {
                 result.error = loadError(lineNumber, "unsupported [[windows.rules]] key: " + key);
                 return result;
@@ -389,14 +409,11 @@ std::string windowEffectConfigSummary(
     const SWindowEffectConfig& config,
     const std::filesystem::path& requestedPath
 ) {
-    const auto* open = findWindowEffect(config.defaultOpenEffect);
-    const auto* close = findWindowEffect(config.defaultCloseEffect);
-
     std::ostringstream summary;
     summary << "source=" << (config.loadedFromFile ? "file" : "built-in")
             << " path=" << (requestedPath.empty() ? "<unavailable>" : requestedPath.string())
-            << " open=" << (open ? open->name : "missing")
-            << " close=" << (close ? close->name : "missing")
+            << " open=" << config.defaultOpenEffect
+            << " close=" << config.defaultCloseEffect
             << " rules=" << config.rules.size();
     return summary.str();
 }

@@ -8,13 +8,13 @@
     std::string_view windowClass
 ) noexcept;
 
-[[nodiscard]] EWindowEffectId automaticOpenEffectForWindow(
+[[nodiscard]] std::string_view automaticOpenEffectForWindow(
     const SWindowEffectConfig& config,
     std::string_view windowClass,
     std::string_view windowTitle
 ) noexcept;
 
-[[nodiscard]] EWindowEffectId automaticCloseEffectForWindow(
+[[nodiscard]] std::string_view automaticCloseEffectForWindow(
     const SWindowEffectConfig& config,
     std::string_view windowClass,
     std::string_view windowTitle

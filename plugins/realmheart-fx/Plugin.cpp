@@ -117,7 +117,7 @@ struct SFrozenSceneWindow {
 struct SWindowAnimation {
     PHLWINDOWREF window;
     PHLMONITORREF monitor;
-    EWindowEffectId effect = EWindowEffectId::None;
+    const SWindowEffectSpec* effect = nullptr;
     EWindowAnimationMode mode = EWindowAnimationMode::ManualCycle;
     CBox box{};
     float rounding = 0.0F;
@@ -239,6 +239,18 @@ std::string reloadWindowEffectConfig(bool startup) {
     );
     appendDiagnostic("window effect config: " + summary);
     return "ok: " + summary;
+}
+
+std::string currentWindowEffectsSummary() {
+    std::ostringstream output;
+    bool first = true;
+    for (const auto& effect : windowEffectSpecs()) {
+        if (!first)
+            output << ',';
+        output << effect.name;
+        first = false;
+    }
+    return output.str();
 }
 
 std::string currentWindowEffectConfigStatus() {
@@ -532,12 +544,12 @@ void fillLocations(SRealmheartEffectShader& shader) {
         glGetUniformLocation(shader.program, "opacity");
 }
 
-SCompiledWindowEffect* compiledEffect(EWindowEffectId id) {
+SCompiledWindowEffect* compiledEffect(const SWindowEffectSpec* spec) {
     if (!g_state)
         return nullptr;
 
     for (auto& effect : g_state->effects) {
-        if (effect.spec != nullptr && effect.spec->id == id)
+        if (effect.spec == spec)
             return &effect;
     }
     return nullptr;
@@ -547,7 +559,7 @@ void initialiseEffects() {
     g_pHyprOpenGL->makeEGLCurrent();
 
     for (const auto& spec : windowEffectSpecs()) {
-        if (spec.id == EWindowEffectId::None || spec.fragmentShaderAsset.empty())
+        if (windowEffectIsNone(spec) || spec.fragmentShaderAsset.empty())
             continue;
 
         const std::string fragment = readEffectShader(spec);
@@ -1089,7 +1101,7 @@ std::string armFocusedWindow(std::string_view effectName = "void") {
     if (effect == nullptr)
         return "unknown effect: " + std::string(effectName);
 
-    if (effect->id == EWindowEffectId::None) {
+    if (windowEffectIsNone(*effect)) {
         cancelAnimation("effect set to none");
         appendDiagnostic("manual test bypassed: effect=none");
         return "ok";
@@ -1098,7 +1110,7 @@ std::string armFocusedWindow(std::string_view effectName = "void") {
     if (!effect->reversible)
         return "effect does not support the manual close-then-open cycle";
 
-    if (compiledEffect(effect->id) == nullptr)
+    if (compiledEffect(effect) == nullptr)
         return "effect is registered but its shader is unavailable";
 
     const PHLWINDOW window = Desktop::focusState()->window();
@@ -1120,7 +1132,7 @@ std::string armFocusedWindow(std::string_view effectName = "void") {
     g_state->animation = {
         .window = window,
         .monitor = window->m_monitor.lock(),
-        .effect = effect->id,
+        .effect = effect,
         .mode = EWindowAnimationMode::ManualCycle,
         .windowClass = std::string(windowClass),
         .armedTime = now,
@@ -1188,7 +1200,7 @@ bool automaticOpenEligibility(
         reason = "effect has no valid open duration";
         return false;
     }
-    if (compiledEffect(effect.id) == nullptr) {
+    if (compiledEffect(&effect) == nullptr) {
         reason = "effect shader is unavailable";
         return false;
     }
@@ -1233,7 +1245,7 @@ bool automaticCloseEligibility(
         reason = "effect has no valid close duration";
         return false;
     }
-    if (compiledEffect(effect.id) == nullptr) {
+    if (compiledEffect(&effect) == nullptr) {
         reason = "effect shader is unavailable";
         return false;
     }
@@ -1246,12 +1258,12 @@ void onWindowOpen(PHLWINDOW window) {
         return;
 
     const std::string_view windowClass = effectiveWindowClass(window);
-    const EWindowEffectId effectId = automaticOpenEffectForWindow(
+    const std::string_view effectName = automaticOpenEffectForWindow(
         g_state->effectConfig,
         windowClass,
         window->m_title
     );
-    if (effectId == EWindowEffectId::None) {
+    if (effectName == kNoWindowEffect) {
         appendDiagnostic(
             "automatic open skipped: class=" + std::string(windowClass) +
             " liveClass=" + window->m_class +
@@ -1261,7 +1273,7 @@ void onWindowOpen(PHLWINDOW window) {
         return;
     }
 
-    const SWindowEffectSpec* effect = findWindowEffect(effectId);
+    const SWindowEffectSpec* effect = findWindowEffect(effectName);
     if (effect == nullptr) {
         appendDiagnostic(
             "automatic open skipped: class=" + std::string(windowClass) +
@@ -1293,7 +1305,7 @@ void onWindowOpen(PHLWINDOW window) {
     g_state->animation = {
         .window = window,
         .monitor = window->m_monitor.lock(),
-        .effect = effect->id,
+        .effect = effect,
         .mode = EWindowAnimationMode::AutomaticOpen,
         .windowClass = std::string(windowClass),
         .armedTime = now,
@@ -1348,8 +1360,8 @@ void onRenderStage(eRenderStage stage) {
 
     if (stage != RENDER_POST_WINDOWS)
         return;
-    const SWindowEffectSpec* effect = findWindowEffect(animation.effect);
-    SCompiledWindowEffect* compiled = compiledEffect(animation.effect);
+    const SWindowEffectSpec* effect = animation.effect;
+    SCompiledWindowEffect* compiled = compiledEffect(effect);
     if (effect == nullptr || compiled == nullptr) {
         cancelAnimation("selected effect became unavailable");
         return;
@@ -1580,7 +1592,7 @@ int onTick(void* data) {
     }
 
     auto& animation = g_state->animation;
-    const SWindowEffectSpec* effect = findWindowEffect(animation.effect);
+    const SWindowEffectSpec* effect = animation.effect;
     const auto window = animation.window.lock();
     const bool closing = animation.mode == EWindowAnimationMode::AutomaticClose;
 
@@ -1670,12 +1682,12 @@ void onWindowClose(PHLWINDOW window) {
         return;
 
     const std::string_view windowClass = effectiveWindowClass(window);
-    const EWindowEffectId effectId = automaticCloseEffectForWindow(
+    const std::string_view effectName = automaticCloseEffectForWindow(
         g_state->effectConfig,
         windowClass,
         window->m_title
     );
-    if (effectId == EWindowEffectId::None) {
+    if (effectName == kNoWindowEffect) {
         appendDiagnostic(
             "automatic close skipped: class=" + std::string(windowClass) +
             " liveClass=" + window->m_class +
@@ -1693,7 +1705,7 @@ void onWindowClose(PHLWINDOW window) {
         return;
     }
 
-    const SWindowEffectSpec* effect = findWindowEffect(effectId);
+    const SWindowEffectSpec* effect = findWindowEffect(effectName);
     if (effect == nullptr) {
         appendDiagnostic(
             "automatic close skipped: class=" + std::string(windowClass) +
@@ -1730,7 +1742,7 @@ void onWindowClose(PHLWINDOW window) {
     g_state->animation = {
         .window = window,
         .monitor = monitor,
-        .effect = effect->id,
+        .effect = effect,
         .mode = EWindowAnimationMode::AutomaticClose,
         .box = closingBox,
         .rounding = window->rounding(),
@@ -1786,6 +1798,8 @@ std::string controlCommand(eHyprCtlOutputFormat format, std::string request) {
         cancelAnimation("cancelled by user");
         return "ok";
     }
+    if (subcommand == "effects")
+        return currentWindowEffectsSummary();
     if (subcommand == "config") {
         std::string action;
         stream >> action;
@@ -1843,7 +1857,7 @@ std::string controlCommand(eHyprCtlOutputFormat format, std::string request) {
         return "usage: realmheart-fx auto-close on|off|status";
     }
 
-    return "usage: realmheart-fx test [effect]|status|cancel|"
+    return "usage: realmheart-fx test [effect]|status|cancel|effects|"
            "config status|path|reload|auto-open on|off|status|"
            "auto-close on|off|status";
 }
@@ -1870,6 +1884,15 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
             " but the running compositor is " + runtime.hash
         );
     }
+
+    const auto registry = loadWindowEffectRegistry(REALMHEART_EFFECT_ASSET_DIR);
+    if (!registry.success)
+        throw std::runtime_error("Realmheart FX effect registry failed: " + registry.error);
+
+    appendDiagnostic(
+        "effect manifests loaded: count=" + std::to_string(registry.loadedEffects) +
+        " effects=" + currentWindowEffectsSummary()
+    );
 
     g_state = makeUnique<SPluginState>();
     initialiseEffects();
@@ -1904,7 +1927,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "Realmheart FX",
         .description = "Realmheart transitions through Hyprland's visible render pass",
         .author = "Zahed; render-pass plumbing adapted from  hyprfx/xhos hyprfx",
-        .version = "0.8.0-toml-assignments",
+        .version = "0.9.0-effect-manifests",
     };
 }
 

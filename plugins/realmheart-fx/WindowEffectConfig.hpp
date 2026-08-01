@@ -19,13 +19,13 @@ struct SWindowEffectRule {
     EWindowEffectTextMatch classMatch = EWindowEffectTextMatch::Exact;
     std::optional<std::string> windowTitle;
     EWindowEffectTextMatch titleMatch = EWindowEffectTextMatch::Contains;
-    std::optional<EWindowEffectId> openEffect;
-    std::optional<EWindowEffectId> closeEffect;
+    std::optional<std::string> openEffect;
+    std::optional<std::string> closeEffect;
 };
 
 struct SWindowEffectConfig {
-    EWindowEffectId defaultOpenEffect = EWindowEffectId::Void;
-    EWindowEffectId defaultCloseEffect = EWindowEffectId::Void;
+    std::string defaultOpenEffect = "void";
+    std::string defaultCloseEffect = "void";
     std::vector<SWindowEffectRule> rules;
     std::filesystem::path sourcePath;
     bool loadedFromFile = false;
