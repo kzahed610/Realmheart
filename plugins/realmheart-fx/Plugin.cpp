@@ -1791,17 +1791,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     wl_event_source_timer_update(g_state->tick, 1);
 
     appendDiagnostic(
-        "automatic open default-allow enabled: effect=void"
+        "automatic open policy enabled: default=void kitty=aether-sunder"
     );
     appendDiagnostic(
-        "automatic close default-allow enabled: effect=void"
+        "automatic close policy enabled: default=void kitty=aether-sunder"
     );
 
     return {
         .name = "Realmheart FX",
         .description = "Realmheart transitions through Hyprland's visible render pass",
         .author = "Zahed; render-pass plumbing adapted from  hyprfx/xhos hyprfx",
-        .version = "0.6.8-close-native-reflow",
+        .version = "0.7.0-second-effect-test",
     };
 }
 

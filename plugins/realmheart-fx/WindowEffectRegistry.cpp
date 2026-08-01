@@ -10,7 +10,7 @@ constexpr WindowEffectCapabilityMask kTexturedWindowCapabilities =
     windowEffectCapabilityBit(EWindowEffectCapability::ExternalTexture) |
     windowEffectCapabilityBit(EWindowEffectCapability::RoundedSource);
 
-constexpr std::array<SWindowEffectSpec, 2> kWindowEffectSpecs{{
+constexpr std::array<SWindowEffectSpec, 3> kWindowEffectSpecs{{
     {
         .id = EWindowEffectId::None,
         .name = "none",
@@ -28,6 +28,16 @@ constexpr std::array<SWindowEffectSpec, 2> kWindowEffectSpecs{{
         .fragmentShaderAsset = "void/void.frag",
         .openDurationSeconds = 0.85F,
         .closeDurationSeconds = 0.85F,
+        .reversible = true,
+        .capabilities = kTexturedWindowCapabilities,
+    },
+    {
+        .id = EWindowEffectId::AetherSunder,
+        .name = "aether-sunder",
+        .displayName = "Aether Sunder",
+        .fragmentShaderAsset = "aether-sunder/aether-sunder.frag",
+        .openDurationSeconds = 0.78F,
+        .closeDurationSeconds = 0.78F,
         .reversible = true,
         .capabilities = kTexturedWindowCapabilities,
     },

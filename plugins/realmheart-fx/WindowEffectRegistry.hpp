@@ -7,6 +7,7 @@
 enum class EWindowEffectId : std::uint8_t {
     None,
     Void,
+    AetherSunder,
 };
 
 enum class EWindowEffectCapability : std::uint32_t {

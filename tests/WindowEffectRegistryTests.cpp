@@ -6,7 +6,7 @@
 
 int main() {
     const auto specs = windowEffectSpecs();
-    assert(specs.size() == 2);
+    assert(specs.size() == 3);
 
     const auto* none = findWindowEffect(EWindowEffectId::None);
     assert(none != nullptr);
@@ -28,6 +28,32 @@ int main() {
     assert(windowEffectSupports(*voidEffect, EWindowEffectCapability::ExternalTexture));
     assert(windowEffectSupports(*voidEffect, EWindowEffectCapability::RoundedSource));
 
+    const auto* aetherSunder = findWindowEffect(std::string_view{"aether-sunder"});
+    assert(aetherSunder != nullptr);
+    assert(aetherSunder->id == EWindowEffectId::AetherSunder);
+    assert(aetherSunder->displayName == "Aether Sunder");
+    assert(aetherSunder->fragmentShaderAsset == "aether-sunder/aether-sunder.frag");
+    assert(std::abs(aetherSunder->openDurationSeconds - 0.78F) < 0.0001F);
+    assert(std::abs(aetherSunder->closeDurationSeconds - 0.78F) < 0.0001F);
+    assert(aetherSunder->reversible);
+    assert(windowEffectSupports(
+        *aetherSunder,
+        EWindowEffectCapability::SourceTexture
+    ));
+    assert(windowEffectSupports(
+        *aetherSunder,
+        EWindowEffectCapability::Texture2D
+    ));
+    assert(windowEffectSupports(
+        *aetherSunder,
+        EWindowEffectCapability::ExternalTexture
+    ));
+    assert(windowEffectSupports(
+        *aetherSunder,
+        EWindowEffectCapability::RoundedSource
+    ));
+
+    assert(findWindowEffect(EWindowEffectId::AetherSunder) == aetherSunder);
     assert(findWindowEffect(std::string_view{"missing-effect"}) == nullptr);
     return 0;
 }

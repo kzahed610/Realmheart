@@ -11,6 +11,18 @@ void expectVoid(std::string_view windowClass) {
     assert(automaticCloseEffectForWindowClass(windowClass) == EWindowEffectId::Void);
 }
 
+void expectAetherSunder(std::string_view windowClass) {
+    assert(!automaticWindowClassIsExcluded(windowClass));
+    assert(
+        automaticOpenEffectForWindowClass(windowClass) ==
+        EWindowEffectId::AetherSunder
+    );
+    assert(
+        automaticCloseEffectForWindowClass(windowClass) ==
+        EWindowEffectId::AetherSunder
+    );
+}
+
 void expectExcluded(std::string_view windowClass) {
     assert(automaticWindowClassIsExcluded(windowClass));
     assert(automaticOpenEffectForWindowClass(windowClass) == EWindowEffectId::None);
@@ -20,8 +32,8 @@ void expectExcluded(std::string_view windowClass) {
 } // namespace
 
 int main() {
-    expectVoid("kitty");
-    expectVoid("Kitty");
+    expectAetherSunder("kitty");
+    expectAetherSunder("Kitty");
     expectVoid("org.kde.dolphin");
     expectVoid("org.kde.kate");
     expectVoid("ORG.KDE.KONSOLE");

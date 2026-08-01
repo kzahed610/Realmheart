@@ -8,15 +8,17 @@ content through the selected registered effect at `RENDER_POST_WINDOWS`, then
 restores or releases resources when the transition finishes or any safety check
 fails.
 
-The compositor backend currently registers `none` and `void`. Realmheart Void
-remains the only compiled visual effect; the registry exists so future shaders
-can be added without rewriting the render lifecycle.
+The compositor backend currently registers `none`, `void`, and
+`aether-sunder`. Realmheart Void remains the default effect. Aether Sunder is a
+second, deliberately simple shader used to prove that the same compositor
+lifecycle can compile, select, and play more than one visual effect.
 
 ## Automatic open and close policy
 
 Automatic lifecycle effects now use a default-allow policy for ordinary
 application windows. Any non-empty window class receives Realmheart Void unless
-it matches a conservative exclusion rule.
+it matches a conservative exclusion rule. Kitty is the first explicit override
+and receives Aether Sunder for both opening and closing.
 
 Current class exclusions cover:
 
@@ -77,6 +79,7 @@ hyprctl realmheart-fx auto-close off
 
 hyprctl realmheart-fx test
 hyprctl realmheart-fx test void
+hyprctl realmheart-fx test aether-sunder
 hyprctl realmheart-fx test none
 ```
 

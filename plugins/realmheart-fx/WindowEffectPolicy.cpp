@@ -127,9 +127,16 @@ bool matchesExclusion(
 EWindowEffectId automaticEffectForWindowClass(
     std::string_view windowClass
 ) noexcept {
-    return automaticWindowClassIsExcluded(windowClass)
-        ? EWindowEffectId::None
-        : EWindowEffectId::Void;
+    if (automaticWindowClassIsExcluded(windowClass))
+        return EWindowEffectId::None;
+
+    // The first per-application assignment proves that effect selection is
+    // independent from the compositor lifecycle. Every other eligible window
+    // keeps Realmheart Void while Kitty exercises the second registered effect.
+    if (asciiEqualIgnoreCase(windowClass, "kitty"))
+        return EWindowEffectId::AetherSunder;
+
+    return EWindowEffectId::Void;
 }
 
 } // namespace
