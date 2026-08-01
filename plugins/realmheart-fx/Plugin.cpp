@@ -5,6 +5,7 @@
 #define WLR_USE_UNSTABLE
 
 #include "RealmheartEffectPassElement.hpp"
+#include "WindowEffectConfig.hpp"
 #include "WindowEffectPolicy.hpp"
 #include "WindowEffectRegistry.hpp"
 
@@ -140,6 +141,9 @@ struct SPluginState {
     std::vector<SCompiledWindowEffect> effects;
     SRealmheartEffectShader sceneBlitShader;
     SWindowAnimation animation;
+    SWindowEffectConfig effectConfig = builtInWindowEffectConfig();
+    std::filesystem::path effectConfigPath;
+    std::string effectConfigStatus = "not loaded";
     bool automaticOpenEnabled = true;
     bool automaticCloseEnabled = true;
     wl_event_source* tick = nullptr;
@@ -166,6 +170,85 @@ void appendDiagnostic(const std::string& message) {
     std::ofstream stream(kDiagnosticLog, std::ios::app);
     if (stream)
         stream << message << '\n';
+}
+
+std::string reloadWindowEffectConfig(bool startup) {
+    if (!g_state)
+        return "error: plugin state is unavailable";
+
+    const auto requestedPath = defaultWindowEffectConfigPath();
+    g_state->effectConfigPath = requestedPath;
+
+    if (requestedPath.empty()) {
+        if (startup)
+            g_state->effectConfig = builtInWindowEffectConfig();
+        g_state->effectConfigStatus =
+            "built-in fallback: HOME and XDG_CONFIG_HOME are unavailable";
+        appendDiagnostic("window effect config: " + g_state->effectConfigStatus);
+        return startup ? "ok: " + g_state->effectConfigStatus
+                       : "error: " + g_state->effectConfigStatus;
+    }
+
+    std::error_code existsError;
+    const bool exists = std::filesystem::exists(requestedPath, existsError);
+    if (existsError) {
+        const std::string message =
+            "could not inspect " + requestedPath.string() + ": " +
+            existsError.message();
+        if (startup)
+            g_state->effectConfig = builtInWindowEffectConfig();
+        g_state->effectConfigStatus =
+            startup ? "built-in fallback: " + message : message;
+        appendDiagnostic("window effect config: " + g_state->effectConfigStatus);
+        return "error: " + message;
+    }
+
+    if (!exists) {
+        g_state->effectConfig = builtInWindowEffectConfig();
+        g_state->effectConfig.sourcePath = requestedPath;
+        g_state->effectConfigStatus =
+            "built-in fallback: config file does not exist";
+        const std::string summary = windowEffectConfigSummary(
+            g_state->effectConfig,
+            requestedPath
+        );
+        appendDiagnostic("window effect config: " + summary +
+                         " note=config file does not exist");
+        return "ok: " + summary;
+    }
+
+    auto loaded = loadWindowEffectConfig(requestedPath);
+    if (!loaded.success) {
+        if (startup) {
+            g_state->effectConfig = builtInWindowEffectConfig();
+            g_state->effectConfig.sourcePath = requestedPath;
+        }
+        g_state->effectConfigStatus =
+            (startup ? "built-in fallback after parse error: "
+                     : "reload rejected; previous config preserved: ") +
+            loaded.error;
+        appendDiagnostic("window effect config: " + g_state->effectConfigStatus);
+        return "error: " + loaded.error;
+    }
+
+    g_state->effectConfig = std::move(loaded.config);
+    g_state->effectConfigStatus = "loaded";
+    const std::string summary = windowEffectConfigSummary(
+        g_state->effectConfig,
+        requestedPath
+    );
+    appendDiagnostic("window effect config: " + summary);
+    return "ok: " + summary;
+}
+
+std::string currentWindowEffectConfigStatus() {
+    if (!g_state)
+        return "unavailable";
+
+    return windowEffectConfigSummary(
+        g_state->effectConfig,
+        g_state->effectConfigPath
+    ) + " status=" + g_state->effectConfigStatus;
 }
 
 class CRealmheartBackdropCapturePassElement final : public IPassElement {
@@ -1163,13 +1246,17 @@ void onWindowOpen(PHLWINDOW window) {
         return;
 
     const std::string_view windowClass = effectiveWindowClass(window);
-    const EWindowEffectId effectId = automaticOpenEffectForWindowClass(windowClass);
+    const EWindowEffectId effectId = automaticOpenEffectForWindow(
+        g_state->effectConfig,
+        windowClass,
+        window->m_title
+    );
     if (effectId == EWindowEffectId::None) {
         appendDiagnostic(
             "automatic open skipped: class=" + std::string(windowClass) +
             " liveClass=" + window->m_class +
             " initialClass=" + window->m_initialClass +
-            " reason=class is empty or explicitly excluded"
+            " reason=assignment resolved to none or class is excluded"
         );
         return;
     }
@@ -1583,13 +1670,17 @@ void onWindowClose(PHLWINDOW window) {
         return;
 
     const std::string_view windowClass = effectiveWindowClass(window);
-    const EWindowEffectId effectId = automaticCloseEffectForWindowClass(windowClass);
+    const EWindowEffectId effectId = automaticCloseEffectForWindow(
+        g_state->effectConfig,
+        windowClass,
+        window->m_title
+    );
     if (effectId == EWindowEffectId::None) {
         appendDiagnostic(
             "automatic close skipped: class=" + std::string(windowClass) +
             " liveClass=" + window->m_class +
             " initialClass=" + window->m_initialClass +
-            " reason=class is empty or explicitly excluded"
+            " reason=assignment resolved to none or class is excluded"
         );
         return;
     }
@@ -1695,6 +1786,20 @@ std::string controlCommand(eHyprCtlOutputFormat format, std::string request) {
         cancelAnimation("cancelled by user");
         return "ok";
     }
+    if (subcommand == "config") {
+        std::string action;
+        stream >> action;
+        if (action.empty() || action == "status")
+            return currentWindowEffectConfigStatus();
+        if (action == "path") {
+            if (!g_state || g_state->effectConfigPath.empty())
+                return "unavailable";
+            return g_state->effectConfigPath.string();
+        }
+        if (action == "reload")
+            return reloadWindowEffectConfig(false);
+        return "usage: realmheart-fx config status|path|reload";
+    }
     if (subcommand == "auto-open") {
         std::string action;
         stream >> action;
@@ -1739,7 +1844,8 @@ std::string controlCommand(eHyprCtlOutputFormat format, std::string request) {
     }
 
     return "usage: realmheart-fx test [effect]|status|cancel|"
-           "auto-open on|off|status|auto-close on|off|status";
+           "config status|path|reload|auto-open on|off|status|"
+           "auto-close on|off|status";
 }
 
 } // namespace
@@ -1767,6 +1873,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     g_state = makeUnique<SPluginState>();
     initialiseEffects();
+    (void)reloadWindowEffectConfig(true);
 
     auto& events = Event::bus()->m_events;
     g_listeners.push_back(events.window.open.listen(onWindowOpen));
@@ -1790,18 +1897,14 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         throw std::runtime_error("failed to create Realmheart FX frame timer");
     wl_event_source_timer_update(g_state->tick, 1);
 
-    appendDiagnostic(
-        "automatic open policy enabled: default=void kitty=aether-sunder"
-    );
-    appendDiagnostic(
-        "automatic close policy enabled: default=void kitty=aether-sunder"
-    );
+    appendDiagnostic("automatic open policy enabled");
+    appendDiagnostic("automatic close policy enabled");
 
     return {
         .name = "Realmheart FX",
         .description = "Realmheart transitions through Hyprland's visible render pass",
         .author = "Zahed; render-pass plumbing adapted from  hyprfx/xhos hyprfx",
-        .version = "0.7.0-multi-effect-engine",
+        .version = "0.8.0-toml-assignments",
     };
 }
 

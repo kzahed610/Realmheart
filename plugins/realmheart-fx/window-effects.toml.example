@@ -1,0 +1,35 @@
+# Realmheart FX assignment configuration.
+# Install as ~/.config/realmheart/window-effects.toml, then run:
+#   hyprctl realmheart-fx config reload
+
+[windows]
+# Defaults for every eligible ordinary application window.
+open = "void"
+close = "void"
+
+# Rules are evaluated from top to bottom. The first matching rule that assigns
+# the requested direction wins. Matching is case-insensitive.
+[[windows.rules]]
+class = "kitty"
+class_match = "exact"
+open = "aether-sunder"
+close = "aether-sunder"
+
+# Example: keep Firefox picture-in-picture windows animation-free while normal
+# Firefox windows continue to use the defaults above.
+# [[windows.rules]]
+# class = "firefox"
+# class_match = "exact"
+# title = "Picture-in-Picture"
+# title_match = "contains"
+# open = "none"
+# close = "none"
+
+# Supported registered effects:
+#   none
+#   void
+#   aether-sunder
+# Supported match modes:
+#   exact
+#   prefix
+#   contains

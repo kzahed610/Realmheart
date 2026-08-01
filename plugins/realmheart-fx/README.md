@@ -13,12 +13,62 @@ The compositor backend currently registers `none`, `void`, and
 second, deliberately simple shader used to prove that the same compositor
 lifecycle can compile, select, and play more than one visual effect.
 
+## TOML effect assignments
+
+Window effect assignment is loaded from:
+
+```text
+$XDG_CONFIG_HOME/realmheart/window-effects.toml
+```
+
+or, when `XDG_CONFIG_HOME` is unset:
+
+```text
+~/.config/realmheart/window-effects.toml
+```
+
+`REALMHEART_FX_CONFIG=/absolute/path.toml` can override the location. Missing
+configuration preserves the built-in policy: Realmheart Void for ordinary
+eligible windows and Aether Sunder for Kitty. An invalid startup file also falls
+back safely; an invalid manual reload preserves the previous valid policy.
+
+Example:
+
+```toml
+[windows]
+open = "void"
+close = "void"
+
+[[windows.rules]]
+class = "kitty"
+class_match = "exact"
+open = "aether-sunder"
+close = "aether-sunder"
+```
+
+Rules are evaluated top-to-bottom and matching is case-insensitive. A rule may
+match `class`, `title`, or both. `class_match` and `title_match` accept `exact`,
+`prefix`, or `contains`. A rule may assign only `open`, only `close`, or both.
+The registered effect name `none` disables that direction for matching windows.
+
+The parser intentionally supports this small, strict TOML assignment schema
+rather than arbitrary TOML values. Unknown tables, keys, match modes, or effect
+names reject the reload with a line-numbered error.
+
+Install the included baseline:
+
+```sh
+mkdir -p ~/.config/realmheart
+cp plugins/realmheart-fx/window-effects.toml.example \
+   ~/.config/realmheart/window-effects.toml
+hyprctl realmheart-fx config reload
+```
+
 ## Automatic open and close policy
 
-Automatic lifecycle effects now use a default-allow policy for ordinary
-application windows. Any non-empty window class receives Realmheart Void unless
-it matches a conservative exclusion rule. Kitty is the first explicit override
-and receives Aether Sunder for both opening and closing.
+Automatic lifecycle effects use a default-allow policy for ordinary application
+windows. The TOML defaults and ordered rules select the registered effect after
+the conservative safety exclusions are applied.
 
 Current class exclusions cover:
 
@@ -69,6 +119,10 @@ hardening milestone.
 hyprctl realmheart-fx status
 hyprctl realmheart-fx cancel
 
+hyprctl realmheart-fx config status
+hyprctl realmheart-fx config path
+hyprctl realmheart-fx config reload
+
 hyprctl realmheart-fx auto-open status
 hyprctl realmheart-fx auto-open on
 hyprctl realmheart-fx auto-open off
@@ -97,7 +151,8 @@ cat /tmp/realmheart-fx.log
 ```
 
 Automatic lifecycle transitions log whether they were armed, started,
-completed, or skipped for a safety reason.
+completed, or skipped for a safety reason. Configuration startup and reload
+results are logged with the active defaults, rule count, and source path.
 
 ## Licensing
 

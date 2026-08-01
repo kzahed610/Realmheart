@@ -5,61 +5,128 @@
 
 namespace {
 
-void expectVoid(std::string_view windowClass) {
+void expectEffects(
+    const SWindowEffectConfig& config,
+    std::string_view windowClass,
+    std::string_view windowTitle,
+    EWindowEffectId open,
+    EWindowEffectId close
+) {
     assert(!automaticWindowClassIsExcluded(windowClass));
-    assert(automaticOpenEffectForWindowClass(windowClass) == EWindowEffectId::Void);
-    assert(automaticCloseEffectForWindowClass(windowClass) == EWindowEffectId::Void);
+    assert(automaticOpenEffectForWindow(config, windowClass, windowTitle) == open);
+    assert(automaticCloseEffectForWindow(config, windowClass, windowTitle) == close);
 }
 
-void expectAetherSunder(std::string_view windowClass) {
-    assert(!automaticWindowClassIsExcluded(windowClass));
-    assert(
-        automaticOpenEffectForWindowClass(windowClass) ==
-        EWindowEffectId::AetherSunder
-    );
-    assert(
-        automaticCloseEffectForWindowClass(windowClass) ==
-        EWindowEffectId::AetherSunder
-    );
-}
-
-void expectExcluded(std::string_view windowClass) {
+void expectExcluded(
+    const SWindowEffectConfig& config,
+    std::string_view windowClass
+) {
     assert(automaticWindowClassIsExcluded(windowClass));
-    assert(automaticOpenEffectForWindowClass(windowClass) == EWindowEffectId::None);
-    assert(automaticCloseEffectForWindowClass(windowClass) == EWindowEffectId::None);
+    assert(
+        automaticOpenEffectForWindow(config, windowClass, "title") ==
+        EWindowEffectId::None
+    );
+    assert(
+        automaticCloseEffectForWindow(config, windowClass, "title") ==
+        EWindowEffectId::None
+    );
 }
 
 } // namespace
 
 int main() {
-    expectAetherSunder("kitty");
-    expectAetherSunder("Kitty");
-    expectVoid("org.kde.dolphin");
-    expectVoid("org.kde.kate");
-    expectVoid("ORG.KDE.KONSOLE");
-    expectVoid("firefox");
-    expectVoid("code");
-    expectVoid("discord");
-    expectVoid("com.github.wwmm.easyeffects");
+    const auto builtIn = builtInWindowEffectConfig();
+    expectEffects(
+        builtIn,
+        "kitty",
+        "fish",
+        EWindowEffectId::AetherSunder,
+        EWindowEffectId::AetherSunder
+    );
+    expectEffects(
+        builtIn,
+        "Kitty",
+        "fish",
+        EWindowEffectId::AetherSunder,
+        EWindowEffectId::AetherSunder
+    );
+    expectEffects(
+        builtIn,
+        "org.kde.dolphin",
+        "Downloads — Dolphin",
+        EWindowEffectId::Void,
+        EWindowEffectId::Void
+    );
+    expectEffects(
+        builtIn,
+        "org.kde.kate",
+        "notes.txt — Kate",
+        EWindowEffectId::Void,
+        EWindowEffectId::Void
+    );
 
-    expectExcluded("");
-    expectExcluded("realmheart");
-    expectExcluded("Realmheart-Launcher");
-    expectExcluded("hyprlock");
-    expectExcluded("Hyprlock-Surface");
-    expectExcluded("gamescope");
-    expectExcluded("gamescope-wl");
-    expectExcluded("steam_app_123456");
-    expectExcluded("STEAM_APP_987654");
-    expectExcluded("xdg-desktop-portal-gtk");
-    expectExcluded("org.freedesktop.impl.portal.desktop.kde");
-    expectExcluded("xwaylandvideobridge");
-    expectExcluded("org.kde.xwaylandvideobridge");
-    expectExcluded("org.kde.polkit-kde-authentication-agent-1");
-    expectExcluded("polkit-gnome-authentication-agent-1");
-    expectExcluded("pinentry-qt");
-    expectExcluded("ksshaskpass");
-    expectExcluded("gcr-prompter");
+    SWindowEffectConfig custom;
+    custom.defaultOpenEffect = EWindowEffectId::AetherSunder;
+    custom.defaultCloseEffect = EWindowEffectId::Void;
+    custom.rules = {
+        {
+            .windowClass = std::string{"org.kde."},
+            .classMatch = EWindowEffectTextMatch::Prefix,
+            .windowTitle = std::nullopt,
+            .titleMatch = EWindowEffectTextMatch::Contains,
+            .openEffect = EWindowEffectId::Void,
+            .closeEffect = EWindowEffectId::None,
+        },
+        {
+            .windowClass = std::nullopt,
+            .classMatch = EWindowEffectTextMatch::Exact,
+            .windowTitle = std::string{"Picture-in-Picture"},
+            .titleMatch = EWindowEffectTextMatch::Contains,
+            .openEffect = EWindowEffectId::None,
+            .closeEffect = EWindowEffectId::None,
+        },
+    };
+
+    expectEffects(
+        custom,
+        "org.kde.dolphin",
+        "Downloads — Dolphin",
+        EWindowEffectId::Void,
+        EWindowEffectId::None
+    );
+    expectEffects(
+        custom,
+        "firefox",
+        "Picture-in-Picture",
+        EWindowEffectId::None,
+        EWindowEffectId::None
+    );
+    expectEffects(
+        custom,
+        "firefox",
+        "Realmheart docs",
+        EWindowEffectId::AetherSunder,
+        EWindowEffectId::Void
+    );
+
+    expectExcluded(builtIn, "");
+    expectExcluded(builtIn, "realmheart");
+    expectExcluded(builtIn, "Realmheart-Launcher");
+    expectExcluded(builtIn, "hyprlock");
+    expectExcluded(builtIn, "Hyprlock-Surface");
+    expectExcluded(builtIn, "gamescope");
+    expectExcluded(builtIn, "gamescope-wl");
+    expectExcluded(builtIn, "steam_app_123456");
+    expectExcluded(builtIn, "STEAM_APP_987654");
+    expectExcluded(builtIn, "xdg-desktop-portal-gtk");
+    expectExcluded(builtIn, "org.freedesktop.impl.portal.desktop.kde");
+    expectExcluded(builtIn, "xwaylandvideobridge");
+    expectExcluded(builtIn, "org.kde.xwaylandvideobridge");
+    expectExcluded(builtIn, "org.kde.polkit-kde-authentication-agent-1");
+    expectExcluded(builtIn, "polkit-gnome-authentication-agent-1");
+    expectExcluded(builtIn, "pinentry-qt");
+    expectExcluded(builtIn, "ksshaskpass");
+    expectExcluded(builtIn, "gcr-prompter");
 
     return 0;
 }

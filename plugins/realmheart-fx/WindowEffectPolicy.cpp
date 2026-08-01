@@ -124,19 +124,58 @@ bool matchesExclusion(
     return false;
 }
 
-EWindowEffectId automaticEffectForWindowClass(
-    std::string_view windowClass
+bool matchesText(
+    std::string_view value,
+    std::string_view pattern,
+    EWindowEffectTextMatch match
+) noexcept {
+    switch (match) {
+        case EWindowEffectTextMatch::Exact:
+            return asciiEqualIgnoreCase(value, pattern);
+        case EWindowEffectTextMatch::Prefix:
+            return asciiStartsWithIgnoreCase(value, pattern);
+        case EWindowEffectTextMatch::Contains:
+            return asciiContainsIgnoreCase(value, pattern);
+    }
+
+    return false;
+}
+
+bool matchesRule(
+    const SWindowEffectRule& rule,
+    std::string_view windowClass,
+    std::string_view windowTitle
+) noexcept {
+    if (rule.windowClass &&
+        !matchesText(windowClass, *rule.windowClass, rule.classMatch)) {
+        return false;
+    }
+    if (rule.windowTitle &&
+        !matchesText(windowTitle, *rule.windowTitle, rule.titleMatch)) {
+        return false;
+    }
+    return true;
+}
+
+EWindowEffectId automaticEffectForWindow(
+    const SWindowEffectConfig& config,
+    std::string_view windowClass,
+    std::string_view windowTitle,
+    bool opening
 ) noexcept {
     if (automaticWindowClassIsExcluded(windowClass))
         return EWindowEffectId::None;
 
-    // The first per-application assignment proves that effect selection is
-    // independent from the compositor lifecycle. Every other eligible window
-    // keeps Realmheart Void while Kitty exercises the second registered effect.
-    if (asciiEqualIgnoreCase(windowClass, "kitty"))
-        return EWindowEffectId::AetherSunder;
+    for (const auto& rule : config.rules) {
+        if (!matchesRule(rule, windowClass, windowTitle))
+            continue;
 
-    return EWindowEffectId::Void;
+        const auto& assigned = opening ? rule.openEffect : rule.closeEffect;
+        if (assigned)
+            return *assigned;
+    }
+
+    return opening ? config.defaultOpenEffect : config.defaultCloseEffect;
 }
 
 } // namespace
@@ -153,14 +192,18 @@ bool automaticWindowClassIsExcluded(std::string_view windowClass) noexcept {
     return false;
 }
 
-EWindowEffectId automaticOpenEffectForWindowClass(
-    std::string_view windowClass
+EWindowEffectId automaticOpenEffectForWindow(
+    const SWindowEffectConfig& config,
+    std::string_view windowClass,
+    std::string_view windowTitle
 ) noexcept {
-    return automaticEffectForWindowClass(windowClass);
+    return automaticEffectForWindow(config, windowClass, windowTitle, true);
 }
 
-EWindowEffectId automaticCloseEffectForWindowClass(
-    std::string_view windowClass
+EWindowEffectId automaticCloseEffectForWindow(
+    const SWindowEffectConfig& config,
+    std::string_view windowClass,
+    std::string_view windowTitle
 ) noexcept {
-    return automaticEffectForWindowClass(windowClass);
+    return automaticEffectForWindow(config, windowClass, windowTitle, false);
 }

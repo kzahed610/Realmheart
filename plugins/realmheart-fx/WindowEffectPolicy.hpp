@@ -1,6 +1,6 @@
 #pragma once
 
-#include "WindowEffectRegistry.hpp"
+#include "WindowEffectConfig.hpp"
 
 #include <string_view>
 
@@ -8,10 +8,14 @@
     std::string_view windowClass
 ) noexcept;
 
-[[nodiscard]] EWindowEffectId automaticOpenEffectForWindowClass(
-    std::string_view windowClass
+[[nodiscard]] EWindowEffectId automaticOpenEffectForWindow(
+    const SWindowEffectConfig& config,
+    std::string_view windowClass,
+    std::string_view windowTitle
 ) noexcept;
 
-[[nodiscard]] EWindowEffectId automaticCloseEffectForWindowClass(
-    std::string_view windowClass
+[[nodiscard]] EWindowEffectId automaticCloseEffectForWindow(
+    const SWindowEffectConfig& config,
+    std::string_view windowClass,
+    std::string_view windowTitle
 ) noexcept;
