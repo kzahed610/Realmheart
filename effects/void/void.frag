@@ -55,18 +55,18 @@ void main() {
     vec2  uv = v_texcoord;
 
     vec4 windowColor = texture(tex, uv);
-    windowColor.a = 1.0;
+    float shapeMask = 1.0;
     if (radius > 0.0) {
         vec2 pixelPos = uv * resolution;
         float sd = roundedBoxSDF(pixelPos - resolution * 0.5, resolution * 0.5, radius);
-        windowColor.a *= 1.0 - smoothstep(-1.0, 1.0, sd);
+        shapeMask = 1.0 - smoothstep(-1.0, 1.0, sd);
     }
 
     // The open endpoint must be an exact copy of the source window. Without
     // this terminal frame, the radial SDF leaves a tiny transparent core at
     // r == 0 and the real window visibly snaps in one frame later.
     if (reverse > 0.5 && progress >= 1.0) {
-        fragColor = windowColor;
+        fragColor = windowColor * shapeMask;
         return;
     }
 
@@ -119,5 +119,7 @@ void main() {
 
     float a   = clamp(ovA + windowColor.a * (1.0 - ovA), 0.0, 1.0);
     vec3  rgb = ovC + windowColor.rgb * windowColor.a * (1.0 - ovA);
-    fragColor = vec4(min(rgb, vec3(1.5)), a);
+    // Clip the complete composed effect, including procedural smoke and stars,
+    // to Hyprland's rounded window silhouette.
+    fragColor = vec4(min(rgb, vec3(1.5)), a) * shapeMask;
 }

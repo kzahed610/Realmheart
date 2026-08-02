@@ -103,9 +103,28 @@ std::vector<UP<IPassElement>> CRealmheartEffectPassElement::draw() {
     glVertexAttribPointer(positionLocation, 2, GL_FLOAT, GL_FALSE, 0, positions);
     glEnableVertexAttribArray(positionLocation);
 
-    g_pHyprRenderer->m_renderData.damage.forEachRect([&](const auto& rectangle) {
+    g_pHyprRenderer->m_renderData.damage.forEachRect([&](const pixman_box32& rectangle) {
+        const double left = std::max(static_cast<double>(rectangle.x1), renderBox.x);
+        const double top = std::max(static_cast<double>(rectangle.y1), renderBox.y);
+        const double right = std::min(
+            static_cast<double>(rectangle.x2),
+            renderBox.x + renderBox.width
+        );
+        const double bottom = std::min(
+            static_cast<double>(rectangle.y2),
+            renderBox.y + renderBox.height
+        );
+        if (right <= left || bottom <= top)
+            return;
+
+        CBox targetDamage{
+            left,
+            top,
+            right - left,
+            bottom - top,
+        };
         g_pHyprOpenGL->scissor(
-            &rectangle,
+            targetDamage,
             g_pHyprRenderer->m_renderData.transformDamage
         );
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);

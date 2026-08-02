@@ -18,7 +18,7 @@ struct SWindowClassExclusion {
     EWindowClassMatch match = EWindowClassMatch::Exact;
 };
 
-constexpr std::array<SWindowClassExclusion, 11> kAutomaticExclusions{{
+constexpr std::array<SWindowClassExclusion, 12> kAutomaticExclusions{{
     {
         .pattern = "realmheart",
         .match = EWindowClassMatch::Prefix,
@@ -30,6 +30,13 @@ constexpr std::array<SWindowClassExclusion, 11> kAutomaticExclusions{{
     {
         .pattern = "gamescope",
         .match = EWindowClassMatch::Prefix,
+    },
+    {
+        // Swappy maps as a standalone floating toplevel rather than a transient
+        // dialog, but its late image/layout configure makes it unsuitable for
+        // Realmheart's target-hiding lifecycle. Let Hyprland animate it normally.
+        .pattern = "swappy",
+        .match = EWindowClassMatch::Exact,
     },
     {
         .pattern = "steam_app_",

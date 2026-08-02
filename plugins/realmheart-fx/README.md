@@ -138,9 +138,18 @@ hyprctl realmheart-fx config reload
 
 ## Automatic open and close policy
 
+> **Frozen-survivor replay build:** `0.10.9-frozen-survivor-replay`
+> retains the disappearing window and every surviving tiled window as independent
+> plugin-owned 2D textures before Hyprland sends the survivors their enlarged
+> post-close buffers. The resized live survivors are hidden while their frozen
+> pre-close pixels are replayed at the old boxes. Native reflow is revealed only
+> after the close effect completes. The abandoned custom `IFadeout` and
+> timer-driven rendering branch remains removed; drawing still occurs only
+> through Hyprland's normal render pass.
+
 Automatic lifecycle effects use a default-allow policy for ordinary application
-windows. The TOML defaults and ordered rules resolve a fixed effect or random effect pool
-after the conservative safety exclusions are applied.
+windows. The TOML defaults and ordered rules resolve a fixed effect or random
+effect pool after the conservative safety exclusions are applied.
 
 Current class exclusions cover:
 
@@ -148,6 +157,7 @@ Current class exclusions cover:
 Realmheart-owned windows
 Hyprlock
 Gamescope
+Swappy image-editor/viewer windows
 steam_app_* game windows
 XDG desktop portals
 XWaylandVideoBridge
@@ -155,41 +165,80 @@ Polkit/authentication agents
 Pinentry/askpass prompts
 ```
 
-Hyprland layer-shell surfaces do not enter the normal-window event path. The
-plugin additionally skips transient/dialog windows, fullscreen windows,
+Hyprland layer-shell surfaces do not enter the normal-window event path. Swappy
+is explicitly excluded because it maps as a normal floating toplevel while still
+performing a late image/layout configure; Realmheart therefore leaves both its
+opening and closing entirely to Hyprland's native animation. Other misclassified
+overlays can use a TOML rule assigning `open = "none"` and `close = "none"`.
+The plugin additionally skips transient/dialog windows, fullscreen windows,
 override-redirect windows, windows on invisible workspaces, and windows
 transitioning while another Realmheart effect is active. A skipped opening
 remains normally visible; a skipped close proceeds normally.
 
 An eligible opening window receives only the reconstruction/open half of its
-randomly or explicitly selected effect. The animation clock begins when a usable live texture reaches
-the render pass, not merely when the window-open event fires. If no texture is
-available within the safety timeout, the plugin immediately restores the real
-window.
+selected effect. The lifecycle now follows the target-only design used by
+/HyprFX: Realmheart suppresses the native target, waits only until the
+client has a usable coherent surface, and then samples that live surface texture
+and the current Hyprland render box on every frame. It does not freeze a geometry
+sample or hand a retained opening snapshot back to the live client. Late client
+configures therefore move or resize the effect and the real target together,
+and the terminal shader frame is already the same live texture and box that
+Hyprland reveals next.
 
-An eligible closing window receives only the consume/close half of its selected effect. Hyprland's
-last-frame snapshot is cropped into a plugin-owned texture before the effect
-begins. For a tiled close, Realmheart also snapshots the other tiled windows on
-the workspace before Hyprland removes the target from the layout. During the
-transition it redraws the complete retained old scene at its original geometry,
-including the compositor gaps between tiles. Once Void has fully consumed the
-closing window, Realmheart restores each surviving live window to its old tile
-geometry and reassigns Hyprland's already-calculated final geometry. Hyprland
-then performs the genuine tiled resize animation after the closing effect, rather
-than Realmheart stretching a frozen screenshot or cutting directly to the final
-layout. Every retained texture is released immediately when the transition
-completes or is cancelled.
+Realmheart sets a temporary `noAnim` override and finishes the already-armed
+Hyprland window animation when the opening event is accepted. The shader still
+receives the current compositor corner radius every frame, so opaque/RGBX
+buffers retain the same rounded silhouette while the native target is hidden.
+If a usable source never arrives within the safety timeout, Realmheart removes
+its overrides and reveals the window normally.
 
-Floating and stacked windows use a different close path: Realmheart draws only
-the retained closing-window texture over Hyprland's live post-window scene. It
-does not replay the tiled pre-window backdrop, so transparent areas in Void,
-Aether Sunder, and future effects reveal the actual window directly underneath
-instead of temporarily exposing the wallpaper.
+An eligible closing window receives only the consume/close half of its selected
+effect. During the unmap signal Realmheart copies the target's current
+`GL_TEXTURE_2D` surface into plugin-owned storage before that surface can be
+released or reused. It does not use `makeSnapshotFB()` for closing because that
+API can reflect the already-reflowed compositor scene rather than the
+disappearing target.
+
+For tiled closes, Realmheart copies each surviving tiled window's current
+surface before the layout reflow can replace it with a differently sized client
+buffer. At `RENDER_PRE_WINDOWS` it stores Hyprland's newly calculated final
+goals, holds the survivors at their old boxes, and alpha-hides the resized live
+clients. At `RENDER_POST_WINDOWS` the frozen survivor frames are replayed at
+their old rounded boxes beneath the disappearing target's effect. When the
+effect ends, the temporary hides are removed, the saved goals are reassigned,
+and Hyprland performs the real tiled reflow. Floating windows do not use this
+frozen-survivor path.
+
+The compositor lifecycle keeps these invariants:
+
+```text
+the close source belongs only to the disappearing target
+survivor pixels and layout remain visually frozen during the close effect
+resized live client buffers cannot leak through the retained scene
+Hyprland owns the eventual reflow animation
+```
+
+If the closing client exposes only an external texture that cannot be copied
+safely by this probe, Realmheart skips that close and leaves it to Hyprland.
 
 Only one compositor transition is allowed at a time. If several windows open or
 close nearly simultaneously, the first eligible transition animates and the
 others proceed normally. Concurrent transition support remains a separate
 hardening milestone.
+
+
+## Hyprland ABI compatibility
+
+Realmheart FX is compiled against Hyprland's internal plugin ABI and therefore
+must be rebuilt after a Hyprland update. The 0.56 port uses the public geometric
+accessors and animation handles plus `Fullscreen::controller()` for fullscreen
+state. Closing retains a strong reference to Hyprland's existing per-window rendered
+framebuffer texture; the backend never captures or reconstructs the workspace. Plugin startup still rejects a runtime
+compositor hash that differs from the headers used at build time.
+
+Do not reuse an older installed `realmheart-fx.so` after upgrading Hyprland.
+Build first, load through a fresh unique path, run the lifecycle regressions,
+and only then replace the canonical installed binary.
 
 ## Controls
 
@@ -207,6 +256,7 @@ hyprctl realmheart-fx auto-open on
 hyprctl realmheart-fx auto-open off
 
 hyprctl realmheart-fx auto-close status
+# Closing starts disabled; enable it only for a controlled regression test.
 hyprctl realmheart-fx auto-close on
 hyprctl realmheart-fx auto-close off
 
@@ -232,9 +282,14 @@ cat /tmp/realmheart-fx.log
 Automatic lifecycle transitions log whether they were armed, started,
 completed, or skipped for a safety reason. Plugin startup logs the discovered
 manifest count and IDs. Configuration startup and reload results are logged with
-the active defaults, rule count, and source path.
+the active defaults, rule count, and source path. Lifecycle logs identify
+whether a transition uses a `live-target` opening source or a
+`retained-target-snapshot` closing source, together with its current box and
+corner radius. No log entry should mention frozen windows, backdrop masks, or
+native reflow restarts in the target-only backend.
 
 ## Licensing
 
-The plugin is GPL-3.0-or-later. Render-pass plumbing is adapted from 
-hyprfx and xhos/hyprfx; see `ATTRIBUTION.md` and `LICENSE`.
+The plugin is GPL-3.0-or-later. Render-pass and target-only lifecycle ideas are
+adapted from  hyprfx, sandwichfarm/hyprfx, and xhos/hyprfx; see
+`ATTRIBUTION.md` and `LICENSE`.

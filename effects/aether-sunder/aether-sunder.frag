@@ -51,8 +51,8 @@ void main() {
     float drift = (bandRandom - 0.5) * 0.042 * pow(consume, 1.35);
     vec2 sampleUv = clamp(uv + vec2(drift, 0.0), vec2(0.0), vec2(1.0));
     vec4 source = texture(tex, sampleUv);
-    source.a = 1.0;
 
+    float shapeMask = 1.0;
     if (radius > 0.0) {
         vec2 pixelPos = uv * resolution;
         float sd = roundedBoxSDF(
@@ -60,12 +60,12 @@ void main() {
             resolution * 0.5,
             radius
         );
-        source.a *= 1.0 - smoothstep(-1.0, 1.0, sd);
+        shapeMask = 1.0 - smoothstep(-1.0, 1.0, sd);
     }
 
     // Hard terminal frames prevent a one-frame handoff snap in either direction.
     if (reverse > 0.5 && progress >= 1.0) {
-        fragColor = source;
+        fragColor = source * shapeMask;
         return;
     }
     if (reverse < 0.5 && progress >= 1.0) {
@@ -119,5 +119,7 @@ void main() {
     float edgeAlpha = frontGlow * endpointFade * source.a * 0.92;
     float alpha = max(source.a * visible, edgeAlpha);
 
-    fragColor = vec4(colour, alpha);
+    // Clip ribbons, fracture glow, and the sampled source together so no
+    // procedural pixels square off the compositor's rounded corners.
+    fragColor = vec4(colour, alpha) * shapeMask;
 }
