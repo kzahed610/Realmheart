@@ -1886,7 +1886,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "Realmheart FX",
         .description = "Realmheart target-only Hyprland window transitions",
         .author = "Zahed; lifecycle adapted from  hyprfx/sandwichfarm hyprfx/xhos hyprfx",
-        .version = "0.10.9-frozen-survivor-replay",
+        .version = "0.10.10-all-ordinary-windows",
     };
 }
 

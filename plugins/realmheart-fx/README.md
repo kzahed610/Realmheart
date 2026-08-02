@@ -138,7 +138,7 @@ hyprctl realmheart-fx config reload
 
 ## Automatic open and close policy
 
-> **Frozen-survivor replay build:** `0.10.9-frozen-survivor-replay`
+> **All-ordinary-windows build:** `0.10.10-all-ordinary-windows`
 > retains the disappearing window and every surviving tiled window as independent
 > plugin-owned 2D textures before Hyprland sends the survivors their enlarged
 > post-close buffers. The resized live survivors are hidden while their frozen
@@ -157,7 +157,6 @@ Current class exclusions cover:
 Realmheart-owned windows
 Hyprlock
 Gamescope
-Swappy image-editor/viewer windows
 steam_app_* game windows
 XDG desktop portals
 XWaylandVideoBridge
@@ -165,12 +164,12 @@ Polkit/authentication agents
 Pinentry/askpass prompts
 ```
 
-Hyprland layer-shell surfaces do not enter the normal-window event path. Swappy
-is explicitly excluded because it maps as a normal floating toplevel while still
-performing a late image/layout configure; Realmheart therefore leaves both its
-opening and closing entirely to Hyprland's native animation. Other misclassified
-overlays can use a TOML rule assigning `open = "none"` and `close = "none"`.
-The plugin additionally skips transient/dialog windows, fullscreen windows,
+Hyprland layer-shell surfaces do not enter the normal-window event path. Ordinary
+application toplevels, including Swappy, receive the configured Realmheart
+transitions. Applications with client-driven late geometry changes may visibly
+resize during their effect; users can opt individual classes out with a TOML rule
+assigning `open = "none"` and `close = "none"`. The plugin additionally skips
+transient/dialog windows, fullscreen windows,
 override-redirect windows, windows on invisible workspaces, and windows
 transitioning while another Realmheart effect is active. A skipped opening
 remains normally visible; a skipped close proceeds normally.

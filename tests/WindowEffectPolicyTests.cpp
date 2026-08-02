@@ -53,6 +53,13 @@ int main() {
         builtIn.defaultOpenEffects,
         builtIn.defaultCloseEffects
     );
+    expectPools(
+        builtIn,
+        "swappy",
+        "swappy",
+        builtIn.defaultOpenEffects,
+        builtIn.defaultCloseEffects
+    );
 
     SWindowEffectConfig custom;
     custom.defaultOpenEffects = {"aether-sunder", "void"};
@@ -112,8 +119,6 @@ int main() {
     expectExcluded(builtIn, "Hyprlock-Surface");
     expectExcluded(builtIn, "gamescope");
     expectExcluded(builtIn, "gamescope-wl");
-    expectExcluded(builtIn, "swappy");
-    expectExcluded(builtIn, "Swappy");
     expectExcluded(builtIn, "steam_app_123456");
     expectExcluded(builtIn, "STEAM_APP_987654");
     expectExcluded(builtIn, "xdg-desktop-portal-gtk");
