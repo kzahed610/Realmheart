@@ -1,0 +1,8 @@
+Realmheart Power Menu Export Audit
+=================================
+Generated: 2026-08-01T18:36:51
+Assets: 17
+Decoded 2x RGBA memory: 54.50 MiB
+Decoded 1x RGBA memory: 13.64 MiB
+
+Warnings: none

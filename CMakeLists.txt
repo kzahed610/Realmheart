@@ -400,6 +400,7 @@ if(BUILD_TESTING)
     )
     realmheart_register_test(realmheart_window_effect_policy_tests)
 
+
     add_executable(
         realmheart_shader_playback_tests
         tests/ShaderPlaybackTests.cpp

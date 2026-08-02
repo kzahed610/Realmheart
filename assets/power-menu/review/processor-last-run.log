@@ -1,0 +1,8 @@
+Realmheart power-menu assets generated successfully.
+  2x decoded RGBA total: 53.26 MiB
+  1x decoded RGBA total: 13.33 MiB
+  Manifest: /home/zahed/Realmheart/assets/power-menu/manifest.json
+  Contact sheet: /home/zahed/Realmheart/assets/power-menu/review/power-menu-assets-contact-sheet.png
+  Warnings:
+    - smoke-mana: non-transparent pixels touch the padded crop edge
+    - smoke-aether: non-transparent pixels touch the padded crop edge
