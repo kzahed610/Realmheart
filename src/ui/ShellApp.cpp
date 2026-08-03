@@ -28,6 +28,7 @@
 #include "ui/bar/VerticalBar.hpp"
 #include "ui/launcher/CommandReceiptOverlay.hpp"
 #include "ui/launcher/LauncherOverlay.hpp"
+#include "ui/powermenu/PowerMenuOverlay.hpp"
 #include "ui/sidebar/RightSidebar.hpp"
 #include "ui/sidebar/SidebarFrame.hpp"
 #include "ui/wallpaper/WallpaperBackend.hpp"
@@ -367,6 +368,7 @@ public:
 
         wallpaper_controller_.reset();
         launcher_overlay_.reset();
+        power_menu_.reset();
         command_receipts_.reset();
         notes_overlay_.reset();
         toast_.reset();
@@ -658,7 +660,8 @@ public:
     }
 
     void open_logout_menu() {
-        session_->logout_menu();
+        ensure_power_menu_initialized();
+        power_menu_->toggle();
     }
 
     void quit() {
@@ -1056,6 +1059,21 @@ private:
         }
     }
 
+    void ensure_power_menu_initialized() {
+        ensure_core_initialized();
+        if (power_menu_) return;
+        power_menu_ = std::make_unique<powermenu::PowerMenuOverlay>(
+            application_,
+            powermenu::PowerMenuActions{
+                .lock = [this] { return session_->lock(); },
+                .suspend = [this] { return session_->suspend(); },
+                .logout = [this] { return session_->logout(); },
+                .reboot = [this] { return session_->reboot(); },
+                .power_off = [this] { return session_->power_off(); },
+            }
+        );
+    }
+
     void ensure_core_initialized() {
         if (!theme_styles_) {
             theme_styles_ = std::make_unique<ThemeStyles>(theme_service_);
@@ -1088,7 +1106,8 @@ private:
                 *battery_,
                 *media_,
                 [this] { toggle_right_sidebar(); },
-                [this] { launch_launcher(); }
+                [this] { launch_launcher(); },
+                [this] { open_logout_menu(); }
             );
         }
         if (hotspot_ == nullptr) {
@@ -1339,6 +1358,7 @@ private:
     bool sidebar_character_exit_complete_ = true;
     std::unique_ptr<CommandReceiptOverlay> command_receipts_;
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
+    std::unique_ptr<powermenu::PowerMenuOverlay> power_menu_;
     std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;
 
     ShellState state_;

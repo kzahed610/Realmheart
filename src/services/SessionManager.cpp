@@ -9,8 +9,20 @@ bool SessionManager::lock() {
     return executor_->run_background({"hyprlock"});
 }
 
-bool SessionManager::logout_menu() {
-    return executor_->run_background({"wlogout"});
+bool SessionManager::suspend() {
+    return executor_->run_background({"systemctl", "suspend"});
+}
+
+bool SessionManager::logout() {
+    return executor_->run_background({"hyprctl", "dispatch", "exit"});
+}
+
+bool SessionManager::reboot() {
+    return executor_->run_background({"systemctl", "reboot"});
+}
+
+bool SessionManager::power_off() {
+    return executor_->run_background({"systemctl", "poweroff"});
 }
 
 bool SessionManager::is_locked() const {

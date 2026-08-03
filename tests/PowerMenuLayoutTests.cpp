@@ -1,0 +1,154 @@
+#include "ui/powermenu/PowerMenuLayout.hpp"
+
+#include <array>
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
+#include <string_view>
+
+namespace {
+
+using realmheart::ui::powermenu::PowerMenuAction;
+using realmheart::ui::powermenu::PowerMenuLayout;
+
+void require(bool condition, const char* message) {
+    if (condition) return;
+    std::cerr << "FAILED: " << message << '\n';
+    std::exit(1);
+}
+
+void require_near(double actual, double expected, const char* message) {
+    require(std::abs(actual - expected) < 0.01, message);
+}
+
+void test_uses_handcrafted_source_base() {
+    require(
+        realmheart::ui::powermenu::power_menu_background_asset() ==
+            std::string_view{"power-menu/source/power-menu-base.png"},
+        "runtime background must be the handcrafted source base"
+    );
+}
+
+void test_action_order_and_labels_match_reference() {
+    constexpr std::array expected{
+        PowerMenuAction::Lock,
+        PowerMenuAction::Suspend,
+        PowerMenuAction::Logout,
+        PowerMenuAction::Reboot,
+        PowerMenuAction::PowerOff,
+    };
+    constexpr std::array labels{
+        std::string_view{"LOCK"},
+        std::string_view{"SUSPEND"},
+        std::string_view{"LOG OUT"},
+        std::string_view{"RESTART"},
+        std::string_view{"SHUT DOWN"},
+    };
+
+    const auto buttons = realmheart::ui::powermenu::power_menu_buttons();
+    require(buttons.size() == expected.size(), "reference must have five actions");
+    for (std::size_t index = 0; index < buttons.size(); ++index) {
+        require(buttons[index].action == expected[index], "action order must match reference");
+        require(buttons[index].label == labels[index], "action label must match reference");
+    }
+}
+
+void test_design_geometry_scales_to_runtime_target() {
+    const PowerMenuLayout layout = realmheart::ui::powermenu::power_menu_layout(1920.0, 1080.0);
+
+    require_near(layout.scale, 0.8, "2400x1350 base must scale uniformly to 1920x1080");
+    require_near(layout.offset_x, 0.0, "16:9 target must not shift base horizontally");
+    require_near(layout.offset_y, 0.0, "16:9 target must not shift base vertically");
+
+    const auto& lock = layout.buttons[0].bounds;
+    require_near(lock.x, 744.0, "lock button x must match the measured reference crop");
+    require_near(lock.y, 332.8, "lock button y must match the measured reference crop");
+    require_near(lock.width, 432.0, "lock button width must match the measured reference crop");
+    require_near(lock.height, 73.6, "lock button height must match the measured reference crop");
+
+    const auto& power = layout.buttons[4].bounds;
+    require_near(power.x, 744.0, "shutdown must share the normal button x position");
+    require_near(power.y, 781.6, "shutdown must be compact until it is hovered");
+    require_near(power.width, 432.0, "shutdown must share the normal button width");
+    require_near(power.height, 73.6, "shutdown must share the normal button height");
+}
+
+void test_all_actions_share_one_normal_size() {
+    const auto& buttons = realmheart::ui::powermenu::power_menu_buttons();
+    const auto& normal = buttons.front().design_bounds;
+    for (const auto& button : buttons) {
+        require_near(
+            button.design_bounds.width,
+            normal.width,
+            "every resting action must use the same width"
+        );
+        require_near(
+            button.design_bounds.height,
+            normal.height,
+            "every resting action must use the same height"
+        );
+    }
+}
+
+void test_hover_state_expands_around_each_button_center() {
+    const PowerMenuLayout layout = realmheart::ui::powermenu::power_menu_layout(1920.0, 1080.0);
+    for (const auto& button : layout.buttons) {
+        const auto& normal = button.bounds;
+        const auto& hover = button.hover_bounds;
+        require_near(
+            hover.x + hover.width * 0.5,
+            normal.x + normal.width * 0.5,
+            "hover width must expand around the normal center"
+        );
+        require_near(
+            hover.y + hover.height * 0.5,
+            normal.y + normal.height * 0.5,
+            "hover height must expand around the normal center"
+        );
+        require_near(hover.width, 472.0, "hover width must match the measured reference state");
+        require_near(hover.height, 88.0, "hover height must match the measured reference state");
+    }
+
+    const auto& shutdown = layout.buttons.back();
+    require_near(shutdown.hover_bounds.x, 724.0, "shutdown hover must remain exactly centered");
+    require_near(shutdown.hover_bounds.y, 774.4, "shutdown hover y must match the reference");
+}
+
+void test_visual_state_selects_hover_bounds_only_while_expanded() {
+    const PowerMenuLayout layout = realmheart::ui::powermenu::power_menu_layout(1920.0, 1080.0);
+    const auto& shutdown = layout.buttons.back();
+    const auto& resting = realmheart::ui::powermenu::power_menu_button_bounds(shutdown, false);
+    const auto& hovered = realmheart::ui::powermenu::power_menu_button_bounds(shutdown, true);
+
+    require_near(resting.x, shutdown.bounds.x, "resting state must select compact bounds");
+    require_near(resting.width, shutdown.bounds.width, "resting state must remain compact");
+    require_near(hovered.x, shutdown.hover_bounds.x, "hover state must select expanded bounds");
+    require_near(hovered.width, shutdown.hover_bounds.width, "hover state must expand");
+}
+
+void test_ultrawide_surface_centers_base_and_controls_together() {
+    const PowerMenuLayout layout = realmheart::ui::powermenu::power_menu_layout(2560.0, 1080.0);
+
+    require_near(layout.scale, 2560.0 / 2400.0, "ultrawide cover scale must follow surface width");
+    require_near(layout.offset_x, 0.0, "ultrawide cover must fill the surface width");
+    require_near(layout.offset_y, -180.0, "ultrawide cover crop must remain vertically centered");
+    require_near(
+        layout.buttons[0].bounds.x,
+        930.0 * (2560.0 / 2400.0),
+        "controls must share the background cover transform"
+    );
+}
+
+} // namespace
+
+int main() {
+    test_uses_handcrafted_source_base();
+    test_action_order_and_labels_match_reference();
+    test_design_geometry_scales_to_runtime_target();
+    test_all_actions_share_one_normal_size();
+    test_hover_state_expands_around_each_button_center();
+    test_visual_state_selects_hover_bounds_only_while_expanded();
+    test_ultrawide_surface_centers_base_and_controls_together();
+    std::cout << "PowerMenuLayout tests passed\n";
+    return 0;
+}

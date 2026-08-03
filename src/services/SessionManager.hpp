@@ -32,7 +32,10 @@ public:
     explicit SessionManager(std::unique_ptr<ICommandExecutor> executor = std::make_unique<SystemCommandExecutor>());
     
     bool lock();
-    bool logout_menu();
+    bool suspend();
+    bool logout();
+    bool reboot();
+    bool power_off();
     bool is_locked() const;
 
 private:

@@ -31,7 +31,8 @@ public:
         services::BatteryService& battery_service,
         services::MediaService& media_service,
         std::function<void()> toggle_sidebar,
-        std::function<void()> launch_launcher
+        std::function<void()> launch_launcher,
+        std::function<void()> open_power_menu = {}
     );
     ~VerticalBar();
 
@@ -93,6 +94,7 @@ private:
     services::MediaService& media_service_;
     std::function<void()> toggle_sidebar_;
     std::function<void()> launch_launcher_;
+    std::function<void()> open_power_menu_;
     std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
     services::NotificationHistory::Subscription notification_subscription_;
     services::MediaService::Subscription media_subscription_;

@@ -167,6 +167,10 @@ add_library(realmheart_ui STATIC
     src/ui/NowPlayingOverlay.cpp
     src/ui/OSDOverlay.cpp
     src/ui/lockscreen/LockScreen.cpp
+    src/ui/powermenu/PowerMenuConfirmation.cpp
+    src/ui/powermenu/PowerMenuControls.cpp
+    src/ui/powermenu/PowerMenuLayout.cpp
+    src/ui/powermenu/PowerMenuOverlay.cpp
     src/ui/launcher/LauncherOverlay.cpp
     src/ui/launcher/CommandReceiptOverlay.cpp
     src/services/LauncherService.cpp
@@ -308,7 +312,11 @@ if(BUILD_TESTING)
 
     function(realmheart_configure_test target)
         target_include_directories(${target} PRIVATE src third_party)
-        target_compile_options(${target} PRIVATE ${REALMHEART_WARNING_FLAGS})
+        # Many of the lightweight tests use assert(). RelWithDebInfo/Release
+        # define NDEBUG globally, which would compile those assertions away and
+        # leave their sampled values unused under -Werror. Keep assertions live
+        # for test targets regardless of the runtime build type.
+        target_compile_options(${target} PRIVATE ${REALMHEART_WARNING_FLAGS} -UNDEBUG)
         target_link_libraries(${target} PRIVATE Threads::Threads)
     endfunction()
 
@@ -601,6 +609,20 @@ if(BUILD_TESTING)
 
     add_executable(realmheart_power_profiles_tests tests/PowerProfilesTests.cpp src/core/Command.cpp src/services/PowerProfiles.cpp)
     realmheart_register_test(realmheart_power_profiles_tests)
+
+    add_executable(
+        realmheart_power_menu_confirmation_tests
+        tests/PowerMenuConfirmationTests.cpp
+        src/ui/powermenu/PowerMenuConfirmation.cpp
+    )
+    realmheart_register_test(realmheart_power_menu_confirmation_tests)
+
+    add_executable(
+        realmheart_power_menu_layout_tests
+        tests/PowerMenuLayoutTests.cpp
+        src/ui/powermenu/PowerMenuLayout.cpp
+    )
+    realmheart_register_test(realmheart_power_menu_layout_tests)
 
     add_executable(realmheart_session_manager_tests tests/SessionManagerTests.cpp src/core/Command.cpp src/services/SessionManager.cpp)
     realmheart_register_test(realmheart_session_manager_tests)

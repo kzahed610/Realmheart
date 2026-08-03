@@ -58,13 +58,15 @@ VerticalBar::VerticalBar(
     services::BatteryService& battery_service,
     services::MediaService& media_service,
     std::function<void()> toggle_sidebar,
-    std::function<void()> launch_launcher
+    std::function<void()> launch_launcher,
+    std::function<void()> open_power_menu
 ) : app_(app),
     notification_history_(notification_history),
     battery_service_(battery_service),
     media_service_(media_service),
     toggle_sidebar_(std::move(toggle_sidebar)),
-    launch_launcher_(std::move(launch_launcher)) {
+    launch_launcher_(std::move(launch_launcher)),
+    open_power_menu_(std::move(open_power_menu)) {
     g_weak_ref_init(&active_popover_ref_, nullptr);
     window_ = gtk_application_window_new(app_);
     gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Aether Spine");
@@ -289,10 +291,10 @@ void VerticalBar::populate_widgets() {
     notification_button_->add_css_class("realmheart-notification-button");
 
     bottom_action_button_ = std::make_unique<widgets::BarIconButton>(
-        "Realmheart-Icons/arrow-clockwise.svg",
-        "Ac",
-        "Open right sidebar",
-        toggle_sidebar_
+        "Realmheart-Icons/power.svg",
+        "Pw",
+        "Open power menu",
+        open_power_menu_
     );
     bottom_action_button_->add_css_class("realmheart-bottom-action-button");
 
