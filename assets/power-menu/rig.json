@@ -1,0 +1,291 @@
+{
+  "version": 1,
+  "scene": "power-menu",
+  "logicalCanvas": [1200, 675],
+  "layers": [
+    {
+      "asset": "static-base",
+      "z": 0,
+      "animation": { "type": "static" }
+    },
+    {
+      "asset": "arthur-hair-back",
+      "z": 13,
+      "animation": {
+        "type": "mesh-flow",
+        "movementMask": "rig/arthur-hair-back-mask.png",
+        "flowMap": "rig/arthur-hair-back-flow.png",
+        "mesh": {
+          "stripAxis": "rows",
+          "stripCount": 20,
+          "anchorMode": "weighted-translate",
+          "direction": [-0.95, 0.30],
+          "amplitude": 4.0
+        },
+        "flow": {
+          "poseCount": 5,
+          "amplitude": 1.30,
+          "frequency": 0.18,
+          "phase": 0.00
+        },
+        "authoring": {
+          "rootZones": [
+            { "shape": "rect", "x": 0.12, "y": 0.00, "width": 0.58, "height": 0.12 },
+            { "shape": "rect", "x": 0.58, "y": 0.10, "width": 0.18, "height": 0.10 }
+          ],
+          "fallbackDirection": [-0.95, 0.30],
+          "fallbackStrength": 0.34,
+          "smoothingSigma": 2.6,
+          "confidenceBias": 0.08,
+          "movementGamma": 1.00
+        }
+      }
+    },
+    {
+      "asset": "arthur-hair-loose-01",
+      "z": 11,
+      "animation": {
+        "type": "spring",
+        "pivot": [0.78, 0.18],
+        "rotationDegrees": 1.1,
+        "translation": [0.8, 0.4],
+        "frequency": 0.24,
+        "damping": 0.82,
+        "phase": 0.40
+      }
+    },
+    {
+      "asset": "arthur-hair-loose-02",
+      "z": 12,
+      "animation": {
+        "type": "spring",
+        "pivot": [0.70, 0.12],
+        "rotationDegrees": 1.4,
+        "translation": [0.7, 0.5],
+        "frequency": 0.27,
+        "damping": 0.80,
+        "phase": 0.75
+      }
+    },
+    {
+      "asset": "arthur-rune-glow",
+      "z": 10,
+      "animation": {
+        "type": "glow-mask",
+        "tintRole": "mana-gold",
+        "idleMinimum": 0.12,
+        "idleMaximum": 0.30
+      }
+    },
+    {
+      "asset": "sylvie-hair-back",
+      "z": 25,
+      "animation": {
+        "type": "mesh-flow",
+        "movementMask": "rig/sylvie-hair-back-mask.png",
+        "flowMap": "rig/sylvie-hair-back-flow.png",
+        "mesh": {
+          "stripAxis": "rows",
+          "stripCount": 20,
+          "anchorMode": "weighted-translate",
+          "direction": [0.18, 0.98],
+          "amplitude": 4.0
+        },
+        "flow": {
+          "poseCount": 5,
+          "amplitude": 1.35,
+          "frequency": 0.20,
+          "phase": 0.20
+        },
+        "authoring": {
+          "rootZones": [
+            { "shape": "rect", "x": 0.24, "y": 0.00, "width": 0.44, "height": 0.12 }
+          ],
+          "fallbackDirection": [0.18, 0.98],
+          "fallbackStrength": 0.36,
+          "smoothingSigma": 2.8,
+          "confidenceBias": 0.08,
+          "movementGamma": 1.00
+        }
+      }
+    },
+    {
+      "asset": "sylvie-hair-side",
+      "z": 26,
+      "animation": {
+        "type": "mesh-flow",
+        "movementMask": "rig/sylvie-hair-side-mask.png",
+        "flowMap": "rig/sylvie-hair-side-flow.png",
+        "mesh": {
+          "stripAxis": "rows",
+          "stripCount": 18,
+          "anchorMode": "weighted-translate",
+          "direction": [0.24, 0.97],
+          "amplitude": 3.6
+        },
+        "flow": {
+          "poseCount": 5,
+          "amplitude": 1.15,
+          "frequency": 0.22,
+          "phase": 0.55
+        },
+        "authoring": {
+          "rootZones": [
+            { "shape": "rect", "x": 0.00, "y": 0.00, "width": 0.56, "height": 0.12 }
+          ],
+          "fallbackDirection": [0.24, 0.97],
+          "fallbackStrength": 0.42,
+          "smoothingSigma": 2.4,
+          "confidenceBias": 0.10,
+          "movementGamma": 1.05
+        }
+      }
+    },
+    {
+      "asset": "sylvie-hair-loose-01",
+      "z": 24,
+      "animation": {
+        "type": "spring",
+        "pivot": [0.42, 0.08],
+        "rotationDegrees": 1.4,
+        "translation": [0.6, 0.8],
+        "frequency": 0.21,
+        "damping": 0.84,
+        "phase": 0.15
+      }
+    },
+    {
+      "asset": "sylvie-hair-loose-02",
+      "z": 23,
+      "animation": {
+        "type": "spring",
+        "pivot": [0.40, 0.10],
+        "rotationDegrees": 1.7,
+        "translation": [0.7, 1.0],
+        "frequency": 0.25,
+        "damping": 0.82,
+        "phase": 0.62
+      }
+    },
+    {
+      "asset": "sylvie-eye-half-patch",
+      "z": 21,
+      "animation": { "type": "blink-patch", "state": "half" }
+    },
+    {
+      "asset": "sylvie-eye-closed-patch",
+      "z": 22,
+      "animation": { "type": "blink-patch", "state": "closed" }
+    },
+    {
+      "asset": "sylvie-iris-glow",
+      "z": 20,
+      "animation": {
+        "type": "glow-mask",
+        "tintRole": "iris-gold",
+        "idleMinimum": 0.18,
+        "idleMaximum": 0.34
+      }
+    },
+    {
+      "asset": "smoke-mana",
+      "z": 31,
+      "animation": {
+        "type": "flow-drift",
+        "movementMask": "rig/smoke-mana-mask.png",
+        "flowMap": "rig/smoke-mana-flow.png",
+        "poseCount": 5,
+        "translation": [3.0, -2.0],
+        "scaleAmplitude": 0.004,
+        "opacityAmplitude": 0.06,
+        "frequency": 0.11,
+        "phase": 0.00,
+        "authoring": {
+          "rootZones": [
+            { "shape": "rect", "x": 0.00, "y": 0.00, "width": 0.08, "height": 1.00 }
+          ],
+          "flowMode": "smoke-mana",
+          "fallbackDirection": [0.56, -0.83],
+          "curlStrength": 0.28,
+          "movementGamma": 0.90
+        }
+      }
+    },
+    {
+      "asset": "smoke-aether",
+      "z": 30,
+      "animation": {
+        "type": "flow-drift",
+        "movementMask": "rig/smoke-aether-mask.png",
+        "flowMap": "rig/smoke-aether-flow.png",
+        "poseCount": 5,
+        "translation": [-2.5, -2.0],
+        "scaleAmplitude": 0.005,
+        "opacityAmplitude": 0.07,
+        "frequency": 0.10,
+        "phase": 0.40,
+        "authoring": {
+          "rootZones": [
+            { "shape": "rect", "x": 0.92, "y": 0.00, "width": 0.08, "height": 1.00 }
+          ],
+          "flowMode": "smoke-aether",
+          "fallbackDirection": [-0.72, -0.69],
+          "curlStrength": 0.40,
+          "movementGamma": 0.92
+        }
+      }
+    },
+    {
+      "asset": "dust-far",
+      "z": 32,
+      "animation": {
+        "type": "drift",
+        "translation": [1.0, -0.6],
+        "opacityAmplitude": 0.04,
+        "frequency": 0.07,
+        "phase": 0.00
+      }
+    },
+    {
+      "asset": "dust-mid",
+      "z": 33,
+      "animation": {
+        "type": "drift",
+        "translation": [1.6, -0.9],
+        "opacityAmplitude": 0.05,
+        "frequency": 0.09,
+        "phase": 0.31
+      }
+    },
+    {
+      "asset": "dust-front",
+      "z": 34,
+      "animation": {
+        "type": "drift",
+        "translation": [2.2, -1.1],
+        "opacityAmplitude": 0.06,
+        "frequency": 0.11,
+        "phase": 0.58
+      }
+    }
+  ],
+  "blink": {
+    "halfAsset": "sylvie-eye-half-patch",
+    "closedAsset": "sylvie-eye-closed-patch",
+    "minimumIntervalSeconds": 3.5,
+    "maximumIntervalSeconds": 8.0,
+    "doubleBlinkChance": 0.12
+  },
+  "glows": {
+    "sylvie-iris-glow": {
+      "tintRole": "iris-gold",
+      "idleMinimum": 0.18,
+      "idleMaximum": 0.34
+    },
+    "arthur-rune-glow": {
+      "tintRole": "mana-gold",
+      "idleMinimum": 0.12,
+      "idleMaximum": 0.30
+    }
+  }
+}

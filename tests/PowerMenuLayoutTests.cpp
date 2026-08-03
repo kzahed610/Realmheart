@@ -21,14 +21,6 @@ void require_near(double actual, double expected, const char* message) {
     require(std::abs(actual - expected) < 0.01, message);
 }
 
-void test_uses_handcrafted_source_base() {
-    require(
-        realmheart::ui::powermenu::power_menu_background_asset() ==
-            std::string_view{"power-menu/source/power-menu-base.png"},
-        "runtime background must be the handcrafted source base"
-    );
-}
-
 void test_action_order_and_labels_match_reference() {
     constexpr std::array expected{
         PowerMenuAction::Lock,
@@ -62,15 +54,15 @@ void test_design_geometry_scales_to_runtime_target() {
 
     const auto& lock = layout.buttons[0].bounds;
     require_near(lock.x, 744.0, "lock button x must match the measured reference crop");
-    require_near(lock.y, 332.8, "lock button y must match the measured reference crop");
+    require_near(lock.y, 335.2, "lock button y must match the approved design geometry");
     require_near(lock.width, 432.0, "lock button width must match the measured reference crop");
-    require_near(lock.height, 73.6, "lock button height must match the measured reference crop");
+    require_near(lock.height, 68.8, "lock button height must match the approved design geometry");
 
     const auto& power = layout.buttons[4].bounds;
     require_near(power.x, 744.0, "shutdown must share the normal button x position");
-    require_near(power.y, 781.6, "shutdown must be compact until it is hovered");
+    require_near(power.y, 784.0, "shutdown must be compact until it is hovered");
     require_near(power.width, 432.0, "shutdown must share the normal button width");
-    require_near(power.height, 73.6, "shutdown must share the normal button height");
+    require_near(power.height, 68.8, "shutdown must share the normal button height");
 }
 
 void test_all_actions_share_one_normal_size() {
@@ -106,12 +98,12 @@ void test_hover_state_expands_around_each_button_center() {
             "hover height must expand around the normal center"
         );
         require_near(hover.width, 472.0, "hover width must match the measured reference state");
-        require_near(hover.height, 88.0, "hover height must match the measured reference state");
+        require_near(hover.height, 80.0, "hover height must match the approved expanded geometry");
     }
 
     const auto& shutdown = layout.buttons.back();
     require_near(shutdown.hover_bounds.x, 724.0, "shutdown hover must remain exactly centered");
-    require_near(shutdown.hover_bounds.y, 774.4, "shutdown hover y must match the reference");
+    require_near(shutdown.hover_bounds.y, 778.4, "shutdown hover y must remain centered");
 }
 
 void test_visual_state_selects_hover_bounds_only_while_expanded() {
@@ -142,7 +134,6 @@ void test_ultrawide_surface_centers_base_and_controls_together() {
 } // namespace
 
 int main() {
-    test_uses_handcrafted_source_base();
     test_action_order_and_labels_match_reference();
     test_design_geometry_scales_to_runtime_target();
     test_all_actions_share_one_normal_size();

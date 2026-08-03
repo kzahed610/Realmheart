@@ -170,6 +170,8 @@ add_library(realmheart_ui STATIC
     src/ui/powermenu/PowerMenuConfirmation.cpp
     src/ui/powermenu/PowerMenuControls.cpp
     src/ui/powermenu/PowerMenuLayout.cpp
+    src/ui/powermenu/PowerMenuManifest.cpp
+    src/ui/powermenu/PowerMenuScene.cpp
     src/ui/powermenu/PowerMenuOverlay.cpp
     src/ui/launcher/LauncherOverlay.cpp
     src/ui/launcher/CommandReceiptOverlay.cpp
@@ -623,6 +625,13 @@ if(BUILD_TESTING)
         src/ui/powermenu/PowerMenuLayout.cpp
     )
     realmheart_register_test(realmheart_power_menu_layout_tests)
+
+    add_executable(
+        realmheart_power_menu_manifest_tests
+        tests/PowerMenuManifestTests.cpp
+        src/ui/powermenu/PowerMenuManifest.cpp
+    )
+    realmheart_register_test(realmheart_power_menu_manifest_tests)
 
     add_executable(realmheart_session_manager_tests tests/SessionManagerTests.cpp src/core/Command.cpp src/services/SessionManager.cpp)
     realmheart_register_test(realmheart_session_manager_tests)

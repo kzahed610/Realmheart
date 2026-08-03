@@ -1,9 +1,8 @@
 #include "ui/powermenu/PowerMenuOverlay.hpp"
 
-#include "ui/AssetResolver.hpp"
 #include "ui/LayerSurface.hpp"
 #include "ui/powermenu/PowerMenuControls.hpp"
-#include "ui/powermenu/PowerMenuLayout.hpp"
+#include "ui/powermenu/PowerMenuScene.hpp"
 
 #include <gtk4-layer-shell/gtk4-layer-shell.h>
 
@@ -91,20 +90,8 @@ PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions
     gtk_widget_set_hexpand(root, TRUE);
     gtk_widget_set_vexpand(root, TRUE);
 
-    GtkWidget* picture = nullptr;
-    if (const auto path = resolve_project_asset(power_menu_background_asset())) {
-        picture = gtk_picture_new_for_filename(path->c_str());
-    } else {
-        std::cerr << "[PowerMenu] Crafted base asset could not be resolved: "
-                  << power_menu_background_asset() << '\n';
-        picture = gtk_picture_new();
-    }
-    gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_COVER);
-    gtk_picture_set_can_shrink(GTK_PICTURE(picture), TRUE);
-    gtk_widget_set_hexpand(picture, TRUE);
-    gtk_widget_set_vexpand(picture, TRUE);
-    gtk_widget_set_can_target(picture, FALSE);
-    gtk_overlay_set_child(GTK_OVERLAY(root), picture);
+    scene_ = std::make_unique<PowerMenuScene>();
+    gtk_overlay_set_child(GTK_OVERLAY(root), scene_->widget());
 
     controls_ = std::make_unique<PowerMenuControls>(
         [this](Action action) { activate(action); },

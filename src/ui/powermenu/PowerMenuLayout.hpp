@@ -36,10 +36,6 @@ struct PowerMenuLayout {
     std::array<PowerMenuButtonLayout, 5> buttons{};
 };
 
-[[nodiscard]] constexpr std::string_view power_menu_background_asset() {
-    return "power-menu/source/power-menu-base.png";
-}
-
 [[nodiscard]] const std::array<PowerMenuButtonDefinition, 5>& power_menu_buttons();
 [[nodiscard]] PowerMenuLayout power_menu_layout(double surface_width, double surface_height);
 [[nodiscard]] const PowerMenuRect& power_menu_button_bounds(

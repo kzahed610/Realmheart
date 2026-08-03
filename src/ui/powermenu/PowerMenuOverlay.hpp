@@ -17,6 +17,7 @@ struct PowerMenuActions {
 };
 
 class PowerMenuControls;
+class PowerMenuScene;
 
 class PowerMenuOverlay {
 public:
@@ -42,6 +43,7 @@ private:
     [[nodiscard]] bool advance_interaction_setup(GtkWidget* widget);
 
     GtkWindow* window_ = nullptr;
+    std::unique_ptr<PowerMenuScene> scene_;
     std::unique_ptr<PowerMenuControls> controls_;
     GtkWidget* confirmation_banner_ = nullptr;
     guint confirmation_timeout_id_ = 0;
