@@ -108,6 +108,15 @@ PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions
     gtk_widget_set_visible(confirmation_banner_, FALSE);
     gtk_overlay_add_overlay(GTK_OVERLAY(root), confirmation_banner_);
 
+    scene_->set_visibility_callback([this](double opacity) {
+        if (controls_ != nullptr) {
+            gtk_widget_set_opacity(controls_->widget(), opacity);
+        }
+        if (confirmation_banner_ != nullptr) {
+            gtk_widget_set_opacity(confirmation_banner_, opacity);
+        }
+    });
+
     if (GdkDisplay* display = gdk_display_get_default(); display != nullptr) {
         GtkCssProvider* provider = gtk_css_provider_new();
         gtk_css_provider_load_from_string(provider, R"CSS(
@@ -161,6 +170,10 @@ PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions
 PowerMenuOverlay::~PowerMenuOverlay() {
     cancel_interaction_setup();
     clear_confirmation();
+    if (scene_ != nullptr) {
+        scene_->set_visibility_callback({});
+        scene_->hide_immediately();
+    }
     if (window_ != nullptr) {
         gtk_window_destroy(window_);
         window_ = nullptr;
@@ -169,6 +182,7 @@ PowerMenuOverlay::~PowerMenuOverlay() {
 
 void PowerMenuOverlay::show() {
     clear_confirmation();
+    if (scene_ != nullptr) scene_->present();
     gtk_window_present(window_);
     schedule_interaction_setup();
 }
@@ -176,7 +190,15 @@ void PowerMenuOverlay::show() {
 void PowerMenuOverlay::hide() {
     cancel_interaction_setup();
     clear_confirmation();
-    gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
+    if (scene_ == nullptr) {
+        gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
+        return;
+    }
+    scene_->dismiss([this]() {
+        if (window_ != nullptr) {
+            gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
+        }
+    });
 }
 
 void PowerMenuOverlay::schedule_interaction_setup() {
@@ -243,6 +265,7 @@ void PowerMenuOverlay::activate(Action action) {
     }
 
     clear_confirmation();
+    if (scene_ != nullptr) scene_->hide_immediately();
     gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
     if (preview_mode_enabled()) {
         std::cerr << "[PowerMenu] Preview confirmation: " << action_name(action) << '\n';
@@ -263,6 +286,7 @@ void PowerMenuOverlay::activate(Action action) {
 }
 
 void PowerMenuOverlay::show_confirmation(Action action) {
+    if (scene_ != nullptr) scene_->set_confirming(true);
     controls_->set_armed(action);
     const std::string message = std::string{action_label(action)} +
         " ARMED — CLICK AGAIN NOW TO CONFIRM";
@@ -290,6 +314,7 @@ void PowerMenuOverlay::clear_confirmation() {
         confirmation_timeout_id_ = 0;
     }
     confirmation_.cancel();
+    if (scene_ != nullptr) scene_->set_confirming(false);
     if (controls_ != nullptr) controls_->set_armed(std::nullopt);
     if (confirmation_banner_ != nullptr) {
         gtk_widget_set_visible(confirmation_banner_, FALSE);

@@ -73,8 +73,9 @@
       "animation": {
         "type": "glow-mask",
         "tintRole": "mana-gold",
-        "idleMinimum": 0.12,
-        "idleMaximum": 0.30
+        "idleMinimum": 0.08,
+        "idleMaximum": 1.0,
+        "frequency": 0.52
       }
     },
     {
@@ -183,8 +184,9 @@
       "animation": {
         "type": "glow-mask",
         "tintRole": "iris-gold",
-        "idleMinimum": 0.18,
-        "idleMaximum": 0.34
+        "idleMinimum": 0.36,
+        "idleMaximum": 0.94,
+        "frequency": 0.24
       }
     },
     {
@@ -195,10 +197,10 @@
         "movementMask": "rig/smoke-mana-mask.png",
         "flowMap": "rig/smoke-mana-flow.png",
         "poseCount": 5,
-        "translation": [3.0, -2.0],
-        "scaleAmplitude": 0.004,
-        "opacityAmplitude": 0.06,
-        "frequency": 0.11,
+        "translation": [5.2, -3.4],
+        "scaleAmplitude": 0.011,
+        "opacityAmplitude": 0.13,
+        "frequency": 0.15,
         "phase": 0.00,
         "authoring": {
           "rootZones": [
@@ -219,10 +221,10 @@
         "movementMask": "rig/smoke-aether-mask.png",
         "flowMap": "rig/smoke-aether-flow.png",
         "poseCount": 5,
-        "translation": [-2.5, -2.0],
-        "scaleAmplitude": 0.005,
-        "opacityAmplitude": 0.07,
-        "frequency": 0.10,
+        "translation": [-4.8, -3.6],
+        "scaleAmplitude": 0.012,
+        "opacityAmplitude": 0.15,
+        "frequency": 0.14,
         "phase": 0.40,
         "authoring": {
           "rootZones": [
@@ -240,9 +242,9 @@
       "z": 32,
       "animation": {
         "type": "drift",
-        "translation": [1.0, -0.6],
-        "opacityAmplitude": 0.04,
-        "frequency": 0.07,
+        "translation": [4.0, -2.2],
+        "opacityAmplitude": 0.12,
+        "frequency": 0.14,
         "phase": 0.00
       }
     },
@@ -251,9 +253,9 @@
       "z": 33,
       "animation": {
         "type": "drift",
-        "translation": [1.6, -0.9],
-        "opacityAmplitude": 0.05,
-        "frequency": 0.09,
+        "translation": [6.0, -3.4],
+        "opacityAmplitude": 0.17,
+        "frequency": 0.18,
         "phase": 0.31
       }
     },
@@ -262,9 +264,9 @@
       "z": 34,
       "animation": {
         "type": "drift",
-        "translation": [2.2, -1.1],
-        "opacityAmplitude": 0.06,
-        "frequency": 0.11,
+        "translation": [8.0, -4.2],
+        "opacityAmplitude": 0.22,
+        "frequency": 0.23,
         "phase": 0.58
       }
     }
@@ -272,20 +274,23 @@
   "blink": {
     "halfAsset": "sylvie-eye-half-patch",
     "closedAsset": "sylvie-eye-closed-patch",
-    "minimumIntervalSeconds": 3.5,
-    "maximumIntervalSeconds": 8.0,
-    "doubleBlinkChance": 0.12
+    "minimumIntervalSeconds": 2.8,
+    "maximumIntervalSeconds": 6.0,
+    "doubleBlinkChance": 0.18,
+    "durationSeconds": 0.7
   },
   "glows": {
     "sylvie-iris-glow": {
       "tintRole": "iris-gold",
-      "idleMinimum": 0.18,
-      "idleMaximum": 0.34
+      "idleMinimum": 0.36,
+      "idleMaximum": 0.94,
+      "frequency": 0.24
     },
     "arthur-rune-glow": {
       "tintRole": "mana-gold",
-      "idleMinimum": 0.12,
-      "idleMaximum": 0.30
+      "idleMinimum": 0.08,
+      "idleMaximum": 1.0,
+      "frequency": 0.52
     }
   }
 }

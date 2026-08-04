@@ -126,6 +126,9 @@ add_library(realmheart_ui STATIC
     src/animation/character/CharacterHairMode.cpp
     src/animation/character/CharacterQualityPreset.cpp
     src/animation/character/CharacterManifest.cpp
+    src/animation/layered/DirectionalStripMesh.cpp
+    src/animation/layered/FlowWarp.cpp
+    src/animation/layered/SpringMotion.cpp
     src/animation/character/HairFlowWarp.cpp
     src/animation/character/HairMesh.cpp
     src/animation/character/CharacterCompositor.cpp
@@ -171,6 +174,7 @@ add_library(realmheart_ui STATIC
     src/ui/powermenu/PowerMenuControls.cpp
     src/ui/powermenu/PowerMenuLayout.cpp
     src/ui/powermenu/PowerMenuManifest.cpp
+    src/ui/powermenu/PowerMenuAnimator.cpp
     src/ui/powermenu/PowerMenuScene.cpp
     src/ui/powermenu/PowerMenuOverlay.cpp
     src/ui/launcher/LauncherOverlay.cpp
@@ -501,8 +505,30 @@ if(BUILD_TESTING)
         realmheart_hair_flow_warp_tests
         tests/HairFlowWarpTests.cpp
         src/animation/character/HairFlowWarp.cpp
+        src/animation/layered/FlowWarp.cpp
     )
     realmheart_register_test(realmheart_hair_flow_warp_tests)
+
+    add_executable(
+        realmheart_layered_flow_warp_tests
+        tests/LayeredFlowWarpTests.cpp
+        src/animation/layered/FlowWarp.cpp
+    )
+    realmheart_register_test(realmheart_layered_flow_warp_tests)
+
+    add_executable(
+        realmheart_directional_strip_mesh_tests
+        tests/DirectionalStripMeshTests.cpp
+        src/animation/layered/DirectionalStripMesh.cpp
+    )
+    realmheart_register_test(realmheart_directional_strip_mesh_tests)
+
+    add_executable(
+        realmheart_spring_motion_tests
+        tests/SpringMotionTests.cpp
+        src/animation/layered/SpringMotion.cpp
+    )
+    realmheart_register_test(realmheart_spring_motion_tests)
 
     add_executable(
         realmheart_character_manifest_tests
@@ -631,7 +657,17 @@ if(BUILD_TESTING)
         tests/PowerMenuManifestTests.cpp
         src/ui/powermenu/PowerMenuManifest.cpp
     )
+    target_compile_definitions(realmheart_power_menu_manifest_tests PRIVATE
+        REALMHEART_TEST_POWER_MENU_ROOT="${CMAKE_SOURCE_DIR}/assets/power-menu"
+    )
     realmheart_register_test(realmheart_power_menu_manifest_tests)
+
+    add_executable(
+        realmheart_power_menu_animator_tests
+        tests/PowerMenuAnimatorTests.cpp
+        src/ui/powermenu/PowerMenuAnimator.cpp
+    )
+    realmheart_register_test(realmheart_power_menu_animator_tests)
 
     add_executable(realmheart_session_manager_tests tests/SessionManagerTests.cpp src/core/Command.cpp src/services/SessionManager.cpp)
     realmheart_register_test(realmheart_session_manager_tests)
