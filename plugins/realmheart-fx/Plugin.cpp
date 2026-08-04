@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -47,8 +48,17 @@ using namespace Render::GL;
 
 namespace {
 
-constexpr float kSourceWaitTimeoutSeconds = 1.20F;
+constexpr float kSourceWaitTimeoutSeconds = 2.00F;
+constexpr float kSlowToolkitSourceWaitTimeoutSeconds = 8.00F;
 constexpr float kPassWaitTimeoutSeconds = 0.60F;
+constexpr std::uint32_t kOpeningStableSourceFrames = 3;
+constexpr std::uint32_t kPlasmaOpeningStableSourceFrames = 1;
+constexpr double kPlasmaMinimumOpeningTextureDimension = 32.0;
+constexpr float kOpeningGhostAlpha = 1.0F / 255.0F;
+constexpr float kMultiSurfaceOpeningSettleSeconds = 0.14F;
+constexpr double kNearFullSurfaceAreaRatio = 0.85;
+constexpr std::string_view kPlasmaSystemMonitorClass =
+    "org.kde.plasma-systemmonitor";
 constexpr float kAutomaticOpenDurationScale = 0.82F;
 constexpr float kAutomaticCloseDurationScale = 0.82F;
 constexpr const char* kDiagnosticLog = "/tmp/realmheart-fx.log";
@@ -183,6 +193,20 @@ struct SWindowAnimation {
     std::string windowClass;
     std::chrono::steady_clock::time_point armedTime{};
     std::chrono::steady_clock::time_point startTime{};
+    GLuint pendingSourceTexture = 0;
+    GLenum pendingSourceTarget = 0;
+    CBox pendingSourceBox{};
+    std::uint32_t pendingSourceFrames = 0;
+    std::uint32_t pendingSourceDepth = 0;
+    std::size_t pendingCandidateCount = 0;
+    std::uint32_t sourceSurfaceDepth = 0;
+    std::size_t sourceCandidateCount = 0;
+    GLuint observedSourceTexture = 0;
+    GLenum observedSourceTarget = 0;
+    Vector2D observedSourceSize{};
+    double observedAspectMismatch = std::numeric_limits<double>::infinity();
+    bool observedPendingSizeAck = false;
+    std::size_t observedPendingSizeAckCount = 0;
     bool active = false;
     bool started = false;
     bool sawPass = false;
@@ -499,13 +523,83 @@ SP<Render::ITexture> stateTexture(const SP<CWLSurfaceResource>& surface) {
     return nullptr;
 }
 
-SP<Render::ITexture> surfaceTexture(const PHLWINDOW& window) {
+struct SSurfaceTextureCandidate {
+    SP<Render::ITexture> texture;
+    std::uint32_t depth = 0;
+    double area = 0.0;
+    double aspectMismatch = std::numeric_limits<double>::infinity();
+};
+
+void collectSurfaceTextureCandidates(
+    const SP<CWLSurfaceResource>& surface,
+    std::uint32_t depth,
+    std::vector<SSurfaceTextureCandidate>& destination
+) {
+    if (!surface)
+        return;
+
+    if (const auto texture = stateTexture(surface);
+        texture && texture->m_texID != 0 && texture->m_size.x > 0.0 &&
+        texture->m_size.y > 0.0) {
+        destination.push_back({
+            .texture = texture,
+            .depth = depth,
+            .area = texture->m_size.x * texture->m_size.y,
+        });
+    }
+
+    for (auto& weakSubsurface : surface->m_subsurfaces) {
+        const auto subsurface = weakSubsurface.lock();
+        if (!subsurface || subsurface->m_surface.expired())
+            continue;
+        collectSurfaceTextureCandidates(
+            subsurface->m_surface.lock(),
+            depth + 1,
+            destination
+        );
+    }
+}
+
+double surfaceTextureAspectMismatch(
+    const SP<Render::ITexture>& texture,
+    const Vector2D& logicalSize
+) noexcept {
+    if (!texture || texture->m_size.x <= 0.0 || texture->m_size.y <= 0.0 ||
+        logicalSize.x <= 0.0 || logicalSize.y <= 0.0) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    const double widthProduct = texture->m_size.x * logicalSize.y;
+    const double heightProduct = texture->m_size.y * logicalSize.x;
+    const double denominator = std::max(
+        std::abs(widthProduct),
+        std::abs(heightProduct)
+    );
+    if (!std::isfinite(widthProduct) || !std::isfinite(heightProduct) ||
+        denominator <= 0.0) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    return std::abs(widthProduct - heightProduct) / denominator;
+}
+
+SP<Render::ITexture> surfaceTexture(
+    const PHLWINDOW& window,
+    std::uint32_t* selectedDepth = nullptr,
+    std::size_t* candidateCount = nullptr
+) {
     if (!window)
         return nullptr;
 
+    // Use the same authoritative surface root Hyprland's renderer uses.
+    // Protocol-specific pointers can lag during early map for Qt Quick clients,
+    // while wlSurface()->resource() already identifies the surface that
+    // renderWindow() traverses.
     SP<CWLSurfaceResource> surface;
+    if (window->wlSurface())
+        surface = window->wlSurface()->resource();
 
-    if (!window->m_xdgSurface.expired()) {
+    if (!surface && !window->m_xdgSurface.expired()) {
         const auto xdg = window->m_xdgSurface.lock();
         if (xdg && !xdg->m_surface.expired())
             surface = xdg->m_surface.lock();
@@ -520,26 +614,67 @@ SP<Render::ITexture> surfaceTexture(const PHLWINDOW& window) {
     if (!surface)
         return nullptr;
 
-    if (const auto texture = stateTexture(surface))
-        return texture;
+    std::vector<SSurfaceTextureCandidate> candidates;
+    collectSurfaceTextureCandidates(surface, 0, candidates);
+    if (candidateCount)
+        *candidateCount = candidates.size();
+    if (candidates.empty())
+        return nullptr;
 
-    SP<Render::ITexture> largest;
-    for (auto& weakSubsurface : surface->m_subsurfaces) {
-        const auto subsurface = weakSubsurface.lock();
-        if (!subsurface || subsurface->m_surface.expired())
+    const Vector2D logicalSize = window->size(
+        Desktop::View::IGeometric::GEOMETRIC_CURRENT
+    );
+    for (auto& candidate : candidates)
+        candidate.aspectMismatch = surfaceTextureAspectMismatch(
+            candidate.texture,
+            logicalSize
+        );
+
+    constexpr double kMaximumAspectMismatch = 0.006;
+    const bool hasCoherentCandidate = std::ranges::any_of(
+        candidates,
+        [](const SSurfaceTextureCandidate& candidate) {
+            return candidate.aspectMismatch <= kMaximumAspectMismatch;
+        }
+    );
+
+    double largestEligibleArea = 0.0;
+    for (const auto& candidate : candidates) {
+        if (hasCoherentCandidate &&
+            candidate.aspectMismatch > kMaximumAspectMismatch) {
             continue;
+        }
+        largestEligibleArea = std::max(largestEligibleArea, candidate.area);
+    }
 
-        const auto texture = stateTexture(subsurface->m_surface.lock());
-        if (!texture)
+    const SSurfaceTextureCandidate* best = nullptr;
+    for (const auto& candidate : candidates) {
+        if (hasCoherentCandidate &&
+            candidate.aspectMismatch > kMaximumAspectMismatch) {
             continue;
+        }
+        if (largestEligibleArea > 0.0 &&
+            candidate.area < largestEligibleArea * kNearFullSurfaceAreaRatio) {
+            continue;
+        }
 
-        if (!largest || texture->m_size.x * texture->m_size.y >
-                largest->m_size.x * largest->m_size.y) {
-            largest = texture;
+        if (!best || candidate.depth > best->depth ||
+            (candidate.depth == best->depth &&
+             candidate.aspectMismatch < best->aspectMismatch) ||
+            (candidate.depth == best->depth &&
+             candidate.aspectMismatch == best->aspectMismatch &&
+             candidate.area > best->area)) {
+            // Firefox/Zen can expose an almost-full-size blank root buffer while
+            // the real client content lives on a near-full-size child surface.
+            // Ignore small popup/video subsurfaces, but prefer the deepest
+            // coherent candidate when it covers most of the window.
+            best = &candidate;
         }
     }
 
-    return largest;
+    if (best && selectedDepth)
+        *selectedDepth = best->depth;
+    return best ? best->texture : nullptr;
 }
 
 GLenum textureTarget(const SP<Render::ITexture>& texture);
@@ -664,18 +799,24 @@ bool copySurfaceTexture(
 bool captureCloseFrame(
     const PHLWINDOW& window,
     SRetainedCloseFrame& destination,
-    std::string& reason
+    std::string& reason,
+    std::uint32_t* selectedDepth = nullptr,
+    std::size_t* candidateCount = nullptr
 ) {
     if (!window) {
         reason = "closing window is unavailable";
         return false;
     }
 
-    return copySurfaceTexture(surfaceTexture(window), destination, reason);
+    return copySurfaceTexture(
+        surfaceTexture(window, selectedDepth, candidateCount),
+        destination,
+        reason
+    );
 }
 
 std::string_view effectiveWindowClass(const PHLWINDOW& window) noexcept;
-void setWindowHidden(const PHLWINDOW& window);
+void setWindowHidden(const PHLWINDOW& window, float alpha = 0.0F);
 void clearWindowHidden(const PHLWINDOW& window);
 
 bool captureTiledReflowHold(
@@ -905,39 +1046,37 @@ bool textureGeometryCoherent(
     const PHLWINDOW& window,
     const SP<Render::ITexture>& texture
 ) noexcept {
-    if (!window || !texture || texture->m_size.x <= 0.0 || texture->m_size.y <= 0.0)
+    if (!window)
         return false;
-
-    const Vector2D logicalSize = window->size(
-        Desktop::View::IGeometric::GEOMETRIC_CURRENT
-    );
-    if (logicalSize.x <= 0.0 || logicalSize.y <= 0.0)
-        return false;
-
-    const double widthProduct = texture->m_size.x * logicalSize.y;
-    const double heightProduct = texture->m_size.y * logicalSize.x;
-    const double denominator = std::max(
-        std::abs(widthProduct),
-        std::abs(heightProduct)
-    );
-    if (!std::isfinite(widthProduct) || !std::isfinite(heightProduct) ||
-        denominator <= 0.0) {
-        return false;
-    }
 
     constexpr double kMaximumAspectMismatch = 0.006;
-    return std::abs(widthProduct - heightProduct) / denominator <=
-        kMaximumAspectMismatch;
+    return surfaceTextureAspectMismatch(
+        texture,
+        window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT)
+    ) <= kMaximumAspectMismatch;
 }
 
 bool openingSourceReady(
     const PHLWINDOW& window,
     const SP<Render::ITexture>& texture,
-    GLenum target
+    GLenum target,
+    bool relaxedToolkitReadiness
 ) noexcept {
     if (!window || !window->m_isMapped || !texture || texture->m_texID == 0 ||
         target == 0 || !validBox(currentWindowRenderBox(window))) {
         return false;
+    }
+
+    if (relaxedToolkitReadiness) {
+        // Plasma System Monitor can publish its first usable Qt Quick buffer
+        // before configure bookkeeping and decorated-window aspect converge.
+        // Waiting for those later states only adds a visible blank pause. The
+        // authoritative wlSurface texture is sufficient once it is non-trivial;
+        // the opening effect samples it live on every following compositor frame.
+        return std::isfinite(texture->m_size.x) &&
+            std::isfinite(texture->m_size.y) &&
+            texture->m_size.x >= kPlasmaMinimumOpeningTextureDimension &&
+            texture->m_size.y >= kPlasmaMinimumOpeningTextureDimension;
     }
 
     // Only reject the known half-configured state. Once playback starts, the
@@ -956,12 +1095,12 @@ void applyAlphaNow(const PHLWINDOW& window) {
     alpha->setValueAndWarp(alpha->goal());
 }
 
-void setWindowHidden(const PHLWINDOW& window) {
+void setWindowHidden(const PHLWINDOW& window, float alpha) {
     if (!window || !window->m_ruleApplicator)
         return;
 
     const auto hidden = Desktop::Types::SAlphaValue{
-        .alpha = 0.0F,
+        .alpha = std::clamp(alpha, 0.0F, 1.0F),
         .overridden = true,
     };
 
@@ -1257,7 +1396,11 @@ void onWindowOpen(PHLWINDOW window) {
     // target, and sample its live surface plus current geometry on every frame.
     window->finishAnimation();
     settleWorkspaceReflowForOpening(window);
-    setWindowHidden(window);
+    // Exact zero alpha makes Hyprland cull renderWindow entirely. Some
+    // multi-surface clients then do not submit their real content until they are
+    // revealed. Keep the target at one 8-bit alpha step: visually imperceptible,
+    // but still rendered so frame callbacks and subsurface commits continue.
+    setWindowHidden(window, kOpeningGhostAlpha);
 
     const auto now = std::chrono::steady_clock::now();
     g_state->animation = {
@@ -1280,7 +1423,8 @@ void onWindowOpen(PHLWINDOW window) {
     appendDiagnostic(
         "automatic open armed: effect=" + std::string(effect->name) +
         " class=" + std::string(windowClass) + " title=" + window->m_title +
-        " source=live-target"
+        " source=live-target ghostAlpha=" +
+        std::to_string(kOpeningGhostAlpha)
     );
     damageExpandedBox(g_state->animation.box);
 }
@@ -1335,19 +1479,96 @@ void onRenderStage(eRenderStage stage) {
         if (currentMonitor && currentMonitor != liveMonitor)
             return;
 
-        liveTexture = surfaceTexture(window);
+        liveTexture = surfaceTexture(
+            window,
+            &animation.sourceSurfaceDepth,
+            &animation.sourceCandidateCount
+        );
         target = textureTarget(liveTexture);
+        animation.observedSourceTexture =
+            liveTexture ? liveTexture->m_texID : 0;
+        animation.observedSourceTarget = target;
+        animation.observedSourceSize =
+            liveTexture ? liveTexture->m_size : Vector2D{};
+        animation.observedAspectMismatch = surfaceTextureAspectMismatch(
+            liveTexture,
+            window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT)
+        );
+        animation.observedPendingSizeAck =
+            window->m_pendingSizeAck.has_value();
+        animation.observedPendingSizeAckCount =
+            window->m_pendingSizeAcks.size();
+
+        const CBox previousBox = animation.box;
+        effectBox = currentWindowRenderBox(window);
+
         if (animation.mode == EWindowAnimationMode::AutomaticOpen &&
-            !animation.started && !openingSourceReady(window, liveTexture, target)) {
-            return;
+            !animation.started) {
+            const float armedElapsed = std::chrono::duration<float>(
+                std::chrono::steady_clock::now() - animation.armedTime
+            ).count();
+
+            // Multi-surface toolkits can publish a placeholder root before the
+            // near-full-size child that contains the real application UI. Give
+            // that surface tree a short bounded settle window before locking the
+            // source. Single-surface clients retain the existing fast path.
+            if (animation.sourceCandidateCount > 1 &&
+                armedElapsed < kMultiSurfaceOpeningSettleSeconds) {
+                animation.pendingSourceTexture = 0;
+                animation.pendingSourceTarget = 0;
+                animation.pendingSourceBox = {};
+                animation.pendingSourceFrames = 0;
+                animation.pendingSourceDepth = 0;
+                animation.pendingCandidateCount = 0;
+                return;
+            }
+
+            const bool relaxedToolkitReadiness =
+                animation.windowClass == kPlasmaSystemMonitorClass;
+            if (!openingSourceReady(
+                    window,
+                    liveTexture,
+                    target,
+                    relaxedToolkitReadiness
+                )) {
+                animation.pendingSourceTexture = 0;
+                animation.pendingSourceTarget = 0;
+                animation.pendingSourceBox = {};
+                animation.pendingSourceFrames = 0;
+                animation.pendingSourceDepth = 0;
+                animation.pendingCandidateCount = 0;
+                return;
+            }
+
+            const bool sameCandidate =
+                animation.pendingSourceTexture == liveTexture->m_texID &&
+                animation.pendingSourceTarget == target &&
+                animation.pendingSourceDepth == animation.sourceSurfaceDepth &&
+                animation.pendingCandidateCount == animation.sourceCandidateCount &&
+                boxesEquivalent(animation.pendingSourceBox, effectBox);
+            if (sameCandidate) {
+                ++animation.pendingSourceFrames;
+            } else {
+                animation.pendingSourceTexture = liveTexture->m_texID;
+                animation.pendingSourceTarget = target;
+                animation.pendingSourceBox = effectBox;
+                animation.pendingSourceFrames = 1;
+                animation.pendingSourceDepth = animation.sourceSurfaceDepth;
+                animation.pendingCandidateCount = animation.sourceCandidateCount;
+            }
+
+            const std::uint32_t requiredStableFrames =
+                relaxedToolkitReadiness
+                ? kPlasmaOpeningStableSourceFrames
+                : kOpeningStableSourceFrames;
+            if (animation.pendingSourceFrames < requiredStableFrames)
+                return;
         }
 
         if (!liveTexture || liveTexture->m_texID == 0 || target == 0)
             return;
         sourceTextureId = liveTexture->m_texID;
 
-        const CBox previousBox = animation.box;
-        effectBox = currentWindowRenderBox(window);
         rounding = window->rounding();
         animation.monitor = liveMonitor;
         animation.box = effectBox;
@@ -1382,7 +1603,23 @@ void onRenderStage(eRenderStage stage) {
             std::to_string(static_cast<int>(effectBox.height)) +
             " pos=" + std::to_string(static_cast<int>(effectBox.x)) + "," +
             std::to_string(static_cast<int>(effectBox.y)) +
-            " rounding=" + std::to_string(rounding)
+            " rounding=" + std::to_string(rounding) +
+            (animation.mode == EWindowAnimationMode::AutomaticOpen
+                 ? " stableFrames=" +
+                       std::to_string(animation.pendingSourceFrames)
+                 : "") +
+            " surfaceDepth=" +
+            std::to_string(animation.sourceSurfaceDepth) +
+            " surfaceCandidates=" +
+            std::to_string(animation.sourceCandidateCount) +
+            (animation.mode == EWindowAnimationMode::AutomaticOpen
+                 ? " armedToStartMs=" +
+                       std::to_string(static_cast<int>(
+                           std::chrono::duration_cast<std::chrono::milliseconds>(
+                               animation.startTime - animation.armedTime
+                           ).count()
+                       ))
+                 : "")
         );
     }
 
@@ -1545,7 +1782,32 @@ int onTick(void* data) {
         ).count();
 
         if (!animation.started) {
-            if (armedElapsed >= kSourceWaitTimeoutSeconds) {
+            const float sourceWaitTimeout =
+                animation.windowClass == kPlasmaSystemMonitorClass
+                ? kSlowToolkitSourceWaitTimeoutSeconds
+                : kSourceWaitTimeoutSeconds;
+            if (armedElapsed >= sourceWaitTimeout) {
+                appendDiagnostic(
+                    "opening source timeout: class=" + animation.windowClass +
+                    " texture=" +
+                    std::to_string(animation.observedSourceTexture) +
+                    " target=" +
+                    std::to_string(animation.observedSourceTarget) +
+                    " textureSize=" +
+                    std::to_string(static_cast<int>(animation.observedSourceSize.x)) +
+                    "x" +
+                    std::to_string(static_cast<int>(animation.observedSourceSize.y)) +
+                    " aspectMismatch=" +
+                    std::to_string(animation.observedAspectMismatch) +
+                    " pendingSizeAck=" +
+                    std::string(animation.observedPendingSizeAck ? "yes" : "no") +
+                    " pendingSizeAcks=" +
+                    std::to_string(animation.observedPendingSizeAckCount) +
+                    " surfaceDepth=" +
+                    std::to_string(animation.sourceSurfaceDepth) +
+                    " surfaceCandidates=" +
+                    std::to_string(animation.sourceCandidateCount)
+                );
                 cancelAnimation("no usable target texture reached the render pass");
             } else if (closing) {
                 damageExpandedBox(animation.box);
@@ -1662,7 +1924,15 @@ void onWindowClose(PHLWINDOW window) {
     }
 
     SRetainedCloseFrame closeFrame;
-    if (!captureCloseFrame(window, closeFrame, reason)) {
+    std::uint32_t closeSurfaceDepth = 0;
+    std::size_t closeSurfaceCandidates = 0;
+    if (!captureCloseFrame(
+            window,
+            closeFrame,
+            reason,
+            &closeSurfaceDepth,
+            &closeSurfaceCandidates
+        )) {
         appendDiagnostic(
             "automatic close skipped: class=" + std::string(windowClass) +
             " reason=owned closing snapshot failed: " + reason
@@ -1705,6 +1975,8 @@ void onWindowClose(PHLWINDOW window) {
         .windowClass = std::string(windowClass),
         .armedTime = now,
         .startTime = now,
+        .sourceSurfaceDepth = closeSurfaceDepth,
+        .sourceCandidateCount = closeSurfaceCandidates,
         .active = true,
         .started = true,
         .sawPass = false,
@@ -1719,7 +1991,9 @@ void onWindowClose(PHLWINDOW window) {
         std::to_string(static_cast<int>(closingBox.width)) + "x" +
         std::to_string(static_cast<int>(closingBox.height)) +
         " heldWindows=" +
-        std::to_string(g_state->animation.heldReflowWindows.size())
+        std::to_string(g_state->animation.heldReflowWindows.size()) +
+        " surfaceDepth=" + std::to_string(closeSurfaceDepth) +
+        " surfaceCandidates=" + std::to_string(closeSurfaceCandidates)
     );
     damageExpandedBox(closingBox);
 }
@@ -1886,7 +2160,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "Realmheart FX",
         .description = "Realmheart target-only Hyprland window transitions",
         .author = "Zahed; lifecycle adapted from  hyprfx/sandwichfarm hyprfx/xhos hyprfx",
-        .version = "0.10.10-all-ordinary-windows",
+        .version = "0.10.14-plasma-fast-open",
     };
 }
 
