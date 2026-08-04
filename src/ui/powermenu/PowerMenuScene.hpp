@@ -1,16 +1,12 @@
 #pragma once
 
-#include "animation/layered/DirectionalStripMesh.hpp"
-#include "ui/powermenu/PowerMenuAnimator.hpp"
-#include "ui/powermenu/PowerMenuManifest.hpp"
+#include "ui/powermenu/PowerMenuVideoState.hpp"
 
 #include <gtk/gtk.h>
 
+#include <filesystem>
 #include <functional>
-#include <memory>
-#include <optional>
 #include <string>
-#include <vector>
 
 namespace realmheart::ui::powermenu {
 
@@ -29,47 +25,40 @@ public:
     void present();
     void dismiss(std::function<void()> on_hidden);
     void hide_immediately();
-    void set_confirming(bool confirming);
 
 private:
-    struct LoadedLayer {
-        std::string name;
-        GdkTexture* texture = nullptr;
-        std::vector<GdkTexture*> flow_poses;
-        std::optional<animation::layered::DirectionalStripMesh> mesh;
-        PowerMenuAnimationRig animation;
-        PowerMenuPlacement placement;
-        double flow_minimum = 0.0;
-        double flow_maximum = 0.0;
-        std::size_t decoded_bytes = 0;
-    };
-
-    static void snapshot_callback(
-        GtkWidget* widget,
-        GtkSnapshot* snapshot,
+    static gboolean timer_callback(gpointer user_data);
+    static void stream_notify_callback(
+        GObject* object,
+        GParamSpec* parameter,
         gpointer user_data
     );
-    static gboolean timer_callback(gpointer user_data);
 
-    bool load();
-    void snapshot(GtkWidget* widget, GtkSnapshot* snapshot) const;
+    void begin_poster_prewarm();
+    void acquire_media();
+    void release_media() noexcept;
+    void release_poster_stream() noexcept;
+    void handle_stream_notify(GtkMediaStream* stream);
+    bool capture_poster(GtkMediaStream* stream);
     gboolean on_timer();
     void ensure_tick();
     void stop_tick();
+    void apply_frame();
     void publish_visibility();
-    void release_layers() noexcept;
 
     GtkWidget* widget_ = nullptr;
-    std::optional<PowerMenuManifest> manifest_;
-    std::optional<PowerMenuRig> rig_;
-    std::unique_ptr<PowerMenuAnimator> animator_;
-    std::vector<LoadedLayer> layers_;
+    GtkWidget* poster_picture_ = nullptr;
+    GtkWidget* video_widget_ = nullptr;
+    GdkTexture* poster_texture_ = nullptr;
+    GtkMediaStream* poster_stream_ = nullptr;
+    GtkMediaStream* media_stream_ = nullptr;
+    std::filesystem::path video_path_;
     std::string error_message_;
+    PowerMenuVideoState state_;
     std::function<void()> on_hidden_;
     std::function<void(double)> visibility_callback_;
     guint tick_callback_id_ = 0;
     gint64 last_frame_time_us_ = 0;
-    double idle_accumulator_seconds_ = 0.0;
 };
 
 } // namespace realmheart::ui::powermenu

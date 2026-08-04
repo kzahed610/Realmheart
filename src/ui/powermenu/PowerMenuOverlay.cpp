@@ -286,7 +286,6 @@ void PowerMenuOverlay::activate(Action action) {
 }
 
 void PowerMenuOverlay::show_confirmation(Action action) {
-    if (scene_ != nullptr) scene_->set_confirming(true);
     controls_->set_armed(action);
     const std::string message = std::string{action_label(action)} +
         " ARMED — CLICK AGAIN NOW TO CONFIRM";
@@ -314,7 +313,6 @@ void PowerMenuOverlay::clear_confirmation() {
         confirmation_timeout_id_ = 0;
     }
     confirmation_.cancel();
-    if (scene_ != nullptr) scene_->set_confirming(false);
     if (controls_ != nullptr) controls_->set_armed(std::nullopt);
     if (confirmation_banner_ != nullptr) {
         gtk_widget_set_visible(confirmation_banner_, FALSE);

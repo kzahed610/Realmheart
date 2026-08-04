@@ -173,8 +173,7 @@ add_library(realmheart_ui STATIC
     src/ui/powermenu/PowerMenuConfirmation.cpp
     src/ui/powermenu/PowerMenuControls.cpp
     src/ui/powermenu/PowerMenuLayout.cpp
-    src/ui/powermenu/PowerMenuManifest.cpp
-    src/ui/powermenu/PowerMenuAnimator.cpp
+    src/ui/powermenu/PowerMenuVideoState.cpp
     src/ui/powermenu/PowerMenuScene.cpp
     src/ui/powermenu/PowerMenuOverlay.cpp
     src/ui/launcher/LauncherOverlay.cpp
@@ -653,21 +652,14 @@ if(BUILD_TESTING)
     realmheart_register_test(realmheart_power_menu_layout_tests)
 
     add_executable(
-        realmheart_power_menu_manifest_tests
-        tests/PowerMenuManifestTests.cpp
-        src/ui/powermenu/PowerMenuManifest.cpp
+        realmheart_power_menu_video_state_tests
+        tests/PowerMenuVideoStateTests.cpp
+        src/ui/powermenu/PowerMenuVideoState.cpp
     )
-    target_compile_definitions(realmheart_power_menu_manifest_tests PRIVATE
+    target_compile_definitions(realmheart_power_menu_video_state_tests PRIVATE
         REALMHEART_TEST_POWER_MENU_ROOT="${CMAKE_SOURCE_DIR}/assets/power-menu"
     )
-    realmheart_register_test(realmheart_power_menu_manifest_tests)
-
-    add_executable(
-        realmheart_power_menu_animator_tests
-        tests/PowerMenuAnimatorTests.cpp
-        src/ui/powermenu/PowerMenuAnimator.cpp
-    )
-    realmheart_register_test(realmheart_power_menu_animator_tests)
+    realmheart_register_test(realmheart_power_menu_video_state_tests)
 
     add_executable(realmheart_session_manager_tests tests/SessionManagerTests.cpp src/core/Command.cpp src/services/SessionManager.cpp)
     realmheart_register_test(realmheart_session_manager_tests)
