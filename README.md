@@ -605,4 +605,43 @@ Realmheart is already used as a functioning shell, but it remains an
 - [ ] Distribution-neutral dependency handling
 - [ ] User-facing configuration instead of source-level tuning
 - [ ] Broader multi-monitor and hardware validation
-- [ ] Mo
+- [ ] More complete documentation for visual asset authoring
+- [ ] Stable releases, migration notes, and compatibility guarantees
+- [ ] A proper screenshot and video showcase
+
+---
+
+## Scope
+
+Realmheart is intentionally **not** trying to become:
+
+- a complete desktop environment;
+- a compositor replacement;
+- a universal shell for every Wayland compositor;
+- a drop-in clone of Quickshell, AGS, Waybar, or any existing shell;
+- a generic framework that sacrifices identity for configurability.
+
+It is a focused Hyprland shell built around one desktop, one design language,
+and one very unreasonable standard for aesthetic integrity.
+
+---
+
+## Attribution and licensing
+
+Realmheart is an unofficial fan-made project inspired by **The Beginning After
+the End** and is not affiliated with its creators, publishers, or rights
+holders. Character and story references belong to their respective owners.
+
+The optional `realmheart-fx` plugin has its own GPL-3.0-or-later license and
+attribution files under `plugins/realmheart-fx/`.
+
+The repository root does not currently declare a project-wide software license.
+Until one is added, do not assume permission to redistribute or reuse the rest
+of the source or bundled assets.
+
+---
+
+<p align="center">
+  <strong>Realmheart</strong><br />
+  Native where it matters. Excessive where it counts.
+</p>
