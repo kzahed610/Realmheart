@@ -155,6 +155,8 @@ struct PowerMenuRippleRenderer::State {
     GLuint program = 0;
     GLuint vertex_array = 0;
     GLuint source_texture = 0;
+    int texture_width = 0;
+    int texture_height = 0;
 
     static constexpr std::array<float, 3> kGold{
         1.000F, 0.790F, 0.310F
@@ -175,11 +177,15 @@ struct PowerMenuRippleRenderer::State {
             }
         }
         source_texture = 0;
+        texture_width = 0;
+        texture_height = 0;
     }
 
     void release_gl_resources() noexcept {
         if (gl_area == nullptr || !gtk_widget_get_realized(gl_area)) {
             source_texture = 0;
+            texture_width = 0;
+            texture_height = 0;
             vertex_array = 0;
             program = 0;
             return;
@@ -192,6 +198,8 @@ struct PowerMenuRippleRenderer::State {
         if (vertex_array != 0) glDeleteVertexArrays(1, &vertex_array);
         if (program != 0) glDeleteProgram(program);
         source_texture = 0;
+        texture_width = 0;
+        texture_height = 0;
         vertex_array = 0;
         program = 0;
     }
@@ -245,24 +253,27 @@ struct PowerMenuRippleRenderer::State {
             return false;
         }
 
-        std::vector<std::uint8_t> pixels(
-            stride * static_cast<std::size_t>(height)
-        );
-        gdk_texture_download(texture, pixels.data(), stride);
+        const std::size_t byte_count =
+            stride * static_cast<std::size_t>(height);
+
+        // Reuse one full-frame CPU staging allocation after the first capture.
+        // Opening and closing both upload a 1080p frame; repeatedly allocating
+        // and freeing that buffer causes allocator arenas to grow across cycles.
+        source_pixels.resize(byte_count);
+        gdk_texture_download(texture, source_pixels.data(), stride);
         g_object_unref(image);
-        convert_argb32_to_rgba(pixels);
+        convert_argb32_to_rgba(source_pixels);
 
         std::uint8_t maximum_alpha = 0;
-        for (std::size_t offset = 3; offset < pixels.size(); offset += 4) {
-            maximum_alpha = std::max(maximum_alpha, pixels[offset]);
+        for (std::size_t offset = 3; offset < source_pixels.size(); offset += 4) {
+            maximum_alpha = std::max(maximum_alpha, source_pixels[offset]);
         }
         if (maximum_alpha == 0) {
+            source_pixels.clear();
             set_error(error, "captured source frame is fully transparent");
             return false;
         }
 
-        release_texture();
-        source_pixels = std::move(pixels);
         source_width = width;
         source_height = height;
         source_upload_pending = true;
@@ -289,31 +300,53 @@ struct PowerMenuRippleRenderer::State {
             return false;
         }
 
-        if (source_texture == 0) glGenTextures(1, &source_texture);
-        glBindTexture(GL_TEXTURE_2D, source_texture);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        if (source_texture == 0) {
+            glGenTextures(1, &source_texture);
+            glBindTexture(GL_TEXTURE_2D, source_texture);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        } else {
+            glBindTexture(GL_TEXTURE_2D, source_texture);
+        }
+
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            GL_RGBA8,
-            source_width,
-            source_height,
-            0,
-            GL_RGBA,
-            GL_UNSIGNED_BYTE,
-            source_pixels.data()
-        );
+        if (texture_width == source_width && texture_height == source_height) {
+            // Same video geometry on every normal invocation: overwrite the
+            // existing storage instead of forcing Mesa to allocate another BO.
+            glTexSubImage2D(
+                GL_TEXTURE_2D,
+                0,
+                0,
+                0,
+                source_width,
+                source_height,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                source_pixels.data()
+            );
+        } else {
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA8,
+                source_width,
+                source_height,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                source_pixels.data()
+            );
+            texture_width = source_width;
+            texture_height = source_height;
+        }
         glBindTexture(GL_TEXTURE_2D, 0);
         source_upload_pending = false;
 
-        // The CPU copy is transition bootstrap data only. GLES owns the frame
-        // after this upload, so return those megabytes immediately.
+        // Keep the allocation capacity but mark the staging buffer empty. It is
+        // reused by the next capture and does not schedule any background work.
         source_pixels.clear();
-        source_pixels.shrink_to_fit();
         return true;
     }
 
@@ -561,9 +594,11 @@ void PowerMenuRippleRenderer::finish() noexcept {
     state_->active = false;
     state_->frame_ready = false;
     state_->source_upload_pending = false;
-    state_->release_texture();
+
+    // The GL area is non-auto-rendering and hidden below, so retaining one
+    // texture object and one staging-buffer capacity costs no idle GPU time.
+    // Reusing them avoids repeated fullscreen allocation/deallocation churn.
     state_->source_pixels.clear();
-    state_->source_pixels.shrink_to_fit();
     state_->source_width = 0;
     state_->source_height = 0;
     if (state_->gl_area != nullptr) {

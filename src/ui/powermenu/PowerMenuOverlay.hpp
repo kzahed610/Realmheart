@@ -32,12 +32,14 @@ public:
     void show(double normalized_origin_x, double normalized_origin_y);
     void hide();
     void toggle(double normalized_origin_x, double normalized_origin_y);
+    void set_closed_callback(std::function<void()> callback);
     [[nodiscard]] bool visible() const;
 
 private:
     void activate(Action action);
     void show_confirmation(Action action);
     void clear_confirmation();
+    void notify_closed();
     void schedule_interaction_setup();
     void cancel_interaction_setup();
     [[nodiscard]] bool advance_interaction_setup(GtkWidget* widget);
@@ -51,6 +53,8 @@ private:
     int input_region_commit_frames_remaining_ = 0;
     PowerMenuConfirmation confirmation_;
     PowerMenuActions actions_;
+    std::function<void()> closed_callback_;
+    bool closed_notified_ = false;
 };
 
 } // namespace realmheart::ui::powermenu

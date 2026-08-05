@@ -5,15 +5,14 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdint>
 #include <iostream>
-#include <limits>
 #include <utility>
 
 namespace realmheart::ui::powermenu {
 namespace {
 
 constexpr const char* kVideoAsset = "power-menu/realmheart-power-menu.mp4";
+constexpr const char* kPosterAsset = "power-menu/realmheart-power-menu-poster.jpg";
 constexpr guint kFrameIntervalMs = 16;
 constexpr unsigned int kMaximumRippleBootstrapAttempts = 10;
 constexpr gint64 kLiveHandoffDurationUs = 140'000;
@@ -70,9 +69,6 @@ PowerMenuScene::PowerMenuScene() {
     gtk_widget_set_visible(video_widget_, FALSE);
     gtk_overlay_add_overlay(GTK_OVERLAY(media_layer_), video_widget_);
 
-    ripple_renderer_ = std::make_unique<animation::PowerMenuRippleRenderer>();
-    gtk_overlay_add_overlay(GTK_OVERLAY(widget_), ripple_renderer_->widget());
-
     if (GdkDisplay* display = gdk_display_get_default(); display != nullptr) {
         GtkCssProvider* provider = gtk_css_provider_new();
         gtk_css_provider_load_from_string(provider, R"CSS(
@@ -93,14 +89,15 @@ PowerMenuScene::PowerMenuScene() {
         g_object_unref(provider);
     }
 
-    const auto resolved = resolve_project_asset(kVideoAsset);
-    if (!resolved) {
-        error_message_ = std::string{"Unable to resolve "} + kVideoAsset;
+    const auto resolved_video = resolve_project_asset(kVideoAsset);
+    const auto resolved_poster = resolve_project_asset(kPosterAsset);
+    if (!resolved_video || !resolved_poster) {
+        error_message_ = "Unable to resolve power-menu media assets";
         std::cerr << "[PowerMenuScene] " << error_message_ << '\n';
         return;
     }
-    video_path_ = *resolved;
-    begin_poster_prewarm();
+    video_path_ = *resolved_video;
+    poster_path_ = *resolved_poster;
 }
 
 PowerMenuScene::~PowerMenuScene() {
@@ -108,13 +105,9 @@ PowerMenuScene::~PowerMenuScene() {
     on_hidden_ = {};
     visibility_callback_ = {};
     finish_ripple();
-    ripple_renderer_.reset();
-    release_media();
-    release_poster_stream();
-    if (poster_picture_ != nullptr) {
-        gtk_picture_set_paintable(GTK_PICTURE(poster_picture_), nullptr);
-    }
-    g_clear_object(&poster_texture_);
+    release_ripple_renderer();
+    destroy_media();
+    release_poster();
     if (widget_ != nullptr) {
         g_object_unref(widget_);
         widget_ = nullptr;
@@ -126,7 +119,9 @@ PowerMenuScene::~PowerMenuScene() {
 
 GtkWidget* PowerMenuScene::widget() const { return widget_; }
 
-bool PowerMenuScene::ready() const { return !video_path_.empty(); }
+bool PowerMenuScene::ready() const {
+    return !video_path_.empty() && !poster_path_.empty();
+}
 
 const std::string& PowerMenuScene::error_message() const { return error_message_; }
 
@@ -144,6 +139,12 @@ void PowerMenuScene::present(
         std::cerr << "[PowerMenuScene] " << error_message_ << '\n';
         return;
     }
+
+    if (!ensure_poster()) {
+        std::cerr << "[PowerMenuScene] " << error_message_ << '\n';
+        return;
+    }
+    ensure_ripple_renderer();
 
     ripple_origin_x_ = sanitize_origin(normalized_origin_x, 0.012);
     ripple_origin_y_ = sanitize_origin(normalized_origin_y, 0.94);
@@ -216,61 +217,98 @@ void PowerMenuScene::stream_notify_callback(
     }
 }
 
-void PowerMenuScene::begin_poster_prewarm() {
-    if (!ready() || poster_texture_ != nullptr || poster_stream_ != nullptr) return;
-
-    poster_stream_ = GTK_MEDIA_STREAM(
-        gtk_media_file_new_for_filename(video_path_.c_str())
-    );
-    gtk_media_stream_set_loop(poster_stream_, FALSE);
-    gtk_media_stream_set_muted(poster_stream_, TRUE);
-    g_signal_connect(
-        poster_stream_,
-        "notify::prepared",
-        G_CALLBACK(&PowerMenuScene::stream_notify_callback),
-        this
-    );
-    g_signal_connect(
-        poster_stream_,
-        "notify::error",
-        G_CALLBACK(&PowerMenuScene::stream_notify_callback),
-        this
-    );
-    gtk_media_stream_pause(poster_stream_);
-
-    if (gtk_media_stream_is_prepared(poster_stream_) ||
-        gtk_media_stream_get_error(poster_stream_) != nullptr) {
-        handle_stream_notify(poster_stream_);
+bool PowerMenuScene::ensure_poster() {
+    if (poster_texture_ != nullptr) return true;
+    if (poster_path_.empty()) {
+        error_message_ = "Power-menu poster path is unavailable";
+        return false;
     }
+
+    GError* error = nullptr;
+    poster_texture_ = gdk_texture_new_from_filename(
+        poster_path_.c_str(),
+        &error
+    );
+    if (poster_texture_ == nullptr) {
+        error_message_ = "Unable to load power-menu poster";
+        if (error != nullptr && error->message != nullptr) {
+            error_message_ += std::string{": "} + error->message;
+        }
+        g_clear_error(&error);
+        return false;
+    }
+
+    gtk_picture_set_paintable(
+        GTK_PICTURE(poster_picture_),
+        GDK_PAINTABLE(poster_texture_)
+    );
+    std::cerr << "[PowerMenuScene] static poster loaded lazily: "
+              << poster_path_.filename().string() << '\n';
+    return true;
+}
+
+void PowerMenuScene::release_poster() noexcept {
+    if (poster_picture_ != nullptr) {
+        gtk_picture_set_paintable(GTK_PICTURE(poster_picture_), nullptr);
+    }
+    g_clear_object(&poster_texture_);
+}
+
+void PowerMenuScene::ensure_ripple_renderer() {
+    if (ripple_renderer_ != nullptr) return;
+    ripple_renderer_ = std::make_unique<animation::PowerMenuRippleRenderer>();
+    gtk_overlay_add_overlay(GTK_OVERLAY(widget_), ripple_renderer_->widget());
+    std::cerr << "[PowerMenuRipple] GL renderer created lazily\n";
+}
+
+void PowerMenuScene::release_ripple_renderer() noexcept {
+    if (ripple_renderer_ == nullptr) return;
+    GtkWidget* ripple_widget = ripple_renderer_->widget();
+    if (ripple_widget != nullptr &&
+        gtk_widget_get_parent(ripple_widget) == widget_) {
+        gtk_overlay_remove_overlay(GTK_OVERLAY(widget_), ripple_widget);
+    }
+    ripple_renderer_.reset();
+    std::cerr << "[PowerMenuRipple] GL renderer destroyed while idle\n";
 }
 
 void PowerMenuScene::acquire_media() {
-    if (!ready() || media_stream_ != nullptr) return;
+    if (!ready()) return;
 
-    if (poster_stream_ != nullptr) {
-        media_stream_ = poster_stream_;
-        poster_stream_ = nullptr;
-        g_signal_handlers_disconnect_by_data(media_stream_, this);
-    } else {
-        media_stream_ = GTK_MEDIA_STREAM(
-            gtk_media_file_new_for_filename(video_path_.c_str())
+    // Create and source the GtkMediaFile only once. Reassigning its filename on
+    // every open causes the GTK GStreamer backend to create another GL worker
+    // family even after the old source was cleared.
+    if (media_stream_ == nullptr) {
+        media_stream_ = GTK_MEDIA_STREAM(gtk_media_file_new());
+        gtk_media_stream_set_loop(media_stream_, TRUE);
+        gtk_media_stream_set_muted(media_stream_, TRUE);
+        g_signal_connect(
+            media_stream_,
+            "notify::prepared",
+            G_CALLBACK(&PowerMenuScene::stream_notify_callback),
+            this
         );
+        g_signal_connect(
+            media_stream_,
+            "notify::error",
+            G_CALLBACK(&PowerMenuScene::stream_notify_callback),
+            this
+        );
+        std::cerr << "[PowerMenuScene] reusable media object created lazily\n";
     }
 
-    gtk_media_stream_set_loop(media_stream_, TRUE);
-    gtk_media_stream_set_muted(media_stream_, TRUE);
-    g_signal_connect(
-        media_stream_,
-        "notify::prepared",
-        G_CALLBACK(&PowerMenuScene::stream_notify_callback),
-        this
-    );
-    g_signal_connect(
-        media_stream_,
-        "notify::error",
-        G_CALLBACK(&PowerMenuScene::stream_notify_callback),
-        this
-    );
+    if (!media_source_loaded_) {
+        gtk_media_file_set_filename(
+            GTK_MEDIA_FILE(media_stream_),
+            video_path_.c_str()
+        );
+        media_source_loaded_ = true;
+        std::cerr << "[PowerMenuScene] video pipeline created once: "
+                  << video_path_.filename().string() << '\n';
+    }
+
+    // release_media() detaches the paintable while hidden so GTK has no reason
+    // to snapshot the paused stream. Reattach the same pipeline for this use.
     gtk_picture_set_paintable(
         GTK_PICTURE(video_widget_),
         GDK_PAINTABLE(media_stream_)
@@ -282,8 +320,6 @@ void PowerMenuScene::acquire_media() {
     } else {
         sync_media_widgets();
     }
-    std::cerr << "[PowerMenuScene] video pipeline primed: "
-              << video_path_.filename().string() << '\n';
 }
 
 void PowerMenuScene::release_media() noexcept {
@@ -298,7 +334,12 @@ void PowerMenuScene::release_media() noexcept {
     }
     if (media_stream_ == nullptr) return;
 
-    g_signal_handlers_disconnect_by_data(media_stream_, this);
+    // Do not clear and reopen GtkMediaFile for every power-menu cycle. On the
+    // GStreamer GTK backend, every filename assignment creates a fresh GL
+    // display/context worker set; gtk_media_file_clear() does not synchronously
+    // retire those workers, so repeated cycles accumulate gstglcontext,
+    // gldisplay-event and driver threads. Keep the single lazily-created
+    // pipeline paused and detached while hidden, then reuse it next time.
     gtk_media_stream_pause(media_stream_);
     if (video_widget_ != nullptr) {
         gtk_picture_set_paintable(GTK_PICTURE(video_widget_), nullptr);
@@ -307,15 +348,18 @@ void PowerMenuScene::release_media() noexcept {
     if (poster_picture_ != nullptr) {
         gtk_widget_set_visible(poster_picture_, TRUE);
     }
-    g_clear_object(&media_stream_);
-    std::cerr << "[PowerMenuScene] video pipeline released\n";
+    std::cerr << "[PowerMenuScene] video pipeline paused while idle\n";
 }
 
-void PowerMenuScene::release_poster_stream() noexcept {
-    if (poster_stream_ == nullptr) return;
-    g_signal_handlers_disconnect_by_data(poster_stream_, this);
-    gtk_media_stream_pause(poster_stream_);
-    g_clear_object(&poster_stream_);
+void PowerMenuScene::destroy_media() noexcept {
+    release_media();
+    if (media_stream_ == nullptr) return;
+    g_signal_handlers_disconnect_by_data(media_stream_, this);
+    if (GTK_IS_MEDIA_FILE(media_stream_)) {
+        gtk_media_file_clear(GTK_MEDIA_FILE(media_stream_));
+    }
+    media_source_loaded_ = false;
+    g_clear_object(&media_stream_);
 }
 
 void PowerMenuScene::start_media_playback() noexcept {
@@ -435,77 +479,16 @@ void PowerMenuScene::handle_stream_notify(GtkMediaStream* stream) {
     if (const GError* error = gtk_media_stream_get_error(stream); error != nullptr) {
         error_message_ = std::string{"Unable to decode power-menu video: "} + error->message;
         std::cerr << "[PowerMenuScene] " << error_message_ << '\n';
-        if (stream == poster_stream_) release_poster_stream();
         if (stream == media_stream_) release_media();
         return;
     }
-    if (!gtk_media_stream_is_prepared(stream)) return;
-
-    const bool poster_ready = poster_texture_ != nullptr || capture_poster(stream);
-    if (!poster_ready) {
-        std::cerr << "[PowerMenuScene] Unable to cache first-frame poster\n";
+    if (stream == media_stream_ && gtk_media_stream_is_prepared(stream)) {
+        sync_media_widgets();
     }
-
-    if (stream == poster_stream_) {
-        release_poster_stream();
-        std::cerr << "[PowerMenuScene] bootstrap decoder released"
-                  << (poster_ready ? " after poster capture" : " without a poster")
-                  << '\n';
-        return;
-    }
-    if (stream == media_stream_) sync_media_widgets();
-}
-
-bool PowerMenuScene::capture_poster(GtkMediaStream* stream) {
-    GdkPaintable* image = gdk_paintable_get_current_image(GDK_PAINTABLE(stream));
-    if (image == nullptr || !GDK_IS_TEXTURE(image)) {
-        g_clear_object(&image);
-        return false;
-    }
-
-    GdkTexture* source = GDK_TEXTURE(image);
-    const int width = gdk_texture_get_width(source);
-    const int height = gdk_texture_get_height(source);
-    constexpr std::size_t kBytesPerPixel = 4U;
-    if (width <= 0 || height <= 0 ||
-        static_cast<std::size_t>(width) >
-            (std::numeric_limits<std::size_t>::max() / kBytesPerPixel)) {
-        g_object_unref(image);
-        return false;
-    }
-
-    const std::size_t stride = static_cast<std::size_t>(width) * kBytesPerPixel;
-    if (static_cast<std::size_t>(height) >
-        (std::numeric_limits<std::size_t>::max() / stride)) {
-        g_object_unref(image);
-        return false;
-    }
-    const std::size_t byte_count = stride * static_cast<std::size_t>(height);
-    auto* pixels = static_cast<std::uint8_t*>(g_malloc(byte_count));
-    gdk_texture_download(source, pixels, stride);
-    g_object_unref(image);
-
-    GBytes* bytes = g_bytes_new_take(pixels, byte_count);
-    GdkTexture* poster = gdk_memory_texture_new(
-        width,
-        height,
-        GDK_MEMORY_DEFAULT,
-        bytes,
-        stride
-    );
-    g_bytes_unref(bytes);
-    if (poster == nullptr) return false;
-
-    gtk_picture_set_paintable(GTK_PICTURE(poster_picture_), GDK_PAINTABLE(poster));
-    g_clear_object(&poster_texture_);
-    poster_texture_ = poster;
-    std::cerr << "[PowerMenuScene] first-frame poster cached in CPU memory: "
-              << width << 'x' << height << '\n';
-    return true;
 }
 
 GdkPaintable* PowerMenuScene::transition_source() const noexcept {
-    // Opening should begin from the prewarmed first frame so the click-to-light
+    // Opening begins from the static first-frame poster so the click-to-light
     // response is deterministic. Closing captures the live stream instead, so
     // the collapsing scene matches whatever frame the user was actually seeing.
     if (state_.phase() == PowerMenuVideoPhase::Opening &&
@@ -664,11 +647,15 @@ void PowerMenuScene::apply_frame() {
         ripple_attempts_ = 0;
         cancel_live_handoff(false);
         live_video_committed_ = false;
-        pause_media_playback();
+        release_media();
+        // Keep the lazily-created GL area/program and decoded static poster as
+        // one-time caches rather than constructing new fullscreen rendering
+        // resources on every invocation. finish_ripple() has already deleted
+        // the transition texture and hidden the non-auto-rendering GL area, so
+        // the cached renderer does not schedule work while the menu is idle.
         gtk_widget_set_visible(media_layer_, FALSE);
         gtk_widget_set_opacity(media_layer_, 1.0);
         gtk_widget_set_opacity(widget_, 0.0);
-        sync_media_widgets();
         publish_visibility();
         return;
     }
