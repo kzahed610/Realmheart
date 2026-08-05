@@ -8,20 +8,22 @@ content through the selected registered effect at `RENDER_POST_WINDOWS`, then
 restores or releases resources when the transition finishes or any safety check
 fails.
 
-The compositor backend discovers effect manifests from the Realmheart `effects/`
+The compositor backend discovers effect manifests from the Realmheart `effects/windows/`
 directory at plugin startup. `none` remains a built-in bypass effect; Realmheart
 Void and Aether Sunder are ordinary manifest-defined effects using the same
 renderer and lifecycle machinery.
 
 ## Effect manifests
 
-Every compatible effect lives in one direct child directory of `effects/`:
+Every compatible effect lives in one direct child directory of
+`effects/windows/`:
 
 ```text
 effects/
-└── mana-shatter/
-    ├── effect.toml
-    └── mana-shatter.frag
+└── windows/
+    └── mana-shatter/
+        ├── effect.toml
+        └── mana-shatter.frag
 ```
 
 A minimal manifest is:

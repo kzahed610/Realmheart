@@ -41,7 +41,9 @@ void starts_hidden_without_media_or_frames() {
     PowerMenuVideoState state;
 
     assert(state.phase() == PowerMenuVideoPhase::Hidden);
+    assert(state.progress() == 0.0);
     assert(state.opacity() == 0.0);
+    assert(state.controls_opacity() == 0.0);
     assert(!state.media_required());
     assert(!state.needs_frame());
 }
@@ -55,7 +57,12 @@ void present_acquires_media_and_completes_the_opening_transition() {
     assert(state.needs_frame());
 
     state.advance(0.20);
+    assert(state.progress() > 0.0 && state.progress() < 1.0);
     assert(state.opacity() > 0.0 && state.opacity() < 1.0);
+    assert(state.controls_opacity() == 0.0);
+
+    state.advance(0.55);
+    assert(state.controls_opacity() > 0.0 && state.controls_opacity() < 1.0);
 
     state.advance(1.0);
     assert(state.phase() == PowerMenuVideoPhase::Visible);
@@ -103,6 +110,7 @@ void reversing_a_close_is_continuous_and_never_drops_media() {
     assert(state.media_required());
 
     state.advance(1.0);
+    state.advance(0.50);
     assert(state.phase() == PowerMenuVideoPhase::Visible);
     assert(state.opacity() == 1.0);
 }

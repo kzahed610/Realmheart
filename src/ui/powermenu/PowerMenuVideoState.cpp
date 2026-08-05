@@ -6,8 +6,8 @@
 namespace realmheart::ui::powermenu {
 namespace {
 
-constexpr double kOpeningSeconds = 0.42;
-constexpr double kClosingSeconds = 0.28;
+constexpr double kOpeningSeconds = 1.75;
+constexpr double kClosingSeconds = 1.05;
 
 double smoothstep(double value) {
     const double t = std::clamp(value, 0.0, 1.0);
@@ -53,7 +53,17 @@ void PowerMenuVideoState::advance(double delta_seconds) {
 
 PowerMenuVideoPhase PowerMenuVideoState::phase() const { return phase_; }
 
+double PowerMenuVideoState::progress() const { return progress_; }
+
 double PowerMenuVideoState::opacity() const { return opacity_; }
+
+double PowerMenuVideoState::controls_opacity() const {
+    // Keep the controls absent while the travelling front is still near the
+    // taskbar. They fade in only once the rupture has reached the central menu
+    // stack, which ties the UI reveal more tightly to the screen-space wave.
+    const double delayed = (progress_ - 0.44) / 0.18;
+    return smoothstep(delayed);
+}
 
 bool PowerMenuVideoState::media_required() const {
     return phase_ != PowerMenuVideoPhase::Hidden;

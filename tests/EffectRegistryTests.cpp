@@ -39,7 +39,7 @@ int main() {
     assert(void_effect->name == "void");
     assert(void_effect->display_name == "Realmheart Void");
     assert(void_effect->backend == EffectBackend::Shader);
-    assert(void_effect->fragment_shader_asset == "void/void.frag");
+    assert(void_effect->fragment_shader_asset == "windows/void/void.frag");
     assert(void_effect->requires_source_texture);
     assert(void_effect->outputs_transparency);
     assert(supports_target(*void_effect, EffectTargetType::Launcher));

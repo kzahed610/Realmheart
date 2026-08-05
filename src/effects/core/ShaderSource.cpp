@@ -125,4 +125,31 @@ bool validate_shell_shader_contract(
     return true;
 }
 
+bool validate_power_menu_ripple_shader_contract(
+    std::string_view source,
+    std::string* missing_symbol
+) noexcept {
+    constexpr std::array<std::string_view, 9> kRequiredSymbols{{
+        "uniform float progress",
+        "uniform vec2 resolution",
+        "uniform sampler2D tex",
+        "uniform vec2 origin",
+        "uniform float opening",
+        "uniform vec3 uGold",
+        "uniform vec3 uStarlight",
+        "uniform vec3 uAstral",
+        "out vec4 fragColor",
+    }};
+
+    for (const auto symbol : kRequiredSymbols) {
+        if (!contains_symbol(source, symbol)) {
+            if (missing_symbol != nullptr) *missing_symbol = std::string{symbol};
+            return false;
+        }
+    }
+
+    if (missing_symbol != nullptr) missing_symbol->clear();
+    return true;
+}
+
 } // namespace realmheart::effects

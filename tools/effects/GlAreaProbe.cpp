@@ -378,10 +378,10 @@ void on_realize(GtkWidget* widget, gpointer user_data) {
 
     if (state->mode != ProbeMode::Void) return;
 
-#ifndef REALMHEART_SOURCE_EFFECT_DIR
-#error "REALMHEART_SOURCE_EFFECT_DIR must be defined for the GL probe"
+#ifndef REALMHEART_SOURCE_WINDOW_EFFECT_DIR
+#error "REALMHEART_SOURCE_WINDOW_EFFECT_DIR must be defined for the GL probe"
 #endif
-    const auto shader_path = std::filesystem::path{REALMHEART_SOURCE_EFFECT_DIR} /
+    const auto shader_path = std::filesystem::path{REALMHEART_SOURCE_WINDOW_EFFECT_DIR} /
         "void" / "void.frag";
     const auto fragment_source = read_text_file(shader_path);
     if (!fragment_source) {

@@ -17,7 +17,9 @@ public:
     void advance(double delta_seconds);
 
     [[nodiscard]] PowerMenuVideoPhase phase() const;
+    [[nodiscard]] double progress() const;
     [[nodiscard]] double opacity() const;
+    [[nodiscard]] double controls_opacity() const;
     [[nodiscard]] bool media_required() const;
     [[nodiscard]] bool needs_frame() const;
 

@@ -18,7 +18,7 @@ void writeFile(const std::filesystem::path& path, std::string_view content) {
 } // namespace
 
 int main() {
-    const auto loaded = loadWindowEffectRegistry(REALMHEART_TEST_EFFECT_DIR);
+    const auto loaded = loadWindowEffectRegistry(REALMHEART_TEST_WINDOW_EFFECT_DIR);
     assert(loaded.success);
     assert(loaded.loadedEffects == 2U);
     assert(loaded.error.empty());

@@ -59,7 +59,7 @@ VerticalBar::VerticalBar(
     services::MediaService& media_service,
     std::function<void()> toggle_sidebar,
     std::function<void()> launch_launcher,
-    std::function<void()> open_power_menu
+    std::function<void(double, double)> open_power_menu
 ) : app_(app),
     notification_history_(notification_history),
     battery_service_(battery_service),
@@ -245,6 +245,39 @@ void VerticalBar::setup_layout() {
     gtk_window_set_child(GTK_WINDOW(window_), root_overlay_);
 }
 
+std::pair<double, double> VerticalBar::power_menu_origin() const {
+    constexpr double kFallbackOriginX = 24.0 / 1920.0;
+    constexpr double kFallbackOriginY = 1048.0 / 1080.0;
+    if (bottom_action_button_ == nullptr || window_ == nullptr) {
+        return {kFallbackOriginX, kFallbackOriginY};
+    }
+
+    GtkWidget* button = bottom_action_button_->widget();
+    const graphene_point_t centre = GRAPHENE_POINT_INIT(
+        static_cast<float>(std::max(gtk_widget_get_width(button), 0)) * 0.5F,
+        static_cast<float>(std::max(gtk_widget_get_height(button), 0)) * 0.5F
+    );
+    graphene_point_t in_bar{};
+    if (!gtk_widget_compute_point(button, window_, &centre, &in_bar)) {
+        return {kFallbackOriginX, kFallbackOriginY};
+    }
+
+    GdkMonitor* monitor = resolve_layer_surface_monitor(window_);
+    if (monitor == nullptr) return {kFallbackOriginX, kFallbackOriginY};
+
+    GdkRectangle geometry{};
+    gdk_monitor_get_geometry(monitor, &geometry);
+    g_object_unref(monitor);
+    if (geometry.width <= 0 || geometry.height <= 0) {
+        return {kFallbackOriginX, kFallbackOriginY};
+    }
+
+    return {
+        std::clamp(static_cast<double>(in_bar.x) / geometry.width, 0.0, 1.0),
+        std::clamp(static_cast<double>(in_bar.y) / geometry.height, 0.0, 1.0),
+    };
+}
+
 void VerticalBar::populate_widgets() {
     auto exclusive_open = [this](GtkPopover* popover) { open_exclusive_popover(popover); };
     auto media_exclusive_open = [this] { open_exclusive_media(); };
@@ -294,7 +327,11 @@ void VerticalBar::populate_widgets() {
         "Realmheart-Icons/power.svg",
         "Pw",
         "Open power menu",
-        open_power_menu_
+        [this] {
+            if (!open_power_menu_) return;
+            const auto [origin_x, origin_y] = power_menu_origin();
+            open_power_menu_(origin_x, origin_y);
+        }
     );
     bottom_action_button_->add_css_class("realmheart-bottom-action-button");
 
