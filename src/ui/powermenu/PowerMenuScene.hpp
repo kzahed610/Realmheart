@@ -50,6 +50,7 @@ private:
     void pause_media_playback() noexcept;
     void sync_media_widgets() noexcept;
     [[nodiscard]] bool live_frame_ready() const noexcept;
+    void refresh_opening_ripple_source() noexcept;
     void arm_live_handoff() noexcept;
     void update_live_handoff(gint64 frame_time_us) noexcept;
     void cancel_live_handoff(bool keep_ripple) noexcept;
@@ -90,6 +91,8 @@ private:
     bool handoff_pending_ = false;
     bool handoff_active_ = false;
     gint64 handoff_started_us_ = 0;
+    gint64 last_ripple_media_timestamp_us_ = -1;
+    bool final_ripple_frame_requested_ = false;
 };
 
 } // namespace realmheart::ui::powermenu

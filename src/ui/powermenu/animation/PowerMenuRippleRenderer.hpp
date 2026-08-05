@@ -31,6 +31,14 @@ public:
         std::string* error = nullptr
     );
 
+    // Replace the transition texture with the paintable's current frame while
+    // preserving the active ripple timeline. Opening uses this to reveal the
+    // actually playing video instead of a frozen first-frame poster.
+    [[nodiscard]] bool refresh_source(
+        GdkPaintable* source,
+        std::string* error = nullptr
+    );
+
     void update(double progress, bool opening) noexcept;
     void set_opacity(double opacity) noexcept;
     void finish() noexcept;

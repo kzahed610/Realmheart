@@ -571,6 +571,34 @@ bool PowerMenuRippleRenderer::begin(
     return true;
 }
 
+bool PowerMenuRippleRenderer::refresh_source(
+    GdkPaintable* source,
+    std::string* error
+) {
+    if (state_ == nullptr || !state_->active) {
+        set_error(error, "ripple renderer is not active");
+        return false;
+    }
+
+    // Do not overwrite the reusable staging buffer before the queued GL frame
+    // has uploaded it. The next scene tick will try the newer media frame.
+    if (state_->source_upload_pending) {
+        if (error != nullptr) error->clear();
+        return false;
+    }
+
+    std::string capture_error;
+    if (!state_->capture(source, &capture_error)) {
+        set_error(error, std::move(capture_error));
+        return false;
+    }
+
+    state_->frame_ready = false;
+    gtk_gl_area_queue_render(GTK_GL_AREA(state_->gl_area));
+    if (error != nullptr) error->clear();
+    return true;
+}
+
 void PowerMenuRippleRenderer::update(
     double progress,
     bool opening

@@ -15,7 +15,8 @@ constexpr const char* kVideoAsset = "power-menu/realmheart-power-menu.mp4";
 constexpr const char* kPosterAsset = "power-menu/realmheart-power-menu-poster.jpg";
 constexpr guint kFrameIntervalMs = 16;
 constexpr unsigned int kMaximumRippleBootstrapAttempts = 10;
-constexpr gint64 kLiveHandoffDurationUs = 140'000;
+constexpr gint64 kLiveHandoffDurationUs = 75'000;
+constexpr gint64 kRippleLiveFrameIntervalUs = 33'000;
 
 void configure_layer(GtkWidget* widget) {
     gtk_widget_set_hexpand(widget, TRUE);
@@ -150,11 +151,15 @@ void PowerMenuScene::present(
     ripple_origin_y_ = sanitize_origin(normalized_origin_y, 0.94);
     cancel_live_handoff(true);
     live_video_committed_ = false;
+    last_ripple_media_timestamp_us_ = -1;
+    final_ripple_frame_requested_ = false;
     state_.present();
     acquire_media();
-    // The reveal snapshots the first frame. Do not let the live decoder run
-    // underneath it and arrive hundreds of milliseconds ahead at handoff.
-    pause_media_playback();
+    // The ripple still snapshots the deterministic first-frame poster, but the
+    // live stream prerolls underneath it immediately. By the time the reveal
+    // reaches its terminal frame, the decoder has already produced live video
+    // and the handoff no longer waits hundreds of milliseconds after opening.
+    start_media_playback();
 
     if (ripple_renderer_ == nullptr || !ripple_renderer_->active()) {
         ripple_pending_ = true;
@@ -175,9 +180,11 @@ void PowerMenuScene::dismiss(std::function<void()> on_hidden) {
         return;
     }
 
-    // If the opening handoff is still fading, keep its frozen GL frame and
-    // reverse that same texture instead of flashing the live picture first.
+    // Freeze the live stream at its current frame before capturing/reversing
+    // the closing transition. This also handles dismissal during the opening
+    // preroll without allowing the hidden video to keep advancing.
     cancel_live_handoff(true);
+    pause_media_playback();
     state_.dismiss();
     if (ripple_renderer_ == nullptr || !ripple_renderer_->active()) {
         ripple_pending_ = true;
@@ -409,6 +416,31 @@ bool PowerMenuScene::live_frame_ready() const noexcept {
     return ready;
 }
 
+void PowerMenuScene::refresh_opening_ripple_source() noexcept {
+    if (state_.phase() != PowerMenuVideoPhase::Opening ||
+        ripple_renderer_ == nullptr || !ripple_renderer_->active() ||
+        media_stream_ == nullptr ||
+        !gtk_media_stream_is_prepared(media_stream_) ||
+        gtk_media_stream_get_error(media_stream_) != nullptr) {
+        return;
+    }
+
+    const gint64 timestamp_us = gtk_media_stream_get_timestamp(media_stream_);
+    if (timestamp_us <= 0 ||
+        (last_ripple_media_timestamp_us_ >= 0 &&
+         timestamp_us - last_ripple_media_timestamp_us_ <
+             kRippleLiveFrameIntervalUs)) {
+        return;
+    }
+
+    std::string error;
+    if (ripple_renderer_->refresh_source(
+            GDK_PAINTABLE(media_stream_),
+            &error)) {
+        last_ripple_media_timestamp_us_ = timestamp_us;
+    }
+}
+
 void PowerMenuScene::arm_live_handoff() noexcept {
     if (handoff_pending_ || handoff_active_ ||
         ripple_renderer_ == nullptr || !ripple_renderer_->active()) {
@@ -426,7 +458,7 @@ void PowerMenuScene::update_live_handoff(gint64 frame_time_us) noexcept {
     }
 
     if (handoff_pending_) {
-        if (!live_frame_ready()) {
+        if (!live_frame_ready() || !ripple_renderer_->frame_ready()) {
             // Keep the exact terminal shader frame on screen until the decoder
             // has actually advanced. Prepared alone only means metadata and a
             // bootstrap frame exist; switching at that point causes the pop.
@@ -572,6 +604,7 @@ gboolean PowerMenuScene::on_timer() {
     // frames. Hold the timeline at its exact endpoint until the first shader
     // frame exists; otherwise the reveal skips the ignition frames.
     if (ripple_pending_) try_begin_ripple();
+    refresh_opening_ripple_source();
     const bool waiting_for_ripple = !ripple_fallback_ && (
         ripple_pending_ ||
         (ripple_renderer_ != nullptr &&
@@ -647,6 +680,7 @@ void PowerMenuScene::apply_frame() {
         ripple_attempts_ = 0;
         cancel_live_handoff(false);
         live_video_committed_ = false;
+        final_ripple_frame_requested_ = false;
         release_media();
         // Keep the lazily-created GL area/program and decoded static poster as
         // one-time caches rather than constructing new fullscreen rendering
@@ -666,6 +700,21 @@ void PowerMenuScene::apply_frame() {
         ripple_pending_ = false;
         ripple_fallback_ = false;
         ripple_attempts_ = 0;
+
+        // Capture one final live frame before the shader dissolves away. The
+        // visible GtkPicture underneath is therefore only a few milliseconds
+        // ahead instead of jumping from the poster to a much later timestamp.
+        if (!final_ripple_frame_requested_ &&
+            ripple_renderer_ != nullptr && ripple_renderer_->active() &&
+            ripple_renderer_->frame_ready() &&
+            media_stream_ != nullptr && live_frame_ready()) {
+            std::string error;
+            if (ripple_renderer_->refresh_source(
+                    GDK_PAINTABLE(media_stream_),
+                    &error)) {
+                final_ripple_frame_requested_ = true;
+            }
+        }
 
         gtk_widget_set_opacity(media_layer_, 1.0);
         gtk_widget_set_visible(media_layer_, TRUE);
@@ -716,7 +765,7 @@ void PowerMenuScene::apply_frame() {
         gtk_widget_set_opacity(media_layer_, state_.opacity());
         if (opening) {
             live_video_committed_ = false;
-            pause_media_playback();
+            start_media_playback();
         } else {
             live_video_committed_ = true;
             start_media_playback();
