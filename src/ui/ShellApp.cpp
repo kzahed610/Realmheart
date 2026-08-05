@@ -28,7 +28,7 @@
 #include "ui/bar/VerticalBar.hpp"
 #include "ui/launcher/CommandReceiptOverlay.hpp"
 #include "ui/launcher/LauncherOverlay.hpp"
-#include "ui/powermenu/PowerMenuOverlay.hpp"
+#include "ui/powermenu/PowerMenuProcess.hpp"
 #include "ui/sidebar/RightSidebar.hpp"
 #include "ui/sidebar/SidebarFrame.hpp"
 #include "ui/wallpaper/WallpaperBackend.hpp"
@@ -77,7 +77,6 @@ std::filesystem::path user_media_directory(GUserDirectory directory, const char*
 }
 
 constexpr int kHotspotHitWidth = 16;
-constexpr unsigned int kPowerMenuPrewarmDelaySeconds = 3;
 
 template <typename... Args>
 void sidebar_input_debug(Args&&... args) {
@@ -354,7 +353,7 @@ public:
     }
 
     ~ShellRuntime() {
-        cancel_power_menu_prewarm();
+        power_menu_process_.close();
 
         // Stop callbacks that capture this before tearing down UI/controllers.
         runtime_async_state_->alive.store(false);
@@ -371,7 +370,6 @@ public:
 
         wallpaper_controller_.reset();
         launcher_overlay_.reset();
-        power_menu_.reset();
         command_receipts_.reset();
         notes_overlay_.reset();
         toast_.reset();
@@ -404,8 +402,6 @@ public:
         ensure_core_initialized();
         state_.show_bar();
         apply_bar_visibility();
-        schedule_power_menu_prewarm();
-
         const std::string current_path = utilities_->load_wallpaper_path();
         if (current_path.empty()) return;
 
@@ -667,9 +663,7 @@ public:
         double origin_x = 24.0 / 1920.0,
         double origin_y = 1048.0 / 1080.0
     ) {
-        cancel_power_menu_prewarm();
-        ensure_power_menu_initialized();
-        power_menu_->toggle(origin_x, origin_y);
+        power_menu_process_.toggle(origin_x, origin_y);
     }
 
     void quit() {
@@ -1067,44 +1061,6 @@ private:
         }
     }
 
-    void ensure_power_menu_initialized() {
-        ensure_core_initialized();
-        if (power_menu_) return;
-        power_menu_ = std::make_unique<powermenu::PowerMenuOverlay>(
-            application_,
-            powermenu::PowerMenuActions{
-                .lock = [this] { return session_->lock(); },
-                .suspend = [this] { return session_->suspend(); },
-                .logout = [this] { return session_->logout(); },
-                .reboot = [this] { return session_->reboot(); },
-                .power_off = [this] { return session_->power_off(); },
-            }
-        );
-    }
-
-    void schedule_power_menu_prewarm() {
-        if (power_menu_ || power_menu_prewarm_id_ != 0) return;
-
-        power_menu_prewarm_id_ = g_timeout_add_seconds_full(
-            G_PRIORITY_LOW,
-            kPowerMenuPrewarmDelaySeconds,
-            +[](gpointer data) -> gboolean {
-                auto* runtime = static_cast<ShellRuntime*>(data);
-                runtime->power_menu_prewarm_id_ = 0;
-                runtime->ensure_power_menu_initialized();
-                return G_SOURCE_REMOVE;
-            },
-            this,
-            nullptr
-        );
-    }
-
-    void cancel_power_menu_prewarm() {
-        if (power_menu_prewarm_id_ == 0) return;
-        g_source_remove(power_menu_prewarm_id_);
-        power_menu_prewarm_id_ = 0;
-    }
-
     void ensure_core_initialized() {
         if (!theme_styles_) {
             theme_styles_ = std::make_unique<ThemeStyles>(theme_service_);
@@ -1389,10 +1345,9 @@ private:
     guint sidebar_tick_id_ = 0;
     gint64 sidebar_last_frame_time_ = 0;
     bool sidebar_character_exit_complete_ = true;
-    guint power_menu_prewarm_id_ = 0;
     std::unique_ptr<CommandReceiptOverlay> command_receipts_;
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
-    std::unique_ptr<powermenu::PowerMenuOverlay> power_menu_;
+    powermenu::PowerMenuProcess power_menu_process_;
     std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;
 
     ShellState state_;

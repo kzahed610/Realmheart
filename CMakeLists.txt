@@ -174,6 +174,7 @@ add_library(realmheart_ui STATIC
     src/ui/powermenu/PowerMenuControls.cpp
     src/ui/powermenu/PowerMenuLayout.cpp
     src/ui/powermenu/PowerMenuVideoState.cpp
+    src/ui/powermenu/PowerMenuProcess.cpp
     src/ui/powermenu/animation/PowerMenuRippleRenderer.cpp
     src/ui/powermenu/PowerMenuScene.cpp
     src/ui/powermenu/PowerMenuOverlay.cpp
@@ -213,6 +214,29 @@ target_link_libraries(realmheart PRIVATE
     PkgConfig::GIO
     Threads::Threads
 )
+
+add_executable(realmheart_power_menu_renderer
+    src/powermenu-renderer/main.cpp
+    src/core/Command.cpp
+    src/services/SessionManager.cpp
+)
+set_target_properties(realmheart_power_menu_renderer PROPERTIES
+    OUTPUT_NAME "realmheart-power-menu-renderer"
+)
+target_include_directories(realmheart_power_menu_renderer PRIVATE src third_party)
+target_compile_options(realmheart_power_menu_renderer PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_link_libraries(realmheart_power_menu_renderer PRIVATE
+    realmheart_ui
+    PkgConfig::GIO
+    PkgConfig::GTK4
+    PkgConfig::GTK4_LAYER_SHELL
+    PkgConfig::GDK_PIXBUF
+    PkgConfig::JPEG
+    PkgConfig::EPOXY
+    Threads::Threads
+)
+
+add_dependencies(realmheart realmheart_power_menu_renderer)
 
 set(REALMHEART_NATIVE_WALLPAPER_BUILT OFF)
 if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
@@ -303,7 +327,7 @@ if(TARGET realmheart_fx)
     install(TARGETS realmheart_fx LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/realmheart)
 endif()
 
-install(TARGETS realmheart RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS realmheart realmheart_power_menu_renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(REALMHEART_NATIVE_WALLPAPER_BUILT)
     install(TARGETS realmheart-wallpaper-renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()

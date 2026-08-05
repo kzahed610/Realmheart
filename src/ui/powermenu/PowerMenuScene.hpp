@@ -39,10 +39,13 @@ private:
         gpointer user_data
     );
 
-    void begin_poster_prewarm();
+    bool ensure_poster();
+    void release_poster() noexcept;
+    void ensure_ripple_renderer();
+    void release_ripple_renderer() noexcept;
     void acquire_media();
     void release_media() noexcept;
-    void release_poster_stream() noexcept;
+    void destroy_media() noexcept;
     void start_media_playback() noexcept;
     void pause_media_playback() noexcept;
     void sync_media_widgets() noexcept;
@@ -52,7 +55,6 @@ private:
     void cancel_live_handoff(bool keep_ripple) noexcept;
     [[nodiscard]] bool handoff_needs_frame() const noexcept;
     void handle_stream_notify(GtkMediaStream* stream);
-    bool capture_poster(GtkMediaStream* stream);
     [[nodiscard]] GdkPaintable* transition_source() const noexcept;
     bool try_begin_ripple();
     void finish_ripple() noexcept;
@@ -67,10 +69,10 @@ private:
     GtkWidget* poster_picture_ = nullptr;
     GtkWidget* video_widget_ = nullptr;
     GdkTexture* poster_texture_ = nullptr;
-    GtkMediaStream* poster_stream_ = nullptr;
     GtkMediaStream* media_stream_ = nullptr;
     std::unique_ptr<animation::PowerMenuRippleRenderer> ripple_renderer_;
     std::filesystem::path video_path_;
+    std::filesystem::path poster_path_;
     std::string error_message_;
     PowerMenuVideoState state_;
     std::function<void()> on_hidden_;
@@ -82,6 +84,7 @@ private:
     unsigned int ripple_attempts_ = 0;
     bool ripple_pending_ = false;
     bool ripple_fallback_ = false;
+    bool media_source_loaded_ = false;
     bool media_playback_started_ = false;
     bool live_video_committed_ = false;
     bool handoff_pending_ = false;

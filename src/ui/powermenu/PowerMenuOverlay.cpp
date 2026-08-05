@@ -239,6 +239,7 @@ void PowerMenuOverlay::show(
     double normalized_origin_x,
     double normalized_origin_y
 ) {
+    closed_notified_ = false;
     clear_confirmation();
     // Prime the transparent scene and its GL endpoint before mapping the layer
     // surface. Mapping first exposes the window's uninitialised backing frame
@@ -260,12 +261,14 @@ void PowerMenuOverlay::hide() {
     }
     if (scene_ == nullptr) {
         gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
+        notify_closed();
         return;
     }
     scene_->dismiss([this]() {
         if (window_ != nullptr) {
             gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
         }
+        notify_closed();
     });
 }
 
@@ -321,6 +324,10 @@ void PowerMenuOverlay::toggle(
     }
 }
 
+void PowerMenuOverlay::set_closed_callback(std::function<void()> callback) {
+    closed_callback_ = std::move(callback);
+}
+
 bool PowerMenuOverlay::visible() const {
     return gtk_widget_get_visible(GTK_WIDGET(window_));
 }
@@ -340,6 +347,7 @@ void PowerMenuOverlay::activate(Action action) {
     gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
     if (preview_mode_enabled()) {
         std::cerr << "[PowerMenu] Preview confirmation: " << action_name(action) << '\n';
+        notify_closed();
         return;
     }
 
@@ -354,6 +362,7 @@ void PowerMenuOverlay::activate(Action action) {
     if (callback == nullptr || !*callback || !(*callback)()) {
         std::cerr << "[PowerMenu] Unable to " << action_name(action) << '\n';
     }
+    notify_closed();
 }
 
 void PowerMenuOverlay::show_confirmation(Action action) {
@@ -376,6 +385,12 @@ void PowerMenuOverlay::show_confirmation(Action action) {
         },
         this
     );
+}
+
+void PowerMenuOverlay::notify_closed() {
+    if (closed_notified_) return;
+    closed_notified_ = true;
+    if (closed_callback_) closed_callback_();
 }
 
 void PowerMenuOverlay::clear_confirmation() {

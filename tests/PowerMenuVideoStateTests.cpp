@@ -13,28 +13,50 @@ namespace {
 using realmheart::ui::powermenu::PowerMenuVideoPhase;
 using realmheart::ui::powermenu::PowerMenuVideoState;
 
-void asset_tree_contains_exactly_one_valid_mp4() {
+void asset_tree_contains_video_and_static_poster() {
     const std::filesystem::path root(REALMHEART_TEST_POWER_MENU_ROOT);
     std::error_code error;
     assert(std::filesystem::is_directory(root, error));
     assert(!error);
 
-    std::size_t entry_count = 0U;
     std::filesystem::path video;
+    std::filesystem::path poster;
+    std::size_t entry_count = 0U;
     for (const auto& entry : std::filesystem::directory_iterator(root)) {
-        ++entry_count;
-        video = entry.path();
         assert(entry.is_regular_file());
+        ++entry_count;
+        if (entry.path().filename() == "realmheart-power-menu.mp4") {
+            video = entry.path();
+        } else if (entry.path().filename() == "realmheart-power-menu-poster.jpg") {
+            poster = entry.path();
+        }
     }
-    assert(entry_count == 1U);
-    assert(video.filename() == "realmheart-power-menu.mp4");
-    assert(std::filesystem::file_size(video) > 1'000'000U);
 
-    std::ifstream input(video, std::ios::binary);
-    std::array<char, 12> header{};
-    input.read(header.data(), static_cast<std::streamsize>(header.size()));
-    assert(input.gcount() == static_cast<std::streamsize>(header.size()));
-    assert(std::string_view(header.data() + 4, 4) == "ftyp");
+    assert(entry_count == 2U);
+    assert(!video.empty());
+    assert(!poster.empty());
+    assert(std::filesystem::file_size(video) > 1'000'000U);
+    assert(std::filesystem::file_size(poster) > 100'000U);
+
+    std::ifstream video_input(video, std::ios::binary);
+    std::array<char, 12> video_header{};
+    video_input.read(
+        video_header.data(),
+        static_cast<std::streamsize>(video_header.size())
+    );
+    assert(video_input.gcount() == static_cast<std::streamsize>(video_header.size()));
+    assert(std::string_view(video_header.data() + 4, 4) == "ftyp");
+
+    std::ifstream poster_input(poster, std::ios::binary);
+    std::array<unsigned char, 3> poster_header{};
+    poster_input.read(
+        reinterpret_cast<char*>(poster_header.data()),
+        static_cast<std::streamsize>(poster_header.size())
+    );
+    assert(poster_input.gcount() == static_cast<std::streamsize>(poster_header.size()));
+    assert(poster_header[0] == 0xffU);
+    assert(poster_header[1] == 0xd8U);
+    assert(poster_header[2] == 0xffU);
 }
 
 void starts_hidden_without_media_or_frames() {
@@ -61,7 +83,7 @@ void present_acquires_media_and_completes_the_opening_transition() {
     assert(state.opacity() > 0.0 && state.opacity() < 1.0);
     assert(state.controls_opacity() == 0.0);
 
-    state.advance(0.55);
+    state.advance(0.80);
     assert(state.controls_opacity() > 0.0 && state.controls_opacity() < 1.0);
 
     state.advance(1.0);
@@ -110,7 +132,7 @@ void reversing_a_close_is_continuous_and_never_drops_media() {
     assert(state.media_required());
 
     state.advance(1.0);
-    state.advance(0.50);
+    state.advance(0.80);
     assert(state.phase() == PowerMenuVideoPhase::Visible);
     assert(state.opacity() == 1.0);
 }
@@ -130,7 +152,7 @@ void immediate_hide_terminates_every_lifecycle_obligation() {
 } // namespace
 
 int main() {
-    asset_tree_contains_exactly_one_valid_mp4();
+    asset_tree_contains_video_and_static_poster();
     starts_hidden_without_media_or_frames();
     present_acquires_media_and_completes_the_opening_transition();
     dismiss_keeps_media_through_fade_then_releases_it_at_hidden();
