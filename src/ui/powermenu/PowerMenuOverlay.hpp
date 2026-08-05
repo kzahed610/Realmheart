@@ -29,9 +29,9 @@ public:
     PowerMenuOverlay(const PowerMenuOverlay&) = delete;
     PowerMenuOverlay& operator=(const PowerMenuOverlay&) = delete;
 
-    void show();
+    void show(double normalized_origin_x, double normalized_origin_y);
     void hide();
-    void toggle();
+    void toggle(double normalized_origin_x, double normalized_origin_y);
     [[nodiscard]] bool visible() const;
 
 private:

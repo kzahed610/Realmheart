@@ -75,7 +75,7 @@ if(REALMHEART_BUILD_HYPRLAND_PLUGIN AND HYPRLAND_FOUND AND GLESV2_FOUND)
         CXX_STANDARD_REQUIRED ON
     )
     target_compile_definitions(realmheart_fx PRIVATE
-        REALMHEART_EFFECT_ASSET_DIR="${CMAKE_SOURCE_DIR}/effects"
+        REALMHEART_WINDOW_EFFECT_ASSET_DIR="${CMAKE_SOURCE_DIR}/effects/windows"
     )
     target_compile_options(realmheart_fx PRIVATE ${REALMHEART_WARNING_FLAGS})
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -97,7 +97,7 @@ set_target_properties(realmheart_gl_probe PROPERTIES
 )
 target_compile_options(realmheart_gl_probe PRIVATE ${REALMHEART_WARNING_FLAGS})
 target_compile_definitions(realmheart_gl_probe PRIVATE
-    REALMHEART_SOURCE_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects"
+    REALMHEART_SOURCE_WINDOW_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects/windows"
 )
 target_link_libraries(realmheart_gl_probe PRIVATE
     PkgConfig::GTK4
@@ -174,6 +174,7 @@ add_library(realmheart_ui STATIC
     src/ui/powermenu/PowerMenuControls.cpp
     src/ui/powermenu/PowerMenuLayout.cpp
     src/ui/powermenu/PowerMenuVideoState.cpp
+    src/ui/powermenu/animation/PowerMenuRippleRenderer.cpp
     src/ui/powermenu/PowerMenuScene.cpp
     src/ui/powermenu/PowerMenuOverlay.cpp
     src/ui/launcher/LauncherOverlay.cpp
@@ -376,7 +377,7 @@ if(BUILD_TESTING)
     )
     target_compile_definitions(
         realmheart_window_effect_registry_tests
-        PRIVATE REALMHEART_TEST_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects"
+        PRIVATE REALMHEART_TEST_WINDOW_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects/windows"
     )
     realmheart_register_test(realmheart_window_effect_registry_tests)
 
@@ -392,7 +393,7 @@ if(BUILD_TESTING)
     )
     target_compile_definitions(
         realmheart_window_effect_config_tests
-        PRIVATE REALMHEART_TEST_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects"
+        PRIVATE REALMHEART_TEST_WINDOW_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects/windows"
     )
     realmheart_register_test(realmheart_window_effect_config_tests)
 
@@ -409,7 +410,7 @@ if(BUILD_TESTING)
     )
     target_compile_definitions(
         realmheart_window_effect_policy_tests
-        PRIVATE REALMHEART_TEST_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects"
+        PRIVATE REALMHEART_TEST_WINDOW_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects/windows"
     )
     realmheart_register_test(realmheart_window_effect_policy_tests)
 

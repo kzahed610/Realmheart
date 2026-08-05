@@ -43,12 +43,32 @@ bool preview_mode_enabled() {
     return value != nullptr && *value != '\0' && g_strcmp0(value, "0") != 0;
 }
 
+bool force_transparent_surface(GtkWidget* widget) {
+    GtkNative* native = gtk_widget_get_native(widget);
+    if (native == nullptr) return false;
+
+    GdkSurface* surface = gtk_native_get_surface(native);
+    if (surface == nullptr) return false;
+
+    // Never advertise any part of this fullscreen layer as opaque. Otherwise
+    // a compositor is allowed to skip alpha blending for the entire surface,
+    // turning the shader's zero-alpha pixels into a black rectangle.
+    cairo_region_t* empty_region = cairo_region_create();
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+    gdk_surface_set_opaque_region(surface, empty_region);
+    G_GNUC_END_IGNORE_DEPRECATIONS
+    cairo_region_destroy(empty_region);
+    return true;
+}
+
 bool apply_full_input_region(GtkWidget* widget) {
     GtkNative* native = gtk_widget_get_native(widget);
     if (native == nullptr) return false;
 
     GdkSurface* surface = gtk_native_get_surface(native);
-    if (surface == nullptr || !gdk_surface_get_mapped(surface)) return false;
+    if (surface == nullptr) return false;
+    force_transparent_surface(widget);
+    if (!gdk_surface_get_mapped(surface)) return false;
 
     const int width = gdk_surface_get_width(surface);
     const int height = gdk_surface_get_height(surface);
@@ -74,6 +94,8 @@ PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions
     gtk_window_set_title(window_, "Realmheart Power Menu");
     gtk_window_set_decorated(window_, FALSE);
     gtk_window_set_resizable(window_, TRUE);
+    gtk_widget_add_css_class(GTK_WIDGET(window_), "realmheart-power-menu-window");
+    gtk_widget_remove_css_class(GTK_WIDGET(window_), "background");
 
     LayerSurfaceSpec spec;
     spec.surface_namespace = "realmheart-power-menu";
@@ -86,7 +108,28 @@ PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions
     apply_layer_surface(window_, spec);
     gtk_layer_set_exclusive_zone(window_, -1);
 
+    // Establish an empty opaque region as soon as the Wayland surface exists,
+    // and repeat it on map because GTK may recompute opaque regions while the
+    // widget tree changes between hidden and visible states.
+    g_signal_connect(
+        window_,
+        "realize",
+        G_CALLBACK(+[](GtkWidget* widget, gpointer) {
+            force_transparent_surface(widget);
+        }),
+        nullptr
+    );
+    g_signal_connect(
+        window_,
+        "map",
+        G_CALLBACK(+[](GtkWidget* widget, gpointer) {
+            force_transparent_surface(widget);
+        }),
+        nullptr
+    );
+
     GtkWidget* root = gtk_overlay_new();
+    gtk_widget_add_css_class(root, "realmheart-power-menu-root");
     gtk_widget_set_hexpand(root, TRUE);
     gtk_widget_set_vexpand(root, TRUE);
 
@@ -98,6 +141,8 @@ PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions
         [this]() { hide(); }
     );
     gtk_overlay_add_overlay(GTK_OVERLAY(root), controls_->widget());
+    gtk_widget_set_opacity(controls_->widget(), 0.0);
+    gtk_widget_set_sensitive(controls_->widget(), FALSE);
 
     confirmation_banner_ = gtk_label_new(nullptr);
     gtk_widget_add_css_class(confirmation_banner_, "realmheart-power-confirmation");
@@ -109,8 +154,12 @@ PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions
     gtk_overlay_add_overlay(GTK_OVERLAY(root), confirmation_banner_);
 
     scene_->set_visibility_callback([this](double opacity) {
+        if (window_ != nullptr) {
+            force_transparent_surface(GTK_WIDGET(window_));
+        }
         if (controls_ != nullptr) {
             gtk_widget_set_opacity(controls_->widget(), opacity);
+            gtk_widget_set_sensitive(controls_->widget(), opacity >= 0.88);
         }
         if (confirmation_banner_ != nullptr) {
             gtk_widget_set_opacity(confirmation_banner_, opacity);
@@ -120,6 +169,12 @@ PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions
     if (GdkDisplay* display = gdk_display_get_default(); display != nullptr) {
         GtkCssProvider* provider = gtk_css_provider_new();
         gtk_css_provider_load_from_string(provider, R"CSS(
+            .realmheart-power-menu-window,
+            .realmheart-power-menu-root {
+                background: transparent;
+                background-color: transparent;
+            }
+
             .realmheart-power-confirmation {
                 background: rgba(17, 10, 28, 0.96);
                 border: 2px solid #f2ce78;
@@ -180,16 +235,29 @@ PowerMenuOverlay::~PowerMenuOverlay() {
     }
 }
 
-void PowerMenuOverlay::show() {
+void PowerMenuOverlay::show(
+    double normalized_origin_x,
+    double normalized_origin_y
+) {
     clear_confirmation();
-    if (scene_ != nullptr) scene_->present();
+    // Prime the transparent scene and its GL endpoint before mapping the layer
+    // surface. Mapping first exposes the window's uninitialised backing frame
+    // for one compositor cycle, which reads as a dark flash at click time.
+    if (scene_ != nullptr) {
+        scene_->present(normalized_origin_x, normalized_origin_y);
+    }
     gtk_window_present(window_);
+    force_transparent_surface(GTK_WIDGET(window_));
     schedule_interaction_setup();
 }
 
 void PowerMenuOverlay::hide() {
     cancel_interaction_setup();
     clear_confirmation();
+    force_transparent_surface(GTK_WIDGET(window_));
+    if (controls_ != nullptr) {
+        gtk_widget_set_sensitive(controls_->widget(), FALSE);
+    }
     if (scene_ == nullptr) {
         gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
         return;
@@ -242,11 +310,14 @@ bool PowerMenuOverlay::advance_interaction_setup(GtkWidget* widget) {
     return input_region_commit_frames_remaining_ > 0;
 }
 
-void PowerMenuOverlay::toggle() {
+void PowerMenuOverlay::toggle(
+    double normalized_origin_x,
+    double normalized_origin_y
+) {
     if (visible()) {
         hide();
     } else {
-        show();
+        show(normalized_origin_x, normalized_origin_y);
     }
 }
 

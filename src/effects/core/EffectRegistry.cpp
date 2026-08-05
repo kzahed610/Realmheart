@@ -65,7 +65,7 @@ constexpr std::array<EffectSpec, 3> kEffectSpecs{{
         .supports_close = true,
         .default_open_duration_seconds = 0.48,
         .default_close_duration_seconds = 0.40,
-        .fragment_shader_asset = "void/void.frag",
+        .fragment_shader_asset = "windows/void/void.frag",
         .requires_source_texture = true,
         .outputs_transparency = true,
     },

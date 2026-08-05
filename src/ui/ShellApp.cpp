@@ -663,10 +663,13 @@ public:
         session_->lock();
     }
 
-    void open_logout_menu() {
+    void open_logout_menu(
+        double origin_x = 24.0 / 1920.0,
+        double origin_y = 1048.0 / 1080.0
+    ) {
         cancel_power_menu_prewarm();
         ensure_power_menu_initialized();
-        power_menu_->toggle();
+        power_menu_->toggle(origin_x, origin_y);
     }
 
     void quit() {
@@ -1135,7 +1138,9 @@ private:
                 *media_,
                 [this] { toggle_right_sidebar(); },
                 [this] { launch_launcher(); },
-                [this] { open_logout_menu(); }
+                [this](double origin_x, double origin_y) {
+                    open_logout_menu(origin_x, origin_y);
+                }
             );
         }
         if (hotspot_ == nullptr) {

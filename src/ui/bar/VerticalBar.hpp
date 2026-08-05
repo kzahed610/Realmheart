@@ -19,6 +19,7 @@
 #include <gtk/gtk.h>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace realmheart::ui::bar {
@@ -32,7 +33,7 @@ public:
         services::MediaService& media_service,
         std::function<void()> toggle_sidebar,
         std::function<void()> launch_launcher,
-        std::function<void()> open_power_menu = {}
+        std::function<void(double, double)> open_power_menu = {}
     );
     ~VerticalBar();
 
@@ -70,6 +71,7 @@ private:
     void open_exclusive_media();
     void open_exclusive_system();
     void activate_workspace(int workspace_id);
+    [[nodiscard]] std::pair<double, double> power_menu_origin() const;
 
     GtkApplication* app_ = nullptr;
     GtkWidget* window_ = nullptr;
@@ -94,7 +96,7 @@ private:
     services::MediaService& media_service_;
     std::function<void()> toggle_sidebar_;
     std::function<void()> launch_launcher_;
-    std::function<void()> open_power_menu_;
+    std::function<void(double, double)> open_power_menu_;
     std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
     services::NotificationHistory::Subscription notification_subscription_;
     services::MediaService::Subscription media_subscription_;

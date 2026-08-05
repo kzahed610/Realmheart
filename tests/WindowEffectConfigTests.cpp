@@ -28,7 +28,7 @@ bool hasEffect(const WindowEffectPool& pool, std::string_view effect) {
 } // namespace
 
 int main() {
-    const auto registry = loadWindowEffectRegistry(REALMHEART_TEST_EFFECT_DIR);
+    const auto registry = loadWindowEffectRegistry(REALMHEART_TEST_WINDOW_EFFECT_DIR);
     assert(registry.success);
 
     const auto builtIn = builtInWindowEffectConfig();

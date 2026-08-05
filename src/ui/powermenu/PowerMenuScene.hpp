@@ -6,7 +6,12 @@
 
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <string>
+
+namespace realmheart::ui::powermenu::animation {
+class PowerMenuRippleRenderer;
+}
 
 namespace realmheart::ui::powermenu {
 
@@ -22,7 +27,7 @@ public:
     [[nodiscard]] bool ready() const;
     [[nodiscard]] const std::string& error_message() const;
     void set_visibility_callback(std::function<void(double)> callback);
-    void present();
+    void present(double normalized_origin_x, double normalized_origin_y);
     void dismiss(std::function<void()> on_hidden);
     void hide_immediately();
 
@@ -38,8 +43,19 @@ private:
     void acquire_media();
     void release_media() noexcept;
     void release_poster_stream() noexcept;
+    void start_media_playback() noexcept;
+    void pause_media_playback() noexcept;
+    void sync_media_widgets() noexcept;
+    [[nodiscard]] bool live_frame_ready() const noexcept;
+    void arm_live_handoff() noexcept;
+    void update_live_handoff(gint64 frame_time_us) noexcept;
+    void cancel_live_handoff(bool keep_ripple) noexcept;
+    [[nodiscard]] bool handoff_needs_frame() const noexcept;
     void handle_stream_notify(GtkMediaStream* stream);
     bool capture_poster(GtkMediaStream* stream);
+    [[nodiscard]] GdkPaintable* transition_source() const noexcept;
+    bool try_begin_ripple();
+    void finish_ripple() noexcept;
     gboolean on_timer();
     void ensure_tick();
     void stop_tick();
@@ -47,11 +63,13 @@ private:
     void publish_visibility();
 
     GtkWidget* widget_ = nullptr;
+    GtkWidget* media_layer_ = nullptr;
     GtkWidget* poster_picture_ = nullptr;
     GtkWidget* video_widget_ = nullptr;
     GdkTexture* poster_texture_ = nullptr;
     GtkMediaStream* poster_stream_ = nullptr;
     GtkMediaStream* media_stream_ = nullptr;
+    std::unique_ptr<animation::PowerMenuRippleRenderer> ripple_renderer_;
     std::filesystem::path video_path_;
     std::string error_message_;
     PowerMenuVideoState state_;
@@ -59,6 +77,16 @@ private:
     std::function<void(double)> visibility_callback_;
     guint tick_callback_id_ = 0;
     gint64 last_frame_time_us_ = 0;
+    double ripple_origin_x_ = 0.012;
+    double ripple_origin_y_ = 0.94;
+    unsigned int ripple_attempts_ = 0;
+    bool ripple_pending_ = false;
+    bool ripple_fallback_ = false;
+    bool media_playback_started_ = false;
+    bool live_video_committed_ = false;
+    bool handoff_pending_ = false;
+    bool handoff_active_ = false;
+    gint64 handoff_started_us_ = 0;
 };
 
 } // namespace realmheart::ui::powermenu
