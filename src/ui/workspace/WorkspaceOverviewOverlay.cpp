@@ -1,5 +1,4 @@
 #include "ui/workspace/WorkspaceOverviewOverlay.hpp"
-
 #include "ui/AssetResolver.hpp"
 #include "ui/LayerSurface.hpp"
 #include "ui/bar/BarGeometry.hpp"
@@ -9,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <optional>
@@ -19,10 +19,90 @@
 namespace realmheart::ui::workspace {
 namespace {
 
+using SnapshotDrawFunc = void (*)(GtkWidget*, GtkSnapshot*, gpointer);
+
+typedef struct _RealmheartWorkspaceOverviewCanvas {
+    GtkWidget parent_instance;
+    SnapshotDrawFunc draw_func;
+    gpointer user_data;
+} RealmheartWorkspaceOverviewCanvas;
+
+typedef struct _RealmheartWorkspaceOverviewCanvasClass {
+    GtkWidgetClass parent_class;
+} RealmheartWorkspaceOverviewCanvasClass;
+
+G_DEFINE_TYPE(
+    RealmheartWorkspaceOverviewCanvas,
+    realmheart_workspace_overview_canvas,
+    GTK_TYPE_WIDGET
+)
+
+void realmheart_workspace_overview_canvas_snapshot(
+    GtkWidget* widget,
+    GtkSnapshot* snapshot
+) {
+    auto* self = reinterpret_cast<RealmheartWorkspaceOverviewCanvas*>(widget);
+    if (self->draw_func != nullptr) {
+        self->draw_func(widget, snapshot, self->user_data);
+    }
+}
+
+void realmheart_workspace_overview_canvas_class_init(
+    RealmheartWorkspaceOverviewCanvasClass* klass
+) {
+    GtkWidgetClass* widget_class = GTK_WIDGET_CLASS(klass);
+    widget_class->snapshot = realmheart_workspace_overview_canvas_snapshot;
+    gtk_widget_class_set_css_name(
+        widget_class,
+        "realmheart-workspace-overview-canvas"
+    );
+}
+
+void realmheart_workspace_overview_canvas_init(
+    RealmheartWorkspaceOverviewCanvas* self
+) {
+    self->draw_func = nullptr;
+    self->user_data = nullptr;
+}
+
+GtkWidget* overview_canvas_new(
+    SnapshotDrawFunc draw_func,
+    gpointer user_data
+) {
+    auto* self = reinterpret_cast<RealmheartWorkspaceOverviewCanvas*>(
+        g_object_new(
+            realmheart_workspace_overview_canvas_get_type(),
+            nullptr
+        )
+    );
+    self->draw_func = draw_func;
+    self->user_data = user_data;
+    return GTK_WIDGET(self);
+}
+
+void overview_canvas_clear(GtkWidget* widget) {
+    if (widget == nullptr) return;
+    auto* self = reinterpret_cast<RealmheartWorkspaceOverviewCanvas*>(widget);
+    self->draw_func = nullptr;
+    self->user_data = nullptr;
+}
+
 constexpr double kReferenceWidth = 1920.0;
 constexpr double kReferenceHeight = 1080.0;
 constexpr double kActiveFraction = 0.56;
 constexpr double kInactiveFraction = (1.0 - kActiveFraction) / 3.0;
+constexpr double kTransitionDurationSeconds = 0.480;
+constexpr double kInactiveBackgroundZoom = 1.62;
+constexpr double kActiveBackgroundZoom = 1.10;
+constexpr gint64 kMicrosecondsPerSecond = 1'000'000;
+
+#if G_BYTE_ORDER == G_LITTLE_ENDIAN
+constexpr GdkMemoryFormat kCairoArgb32MemoryFormat =
+    GDK_MEMORY_B8G8R8A8_PREMULTIPLIED;
+#else
+constexpr GdkMemoryFormat kCairoArgb32MemoryFormat =
+    GDK_MEMORY_A8R8G8B8_PREMULTIPLIED;
+#endif
 
 struct Point {
     double x = 0.0;
@@ -99,15 +179,24 @@ constexpr std::array<RealmStyle, 4> kRealms{{
     },
 }};
 
-constexpr std::array<double, 13> kBoundaryXPercent{
-    0.0, 8.0, 16.0, 24.0, 32.0, 40.0, 50.0,
-    60.0, 70.0, 80.0, 88.0, 94.0, 100.0,
+constexpr std::size_t kBoundarySampleCount = 65;
+using BoundaryPoints = std::array<Point, kBoundarySampleCount>;
+
+struct RippleSpec {
+    double primary_amplitude = 0.0;
+    double primary_cycles = 1.0;
+    double secondary_amplitude = 0.0;
+    double secondary_cycles = 2.0;
+    double phase = 0.0;
 };
 
-constexpr std::array<std::array<double, 13>, 3> kBoundaryOffsets{{
-    {6.0, -18.0, -4.0, 14.0, -12.0, 8.0, -20.0, 4.0, 17.0, -10.0, 7.0, -5.0, 11.0},
-    {0.0, 16.0, 28.0, 13.0, -8.0, -21.0, -5.0, 18.0, 27.0, 9.0, -15.0, -7.0, 2.0},
-    {3.0, -12.0, 16.0, -7.0, 21.0, -17.0, 7.0, -14.0, 19.0, -5.0, 13.0, -9.0, 4.0},
+// Smooth, restrained waves. The phases differ so the three boundaries do not
+// read as duplicated sine curves, but none of them has the jagged fault-line
+// silhouette of the previous shader.
+constexpr std::array<RippleSpec, 3> kRippleSpecs{{
+    {6.4, 1.10, 1.8, 2.55, 0.20},
+    {7.2, 0.92, 2.0, 2.20, 1.05},
+    {5.8, 1.24, 1.6, 2.85, 2.10},
 }};
 
 constexpr std::array<std::array<std::pair<std::string_view, std::string_view>, 3>, 4>
@@ -117,6 +206,46 @@ constexpr std::array<std::array<std::pair<std::string_view, std::string_view>, 3
         {{{"Editor", "WorkspaceOverview.cpp"}, {"Terminal", "hyprctl clients -j"}, {"Docs", "interaction notes"}}},
         {{{"Build", "cmake --build"}, {"Tests", "Workspace model"}, {"Monitor", "Realmheart RSS"}}},
     }};
+
+
+double lerp(double from, double to, double progress) {
+    return from + (to - from) * progress;
+}
+
+Rect lerp_rect(const Rect& from, const Rect& to, double progress) {
+    return {
+        lerp(from.x, to.x, progress),
+        lerp(from.y, to.y, progress),
+        lerp(from.width, to.width, progress),
+        lerp(from.height, to.height, progress),
+    };
+}
+
+double cubic_bezier_coordinate(double t, double first, double second) {
+    const double inverse = 1.0 - t;
+    return 3.0 * inverse * inverse * t * first +
+        3.0 * inverse * t * t * second + t * t * t;
+}
+
+double cubic_bezier_derivative(double t, double first, double second) {
+    const double inverse = 1.0 - t;
+    return 3.0 * inverse * inverse * first +
+        6.0 * inverse * t * (second - first) +
+        3.0 * t * t * (1.0 - second);
+}
+
+// CSS cubic-bezier(.22, .78, .2, 1). Solve X first, then sample Y.
+double transition_ease(double progress) {
+    const double x = std::clamp(progress, 0.0, 1.0);
+    double t = x;
+    for (int iteration = 0; iteration < 6; ++iteration) {
+        const double error = cubic_bezier_coordinate(t, 0.22, 0.20) - x;
+        const double derivative = cubic_bezier_derivative(t, 0.22, 0.20);
+        if (std::abs(derivative) < 0.000001) break;
+        t = std::clamp(t - error / derivative, 0.0, 1.0);
+    }
+    return cubic_bezier_coordinate(t, 0.78, 1.0);
+}
 
 void set_source(cairo_t* cr, const Color& color, double alpha_multiplier = 1.0) {
     cairo_set_source_rgba(
@@ -219,7 +348,7 @@ void draw_text(
     g_object_unref(layout);
 }
 
-std::array<double, 4> realm_heights(int active_index) {
+std::array<double, 4> target_realm_heights(int active_index) {
     std::array<double, 4> heights{};
     for (int index = 0; index < 4; ++index) {
         heights[static_cast<std::size_t>(index)] =
@@ -237,108 +366,116 @@ std::array<double, 4> realm_tops(const std::array<double, 4>& heights) {
     return tops;
 }
 
-std::array<Point, 13> boundary_points(double base, std::size_t boundary_index) {
-    std::array<Point, 13> points{};
+double realm_activity(double height) {
+    const double inactive_height = kInactiveFraction * kReferenceHeight;
+    const double active_height = kActiveFraction * kReferenceHeight;
+    return std::clamp(
+        (height - inactive_height) / (active_height - inactive_height),
+        0.0,
+        1.0
+    );
+}
+
+BoundaryPoints boundary_points(double base, std::size_t boundary_index) {
+    BoundaryPoints points{};
+    const auto& ripple = kRippleSpecs[boundary_index];
+    constexpr double kTau = 6.28318530717958647692;
+
     for (std::size_t index = 0; index < points.size(); ++index) {
+        const double progress = static_cast<double>(index) /
+            static_cast<double>(points.size() - 1U);
+        const double primary = std::sin(
+            progress * kTau * ripple.primary_cycles + ripple.phase
+        ) * ripple.primary_amplitude;
+        const double secondary = std::sin(
+            progress * kTau * ripple.secondary_cycles - ripple.phase * 0.65
+        ) * ripple.secondary_amplitude;
         points[index] = {
-            kBoundaryXPercent[index] * kReferenceWidth / 100.0,
-            base + kBoundaryOffsets[boundary_index][index],
+            progress * kReferenceWidth,
+            base + primary + secondary,
         };
     }
     return points;
 }
 
-std::array<Point, 13> shifted(
-    const std::array<Point, 13>& points,
-    double delta_y
-) {
+BoundaryPoints shifted(const BoundaryPoints& points, double delta_y) {
     auto result = points;
     for (auto& point : result) point.y += delta_y;
     return result;
 }
 
-std::array<Point, 13> flat_boundary(double y) {
-    std::array<Point, 13> points{};
-    for (std::size_t index = 0; index < points.size(); ++index) {
-        points[index] = {
-            kBoundaryXPercent[index] * kReferenceWidth / 100.0,
-            y,
-        };
-    }
-    return points;
-}
+struct CardVisual {
+    Rect rect;
+    double detail = 0.0;
+    double opacity = 1.0;
+};
 
-std::array<Rect, 3> window_card_rects(
+std::array<CardVisual, 3> window_card_visuals(
     double top,
     double realm_height,
-    bool active
+    double activity
 ) {
-    if (active) {
-        const double windows_top = top + 68.0;
-        const double windows_height = std::max(360.0, realm_height - 118.0);
-        return {{
-            {355.0, windows_top + windows_height * 0.02, 520.0, 255.0},
-            {903.0, windows_top + windows_height * 0.12, 350.0, 220.0},
-            {640.0, windows_top + windows_height * 0.57, 430.0, 160.0},
-        }};
-    }
-
-    const double windows_top = top + std::max(18.0, (realm_height - 72.0) * 0.5);
-    return {{
-        {355.0, windows_top, 320.0, 72.0},
-        {697.0, windows_top, 270.0, 72.0},
-        {},
+    const double compact_top =
+        top + std::max(18.0, (realm_height - 72.0) * 0.5);
+    const std::array<Rect, 3> compact{{
+        {355.0, compact_top, 320.0, 72.0},
+        {697.0, compact_top, 270.0, 72.0},
+        {790.5, compact_top + 10.0, 301.0, 52.0},
     }};
+
+    const double windows_top = top + 68.0;
+    const double windows_height = std::max(360.0, realm_height - 118.0);
+    const std::array<Rect, 3> expanded{{
+        {355.0, windows_top + windows_height * 0.02, 520.0, 255.0},
+        {903.0, windows_top + windows_height * 0.12, 350.0, 220.0},
+        {640.0, windows_top + windows_height * 0.57, 430.0, 160.0},
+    }};
+
+    std::array<CardVisual, 3> result{};
+    for (std::size_t index = 0; index < result.size(); ++index) {
+        result[index] = {
+            lerp_rect(compact[index], expanded[index], activity),
+            activity,
+            index == 2U ? activity : 1.0,
+        };
+    }
+    return result;
 }
 
-bool point_hits_window_card(double x, double y, int active_index) {
-    const auto heights = realm_heights(active_index);
+Rect identity_rect(double top, double realm_height, double activity) {
+    (void)activity;
+    constexpr double width = 254.0;
+    constexpr double height = 70.0;
+    return {
+        96.0,
+        top + realm_height * 0.5 - height * 0.5,
+        width,
+        height,
+    };
+}
+
+std::optional<int> hit_realm_content(
+    double x,
+    double y,
+    const std::array<double, 4>& heights
+) {
     const auto tops = realm_tops(heights);
     for (std::size_t index = 0; index < kRealms.size(); ++index) {
-        const bool active = static_cast<int>(index) == active_index;
-        const auto cards = window_card_rects(tops[index], heights[index], active);
-        const std::size_t count = active ? cards.size() : cards.size() - 1U;
-        for (std::size_t card_index = 0; card_index < count; ++card_index) {
-            if (cards[card_index].contains(x, y)) return true;
+        const double activity = realm_activity(heights[index]);
+        if (identity_rect(tops[index], heights[index], activity).contains(x, y)) {
+            return static_cast<int>(index);
+        }
+        const auto cards = window_card_visuals(tops[index], heights[index], activity);
+        for (const auto& card : cards) {
+            if (card.opacity > 0.05 && card.rect.contains(x, y)) {
+                return static_cast<int>(index);
+            }
         }
     }
-    return false;
+    return std::nullopt;
 }
 
-void polygon_path(
-    cairo_t* cr,
-    const std::array<Point, 13>& top,
-    const std::array<Point, 13>& bottom
-) {
-    cairo_new_path(cr);
-    cairo_move_to(cr, top.front().x, top.front().y);
-    for (std::size_t index = 1; index < top.size(); ++index) {
-        cairo_line_to(cr, top[index].x, top[index].y);
-    }
-    for (auto index = bottom.size(); index-- > 0;) {
-        cairo_line_to(cr, bottom[index].x, bottom[index].y);
-    }
-    cairo_close_path(cr);
-}
-
-void frontier_path(
-    cairo_t* cr,
-    const std::array<Point, 13>& points,
-    double upward,
-    double downward
-) {
-    cairo_new_path(cr);
-    cairo_move_to(cr, points.front().x, points.front().y - upward);
-    for (std::size_t index = 1; index < points.size(); ++index) {
-        cairo_line_to(cr, points[index].x, points[index].y - upward);
-    }
-    for (auto index = points.size(); index-- > 0;) {
-        cairo_line_to(cr, points[index].x, points[index].y + downward);
-    }
-    cairo_close_path(cr);
-}
-
-[[nodiscard]] cairo_surface_t* load_cairo_surface(
+[[nodiscard]] GdkTexture* load_texture(
     const std::filesystem::path& path,
     std::string& error_message
 ) {
@@ -354,116 +491,8 @@ void frontier_path(
             error_message += texture_error->message;
         }
         g_clear_error(&texture_error);
-        return nullptr;
     }
-
-    const int width = gdk_texture_get_width(texture);
-    const int height = gdk_texture_get_height(texture);
-    cairo_surface_t* surface = cairo_image_surface_create(
-        CAIRO_FORMAT_ARGB32,
-        width,
-        height
-    );
-    const cairo_status_t status = cairo_surface_status(surface);
-    if (status != CAIRO_STATUS_SUCCESS) {
-        error_message = "Unable to create Cairo surface for " +
-            path.filename().string() + ": " + cairo_status_to_string(status);
-        cairo_surface_destroy(surface);
-        g_object_unref(texture);
-        return nullptr;
-    }
-
-    gdk_texture_download(
-        texture,
-        cairo_image_surface_get_data(surface),
-        static_cast<gsize>(cairo_image_surface_get_stride(surface))
-    );
-    cairo_surface_mark_dirty(surface);
-    g_object_unref(texture);
-    return surface;
-}
-
-void draw_surface_cover(
-    cairo_t* cr,
-    cairo_surface_t* surface,
-    double x,
-    double y,
-    double width,
-    double height
-) {
-    if (surface == nullptr || width <= 0.0 || height <= 0.0) return;
-    const int source_width = cairo_image_surface_get_width(surface);
-    const int source_height = cairo_image_surface_get_height(surface);
-    if (source_width <= 0 || source_height <= 0) return;
-
-    const double scale = std::max(
-        width / static_cast<double>(source_width),
-        height / static_cast<double>(source_height)
-    );
-    const double drawn_width = static_cast<double>(source_width) * scale;
-    const double drawn_height = static_cast<double>(source_height) * scale;
-    const double draw_x = x + width - drawn_width;
-    const double draw_y = y + (height - drawn_height) * 0.5;
-
-    cairo_save(cr);
-    cairo_rectangle(cr, x, y, width, height);
-    cairo_clip(cr);
-    cairo_translate(cr, draw_x, draw_y);
-    cairo_scale(cr, scale, scale);
-    cairo_set_source_surface(cr, surface, 0.0, 0.0);
-    cairo_paint(cr);
-    cairo_restore(cr);
-}
-
-void draw_character(
-    cairo_t* cr,
-    cairo_surface_t* surface,
-    double target_height,
-    double right,
-    double top
-) {
-    if (surface == nullptr || target_height <= 0.0) return;
-    const int source_width = cairo_image_surface_get_width(surface);
-    const int source_height = cairo_image_surface_get_height(surface);
-    if (source_width <= 0 || source_height <= 0) return;
-
-    const double scale = target_height / static_cast<double>(source_height);
-    const double width = static_cast<double>(source_width) * scale;
-    const double x = kReferenceWidth - right - width;
-
-    cairo_save(cr);
-    cairo_translate(cr, x, top);
-    cairo_scale(cr, scale, scale);
-    cairo_set_source_surface(cr, surface, 0.0, 0.0);
-    cairo_paint(cr);
-    cairo_restore(cr);
-}
-
-void draw_atmosphere(
-    cairo_t* cr,
-    double top,
-    double height,
-    bool active
-) {
-    cairo_pattern_t* horizontal = cairo_pattern_create_linear(0.0, 0.0, kReferenceWidth, 0.0);
-    cairo_pattern_add_color_stop_rgba(horizontal, 0.0, 0.01, 0.02, 0.03, 0.92);
-    cairo_pattern_add_color_stop_rgba(horizontal, 0.15, 0.02, 0.03, 0.04, active ? 0.64 : 0.72);
-    cairo_pattern_add_color_stop_rgba(horizontal, 0.45, 0.02, 0.03, 0.04, active ? 0.17 : 0.26);
-    cairo_pattern_add_color_stop_rgba(horizontal, 0.75, 0.01, 0.02, 0.03, active ? 0.01 : 0.04);
-    cairo_pattern_add_color_stop_rgba(horizontal, 1.0, 0.0, 0.0, 0.0, active ? 0.08 : 0.10);
-    cairo_rectangle(cr, 0.0, top, kReferenceWidth, height);
-    cairo_set_source(cr, horizontal);
-    cairo_fill(cr);
-    cairo_pattern_destroy(horizontal);
-
-    cairo_pattern_t* vertical = cairo_pattern_create_linear(0.0, top, 0.0, top + height);
-    cairo_pattern_add_color_stop_rgba(vertical, 0.0, 0.0, 0.0, 0.0, active ? 0.08 : 0.18);
-    cairo_pattern_add_color_stop_rgba(vertical, 0.45, 0.0, 0.0, 0.0, 0.0);
-    cairo_pattern_add_color_stop_rgba(vertical, 1.0, 0.0, 0.0, 0.0, active ? 0.24 : 0.33);
-    cairo_rectangle(cr, 0.0, top, kReferenceWidth, height);
-    cairo_set_source(cr, vertical);
-    cairo_fill(cr);
-    cairo_pattern_destroy(vertical);
+    return texture;
 }
 
 void draw_window_card(
@@ -474,9 +503,16 @@ void draw_window_card(
     double height,
     const RealmStyle& style,
     std::pair<std::string_view, std::string_view> content,
-    bool compact
+    double detail,
+    double opacity
 ) {
-    rounded_rectangle(cr, x, y, width, height, compact ? 11.0 : 15.0);
+    if (opacity <= 0.001 || width <= 0.0 || height <= 0.0) return;
+
+    cairo_save(cr);
+    cairo_push_group(cr);
+
+    const double radius = lerp(11.0, 15.0, detail);
+    rounded_rectangle(cr, x, y, width, height, radius);
     cairo_pattern_t* background = cairo_pattern_create_linear(x, y, x + width, y + height);
     cairo_pattern_add_color_stop_rgba(background, 0.0, 0.035, 0.047, 0.059, 0.94);
     cairo_pattern_add_color_stop_rgba(background, 1.0, 0.051, 0.067, 0.082, 0.84);
@@ -488,7 +524,7 @@ void draw_window_card(
     cairo_set_line_width(cr, 1.0);
     cairo_stroke(cr);
 
-    const double titlebar_height = compact ? 34.0 : 38.0;
+    const double titlebar_height = lerp(34.0, 38.0, detail);
     set_source(cr, {0.0, 0.0, 0.0, 0.17});
     cairo_rectangle(cr, x, y, width, titlebar_height);
     cairo_fill(cr);
@@ -498,7 +534,7 @@ void draw_window_card(
         cr,
         x + 18.0,
         y + titlebar_height * 0.5,
-        compact ? 4.2 : 5.0,
+        lerp(4.2, 5.0, detail),
         0.0,
         2.0 * std::acos(-1.0)
     );
@@ -509,7 +545,7 @@ void draw_window_card(
         content.first,
         x + 33.0,
         y + titlebar_height * 0.5,
-        compact ? 12.0 : 14.0,
+        lerp(12.0, 14.0, detail),
         {0.95, 0.94, 0.91, 0.96},
         true
     );
@@ -518,15 +554,16 @@ void draw_window_card(
         content.second,
         x + width - 14.0,
         y + titlebar_height * 0.5,
-        compact ? 10.0 : 11.0,
+        lerp(10.0, 11.0, detail),
         {1.0, 1.0, 1.0, 0.42},
         false,
         "Inter",
         true
     );
 
-    if (compact) {
-        const double preview_y = y + 45.0;
+    const double compact_opacity = 1.0 - detail;
+    if (compact_opacity > 0.001) {
+        const double preview_y = y + lerp(45.0, 52.0, detail);
         const double gap = 7.0;
         const double cell_width = (width - 26.0 - gap * 2.0) / 3.0;
         for (int index = 0; index < 3; ++index) {
@@ -538,121 +575,599 @@ void draw_window_card(
                 8.0,
                 3.0
             );
-            set_source(cr, style.accent, 0.12);
+            set_source(cr, style.accent, 0.12 * compact_opacity);
             cairo_fill(cr);
         }
-        return;
     }
 
-    const double preview_x = x + 18.0;
-    const double preview_y = y + 52.0;
-    const double preview_width = width - 36.0;
-    const double preview_height = std::max(height - 68.0, 0.0);
-    const double gap = 9.0;
-    const double left_width = (preview_width - gap) / 2.4;
-    const double right_width = preview_width - left_width - gap;
-    const double row_height = std::max((preview_height - gap) * 0.5, 0.0);
+    if (detail > 0.001) {
+        const double preview_x = x + 18.0;
+        const double preview_y = y + 52.0;
+        const double preview_width = std::max(width - 36.0, 0.0);
+        const double preview_height = std::max(height - 68.0, 0.0);
+        const double gap = 9.0;
+        const double left_width = std::max((preview_width - gap) / 2.4, 0.0);
+        const double right_width = std::max(preview_width - left_width - gap, 0.0);
+        const double row_height = std::max((preview_height - gap) * 0.5, 0.0);
 
-    const std::array<std::array<double, 4>, 4> cells{{
-        {preview_x, preview_y, left_width, row_height},
-        {preview_x + left_width + gap, preview_y, right_width, preview_height},
-        {preview_x, preview_y + row_height + gap, left_width, row_height},
-        {preview_x, preview_y + preview_height - std::min(34.0, preview_height), preview_width, std::min(34.0, preview_height)},
-    }};
-    for (const auto& cell : cells) {
-        rounded_rectangle(cr, cell[0], cell[1], cell[2], cell[3], 6.0);
-        set_source(cr, style.accent, 0.10);
-        cairo_fill_preserve(cr);
-        set_source(cr, {1.0, 1.0, 1.0, 0.035});
-        cairo_set_line_width(cr, 1.0);
-        cairo_stroke(cr);
+        const std::array<std::array<double, 4>, 4> cells{{
+            {preview_x, preview_y, left_width, row_height},
+            {preview_x + left_width + gap, preview_y, right_width, preview_height},
+            {preview_x, preview_y + row_height + gap, left_width, row_height},
+            {
+                preview_x,
+                preview_y + preview_height - std::min(34.0, preview_height),
+                preview_width,
+                std::min(34.0, preview_height),
+            },
+        }};
+        for (const auto& cell : cells) {
+            if (cell[2] <= 0.0 || cell[3] <= 0.0) continue;
+            rounded_rectangle(cr, cell[0], cell[1], cell[2], cell[3], 6.0);
+            set_source(cr, style.accent, 0.10 * detail);
+            cairo_fill_preserve(cr);
+            set_source(cr, {1.0, 1.0, 1.0, 0.035 * detail});
+            cairo_set_line_width(cr, 1.0);
+            cairo_stroke(cr);
+        }
     }
-}
 
-void draw_identity(
-    cairo_t* cr,
-    const RealmStyle& style,
-    double center_y,
-    bool active
-) {
-    const double scale = active ? 1.0 : 0.84;
-    cairo_save(cr);
-    cairo_translate(cr, 112.0, center_y);
-    cairo_scale(cr, scale, scale);
-
-    draw_text(
-        cr,
-        style.roman,
-        0.0,
-        0.0,
-        60.0,
-        style.accent_soft,
-        false,
-        "Georgia"
-    );
-    draw_text(
-        cr,
-        style.element,
-        78.0,
-        -14.0,
-        23.0,
-        style.accent_soft,
-        false,
-        "Georgia",
-        false,
-        3
-    );
-    draw_text(
-        cr,
-        style.place,
-        78.0,
-        18.0,
-        13.0,
-        {1.0, 1.0, 1.0, active ? 0.55 : 0.46},
-        false,
-        "Inter",
-        false,
-        2
-    );
+    cairo_pop_group_to_source(cr);
+    cairo_paint_with_alpha(cr, std::clamp(opacity, 0.0, 1.0));
     cairo_restore(cr);
 }
 
-void draw_frontier(
-    cairo_t* cr,
-    const std::array<Point, 13>& points,
-    double upward,
-    double downward,
-    const Color& top,
-    const Color& bottom,
+[[nodiscard]] PangoLayout* create_identity_layout(
+    GtkWidget* widget,
+    std::string_view text,
+    double size,
+    std::string_view family,
+    int letter_spacing,
+    std::string& error_message
+) {
+    const std::string owned(text);
+    PangoLayout* layout = gtk_widget_create_pango_layout(widget, owned.c_str());
+    if (layout == nullptr) {
+        error_message = "Unable to create workspace identity layout";
+        return nullptr;
+    }
+
+    PangoFontDescription* font = pango_font_description_new();
+    const std::string family_name(family);
+    pango_font_description_set_family(font, family_name.c_str());
+    pango_font_description_set_absolute_size(font, size * PANGO_SCALE);
+    pango_layout_set_font_description(layout, font);
+    pango_font_description_free(font);
+
+    if (letter_spacing != 0) {
+        PangoAttrList* attributes = pango_attr_list_new();
+        pango_attr_list_insert(
+            attributes,
+            pango_attr_letter_spacing_new(letter_spacing * PANGO_SCALE)
+        );
+        pango_layout_set_attributes(layout, attributes);
+        pango_attr_list_unref(attributes);
+    }
+    return layout;
+}
+
+void append_identity_layout(
+    GtkSnapshot* snapshot,
+    PangoLayout* layout,
+    double x,
+    double center_y,
+    const Color& color,
+    const Color* shadow_color = nullptr,
+    double shadow_strength = 0.0
+) {
+    if (layout == nullptr) return;
+
+    int text_height = 0;
+    pango_layout_get_pixel_size(layout, nullptr, &text_height);
+    const graphene_point_t offset = GRAPHENE_POINT_INIT(
+        static_cast<float>(x),
+        static_cast<float>(center_y - static_cast<double>(text_height) * 0.5)
+    );
+    const GdkRGBA rgba{
+        static_cast<float>(color.red),
+        static_cast<float>(color.green),
+        static_cast<float>(color.blue),
+        static_cast<float>(color.alpha),
+    };
+
+    gtk_snapshot_save(snapshot);
+    gtk_snapshot_translate(snapshot, &offset);
+    if (shadow_color != nullptr && shadow_strength > 0.0) {
+        const GdkRGBA shadow_rgba{
+            static_cast<float>(shadow_color->red),
+            static_cast<float>(shadow_color->green),
+            static_cast<float>(shadow_color->blue),
+            static_cast<float>(shadow_color->alpha * shadow_strength),
+        };
+        const graphene_point_t shadow_offset_far = GRAPHENE_POINT_INIT(0.0F, 3.0F);
+        gtk_snapshot_save(snapshot);
+        gtk_snapshot_translate(snapshot, &shadow_offset_far);
+        gtk_snapshot_append_layout(snapshot, layout, &shadow_rgba);
+        gtk_snapshot_restore(snapshot);
+
+        const GdkRGBA shadow_rgba_near{
+            static_cast<float>(shadow_color->red),
+            static_cast<float>(shadow_color->green),
+            static_cast<float>(shadow_color->blue),
+            static_cast<float>(shadow_color->alpha * shadow_strength * 1.35),
+        };
+        const graphene_point_t shadow_offset_near = GRAPHENE_POINT_INIT(0.0F, 1.5F);
+        gtk_snapshot_save(snapshot);
+        gtk_snapshot_translate(snapshot, &shadow_offset_near);
+        gtk_snapshot_append_layout(snapshot, layout, &shadow_rgba_near);
+        gtk_snapshot_restore(snapshot);
+    }
+    gtk_snapshot_append_layout(snapshot, layout, &rgba);
+    gtk_snapshot_restore(snapshot);
+}
+
+[[nodiscard]] GdkTexture* texture_from_surface(
+    cairo_surface_t* surface,
+    std::string& error_message
+) {
+    if (surface == nullptr ||
+        cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS ||
+        cairo_image_surface_get_format(surface) != CAIRO_FORMAT_ARGB32) {
+        error_message = "Unable to convert workspace scene into a GDK texture";
+        return nullptr;
+    }
+
+    cairo_surface_flush(surface);
+    const int width = cairo_image_surface_get_width(surface);
+    const int height = cairo_image_surface_get_height(surface);
+    const int stride = cairo_image_surface_get_stride(surface);
+    const auto* pixels = cairo_image_surface_get_data(surface);
+    if (width <= 0 || height <= 0 || stride < width * 4 || pixels == nullptr) {
+        error_message = "Workspace scene produced invalid texture data";
+        return nullptr;
+    }
+
+    const gsize byte_count = static_cast<gsize>(stride) *
+        static_cast<gsize>(height);
+    GBytes* bytes = g_bytes_new(pixels, byte_count);
+    GdkTexture* texture = gdk_memory_texture_new(
+        width,
+        height,
+        kCairoArgb32MemoryFormat,
+        bytes,
+        static_cast<gsize>(stride)
+    );
+    g_bytes_unref(bytes);
+    if (texture == nullptr) {
+        error_message = "Unable to allocate workspace GDK texture";
+    }
+    return texture;
+}
+
+[[nodiscard]] GdkTexture* render_realm_overlay_texture(
+    std::size_t realm_index,
+    bool expanded,
+    std::string& error_message
+) {
+    const auto& style = kRealms[realm_index];
+    const double activity = expanded ? 1.0 : 0.0;
+    const double realm_height = (expanded ? kActiveFraction : kInactiveFraction) *
+        kReferenceHeight;
+    const int pixel_width = static_cast<int>(kReferenceWidth);
+    const int pixel_height = std::max(
+        1,
+        static_cast<int>(std::ceil(realm_height))
+    );
+
+    cairo_surface_t* surface = cairo_image_surface_create(
+        CAIRO_FORMAT_ARGB32,
+        pixel_width,
+        pixel_height
+    );
+    const cairo_status_t surface_status = cairo_surface_status(surface);
+    if (surface_status != CAIRO_STATUS_SUCCESS) {
+        error_message = "Unable to allocate workspace overlay surface: ";
+        error_message += cairo_status_to_string(surface_status);
+        cairo_surface_destroy(surface);
+        return nullptr;
+    }
+
+    cairo_t* cr = cairo_create(surface);
+    const cairo_status_t context_status = cairo_status(cr);
+    if (context_status != CAIRO_STATUS_SUCCESS) {
+        error_message = "Unable to create workspace overlay renderer: ";
+        error_message += cairo_status_to_string(context_status);
+        cairo_destroy(cr);
+        cairo_surface_destroy(surface);
+        return nullptr;
+    }
+
+    cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+    const auto cards = window_card_visuals(0.0, realm_height, activity);
+    for (std::size_t card_index = 0; card_index < cards.size(); ++card_index) {
+        const auto& card = cards[card_index];
+        draw_window_card(
+            cr,
+            card.rect.x,
+            card.rect.y,
+            card.rect.width,
+            card.rect.height,
+            style,
+            kFakeWindows[realm_index][card_index],
+            card.detail,
+            card.opacity
+        );
+    }
+
+    if (expanded) {
+        draw_text(
+            cr,
+            style.character,
+            kReferenceWidth - 52.0,
+            realm_height - 85.0,
+            21.0,
+            style.accent_soft,
+            false,
+            "Georgia",
+            true,
+            1
+        );
+        draw_text(
+            cr,
+            style.place,
+            kReferenceWidth - 52.0,
+            realm_height - 57.0,
+            11.0,
+            {1.0, 1.0, 1.0, 0.55},
+            false,
+            "Inter",
+            true,
+            2
+        );
+    }
+
+    cairo_destroy(cr);
+    cairo_surface_flush(surface);
+    GdkTexture* texture = texture_from_surface(surface, error_message);
+    cairo_surface_destroy(surface);
+    return texture;
+}
+
+[[nodiscard]] GskPath* polygon_gsk_path(
+    const BoundaryPoints& top,
+    const BoundaryPoints& bottom
+) {
+    GskPathBuilder* builder = gsk_path_builder_new();
+    gsk_path_builder_move_to(
+        builder,
+        static_cast<float>(top.front().x),
+        static_cast<float>(top.front().y)
+    );
+    for (std::size_t index = 1; index < top.size(); ++index) {
+        gsk_path_builder_line_to(
+            builder,
+            static_cast<float>(top[index].x),
+            static_cast<float>(top[index].y)
+        );
+    }
+    for (auto index = bottom.size(); index-- > 0;) {
+        gsk_path_builder_line_to(
+            builder,
+            static_cast<float>(bottom[index].x),
+            static_cast<float>(bottom[index].y)
+        );
+    }
+    gsk_path_builder_close(builder);
+    return gsk_path_builder_free_to_path(builder);
+}
+
+[[nodiscard]] GskPath* create_separator_band_path(
+    std::size_t boundary_index,
+    double top_offset,
+    double bottom_offset
+) {
+    const auto centerline = boundary_points(0.0, boundary_index);
+    return polygon_gsk_path(
+        shifted(centerline, top_offset),
+        shifted(centerline, bottom_offset)
+    );
+}
+
+[[nodiscard]] GskRenderNode* create_separator_node(
+    std::size_t boundary_index
+) {
+    constexpr std::array<std::pair<double, double>, 4> kLayerOffsets{{
+        {-9.5, 9.5},
+        {-7.4, 7.4},
+        {-7.4, -5.4},
+        {5.4, 7.4},
+    }};
+    constexpr std::array<GdkRGBA, 3> kBodyColors{{
+        {0.14F, 0.085F, 0.050F, 0.72F},
+        {0.035F, 0.095F, 0.115F, 0.72F},
+        {0.075F, 0.095F, 0.055F, 0.72F},
+    }};
+    constexpr std::array<GdkRGBA, 3> kUpperAccentColors{{
+        {0.86F, 0.53F, 0.27F, 0.58F},
+        {0.60F, 0.85F, 0.90F, 0.56F},
+        {0.62F, 0.72F, 0.50F, 0.54F},
+    }};
+    constexpr std::array<GdkRGBA, 3> kLowerAccentColors{{
+        {0.55F, 0.30F, 0.16F, 0.22F},
+        {0.30F, 0.58F, 0.66F, 0.22F},
+        {0.36F, 0.46F, 0.28F, 0.20F},
+    }};
+    const std::array<GdkRGBA, 4> colors{{
+        {0.0F, 0.0F, 0.0F, 0.07F},
+        kBodyColors[boundary_index],
+        kUpperAccentColors[boundary_index],
+        kLowerAccentColors[boundary_index],
+    }};
+
+    GtkSnapshot* separator_snapshot = gtk_snapshot_new();
+    for (std::size_t layer = 0; layer < kLayerOffsets.size(); ++layer) {
+        GskPath* path = create_separator_band_path(
+            boundary_index,
+            kLayerOffsets[layer].first,
+            kLayerOffsets[layer].second
+        );
+        if (path == nullptr) continue;
+        gtk_snapshot_append_fill(
+            separator_snapshot,
+            path,
+            GSK_FILL_RULE_WINDING,
+            &colors[layer]
+        );
+        gsk_path_unref(path);
+    }
+    return gtk_snapshot_free_to_node(separator_snapshot);
+}
+
+void append_ripple_separator(
+    GtkSnapshot* snapshot,
+    GskRenderNode* node,
+    double y
+) {
+    if (node == nullptr) return;
+
+    const graphene_point_t offset = GRAPHENE_POINT_INIT(
+        0.0F,
+        static_cast<float>(y)
+    );
+    gtk_snapshot_save(snapshot);
+    gtk_snapshot_translate(snapshot, &offset);
+    gtk_snapshot_append_node(snapshot, node);
+    gtk_snapshot_restore(snapshot);
+}
+
+void append_texture_with_opacity(
+    GtkSnapshot* snapshot,
+    GdkTexture* texture,
+    const Rect& bounds,
     double opacity
 ) {
-    frontier_path(cr, points, upward, downward);
-    double min_y = points.front().y;
-    double max_y = points.front().y;
-    for (const auto& point : points) {
-        min_y = std::min(min_y, point.y);
-        max_y = std::max(max_y, point.y);
+    if (texture == nullptr || opacity <= 0.001 ||
+        bounds.width <= 0.0 || bounds.height <= 0.0) {
+        return;
     }
-    cairo_pattern_t* gradient = cairo_pattern_create_linear(
-        0.0,
-        min_y - upward,
-        0.0,
-        max_y + downward
+
+    const bool translucent = opacity < 0.999;
+    if (translucent) {
+        gtk_snapshot_push_opacity(
+            snapshot,
+            static_cast<float>(std::clamp(opacity, 0.0, 1.0))
+        );
+    }
+    const graphene_rect_t texture_bounds = GRAPHENE_RECT_INIT(
+        static_cast<float>(bounds.x),
+        static_cast<float>(bounds.y),
+        static_cast<float>(bounds.width),
+        static_cast<float>(bounds.height)
     );
-    cairo_pattern_add_color_stop_rgba(
-        gradient, 0.0, top.red, top.green, top.blue, top.alpha * opacity
+    gtk_snapshot_append_scaled_texture(
+        snapshot,
+        texture,
+        GSK_SCALING_FILTER_LINEAR,
+        &texture_bounds
     );
-    cairo_pattern_add_color_stop_rgba(
-        gradient, 1.0, bottom.red, bottom.green, bottom.blue, bottom.alpha * opacity
+    if (translucent) gtk_snapshot_pop(snapshot);
+}
+
+Rect background_bounds(
+    GdkTexture* texture,
+    double top,
+    double realm_height,
+    double activity
+) {
+    if (texture == nullptr) return {};
+    const int source_width = gdk_texture_get_width(texture);
+    const int source_height = gdk_texture_get_height(texture);
+    if (source_width <= 0 || source_height <= 0) return {};
+
+    const double cover_scale = std::max(
+        kReferenceWidth / static_cast<double>(source_width),
+        realm_height / static_cast<double>(source_height)
     );
-    cairo_set_source(cr, gradient);
-    cairo_fill(cr);
-    cairo_pattern_destroy(gradient);
+    const double zoom = lerp(
+        kInactiveBackgroundZoom,
+        kActiveBackgroundZoom,
+        activity
+    );
+    const double width = static_cast<double>(source_width) * cover_scale * zoom;
+    const double height = static_cast<double>(source_height) * cover_scale * zoom;
+
+    return {
+        kReferenceWidth - width,
+        top + (realm_height - height) * 0.5,
+        width,
+        height,
+    };
+}
+
+Rect character_bounds(
+    GdkTexture* texture,
+    const RealmStyle& style,
+    double top,
+    double realm_height,
+    double activity
+) {
+    if (texture == nullptr) return {};
+    const int source_width = gdk_texture_get_width(texture);
+    const int source_height = gdk_texture_get_height(texture);
+    if (source_width <= 0 || source_height <= 0) return {};
+
+    const double active_top = std::max(8.0, realm_height * 0.02);
+    const double target_height = lerp(
+        style.idle_height,
+        style.active_height,
+        activity
+    );
+    const double target_width = static_cast<double>(source_width) *
+        target_height / static_cast<double>(source_height);
+    const double right = lerp(style.idle_right, style.active_right, activity);
+    const double local_top = lerp(style.idle_top, active_top, activity);
+
+    return {
+        kReferenceWidth - right - target_width,
+        top + local_top,
+        target_width,
+        target_height,
+    };
+}
+
+void append_realm_atmosphere(
+    GtkSnapshot* snapshot,
+    double top,
+    double height,
+    double activity
+) {
+    if (height <= 0.0) return;
+
+    const graphene_rect_t bounds = GRAPHENE_RECT_INIT(
+        0.0F,
+        static_cast<float>(top),
+        static_cast<float>(kReferenceWidth),
+        static_cast<float>(height)
+    );
+
+    const double idle_darkness = 0.24 * (1.0 - activity);
+    if (idle_darkness > 0.001) {
+        const GdkRGBA shade{
+            0.0F,
+            0.0F,
+            0.0F,
+            static_cast<float>(idle_darkness),
+        };
+        gtk_snapshot_append_color(snapshot, &shade, &bounds);
+    }
+
+    const graphene_point_t horizontal_start = GRAPHENE_POINT_INIT(
+        0.0F,
+        static_cast<float>(top)
+    );
+    const graphene_point_t horizontal_end = GRAPHENE_POINT_INIT(
+        static_cast<float>(kReferenceWidth),
+        static_cast<float>(top)
+    );
+    const std::array<GskColorStop, 5> horizontal_stops{{
+        {0.0F, GdkRGBA{0.01F, 0.02F, 0.03F, 0.92F}},
+        {0.15F, GdkRGBA{0.02F, 0.03F, 0.04F, static_cast<float>(lerp(0.72, 0.64, activity))}},
+        {0.45F, GdkRGBA{0.02F, 0.03F, 0.04F, static_cast<float>(lerp(0.26, 0.17, activity))}},
+        {0.75F, GdkRGBA{0.01F, 0.02F, 0.03F, static_cast<float>(lerp(0.04, 0.01, activity))}},
+        {1.0F, GdkRGBA{0.0F, 0.0F, 0.0F, static_cast<float>(lerp(0.10, 0.08, activity))}},
+    }};
+    gtk_snapshot_append_linear_gradient(
+        snapshot,
+        &bounds,
+        &horizontal_start,
+        &horizontal_end,
+        horizontal_stops.data(),
+        horizontal_stops.size()
+    );
+
+    const graphene_point_t vertical_start = GRAPHENE_POINT_INIT(
+        0.0F,
+        static_cast<float>(top)
+    );
+    const graphene_point_t vertical_end = GRAPHENE_POINT_INIT(
+        0.0F,
+        static_cast<float>(top + height)
+    );
+    const std::array<GskColorStop, 3> vertical_stops{{
+        {0.0F, GdkRGBA{0.0F, 0.0F, 0.0F, static_cast<float>(lerp(0.18, 0.08, activity))}},
+        {0.45F, GdkRGBA{0.0F, 0.0F, 0.0F, 0.0F}},
+        {1.0F, GdkRGBA{0.0F, 0.0F, 0.0F, static_cast<float>(lerp(0.33, 0.24, activity))}},
+    }};
+    gtk_snapshot_append_linear_gradient(
+        snapshot,
+        &bounds,
+        &vertical_start,
+        &vertical_end,
+        vertical_stops.data(),
+        vertical_stops.size()
+    );
+}
+
+void append_global_vignette(GtkSnapshot* snapshot) {
+    const graphene_rect_t bounds = GRAPHENE_RECT_INIT(
+        0.0F,
+        0.0F,
+        static_cast<float>(kReferenceWidth),
+        static_cast<float>(kReferenceHeight)
+    );
+
+    const graphene_point_t horizontal_start = GRAPHENE_POINT_INIT(0.0F, 0.0F);
+    const graphene_point_t horizontal_end = GRAPHENE_POINT_INIT(
+        static_cast<float>(kReferenceWidth),
+        0.0F
+    );
+    const std::array<GskColorStop, 4> horizontal_stops{{
+        {0.0F, GdkRGBA{0.0, 0.0, 0.0, 0.18}},
+        {0.12F, GdkRGBA{0.0, 0.0, 0.0, 0.0}},
+        {0.86F, GdkRGBA{0.0, 0.0, 0.0, 0.0}},
+        {1.0F, GdkRGBA{0.0, 0.0, 0.0, 0.08}},
+    }};
+    gtk_snapshot_append_linear_gradient(
+        snapshot,
+        &bounds,
+        &horizontal_start,
+        &horizontal_end,
+        horizontal_stops.data(),
+        horizontal_stops.size()
+    );
+
+    const graphene_point_t vertical_start = GRAPHENE_POINT_INIT(0.0F, 0.0F);
+    const graphene_point_t vertical_end = GRAPHENE_POINT_INIT(
+        0.0F,
+        static_cast<float>(kReferenceHeight)
+    );
+    const std::array<GskColorStop, 4> vertical_stops{{
+        {0.0F, GdkRGBA{0.0, 0.0, 0.0, 0.12}},
+        {0.09F, GdkRGBA{0.0, 0.0, 0.0, 0.0}},
+        {0.91F, GdkRGBA{0.0, 0.0, 0.0, 0.0}},
+        {1.0F, GdkRGBA{0.0, 0.0, 0.0, 0.25}},
+    }};
+    gtk_snapshot_append_linear_gradient(
+        snapshot,
+        &bounds,
+        &vertical_start,
+        &vertical_end,
+        vertical_stops.data(),
+        vertical_stops.size()
+    );
 }
 
 } // namespace
 
 WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(GtkApplication* app) {
+    initialize_separator_nodes();
+    displayed_heights_ = target_realm_heights(active_index_);
+    animation_start_heights_ = displayed_heights_;
+    animation_target_heights_ = displayed_heights_;
+
     window_ = GTK_WINDOW(gtk_application_window_new(app));
     gtk_window_set_title(window_, "Realmheart Workspace Overview");
     gtk_window_set_decorated(window_, FALSE);
@@ -670,16 +1185,13 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(GtkApplication* app) {
     spec.margin_left = 0;
     apply_layer_surface(window_, spec);
 
-    canvas_ = gtk_drawing_area_new();
+    canvas_ = overview_canvas_new(
+        &WorkspaceOverviewOverlay::snapshot_callback,
+        this
+    );
     gtk_widget_set_hexpand(canvas_, TRUE);
     gtk_widget_set_vexpand(canvas_, TRUE);
     gtk_widget_set_focusable(canvas_, TRUE);
-    gtk_drawing_area_set_draw_func(
-        GTK_DRAWING_AREA(canvas_),
-        &WorkspaceOverviewOverlay::draw_callback,
-        this,
-        nullptr
-    );
 
     GtkEventController* keys = gtk_event_controller_key_new();
     gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
@@ -699,8 +1211,7 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(GtkApplication* app) {
                 return GDK_EVENT_STOP;
             }
             if (keyval >= GDK_KEY_1 && keyval <= GDK_KEY_4) {
-                self->active_index_ = static_cast<int>(keyval - GDK_KEY_1);
-                gtk_widget_queue_draw(self->canvas_);
+                self->select_realm(static_cast<int>(keyval - GDK_KEY_1));
                 return GDK_EVENT_STOP;
             }
             return GDK_EVENT_PROPAGATE;
@@ -727,12 +1238,31 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(GtkApplication* app) {
     );
     gtk_widget_add_controller(canvas_, GTK_EVENT_CONTROLLER(click));
 
+    GtkEventController* motion = gtk_event_controller_motion_new();
+    g_signal_connect(
+        motion,
+        "motion",
+        G_CALLBACK(+[](
+            GtkEventControllerMotion*,
+            double x,
+            double y,
+            gpointer data
+        ) {
+            static_cast<WorkspaceOverviewOverlay*>(data)->handle_hover(x, y);
+        }),
+        this
+    );
+    gtk_widget_add_controller(canvas_, motion);
+
     gtk_window_set_child(window_, canvas_);
     gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
 }
 
 WorkspaceOverviewOverlay::~WorkspaceOverviewOverlay() {
+    stop_animation(false);
+    overview_canvas_clear(canvas_);
     release_assets();
+    release_separator_nodes();
     if (window_ != nullptr) {
         gtk_window_destroy(window_);
         window_ = nullptr;
@@ -740,13 +1270,30 @@ WorkspaceOverviewOverlay::~WorkspaceOverviewOverlay() {
     canvas_ = nullptr;
 }
 
+void WorkspaceOverviewOverlay::initialize_separator_nodes() {
+    for (std::size_t boundary = 0; boundary < separator_nodes_.size(); ++boundary) {
+        separator_nodes_[boundary] = create_separator_node(boundary);
+    }
+}
+
+void WorkspaceOverviewOverlay::release_separator_nodes() noexcept {
+    for (auto*& node : separator_nodes_) {
+        if (node != nullptr) {
+            gsk_render_node_unref(node);
+            node = nullptr;
+        }
+    }
+}
+
 void WorkspaceOverviewOverlay::show() {
     static_cast<void>(ensure_assets());
+    gtk_widget_queue_draw(canvas_);
     gtk_window_present(window_);
     gtk_widget_grab_focus(canvas_);
 }
 
 void WorkspaceOverviewOverlay::hide() {
+    stop_animation(true);
     gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
 }
 
@@ -758,222 +1305,255 @@ bool WorkspaceOverviewOverlay::visible() const {
     return window_ != nullptr && gtk_widget_get_visible(GTK_WIDGET(window_));
 }
 
-void WorkspaceOverviewOverlay::draw_callback(
-    GtkDrawingArea*,
-    cairo_t* cr,
-    int width,
-    int height,
+void WorkspaceOverviewOverlay::snapshot_callback(
+    GtkWidget* widget,
+    GtkSnapshot* snapshot,
     gpointer data
 ) {
-    static_cast<WorkspaceOverviewOverlay*>(data)->draw(cr, width, height);
+    static_cast<WorkspaceOverviewOverlay*>(data)->snapshot(widget, snapshot);
 }
 
-void WorkspaceOverviewOverlay::draw(cairo_t* cr, int width, int height) {
-    cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
-    cairo_paint(cr);
+gboolean WorkspaceOverviewOverlay::animation_tick_callback(
+    GtkWidget*,
+    GdkFrameClock* frame_clock,
+    gpointer data
+) {
+    auto* self = static_cast<WorkspaceOverviewOverlay*>(data);
+    const gint64 frame_time_us = gdk_frame_clock_get_frame_time(frame_clock);
+    if (self->animation_start_time_us_ == 0) {
+        self->animation_start_time_us_ = frame_time_us;
+    }
+
+    const double elapsed_seconds = static_cast<double>(
+        frame_time_us - self->animation_start_time_us_
+    ) / static_cast<double>(kMicrosecondsPerSecond);
+    const double linear = std::clamp(
+        elapsed_seconds / kTransitionDurationSeconds,
+        0.0,
+        1.0
+    );
+    const double eased = transition_ease(linear);
+
+    for (std::size_t index = 0; index < self->displayed_heights_.size(); ++index) {
+        self->displayed_heights_[index] = lerp(
+            self->animation_start_heights_[index],
+            self->animation_target_heights_[index],
+            eased
+        );
+    }
+    gtk_widget_queue_draw(self->canvas_);
+
+    if (linear >= 1.0) {
+        self->displayed_heights_ = self->animation_target_heights_;
+        self->animation_tick_id_ = 0;
+        self->animation_start_time_us_ = 0;
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+void WorkspaceOverviewOverlay::select_realm(int index) {
+    if (index < 0 || index >= static_cast<int>(displayed_heights_.size())) return;
+
+    // Motion events arrive continuously while the pointer moves inside a realm.
+    // Do not restart an in-flight transition that is already targeting it.
+    if (index == active_index_) return;
+
+    active_index_ = index;
+    const auto target = target_realm_heights(index);
+    animation_start_heights_ = displayed_heights_;
+    animation_target_heights_ = target;
+    animation_start_time_us_ = 0;
+
+    if (animation_tick_id_ == 0) {
+        animation_tick_id_ = gtk_widget_add_tick_callback(
+            canvas_,
+            &WorkspaceOverviewOverlay::animation_tick_callback,
+            this,
+            nullptr
+        );
+    }
+}
+
+void WorkspaceOverviewOverlay::stop_animation(bool snap_to_target) noexcept {
+    if (animation_tick_id_ != 0 && canvas_ != nullptr) {
+        gtk_widget_remove_tick_callback(canvas_, animation_tick_id_);
+        animation_tick_id_ = 0;
+    }
+    animation_start_time_us_ = 0;
+    if (snap_to_target) {
+        displayed_heights_ = animation_target_heights_;
+        animation_start_heights_ = animation_target_heights_;
+    }
+}
+
+void WorkspaceOverviewOverlay::snapshot(
+    GtkWidget* widget,
+    GtkSnapshot* snapshot
+) {
+    const int width = gtk_widget_get_width(widget);
+    const int height = gtk_widget_get_height(widget);
     if (width <= 0 || height <= 0) return;
 
-    const double scale = std::min(
-        static_cast<double>(width) / kReferenceWidth,
-        static_cast<double>(height) / kReferenceHeight
+    const graphene_rect_t widget_bounds = GRAPHENE_RECT_INIT(
+        0.0F,
+        0.0F,
+        static_cast<float>(width),
+        static_cast<float>(height)
     );
-    const double stage_width = kReferenceWidth * scale;
-    const double stage_height = kReferenceHeight * scale;
-    const double offset_x = (static_cast<double>(width) - stage_width) * 0.5;
-    const double offset_y = (static_cast<double>(height) - stage_height) * 0.5;
+    const GdkRGBA black{0.0, 0.0, 0.0, 1.0};
+    gtk_snapshot_append_color(snapshot, &black, &widget_bounds);
 
-    cairo_save(cr);
-    cairo_translate(cr, offset_x, offset_y);
-    cairo_scale(cr, scale, scale);
+    const double scale_x = static_cast<double>(width) / kReferenceWidth;
+    const double scale_y = static_cast<double>(height) / kReferenceHeight;
 
-    cairo_set_source_rgb(cr, 0.008, 0.012, 0.016);
-    cairo_rectangle(cr, 0.0, 0.0, kReferenceWidth, kReferenceHeight);
-    cairo_fill(cr);
+    gtk_snapshot_save(snapshot);
+    gtk_snapshot_scale(
+        snapshot,
+        static_cast<float>(scale_x),
+        static_cast<float>(scale_y)
+    );
+
+    const graphene_rect_t stage_bounds = GRAPHENE_RECT_INIT(
+        0.0F,
+        0.0F,
+        static_cast<float>(kReferenceWidth),
+        static_cast<float>(kReferenceHeight)
+    );
+    const GdkRGBA stage_color{0.008, 0.012, 0.016, 1.0};
+    gtk_snapshot_append_color(snapshot, &stage_color, &stage_bounds);
 
     if (!ensure_assets()) {
-        draw_text(
-            cr,
-            asset_error_.empty() ? "Workspace overview assets unavailable" : asset_error_,
-            kReferenceWidth * 0.5,
-            kReferenceHeight * 0.5,
-            24.0,
-            {0.95, 0.82, 0.55, 1.0},
-            true,
-            "Inter",
-            true
+        const std::string message = asset_error_.empty()
+            ? "Workspace overview assets unavailable"
+            : asset_error_;
+        PangoLayout* layout = gtk_widget_create_pango_layout(
+            widget,
+            message.c_str()
         );
-        cairo_restore(cr);
+        PangoFontDescription* font = pango_font_description_from_string(
+            "Inter Bold 24"
+        );
+        pango_layout_set_font_description(layout, font);
+        pango_font_description_free(font);
+        int text_width = 0;
+        int text_height = 0;
+        pango_layout_get_pixel_size(layout, &text_width, &text_height);
+        const graphene_point_t text_offset = GRAPHENE_POINT_INIT(
+            static_cast<float>(kReferenceWidth * 0.5 - text_width * 0.5),
+            static_cast<float>(kReferenceHeight * 0.5 - text_height * 0.5)
+        );
+        gtk_snapshot_save(snapshot);
+        gtk_snapshot_translate(snapshot, &text_offset);
+        const GdkRGBA error_color{0.95, 0.82, 0.55, 1.0};
+        gtk_snapshot_append_layout(snapshot, layout, &error_color);
+        gtk_snapshot_restore(snapshot);
+        g_object_unref(layout);
+        gtk_snapshot_restore(snapshot);
         return;
     }
 
-    const auto heights = realm_heights(active_index_);
+    const auto& heights = displayed_heights_;
     const auto tops = realm_tops(heights);
-    const auto boundary_one = boundary_points(tops[1], 0);
-    const auto boundary_two = boundary_points(tops[2], 1);
-    const auto boundary_three = boundary_points(tops[3], 2);
-    const auto top_flat = flat_boundary(-30.0);
-    const auto bottom_flat = flat_boundary(kReferenceHeight + 30.0);
-
-    const std::array<std::array<Point, 13>, 4> clip_tops{{
-        top_flat,
-        shifted(boundary_one, -12.0),
-        shifted(boundary_two, -10.0),
-        shifted(boundary_three, -13.0),
-    }};
-    const std::array<std::array<Point, 13>, 4> clip_bottoms{{
-        shifted(boundary_one, 18.0),
-        shifted(boundary_two, 14.0),
-        shifted(boundary_three, 18.0),
-        bottom_flat,
-    }};
 
     for (std::size_t index = 0; index < kRealms.size(); ++index) {
-        const bool active = static_cast<int>(index) == active_index_;
-        const auto& style = kRealms[index];
-        const double top = tops[index];
         const double realm_height = heights[index];
-
-        cairo_save(cr);
-        polygon_path(cr, clip_tops[index], clip_bottoms[index]);
-        cairo_clip(cr);
-
-        draw_surface_cover(
-            cr,
-            assets_[index].background,
+        const double activity = realm_activity(realm_height);
+        const Rect texture_bounds{
             0.0,
-            top,
+            tops[index],
             kReferenceWidth,
-            realm_height
+            realm_height,
+        };
+        const graphene_rect_t realm_clip = GRAPHENE_RECT_INIT(
+            0.0F,
+            static_cast<float>(tops[index]),
+            static_cast<float>(kReferenceWidth),
+            static_cast<float>(realm_height)
         );
-
-        if (!active) {
-            set_source(cr, {0.0, 0.0, 0.0, 0.24});
-            cairo_rectangle(cr, 0.0, top, kReferenceWidth, realm_height);
-            cairo_fill(cr);
-        }
-        draw_atmosphere(cr, top, realm_height, active);
-
-        const double character_height = active
-            ? std::min(style.active_height, realm_height * 1.34)
-            : style.idle_height;
-        const double character_top = active
-            ? top + std::max(8.0, realm_height * 0.02)
-            : top + style.idle_top;
-        const double character_right = active
-            ? style.active_right
-            : style.idle_right;
-        draw_character(
-            cr,
+        gtk_snapshot_push_clip(snapshot, &realm_clip);
+        append_texture_with_opacity(
+            snapshot,
+            assets_[index].background,
+            background_bounds(
+                assets_[index].background,
+                tops[index],
+                realm_height,
+                activity
+            ),
+            1.0
+        );
+        append_realm_atmosphere(
+            snapshot,
+            tops[index],
+            realm_height,
+            activity
+        );
+        append_texture_with_opacity(
+            snapshot,
             assets_[index].character,
-            character_height,
-            character_right,
-            character_top
+            character_bounds(
+                assets_[index].character,
+                kRealms[index],
+                tops[index],
+                realm_height,
+                activity
+            ),
+            lerp(0.92, 1.0, activity)
         );
-
-        draw_identity(
-            cr,
-            style,
-            top + realm_height * 0.5,
-            active
+        append_texture_with_opacity(
+            snapshot,
+            assets_[index].compact_overlay,
+            texture_bounds,
+            1.0 - activity
         );
-
-        const auto cards = window_card_rects(top, realm_height, active);
-        const std::size_t card_count = active ? cards.size() : cards.size() - 1U;
-        for (std::size_t card_index = 0; card_index < card_count; ++card_index) {
-            const auto& card = cards[card_index];
-            draw_window_card(
-                cr,
-                card.x,
-                card.y,
-                card.width,
-                card.height,
-                style,
-                kFakeWindows[index][card_index],
-                !active
-            );
-        }
-
-        if (active) {
-            draw_text(
-                cr,
-                style.character,
-                kReferenceWidth - 52.0,
-                top + realm_height - 85.0,
-                21.0,
-                style.accent_soft,
-                false,
-                "Georgia",
-                true,
-                1
-            );
-            draw_text(
-                cr,
-                style.place,
-                kReferenceWidth - 52.0,
-                top + realm_height - 57.0,
-                11.0,
-                {1.0, 1.0, 1.0, 0.55},
-                false,
-                "Inter",
-                true,
-                2
-            );
-        }
-
-        cairo_restore(cr);
+        append_texture_with_opacity(
+            snapshot,
+            assets_[index].expanded_overlay,
+            texture_bounds,
+            activity
+        );
+        const Color identity_shadow{
+            kRealms[index].accent.red,
+            kRealms[index].accent.green,
+            kRealms[index].accent.blue,
+            0.22,
+        };
+        append_identity_layout(
+            snapshot,
+            assets_[index].roman_layout,
+            112.0,
+            tops[index] + realm_height * 0.5,
+            kRealms[index].accent_soft,
+            &identity_shadow,
+            0.70
+        );
+        append_identity_layout(
+            snapshot,
+            assets_[index].element_layout,
+            190.0,
+            tops[index] + realm_height * 0.5 - 14.0,
+            {1.0, 1.0, 1.0, 0.90},
+            &identity_shadow,
+            0.52
+        );
+        append_identity_layout(
+            snapshot,
+            assets_[index].place_layout,
+            190.0,
+            tops[index] + realm_height * 0.5 + 17.0,
+            {1.0, 1.0, 1.0, 0.52},
+            &identity_shadow,
+            0.36
+        );
+        gtk_snapshot_pop(snapshot);
     }
 
-    draw_frontier(
-        cr,
-        boundary_one,
-        6.0,
-        12.0,
-        {0.129, 0.075, 0.051, 1.0},
-        {0.020, 0.024, 0.027, 0.15},
-        0.68
-    );
-    draw_frontier(
-        cr,
-        boundary_two,
-        3.0,
-        9.0,
-        {0.835, 0.945, 0.957, 0.24},
-        {0.024, 0.078, 0.102, 0.03},
-        0.42
-    );
-    draw_frontier(
-        cr,
-        boundary_three,
-        7.0,
-        13.0,
-        {0.102, 0.090, 0.075, 1.0},
-        {0.008, 0.012, 0.012, 0.08},
-        0.70
-    );
-
-    cairo_pattern_t* horizontal_vignette =
-        cairo_pattern_create_linear(0.0, 0.0, kReferenceWidth, 0.0);
-    cairo_pattern_add_color_stop_rgba(horizontal_vignette, 0.0, 0.0, 0.0, 0.0, 0.18);
-    cairo_pattern_add_color_stop_rgba(horizontal_vignette, 0.12, 0.0, 0.0, 0.0, 0.0);
-    cairo_pattern_add_color_stop_rgba(horizontal_vignette, 0.86, 0.0, 0.0, 0.0, 0.0);
-    cairo_pattern_add_color_stop_rgba(horizontal_vignette, 1.0, 0.0, 0.0, 0.0, 0.08);
-    cairo_rectangle(cr, 0.0, 0.0, kReferenceWidth, kReferenceHeight);
-    cairo_set_source(cr, horizontal_vignette);
-    cairo_fill(cr);
-    cairo_pattern_destroy(horizontal_vignette);
-
-    cairo_pattern_t* vertical_vignette =
-        cairo_pattern_create_linear(0.0, 0.0, 0.0, kReferenceHeight);
-    cairo_pattern_add_color_stop_rgba(vertical_vignette, 0.0, 0.0, 0.0, 0.0, 0.12);
-    cairo_pattern_add_color_stop_rgba(vertical_vignette, 0.09, 0.0, 0.0, 0.0, 0.0);
-    cairo_pattern_add_color_stop_rgba(vertical_vignette, 0.91, 0.0, 0.0, 0.0, 0.0);
-    cairo_pattern_add_color_stop_rgba(vertical_vignette, 1.0, 0.0, 0.0, 0.0, 0.25);
-    cairo_rectangle(cr, 0.0, 0.0, kReferenceWidth, kReferenceHeight);
-    cairo_set_source(cr, vertical_vignette);
-    cairo_fill(cr);
-    cairo_pattern_destroy(vertical_vignette);
-
-    cairo_restore(cr);
+    append_ripple_separator(snapshot, separator_nodes_[0], tops[1]);
+    append_ripple_separator(snapshot, separator_nodes_[1], tops[2]);
+    append_ripple_separator(snapshot, separator_nodes_[2], tops[3]);
+    append_global_vignette(snapshot);
+    gtk_snapshot_restore(snapshot);
 }
 
 void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
@@ -982,24 +1562,38 @@ void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
     const int height = gtk_widget_get_height(canvas_);
     if (width <= 0 || height <= 0) return;
 
-    const double scale = std::min(
-        static_cast<double>(width) / kReferenceWidth,
-        static_cast<double>(height) / kReferenceHeight
+    const double scale_x = static_cast<double>(width) / kReferenceWidth;
+    const double scale_y = static_cast<double>(height) / kReferenceHeight;
+    const double reference_x = x / scale_x;
+    const double reference_y = y / scale_y;
+    const auto realm = hit_realm_content(
+        reference_x,
+        reference_y,
+        displayed_heights_
     );
-    const double stage_width = kReferenceWidth * scale;
-    const double stage_height = kReferenceHeight * scale;
-    const double offset_x = (static_cast<double>(width) - stage_width) * 0.5;
-    const double offset_y = (static_cast<double>(height) - stage_height) * 0.5;
-    if (x < offset_x || x > offset_x + stage_width ||
-        y < offset_y || y > offset_y + stage_height) {
-        hide();
+    if (realm.has_value()) {
+        if (*realm != active_index_) select_realm(*realm);
         return;
     }
-
-    const double reference_x = (x - offset_x) / scale;
-    const double reference_y = (y - offset_y) / scale;
-    if (point_hits_window_card(reference_x, reference_y, active_index_)) return;
     hide();
+}
+
+void WorkspaceOverviewOverlay::handle_hover(double, double y) {
+    if (canvas_ == nullptr) return;
+    const int width = gtk_widget_get_width(canvas_);
+    const int height = gtk_widget_get_height(canvas_);
+    if (width <= 0 || height <= 0) return;
+
+    const double scale_y = static_cast<double>(height) / kReferenceHeight;
+    const double reference_y = y / scale_y;
+    double bottom = 0.0;
+    for (std::size_t index = 0; index < displayed_heights_.size(); ++index) {
+        bottom += displayed_heights_[index];
+        if (reference_y < bottom) {
+            select_realm(static_cast<int>(index));
+            return;
+        }
+    }
 }
 
 bool WorkspaceOverviewOverlay::ensure_assets() {
@@ -1007,50 +1601,104 @@ bool WorkspaceOverviewOverlay::ensure_assets() {
     assets_attempted_ = true;
 
     for (std::size_t index = 0; index < kRealms.size(); ++index) {
-        const auto background = resolve_project_asset(kRealms[index].background_asset);
-        const auto character = resolve_project_asset(kRealms[index].character_asset);
-        if (!background || !character) {
+        const auto background_path = resolve_project_asset(
+            kRealms[index].background_asset
+        );
+        const auto character_path = resolve_project_asset(
+            kRealms[index].character_asset
+        );
+        if (!background_path || !character_path) {
             asset_error_ = "Unable to resolve workspace overview assets";
             std::cerr << "[WorkspaceOverview] " << asset_error_ << '\n';
             release_assets();
             return false;
         }
 
-        assets_[index].background = load_cairo_surface(
-            *background,
+        assets_[index].background = load_texture(
+            *background_path,
             asset_error_
         );
-        if (assets_[index].background == nullptr) {
-            release_assets();
-            std::cerr << "[WorkspaceOverview] " << asset_error_ << '\n';
-            return false;
+        if (assets_[index].background != nullptr) {
+            assets_[index].character = load_texture(
+                *character_path,
+                asset_error_
+            );
+        }
+        if (assets_[index].character != nullptr) {
+            assets_[index].roman_layout = create_identity_layout(
+                canvas_,
+                kRealms[index].roman,
+                60.0,
+                "Georgia",
+                0,
+                asset_error_
+            );
+        }
+        if (assets_[index].roman_layout != nullptr) {
+            assets_[index].element_layout = create_identity_layout(
+                canvas_,
+                kRealms[index].element,
+                23.0,
+                "Georgia",
+                3,
+                asset_error_
+            );
+        }
+        if (assets_[index].element_layout != nullptr) {
+            assets_[index].place_layout = create_identity_layout(
+                canvas_,
+                kRealms[index].place,
+                12.0,
+                "Inter",
+                2,
+                asset_error_
+            );
+        }
+        if (assets_[index].place_layout != nullptr) {
+            assets_[index].compact_overlay = render_realm_overlay_texture(
+                index,
+                false,
+                asset_error_
+            );
+        }
+        if (assets_[index].compact_overlay != nullptr) {
+            assets_[index].expanded_overlay = render_realm_overlay_texture(
+                index,
+                true,
+                asset_error_
+            );
         }
 
-        assets_[index].character = load_cairo_surface(
-            *character,
-            asset_error_
-        );
-        if (assets_[index].character == nullptr) {
-            release_assets();
+        if (assets_[index].background == nullptr ||
+            assets_[index].character == nullptr ||
+            assets_[index].roman_layout == nullptr ||
+            assets_[index].element_layout == nullptr ||
+            assets_[index].place_layout == nullptr ||
+            assets_[index].compact_overlay == nullptr ||
+            assets_[index].expanded_overlay == nullptr) {
+            if (asset_error_.empty()) {
+                asset_error_ = "Unable to prepare workspace overview layers";
+            }
             std::cerr << "[WorkspaceOverview] " << asset_error_ << '\n';
+            release_assets();
             return false;
         }
     }
 
-    std::cerr << "[WorkspaceOverview] 1080p visual assets loaded lazily\n";
+    std::cerr
+        << "[WorkspaceOverview] backgrounds, characters, and UI overlays cached\n";
     return true;
 }
 
 void WorkspaceOverviewOverlay::release_assets() noexcept {
     for (auto& realm : assets_) {
-        if (realm.background != nullptr) {
-            cairo_surface_destroy(realm.background);
-            realm.background = nullptr;
-        }
-        if (realm.character != nullptr) {
-            cairo_surface_destroy(realm.character);
-            realm.character = nullptr;
-        }
+        g_clear_object(&realm.background);
+        g_clear_object(&realm.character);
+        g_clear_object(&realm.roman_layout);
+        g_clear_object(&realm.element_layout);
+        g_clear_object(&realm.place_layout);
+        g_clear_object(&realm.compact_overlay);
+        g_clear_object(&realm.expanded_overlay);
     }
 }
 
