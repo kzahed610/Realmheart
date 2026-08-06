@@ -77,13 +77,9 @@ WorkspaceOverviewState build_workspace_overview_state(
 
         if (workspace == snapshot.workspaces.end() ||
             workspace->window_details.empty()) {
-            realm.cards[0] = {
-                {},
-                "Workspace " + std::to_string(realm.workspace_id),
-                "No open windows",
-                true,
-            };
-            realm.card_count = 1;
+            // Empty realms intentionally render no card at all. The landscape,
+            // identity, and character are the empty-workspace state.
+            realm.card_count = 0;
             realm.total_windows = workspace == snapshot.workspaces.end()
                 ? 0
                 : workspace->windows;
