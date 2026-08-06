@@ -13,6 +13,7 @@ inline constexpr std::size_t kWorkspaceOverviewCardLimit = 3;
 
 struct WorkspaceOverviewCard {
     std::string address;
+    std::string icon_name;
     std::string app_name;
     std::string title;
     bool summary = false;

@@ -6,6 +6,8 @@
 #include <functional>
 #include <gtk/gtk.h>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 
 namespace realmheart::ui::workspace {
 
@@ -91,6 +93,11 @@ private:
     void snapshot(GtkWidget* widget, GtkSnapshot* snapshot);
     void handle_primary_click(double x, double y);
     void handle_hover(double x, double y);
+    bool handle_key_pressed(guint keyval);
+    void move_realm_selection(int delta);
+    void move_card_selection(int delta);
+    void activate_selected();
+    void normalize_selection() noexcept;
     void handle_drag_begin(double x, double y);
     void handle_drag_update(double offset_x, double offset_y);
     void handle_drag_end(double offset_x, double offset_y);
@@ -103,6 +110,11 @@ private:
     void initialize_separator_nodes();
     void release_separator_nodes() noexcept;
     void synchronize_active_workspace();
+    cairo_surface_t* application_icon_surface(
+        std::string_view requested_icon_name,
+        std::string_view app_name
+    );
+    void clear_icon_cache() noexcept;
     bool rebuild_dirty_overlays();
     bool ensure_assets();
     void release_assets() noexcept;
@@ -127,10 +139,12 @@ private:
     std::function<void(int)> activate_workspace_;
     std::function<void(int, std::string)> activate_window_;
     std::function<void(int, std::string)> move_window_;
+    std::unordered_map<std::string, cairo_surface_t*> icon_surfaces_;
     DragCard drag_card_{};
     int drag_target_index_ = -1;
     std::string asset_error_;
     int active_index_ = 1;
+    int selected_card_index_ = -1;
     guint animation_tick_id_ = 0;
     gint64 animation_start_time_us_ = 0;
     gint64 card_animation_start_time_us_ = 0;

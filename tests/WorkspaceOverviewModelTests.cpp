@@ -28,6 +28,8 @@ void test_maps_real_clients_into_realms() {
             "simple classes must be humanized");
     require(state[1].cards[0].app_name == "Firefox",
             "reverse-DNS classes must show their final component");
+    require(state[1].cards[0].icon_name == "org.mozilla.firefox",
+            "raw application identifiers must be retained for icon lookup");
     require(state[1].cards[0].title == "Realmheart · GitHub",
             "real client titles must be retained");
     require(state[1].cards[0].address == "0x2",
