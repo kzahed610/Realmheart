@@ -70,7 +70,7 @@ GdkMonitor* resolve_layer_surface_monitor(
 LayerSurfaceSpec make_bar_surface_spec(int width) {
     LayerSurfaceSpec spec;
     spec.surface_namespace = "realmheart-bar";
-    spec.layer = LayerSurfaceLevel::Top;
+    spec.layer = LayerSurfaceLevel::Overlay;
     spec.keyboard_mode = LayerKeyboardMode::OnDemand;
     spec.anchor_left = true;
     spec.anchor_top = true;

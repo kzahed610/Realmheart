@@ -1104,6 +1104,7 @@ private:
                 *media_,
                 [this] { toggle_right_sidebar(); },
                 [this] { launch_launcher(); },
+                [this] { toggle_workspace_overview(); },
                 [this](double origin_x, double origin_y) {
                     open_logout_menu(origin_x, origin_y);
                 }

@@ -33,6 +33,7 @@ public:
         services::MediaService& media_service,
         std::function<void()> toggle_sidebar,
         std::function<void()> launch_launcher,
+        std::function<void()> toggle_workspace_overview = {},
         std::function<void(double, double)> open_power_menu = {}
     );
     ~VerticalBar();
@@ -70,6 +71,7 @@ private:
     void open_exclusive_popover(GtkPopover* popover);
     void open_exclusive_media();
     void open_exclusive_system();
+    void request_workspace_overview_toggle();
     void activate_workspace(int workspace_id);
     [[nodiscard]] std::pair<double, double> power_menu_origin() const;
 
@@ -96,6 +98,7 @@ private:
     services::MediaService& media_service_;
     std::function<void()> toggle_sidebar_;
     std::function<void()> launch_launcher_;
+    std::function<void()> toggle_workspace_overview_;
     std::function<void(double, double)> open_power_menu_;
     std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
     services::NotificationHistory::Subscription notification_subscription_;

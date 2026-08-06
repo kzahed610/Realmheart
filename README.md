@@ -439,6 +439,10 @@ realmheart --command osd-volume
 realmheart --command osd-brightness
 ```
 
+The workspace overview is also toggled by right-clicking any workspace rune in
+the Aether Spine. It docks beside the bar; clicking its background closes it,
+while window cards retain the click for future window activation.
+
 ### Character controls
 
 ```bash

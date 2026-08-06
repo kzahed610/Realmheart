@@ -35,7 +35,7 @@ private:
     );
 
     void draw(cairo_t* cr, int width, int height);
-    void activate_at(double x, double y);
+    void handle_primary_click(double x, double y);
     bool ensure_assets();
     void release_assets() noexcept;
 
