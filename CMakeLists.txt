@@ -178,6 +178,7 @@ add_library(realmheart_ui STATIC
     src/ui/powermenu/animation/PowerMenuRippleRenderer.cpp
     src/ui/powermenu/PowerMenuScene.cpp
     src/ui/powermenu/PowerMenuOverlay.cpp
+    src/ui/workspace/WorkspaceOverviewOverlay.cpp
     src/ui/launcher/LauncherOverlay.cpp
     src/ui/launcher/CommandReceiptOverlay.cpp
     src/services/LauncherService.cpp

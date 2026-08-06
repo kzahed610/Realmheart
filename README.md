@@ -430,6 +430,7 @@ realmheart --command <name> [argument]
 ```bash
 realmheart --command launch-launcher
 realmheart --command launch-launcher-query ">clip "
+realmheart --command workspace-overview-toggle
 realmheart --command sidebar-right-toggle
 realmheart --command bar-toggle
 realmheart --command toggle-notes
