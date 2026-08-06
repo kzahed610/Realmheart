@@ -440,8 +440,10 @@ realmheart --command osd-brightness
 ```
 
 The workspace overview is also toggled by right-clicking any workspace rune in
-the Aether Spine. It docks beside the bar; clicking its background closes it,
-while window cards retain the click for future window activation.
+the Aether Spine. It docks beside the bar and mirrors Hyprland workspaces 1–4
+using live client class/title data. Client open, close, move, and title changes
+refresh the cached cards. Clicking a card switches to that workspace and closes
+the overview; clicking unused background closes it without switching.
 
 ### Character controls
 

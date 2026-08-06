@@ -178,6 +178,7 @@ add_library(realmheart_ui STATIC
     src/ui/powermenu/animation/PowerMenuRippleRenderer.cpp
     src/ui/powermenu/PowerMenuScene.cpp
     src/ui/powermenu/PowerMenuOverlay.cpp
+    src/ui/workspace/WorkspaceOverviewModel.cpp
     src/ui/workspace/WorkspaceOverviewOverlay.cpp
     src/ui/launcher/LauncherOverlay.cpp
     src/ui/launcher/CommandReceiptOverlay.cpp
@@ -586,6 +587,13 @@ if(BUILD_TESTING)
 
     add_executable(realmheart_workspace_tests tests/HyprlandWorkspacesTests.cpp src/core/Command.cpp src/services/HyprlandWorkspaces.cpp)
     realmheart_register_test(realmheart_workspace_tests)
+
+    add_executable(
+        realmheart_workspace_overview_model_tests
+        tests/WorkspaceOverviewModelTests.cpp
+        src/ui/workspace/WorkspaceOverviewModel.cpp
+    )
+    realmheart_register_test(realmheart_workspace_overview_model_tests)
 
     add_executable(realmheart_hyprland_event_monitor_tests tests/HyprlandEventMonitorTests.cpp src/services/HyprlandEventMonitor.cpp)
     realmheart_register_test(realmheart_hyprland_event_monitor_tests)

@@ -1,6 +1,9 @@
 #pragma once
 
+#include "ui/workspace/WorkspaceOverviewModel.hpp"
+
 #include <array>
+#include <functional>
 #include <gtk/gtk.h>
 #include <string>
 
@@ -9,7 +12,10 @@ namespace realmheart::ui::workspace {
 
 class WorkspaceOverviewOverlay {
 public:
-    explicit WorkspaceOverviewOverlay(GtkApplication* app);
+    explicit WorkspaceOverviewOverlay(
+        GtkApplication* app,
+        std::function<void(int)> activate_workspace = {}
+    );
     ~WorkspaceOverviewOverlay();
 
     WorkspaceOverviewOverlay(const WorkspaceOverviewOverlay&) = delete;
@@ -18,6 +24,7 @@ public:
     void show();
     void hide();
     void toggle();
+    void set_workspace_snapshot(const services::WorkspaceSnapshot& snapshot);
 
     [[nodiscard]] bool visible() const;
 
@@ -50,16 +57,23 @@ private:
     void stop_animation(bool snap_to_target) noexcept;
     void initialize_separator_nodes();
     void release_separator_nodes() noexcept;
+    void synchronize_active_workspace();
+    bool rebuild_dirty_overlays();
     bool ensure_assets();
     void release_assets() noexcept;
 
     GtkWindow* window_ = nullptr;
     GtkWidget* canvas_ = nullptr;
-    std::array<RealmAssets, 4> assets_{};
+    std::array<RealmAssets, kWorkspaceOverviewRealmCount> assets_{};
+    WorkspaceOverviewState workspace_state_{};
+    std::array<bool, kWorkspaceOverviewRealmCount> overlay_dirty_{{
+        true, true, true, true,
+    }};
     std::array<GskRenderNode*, 3> separator_nodes_{};
     std::array<double, 4> displayed_heights_{};
     std::array<double, 4> animation_start_heights_{};
     std::array<double, 4> animation_target_heights_{};
+    std::function<void(int)> activate_workspace_;
     std::string asset_error_;
     int active_index_ = 1;
     guint animation_tick_id_ = 0;

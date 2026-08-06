@@ -54,7 +54,8 @@ VerticalBar::VerticalBar(
     std::function<void()> toggle_sidebar,
     std::function<void()> launch_launcher,
     std::function<void()> toggle_workspace_overview,
-    std::function<void(double, double)> open_power_menu
+    std::function<void(double, double)> open_power_menu,
+    std::function<void(services::WorkspaceSnapshot)> workspace_snapshot_changed
 ) : app_(app),
     notification_history_(notification_history),
     battery_service_(battery_service),
@@ -62,7 +63,8 @@ VerticalBar::VerticalBar(
     toggle_sidebar_(std::move(toggle_sidebar)),
     launch_launcher_(std::move(launch_launcher)),
     toggle_workspace_overview_(std::move(toggle_workspace_overview)),
-    open_power_menu_(std::move(open_power_menu)) {
+    open_power_menu_(std::move(open_power_menu)),
+    workspace_snapshot_changed_(std::move(workspace_snapshot_changed)) {
     g_weak_ref_init(&active_popover_ref_, nullptr);
     window_ = gtk_application_window_new(app_);
     gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Aether Spine");
@@ -602,6 +604,7 @@ void VerticalBar::request_wifi_refresh() {
 
 void VerticalBar::apply_workspaces(services::WorkspaceSnapshot snapshot) {
     workspace_window_tracker_.apply(snapshot);
+    if (workspace_snapshot_changed_) workspace_snapshot_changed_(snapshot);
     const auto states = build_workspace_pills(snapshot);
     const bool same_topology = states.size() == workspace_runes_.size() &&
         std::equal(states.begin(), states.end(), workspace_runes_.begin(), [](const auto& state, const auto& rune) {

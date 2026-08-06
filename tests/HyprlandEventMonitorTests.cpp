@@ -22,8 +22,10 @@ void test_workspace_event_filter() {
             "window-count changes must trigger refresh");
     require(HyprlandEventMonitor::is_workspace_event("focusedmon>>DP-1,2"),
             "focused monitor changes must trigger refresh");
+    require(HyprlandEventMonitor::is_workspace_event("windowtitlev2>>abc,Updated title"),
+            "window title changes must refresh overview cards");
     require(!HyprlandEventMonitor::is_workspace_event("activewindow>>kitty,title"),
-            "unrelated title changes must not refresh workspaces");
+            "focus-only application changes must not refresh workspaces");
 }
 
 void test_modern_socket_path_resolution() {

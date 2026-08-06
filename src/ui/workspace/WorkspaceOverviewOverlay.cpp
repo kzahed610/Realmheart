@@ -199,14 +199,6 @@ constexpr std::array<RippleSpec, 3> kRippleSpecs{{
     {5.8, 1.24, 1.6, 2.85, 2.10},
 }};
 
-constexpr std::array<std::array<std::pair<std::string_view, std::string_view>, 3>, 4>
-    kFakeWindows{{
-        {{{"Zen Browser", "Realmheart · GitHub"}, {"kitty", "realmheart build"}, {"Spotify", "The Hearth Mix"}}},
-        {{{"Notes", "Tomorrow plan"}, {"Music", "Siren's Call"}, {"Files", "workspace assets"}}},
-        {{{"Editor", "WorkspaceOverview.cpp"}, {"Terminal", "hyprctl clients -j"}, {"Docs", "interaction notes"}}},
-        {{{"Build", "cmake --build"}, {"Tests", "Workspace model"}, {"Monitor", "Realmheart RSS"}}},
-    }};
-
 
 double lerp(double from, double to, double progress) {
     return from + (to - from) * progress;
@@ -454,7 +446,7 @@ Rect identity_rect(double top, double realm_height, double activity) {
     };
 }
 
-std::optional<int> hit_realm_content(
+std::optional<int> hit_realm_identity(
     double x,
     double y,
     const std::array<double, 4>& heights
@@ -465,8 +457,26 @@ std::optional<int> hit_realm_content(
         if (identity_rect(tops[index], heights[index], activity).contains(x, y)) {
             return static_cast<int>(index);
         }
+    }
+    return std::nullopt;
+}
+
+std::optional<int> hit_realm_card(
+    double x,
+    double y,
+    const std::array<double, 4>& heights,
+    const WorkspaceOverviewState& workspace_state
+) {
+    const auto tops = realm_tops(heights);
+    for (std::size_t index = 0; index < kRealms.size(); ++index) {
+        const double activity = realm_activity(heights[index]);
         const auto cards = window_card_visuals(tops[index], heights[index], activity);
-        for (const auto& card : cards) {
+        const auto count = std::min(
+            workspace_state[index].card_count,
+            cards.size()
+        );
+        for (std::size_t card_index = 0; card_index < count; ++card_index) {
+            const auto& card = cards[card_index];
             if (card.opacity > 0.05 && card.rect.contains(x, y)) {
                 return static_cast<int>(index);
             }
@@ -746,6 +756,7 @@ void append_identity_layout(
 
 [[nodiscard]] GdkTexture* render_realm_overlay_texture(
     std::size_t realm_index,
+    const WorkspaceOverviewRealm& workspace,
     bool expanded,
     std::string& error_message
 ) {
@@ -787,8 +798,10 @@ void append_identity_layout(
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 
     const auto cards = window_card_visuals(0.0, realm_height, activity);
-    for (std::size_t card_index = 0; card_index < cards.size(); ++card_index) {
+    const auto card_count = std::min(workspace.card_count, cards.size());
+    for (std::size_t card_index = 0; card_index < card_count; ++card_index) {
         const auto& card = cards[card_index];
+        const auto& content = workspace.cards[card_index];
         draw_window_card(
             cr,
             card.rect.x,
@@ -796,7 +809,7 @@ void append_identity_layout(
             card.rect.width,
             card.rect.height,
             style,
-            kFakeWindows[realm_index][card_index],
+            {content.app_name, content.title},
             card.detail,
             card.opacity
         );
@@ -1162,7 +1175,11 @@ void append_global_vignette(GtkSnapshot* snapshot) {
 
 } // namespace
 
-WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(GtkApplication* app) {
+WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(
+    GtkApplication* app,
+    std::function<void(int)> activate_workspace
+) : activate_workspace_(std::move(activate_workspace)) {
+    workspace_state_ = build_workspace_overview_state({});
     initialize_separator_nodes();
     displayed_heights_ = target_realm_heights(active_index_);
     animation_start_heights_ = displayed_heights_;
@@ -1285,8 +1302,91 @@ void WorkspaceOverviewOverlay::release_separator_nodes() noexcept {
     }
 }
 
+void WorkspaceOverviewOverlay::synchronize_active_workspace() {
+    for (std::size_t index = 0; index < workspace_state_.size(); ++index) {
+        if (!workspace_state_[index].active) continue;
+        active_index_ = static_cast<int>(index);
+        stop_animation(false);
+        displayed_heights_ = target_realm_heights(active_index_);
+        animation_start_heights_ = displayed_heights_;
+        animation_target_heights_ = displayed_heights_;
+        return;
+    }
+}
+
+bool WorkspaceOverviewOverlay::rebuild_dirty_overlays() {
+    bool success = true;
+    for (std::size_t index = 0; index < assets_.size(); ++index) {
+        if (!overlay_dirty_[index]) continue;
+        if (assets_[index].background == nullptr ||
+            assets_[index].character == nullptr ||
+            assets_[index].roman_layout == nullptr ||
+            assets_[index].element_layout == nullptr ||
+            assets_[index].place_layout == nullptr) {
+            success = false;
+            continue;
+        }
+
+        std::string render_error;
+        GdkTexture* compact = render_realm_overlay_texture(
+            index,
+            workspace_state_[index],
+            false,
+            render_error
+        );
+        GdkTexture* expanded = compact != nullptr
+            ? render_realm_overlay_texture(
+                index,
+                workspace_state_[index],
+                true,
+                render_error
+            )
+            : nullptr;
+
+        if (compact == nullptr || expanded == nullptr) {
+            g_clear_object(&compact);
+            g_clear_object(&expanded);
+            std::cerr
+                << "[WorkspaceOverview] unable to refresh workspace "
+                << workspace_state_[index].workspace_id
+                << " cards";
+            if (!render_error.empty()) std::cerr << ": " << render_error;
+            std::cerr << '\n';
+            success = false;
+            continue;
+        }
+
+        g_clear_object(&assets_[index].compact_overlay);
+        g_clear_object(&assets_[index].expanded_overlay);
+        assets_[index].compact_overlay = compact;
+        assets_[index].expanded_overlay = expanded;
+        overlay_dirty_[index] = false;
+    }
+    return success;
+}
+
+void WorkspaceOverviewOverlay::set_workspace_snapshot(
+    const services::WorkspaceSnapshot& snapshot
+) {
+    auto next = build_workspace_overview_state(snapshot);
+    for (std::size_t index = 0; index < next.size(); ++index) {
+        if (!same_workspace_overview_cards(workspace_state_[index], next[index])) {
+            overlay_dirty_[index] = true;
+        }
+    }
+    workspace_state_ = std::move(next);
+
+    if (!visible()) synchronize_active_workspace();
+    if (visible() && assets_attempted_ && asset_error_.empty()) {
+        static_cast<void>(rebuild_dirty_overlays());
+    }
+    if (canvas_ != nullptr) gtk_widget_queue_draw(canvas_);
+}
+
 void WorkspaceOverviewOverlay::show() {
+    synchronize_active_workspace();
     static_cast<void>(ensure_assets());
+    static_cast<void>(rebuild_dirty_overlays());
     gtk_widget_queue_draw(canvas_);
     gtk_window_present(window_);
     gtk_widget_grab_focus(canvas_);
@@ -1566,13 +1666,26 @@ void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
     const double scale_y = static_cast<double>(height) / kReferenceHeight;
     const double reference_x = x / scale_x;
     const double reference_y = y / scale_y;
-    const auto realm = hit_realm_content(
+    const auto card_realm = hit_realm_card(
+        reference_x,
+        reference_y,
+        displayed_heights_,
+        workspace_state_
+    );
+    if (card_realm.has_value()) {
+        const auto& realm = workspace_state_[static_cast<std::size_t>(*card_realm)];
+        if (activate_workspace_) activate_workspace_(realm.workspace_id);
+        hide();
+        return;
+    }
+
+    const auto identity_realm = hit_realm_identity(
         reference_x,
         reference_y,
         displayed_heights_
     );
-    if (realm.has_value()) {
-        if (*realm != active_index_) select_realm(*realm);
+    if (identity_realm.has_value()) {
+        if (*identity_realm != active_index_) select_realm(*identity_realm);
         return;
     }
     hide();
@@ -1654,28 +1767,11 @@ bool WorkspaceOverviewOverlay::ensure_assets() {
                 asset_error_
             );
         }
-        if (assets_[index].place_layout != nullptr) {
-            assets_[index].compact_overlay = render_realm_overlay_texture(
-                index,
-                false,
-                asset_error_
-            );
-        }
-        if (assets_[index].compact_overlay != nullptr) {
-            assets_[index].expanded_overlay = render_realm_overlay_texture(
-                index,
-                true,
-                asset_error_
-            );
-        }
-
         if (assets_[index].background == nullptr ||
             assets_[index].character == nullptr ||
             assets_[index].roman_layout == nullptr ||
             assets_[index].element_layout == nullptr ||
-            assets_[index].place_layout == nullptr ||
-            assets_[index].compact_overlay == nullptr ||
-            assets_[index].expanded_overlay == nullptr) {
+            assets_[index].place_layout == nullptr) {
             if (asset_error_.empty()) {
                 asset_error_ = "Unable to prepare workspace overview layers";
             }
@@ -1685,12 +1781,19 @@ bool WorkspaceOverviewOverlay::ensure_assets() {
         }
     }
 
+    if (!rebuild_dirty_overlays()) {
+        asset_error_ = "Unable to prepare workspace overview card overlays";
+        release_assets();
+        return false;
+    }
+
     std::cerr
-        << "[WorkspaceOverview] backgrounds, characters, and UI overlays cached\n";
+        << "[WorkspaceOverview] backgrounds, characters, and live card overlays cached\n";
     return true;
 }
 
 void WorkspaceOverviewOverlay::release_assets() noexcept {
+    overlay_dirty_.fill(true);
     for (auto& realm : assets_) {
         g_clear_object(&realm.background);
         g_clear_object(&realm.character);

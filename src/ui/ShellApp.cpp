@@ -8,6 +8,7 @@
 #include "services/AudioMonitor.hpp"
 #include "services/BatteryService.hpp"
 #include "services/Brightness.hpp"
+#include "services/HyprlandWorkspaces.hpp"
 #include "services/LauncherService.hpp"
 #include "services/MediaService.hpp"
 #include "services/NotesService.hpp"
@@ -550,10 +551,37 @@ public:
         launcher_overlay_->show_with_query(query);
     }
 
+    void apply_workspace_snapshot(services::WorkspaceSnapshot snapshot) {
+        workspace_snapshot_ = std::move(snapshot);
+        if (workspace_overview_) {
+            workspace_overview_->set_workspace_snapshot(workspace_snapshot_);
+        }
+    }
+
+    void activate_overview_workspace(int workspace_id) {
+        if (workspace_id <= 0) return;
+        static_cast<void>(realmheart::core::shared_task_executor().post(
+            [workspace_id] {
+                if (!services::HyprlandWorkspaces::switch_to(workspace_id)) {
+                    std::cerr
+                        << "[WorkspaceOverview] unable to activate workspace "
+                        << workspace_id << '\n';
+                }
+            }
+        ));
+    }
+
     void toggle_workspace_overview() {
+        ensure_core_initialized();
         if (!workspace_overview_) {
             workspace_overview_ =
-                std::make_unique<workspace::WorkspaceOverviewOverlay>(application_);
+                std::make_unique<workspace::WorkspaceOverviewOverlay>(
+                    application_,
+                    [this](int workspace_id) {
+                        activate_overview_workspace(workspace_id);
+                    }
+                );
+            workspace_overview_->set_workspace_snapshot(workspace_snapshot_);
         }
         workspace_overview_->toggle();
     }
@@ -1107,6 +1135,9 @@ private:
                 [this] { toggle_workspace_overview(); },
                 [this](double origin_x, double origin_y) {
                     open_logout_menu(origin_x, origin_y);
+                },
+                [this](services::WorkspaceSnapshot snapshot) {
+                    apply_workspace_snapshot(std::move(snapshot));
                 }
             );
         }
@@ -1359,6 +1390,7 @@ private:
     std::unique_ptr<CommandReceiptOverlay> command_receipts_;
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
     std::unique_ptr<workspace::WorkspaceOverviewOverlay> workspace_overview_;
+    services::WorkspaceSnapshot workspace_snapshot_;
     powermenu::PowerMenuProcess power_menu_process_;
     std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;
 
