@@ -8,13 +8,16 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace realmheart::ui::workspace {
 namespace {
@@ -556,6 +559,82 @@ std::optional<int> realm_index_at_point(
     return std::nullopt;
 }
 
+std::string normalized_app_identifier(std::string_view value) {
+    std::string result;
+    result.reserve(value.size());
+    for (const char character : value) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (std::isalnum(byte) != 0) {
+            result.push_back(static_cast<char>(std::tolower(byte)));
+        }
+    }
+    constexpr std::string_view suffix = "desktop";
+    if (result.size() > suffix.size() &&
+        result.compare(result.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        result.erase(result.size() - suffix.size());
+    }
+    return result;
+}
+
+void append_unique_icon_candidate(
+    std::vector<std::string>& candidates,
+    std::unordered_set<std::string>& seen,
+    std::string value
+) {
+    if (value.empty() || !seen.insert(value).second) return;
+    candidates.push_back(std::move(value));
+}
+
+std::vector<std::string> basic_icon_candidates(std::string_view requested) {
+    std::vector<std::string> candidates;
+    std::unordered_set<std::string> seen;
+    std::string raw(requested);
+    append_unique_icon_candidate(candidates, seen, raw);
+
+    if (raw.ends_with(".desktop")) {
+        raw.resize(raw.size() - std::string_view(".desktop").size());
+        append_unique_icon_candidate(candidates, seen, raw);
+    }
+
+    std::string lowered = raw;
+    std::transform(
+        lowered.begin(),
+        lowered.end(),
+        lowered.begin(),
+        [](unsigned char character) {
+            return static_cast<char>(std::tolower(character));
+        }
+    );
+    append_unique_icon_candidate(candidates, seen, lowered);
+
+    const auto separator = lowered.find_last_of('.');
+    if (separator != std::string::npos && separator + 1 < lowered.size()) {
+        append_unique_icon_candidate(
+            candidates,
+            seen,
+            lowered.substr(separator + 1)
+        );
+    }
+
+    if (lowered.find("dolphin") != std::string::npos ||
+        lowered.find("nautilus") != std::string::npos ||
+        lowered.find("thunar") != std::string::npos) {
+        append_unique_icon_candidate(candidates, seen, "system-file-manager");
+    }
+    if (lowered.find("terminal") != std::string::npos ||
+        lowered.find("kitty") != std::string::npos ||
+        lowered.find("alacritty") != std::string::npos) {
+        append_unique_icon_candidate(candidates, seen, "utilities-terminal");
+    }
+    if (lowered == "code" || lowered.find("visualstudiocode") != std::string::npos) {
+        append_unique_icon_candidate(candidates, seen, "visual-studio-code");
+    }
+    if (lowered.find("zen") != std::string::npos) {
+        append_unique_icon_candidate(candidates, seen, "zen-browser");
+    }
+    return candidates;
+}
+
 [[nodiscard]] GdkTexture* load_texture(
     const std::filesystem::path& path,
     std::string& error_message
@@ -584,6 +663,7 @@ void draw_window_card(
     double height,
     const RealmStyle& style,
     std::pair<std::string_view, std::string_view> content,
+    cairo_surface_t* icon_surface,
     double detail,
     double opacity
 ) {
@@ -642,55 +722,67 @@ void draw_window_card(
         true
     );
 
-    const double compact_opacity = 1.0 - detail;
-    if (compact_opacity > 0.001) {
-        const double preview_y = y + lerp(45.0, 52.0, detail);
-        const double gap = 7.0;
-        const double cell_width = (width - 26.0 - gap * 2.0) / 3.0;
-        for (int index = 0; index < 3; ++index) {
-            rounded_rectangle(
-                cr,
-                x + 13.0 + static_cast<double>(index) * (cell_width + gap),
-                preview_y,
-                cell_width,
-                8.0,
-                3.0
+    const double content_top = y + titlebar_height;
+    const double content_height = std::max(height - titlebar_height, 0.0);
+    const double icon_size = std::clamp(
+        std::min(width * 0.28, content_height * lerp(0.56, 0.48, detail)),
+        18.0,
+        88.0
+    );
+    const double icon_center_x = x + width * 0.5;
+    const double icon_center_y = content_top + content_height * 0.5;
+
+    set_source(cr, style.accent, lerp(0.08, 0.12, detail));
+    cairo_arc(
+        cr,
+        icon_center_x,
+        icon_center_y,
+        icon_size * 0.72,
+        0.0,
+        2.0 * std::acos(-1.0)
+    );
+    cairo_fill(cr);
+
+    if (icon_surface != nullptr &&
+        cairo_surface_get_type(icon_surface) == CAIRO_SURFACE_TYPE_IMAGE) {
+        const int source_width = cairo_image_surface_get_width(icon_surface);
+        const int source_height = cairo_image_surface_get_height(icon_surface);
+        if (source_width > 0 && source_height > 0) {
+            const double scale = std::min(
+                icon_size / static_cast<double>(source_width),
+                icon_size / static_cast<double>(source_height)
             );
-            set_source(cr, style.accent, 0.12 * compact_opacity);
-            cairo_fill(cr);
+            const double draw_width = static_cast<double>(source_width) * scale;
+            const double draw_height = static_cast<double>(source_height) * scale;
+            cairo_save(cr);
+            cairo_translate(
+                cr,
+                icon_center_x - draw_width * 0.5,
+                icon_center_y - draw_height * 0.5
+            );
+            cairo_scale(cr, scale, scale);
+            cairo_set_source_surface(cr, icon_surface, 0.0, 0.0);
+            cairo_paint_with_alpha(cr, 0.96);
+            cairo_restore(cr);
         }
-    }
-
-    if (detail > 0.001) {
-        const double preview_x = x + 18.0;
-        const double preview_y = y + 52.0;
-        const double preview_width = std::max(width - 36.0, 0.0);
-        const double preview_height = std::max(height - 68.0, 0.0);
-        const double gap = 9.0;
-        const double left_width = std::max((preview_width - gap) / 2.4, 0.0);
-        const double right_width = std::max(preview_width - left_width - gap, 0.0);
-        const double row_height = std::max((preview_height - gap) * 0.5, 0.0);
-
-        const std::array<std::array<double, 4>, 4> cells{{
-            {preview_x, preview_y, left_width, row_height},
-            {preview_x + left_width + gap, preview_y, right_width, preview_height},
-            {preview_x, preview_y + row_height + gap, left_width, row_height},
-            {
-                preview_x,
-                preview_y + preview_height - std::min(34.0, preview_height),
-                preview_width,
-                std::min(34.0, preview_height),
-            },
-        }};
-        for (const auto& cell : cells) {
-            if (cell[2] <= 0.0 || cell[3] <= 0.0) continue;
-            rounded_rectangle(cr, cell[0], cell[1], cell[2], cell[3], 6.0);
-            set_source(cr, style.accent, 0.10 * detail);
-            cairo_fill_preserve(cr);
-            set_source(cr, {1.0, 1.0, 1.0, 0.035 * detail});
-            cairo_set_line_width(cr, 1.0);
-            cairo_stroke(cr);
+    } else {
+        std::string monogram = "?";
+        if (!content.first.empty()) {
+            monogram.assign(1, static_cast<char>(std::toupper(
+                static_cast<unsigned char>(content.first.front())
+            )));
         }
+        draw_text(
+            cr,
+            monogram,
+            icon_center_x,
+            icon_center_y,
+            icon_size * 0.58,
+            {0.96, 0.95, 0.92, 0.88},
+            true,
+            "Inter",
+            true
+        );
     }
 
     cairo_pop_group_to_source(cr);
@@ -828,6 +920,7 @@ void append_identity_layout(
 [[nodiscard]] GdkTexture* render_card_texture(
     std::size_t realm_index,
     const WorkspaceOverviewCard& content,
+    cairo_surface_t* icon_surface,
     std::size_t slot,
     bool expanded,
     std::string& error_message
@@ -887,6 +980,7 @@ void append_identity_layout(
         visual.rect.height,
         kRealms[realm_index],
         {content.app_name, content.title},
+        icon_surface,
         visual.detail,
         visual.opacity
     );
@@ -1157,6 +1251,65 @@ void append_card_texture_pair(
     );
 }
 
+void append_card_selection_outline(
+    GtkSnapshot* snapshot,
+    const Rect& bounds,
+    const Color& accent,
+    double opacity
+) {
+    if (bounds.width <= 0.0 || bounds.height <= 0.0 || opacity <= 0.001) return;
+
+    const auto append_edges = [snapshot, &bounds](
+        double thickness,
+        const GdkRGBA& color
+    ) {
+        const std::array<graphene_rect_t, 4> edges{{
+            GRAPHENE_RECT_INIT(
+                static_cast<float>(bounds.x),
+                static_cast<float>(bounds.y),
+                static_cast<float>(bounds.width),
+                static_cast<float>(thickness)
+            ),
+            GRAPHENE_RECT_INIT(
+                static_cast<float>(bounds.x),
+                static_cast<float>(bounds.y + bounds.height - thickness),
+                static_cast<float>(bounds.width),
+                static_cast<float>(thickness)
+            ),
+            GRAPHENE_RECT_INIT(
+                static_cast<float>(bounds.x),
+                static_cast<float>(bounds.y),
+                static_cast<float>(thickness),
+                static_cast<float>(bounds.height)
+            ),
+            GRAPHENE_RECT_INIT(
+                static_cast<float>(bounds.x + bounds.width - thickness),
+                static_cast<float>(bounds.y),
+                static_cast<float>(thickness),
+                static_cast<float>(bounds.height)
+            ),
+        }};
+        for (const auto& edge : edges) {
+            gtk_snapshot_append_color(snapshot, &color, &edge);
+        }
+    };
+
+    const GdkRGBA glow{
+        static_cast<float>(accent.red),
+        static_cast<float>(accent.green),
+        static_cast<float>(accent.blue),
+        static_cast<float>(0.16 * opacity),
+    };
+    const GdkRGBA line{
+        static_cast<float>(accent.red),
+        static_cast<float>(accent.green),
+        static_cast<float>(accent.blue),
+        static_cast<float>(0.88 * opacity),
+    };
+    append_edges(4.0, glow);
+    append_edges(1.5, line);
+}
+
 Rect background_bounds(
     GdkTexture* texture,
     double top,
@@ -1400,15 +1553,9 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(
             gpointer data
         ) -> gboolean {
             auto* self = static_cast<WorkspaceOverviewOverlay*>(data);
-            if (keyval == GDK_KEY_Escape) {
-                self->hide();
-                return GDK_EVENT_STOP;
-            }
-            if (keyval >= GDK_KEY_1 && keyval <= GDK_KEY_4) {
-                self->select_realm(static_cast<int>(keyval - GDK_KEY_1));
-                return GDK_EVENT_STOP;
-            }
-            return GDK_EVENT_PROPAGATE;
+            return self->handle_key_pressed(keyval)
+                ? GDK_EVENT_STOP
+                : GDK_EVENT_PROPAGATE;
         }),
         this
     );
@@ -1502,6 +1649,7 @@ WorkspaceOverviewOverlay::~WorkspaceOverviewOverlay() {
     reset_drag();
     overview_canvas_clear(canvas_);
     release_assets();
+    clear_icon_cache();
     release_separator_nodes();
     if (window_ != nullptr) {
         gtk_window_destroy(window_);
@@ -1630,8 +1778,131 @@ void WorkspaceOverviewOverlay::synchronize_active_workspace() {
         displayed_heights_ = target_realm_heights(active_index_);
         animation_start_heights_ = displayed_heights_;
         animation_target_heights_ = displayed_heights_;
+        normalize_selection();
         return;
     }
+}
+
+cairo_surface_t* WorkspaceOverviewOverlay::application_icon_surface(
+    std::string_view requested_icon_name,
+    std::string_view app_name
+) {
+    const std::string cache_key = std::string(requested_icon_name) + '\n' +
+        std::string(app_name);
+    const auto cached = icon_surfaces_.find(cache_key);
+    if (cached != icon_surfaces_.end()) return cached->second;
+
+    auto candidates = basic_icon_candidates(requested_icon_name);
+    std::unordered_set<std::string> seen(
+        candidates.begin(),
+        candidates.end()
+    );
+    const std::string requested_identity = normalized_app_identifier(
+        requested_icon_name
+    );
+    const std::string app_identity = normalized_app_identifier(app_name);
+
+    GList* applications = g_app_info_get_all();
+    for (GList* item = applications; item != nullptr; item = item->next) {
+        GAppInfo* info = G_APP_INFO(item->data);
+        const char* id = g_app_info_get_id(info);
+        const char* executable = g_app_info_get_executable(info);
+        const char* display_name = g_app_info_get_display_name(info);
+        const bool identifier_match = id != nullptr &&
+            normalized_app_identifier(id) == requested_identity;
+        const bool executable_match = executable != nullptr &&
+            normalized_app_identifier(executable) == requested_identity;
+        const bool display_match = display_name != nullptr &&
+            normalized_app_identifier(display_name) == app_identity;
+        if (!identifier_match && !executable_match && !display_match) continue;
+
+        GIcon* icon = g_app_info_get_icon(info);
+        if (icon == nullptr || !G_IS_THEMED_ICON(icon)) continue;
+        const char* const* names = g_themed_icon_get_names(G_THEMED_ICON(icon));
+        if (names == nullptr) continue;
+        for (std::size_t index = 0; names[index] != nullptr; ++index) {
+            append_unique_icon_candidate(candidates, seen, names[index]);
+        }
+    }
+    g_list_free_full(applications, g_object_unref);
+    append_unique_icon_candidate(
+        candidates,
+        seen,
+        "application-x-executable"
+    );
+
+    GdkDisplay* display = window_ != nullptr
+        ? gtk_widget_get_display(GTK_WIDGET(window_))
+        : nullptr;
+    GtkIconTheme* theme = display != nullptr
+        ? gtk_icon_theme_get_for_display(display)
+        : nullptr;
+    if (theme == nullptr) {
+        icon_surfaces_.emplace(cache_key, nullptr);
+        return nullptr;
+    }
+
+    const int scale = std::max(
+        1,
+        canvas_ != nullptr ? gtk_widget_get_scale_factor(canvas_) : 1
+    );
+    for (const auto& candidate : candidates) {
+        if (!gtk_icon_theme_has_icon(theme, candidate.c_str())) continue;
+        GtkIconPaintable* paintable = gtk_icon_theme_lookup_icon(
+            theme,
+            candidate.c_str(),
+            nullptr,
+            96,
+            scale,
+            GTK_TEXT_DIR_NONE,
+            GTK_ICON_LOOKUP_FORCE_REGULAR
+        );
+        if (paintable == nullptr) continue;
+
+        GFile* file = gtk_icon_paintable_get_file(paintable);
+        g_object_unref(paintable);
+        if (file == nullptr) continue;
+
+        GError* error = nullptr;
+        GdkTexture* texture = gdk_texture_new_from_file(file, &error);
+        g_object_unref(file);
+        if (texture == nullptr) {
+            g_clear_error(&error);
+            continue;
+        }
+
+        const int width = gdk_texture_get_width(texture);
+        const int height = gdk_texture_get_height(texture);
+        cairo_surface_t* surface = width > 0 && height > 0
+            ? cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height)
+            : nullptr;
+        if (surface == nullptr ||
+            cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
+            if (surface != nullptr) cairo_surface_destroy(surface);
+            g_object_unref(texture);
+            continue;
+        }
+        gdk_texture_download(
+            texture,
+            cairo_image_surface_get_data(surface),
+            static_cast<gsize>(cairo_image_surface_get_stride(surface))
+        );
+        cairo_surface_mark_dirty(surface);
+        g_object_unref(texture);
+        icon_surfaces_.emplace(cache_key, surface);
+        return surface;
+    }
+
+    icon_surfaces_.emplace(cache_key, nullptr);
+    return nullptr;
+}
+
+void WorkspaceOverviewOverlay::clear_icon_cache() noexcept {
+    for (const auto& [key, surface] : icon_surfaces_) {
+        static_cast<void>(key);
+        if (surface != nullptr) cairo_surface_destroy(surface);
+    }
+    icon_surfaces_.clear();
 }
 
 bool WorkspaceOverviewOverlay::rebuild_dirty_overlays() {
@@ -1674,6 +1945,10 @@ bool WorkspaceOverviewOverlay::rebuild_dirty_overlays() {
             cards[slot].compact = render_card_texture(
                 index,
                 workspace_state_[index].cards[slot],
+                application_icon_surface(
+                    workspace_state_[index].cards[slot].icon_name,
+                    workspace_state_[index].cards[slot].app_name
+                ),
                 slot,
                 false,
                 render_error
@@ -1682,6 +1957,10 @@ bool WorkspaceOverviewOverlay::rebuild_dirty_overlays() {
                 ? render_card_texture(
                     index,
                     workspace_state_[index].cards[slot],
+                    application_icon_surface(
+                        workspace_state_[index].cards[slot].icon_name,
+                        workspace_state_[index].cards[slot].app_name
+                    ),
                     slot,
                     true,
                     render_error
@@ -1735,6 +2014,7 @@ void WorkspaceOverviewOverlay::set_workspace_snapshot(
     }
     if (cards_changed) prepare_card_transition(next);
     workspace_state_ = std::move(next);
+    normalize_selection();
 
     if (!visible()) synchronize_active_workspace();
     if (visible() && assets_attempted_ && asset_error_.empty()) {
@@ -1745,6 +2025,7 @@ void WorkspaceOverviewOverlay::set_workspace_snapshot(
 
 void WorkspaceOverviewOverlay::show() {
     synchronize_active_workspace();
+    normalize_selection();
     static_cast<void>(ensure_assets());
     static_cast<void>(rebuild_dirty_overlays());
     gtk_widget_queue_draw(canvas_);
@@ -1843,14 +2124,127 @@ gboolean WorkspaceOverviewOverlay::animation_tick_callback(
     return G_SOURCE_CONTINUE;
 }
 
+bool WorkspaceOverviewOverlay::handle_key_pressed(guint keyval) {
+    if (keyval == GDK_KEY_Escape) {
+        hide();
+        return true;
+    }
+    if (keyval >= GDK_KEY_1 && keyval <= GDK_KEY_4) {
+        select_realm(static_cast<int>(keyval - GDK_KEY_1));
+        return true;
+    }
+
+    switch (keyval) {
+        case GDK_KEY_Up:
+        case GDK_KEY_k:
+        case GDK_KEY_K:
+            move_realm_selection(-1);
+            return true;
+        case GDK_KEY_Down:
+        case GDK_KEY_j:
+        case GDK_KEY_J:
+            move_realm_selection(1);
+            return true;
+        case GDK_KEY_Left:
+        case GDK_KEY_h:
+        case GDK_KEY_H:
+            move_card_selection(-1);
+            return true;
+        case GDK_KEY_Right:
+        case GDK_KEY_l:
+        case GDK_KEY_L:
+            move_card_selection(1);
+            return true;
+        case GDK_KEY_Return:
+        case GDK_KEY_KP_Enter:
+        case GDK_KEY_ISO_Enter:
+            activate_selected();
+            return true;
+        default:
+            return false;
+    }
+}
+
+void WorkspaceOverviewOverlay::move_realm_selection(int delta) {
+    const int count = static_cast<int>(workspace_state_.size());
+    if (count <= 0 || delta == 0) return;
+    const int next = (active_index_ + delta % count + count) % count;
+    select_realm(next);
+}
+
+void WorkspaceOverviewOverlay::move_card_selection(int delta) {
+    if (active_index_ < 0 ||
+        active_index_ >= static_cast<int>(workspace_state_.size()) ||
+        delta == 0) {
+        return;
+    }
+
+    const auto& realm = workspace_state_[static_cast<std::size_t>(active_index_)];
+    const int count = static_cast<int>(realm.card_count);
+    if (count <= 0) {
+        selected_card_index_ = -1;
+    } else if (selected_card_index_ < 0) {
+        selected_card_index_ = delta > 0 ? 0 : count - 1;
+    } else {
+        selected_card_index_ =
+            (selected_card_index_ + delta % count + count) % count;
+    }
+    if (canvas_ != nullptr) gtk_widget_queue_draw(canvas_);
+}
+
+void WorkspaceOverviewOverlay::activate_selected() {
+    if (active_index_ < 0 ||
+        active_index_ >= static_cast<int>(workspace_state_.size())) {
+        return;
+    }
+
+    const auto& realm = workspace_state_[static_cast<std::size_t>(active_index_)];
+    if (selected_card_index_ >= 0 &&
+        selected_card_index_ < static_cast<int>(realm.card_count)) {
+        const auto& card = realm.cards[
+            static_cast<std::size_t>(selected_card_index_)
+        ];
+        if (!card.summary && !card.address.empty() && activate_window_) {
+            activate_window_(realm.workspace_id, card.address);
+        } else if (activate_workspace_) {
+            activate_workspace_(realm.workspace_id);
+        }
+    } else if (activate_workspace_) {
+        activate_workspace_(realm.workspace_id);
+    }
+    hide();
+}
+
+void WorkspaceOverviewOverlay::normalize_selection() noexcept {
+    if (active_index_ < 0 ||
+        active_index_ >= static_cast<int>(workspace_state_.size())) {
+        selected_card_index_ = -1;
+        return;
+    }
+    const int count = static_cast<int>(
+        workspace_state_[static_cast<std::size_t>(active_index_)].card_count
+    );
+    if (count <= 0) {
+        selected_card_index_ = -1;
+    } else {
+        selected_card_index_ = std::clamp(selected_card_index_, 0, count - 1);
+    }
+}
+
 void WorkspaceOverviewOverlay::select_realm(int index) {
     if (index < 0 || index >= static_cast<int>(displayed_heights_.size())) return;
 
     // Motion events arrive continuously while the pointer moves inside a realm.
     // Do not restart an in-flight transition that is already targeting it.
-    if (index == active_index_) return;
+    if (index == active_index_) {
+        normalize_selection();
+        return;
+    }
 
     active_index_ = index;
+    selected_card_index_ = workspace_state_[static_cast<std::size_t>(index)].card_count > 0
+        ? 0
+        : -1;
     const auto target = target_realm_heights(index);
     animation_start_heights_ = displayed_heights_;
     animation_target_heights_ = target;
@@ -2080,15 +2474,35 @@ void WorkspaceOverviewOverlay::snapshot(
                 drag_card_.realm_index == index &&
                 drag_card_.card_index == slot;
             const double card_opacity = entering ? card_progress : 1.0;
+            const Rect compact_current = lerp_rect(
+                compact_start,
+                compact_target,
+                card_progress
+            );
+            const Rect expanded_current = lerp_rect(
+                expanded_start,
+                expanded_target,
+                card_progress
+            );
             append_card_texture_pair(
                 snapshot,
                 assets_[index].cards[slot].compact,
                 assets_[index].cards[slot].expanded,
-                lerp_rect(compact_start, compact_target, card_progress),
-                lerp_rect(expanded_start, expanded_target, card_progress),
+                compact_current,
+                expanded_current,
                 activity,
                 dragged_source ? card_opacity * 0.14 : card_opacity
             );
+            if (!dragged_source &&
+                active_index_ == static_cast<int>(index) &&
+                selected_card_index_ == static_cast<int>(slot)) {
+                append_card_selection_outline(
+                    snapshot,
+                    lerp_rect(compact_current, expanded_current, activity),
+                    kRealms[index].accent_soft,
+                    card_opacity
+                );
+            }
         }
 
         if (card_animation_active_) {
@@ -2303,8 +2717,7 @@ void WorkspaceOverviewOverlay::handle_drag_update(
         drag_card_.current_y,
         displayed_heights_
     );
-    if (target.has_value() &&
-        *target != static_cast<int>(drag_card_.realm_index)) {
+    if (target.has_value()) {
         drag_target_index_ = *target;
         select_realm(*target);
     } else {
@@ -2402,22 +2815,35 @@ void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
     hide();
 }
 
-void WorkspaceOverviewOverlay::handle_hover(double, double y) {
+void WorkspaceOverviewOverlay::handle_hover(double x, double y) {
     if (canvas_ == nullptr || drag_card_.active) return;
     const int width = gtk_widget_get_width(canvas_);
     const int height = gtk_widget_get_height(canvas_);
     if (width <= 0 || height <= 0) return;
 
+    const double scale_x = static_cast<double>(width) / kReferenceWidth;
     const double scale_y = static_cast<double>(height) / kReferenceHeight;
+    const double reference_x = x / scale_x;
     const double reference_y = y / scale_y;
-    double bottom = 0.0;
-    for (std::size_t index = 0; index < displayed_heights_.size(); ++index) {
-        bottom += displayed_heights_[index];
-        if (reference_y < bottom) {
-            select_realm(static_cast<int>(index));
-            return;
-        }
+    const auto card = hit_realm_card(
+        reference_x,
+        reference_y,
+        displayed_heights_,
+        workspace_state_
+    );
+    if (card.has_value()) {
+        select_realm(static_cast<int>(card->realm_index));
+        selected_card_index_ = static_cast<int>(card->card_index);
+        gtk_widget_queue_draw(canvas_);
+        return;
     }
+
+    const auto realm = realm_index_at_point(
+        reference_x,
+        reference_y,
+        displayed_heights_
+    );
+    if (realm.has_value()) select_realm(*realm);
 }
 
 bool WorkspaceOverviewOverlay::ensure_assets() {

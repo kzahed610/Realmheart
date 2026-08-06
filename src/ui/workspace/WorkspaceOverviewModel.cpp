@@ -37,6 +37,7 @@ std::string display_app_name(std::string_view app_id) {
 WorkspaceOverviewCard make_window_card(const services::WorkspaceWindow& window) {
     return {
         window.address,
+        window.app_id.empty() ? "application-x-executable" : window.app_id,
         display_app_name(window.app_id),
         window.title.empty() ? "Untitled window" : window.title,
         false,
@@ -105,6 +106,7 @@ WorkspaceOverviewState build_workspace_overview_state(
         const auto hidden = workspace->window_details.size() - 2U;
         realm.cards[2] = {
             {},
+            "view-more-symbolic",
             "+" + std::to_string(hidden) + " more",
             "Additional windows on workspace " +
                 std::to_string(realm.workspace_id),
