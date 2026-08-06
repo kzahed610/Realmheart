@@ -57,7 +57,7 @@ private:
         DragBounds compact_bounds{};
         DragBounds expanded_bounds{};
         std::string address;
-        std::size_t realm_index = 0;
+        int source_workspace_id = 0;
         std::size_t card_index = 0;
         double start_x = 0.0;
         double start_y = 0.0;
@@ -73,6 +73,7 @@ private:
         GdkTexture* background = nullptr;
         GdkTexture* character = nullptr;
         PangoLayout* roman_layout = nullptr;
+        int roman_workspace_id = 0;
         PangoLayout* element_layout = nullptr;
         PangoLayout* place_layout = nullptr;
         GdkTexture* compact_overlay = nullptr;
@@ -115,6 +116,11 @@ private:
     void initialize_separator_nodes();
     void release_separator_nodes() noexcept;
     void synchronize_active_workspace();
+    void begin_viewport_transition(int direction);
+    [[nodiscard]] std::size_t style_index_for_realm(
+        std::size_t realm_index
+    ) const noexcept;
+    [[nodiscard]] double viewport_visual_offset() const noexcept;
     cairo_surface_t* application_icon_surface(
         std::string_view requested_icon_name,
         std::string_view app_name
@@ -131,7 +137,8 @@ private:
     std::array<bool, kWorkspaceOverviewRealmCount> overlay_dirty_{{
         true, true, true, true,
     }};
-    std::array<GskRenderNode*, 3> separator_nodes_{};
+    std::array<std::array<GskRenderNode*, kWorkspaceOverviewRealmCount>, 3>
+        separator_nodes_{};
     std::array<double, 4> displayed_heights_{};
     std::array<double, 4> animation_start_heights_{};
     std::array<double, 4> animation_target_heights_{};
@@ -148,19 +155,24 @@ private:
     DragCard drag_card_{};
     int drag_target_index_ = -1;
     std::string asset_error_;
+    int viewport_start_workspace_id_ = 1;
+    int viewport_transition_direction_ = 0;
     int active_index_ = 1;
     int selected_card_index_ = -1;
     guint animation_tick_id_ = 0;
     gint64 animation_start_time_us_ = 0;
     gint64 card_animation_start_time_us_ = 0;
     gint64 selection_animation_start_time_us_ = 0;
+    gint64 viewport_animation_start_time_us_ = 0;
     graphene_rect_t selection_outline_start_bounds_{};
     double card_animation_progress_ = 1.0;
     double selection_animation_progress_ = 1.0;
+    double viewport_animation_progress_ = 1.0;
     double selection_outline_start_opacity_ = 0.0;
     bool realm_animation_active_ = false;
     bool card_animation_active_ = false;
     bool selection_animation_active_ = false;
+    bool viewport_animation_active_ = false;
     bool selection_outline_has_start_bounds_ = false;
     bool assets_attempted_ = false;
 };

@@ -440,14 +440,21 @@ realmheart --command osd-brightness
 ```
 
 The workspace overview is also toggled by right-clicking any workspace rune in
-the Aether Spine. It docks beside the bar and mirrors Hyprland workspaces 1–4
-using live client class/title data and cached application icons. Client open,
-close, move, and title changes refresh the cards. Clicking a card focuses that
-exact window; dragging a card into another realm moves the client there.
+the Aether Spine. It docks beside the bar and presents a four-workspace viewport
+that follows Hyprland beyond workspace 4. For example, activating workspace 5
+shifts the visible range to workspaces 2–5. Fire, Water, Wind, and Earth cycle
+across later workspaces, so workspace 5 returns to Bairon and the Fire realm.
+
+The overview uses live client class/title data and cached application icons.
+Client open, close, move, and title changes refresh the cards. Clicking a card
+focuses that exact window; dragging a card into another visible realm moves the
+client there. A held drag survives workspace scrolling, allowing `SUPER` plus
+the configured workspace wheel bind to reveal a later destination before drop.
 
 Use `Up`/`Down` or `K`/`J` to select a realm, `Left`/`Right` or `H`/`L` to
-select a window, and `Enter` to activate it. Number keys `1`–`4` select realm
-slots, while `Escape` or clicking unused background closes the overview.
+select a window, and `Enter` to activate it. Number keys `1`–`4` select the four
+currently visible realm slots, while `Escape` or clicking unused background
+closes the overview.
 
 ### Character controls
 

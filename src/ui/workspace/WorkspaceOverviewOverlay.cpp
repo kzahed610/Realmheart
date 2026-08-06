@@ -97,6 +97,8 @@ constexpr double kInactiveFraction = (1.0 - kActiveFraction) / 3.0;
 constexpr double kTransitionDurationSeconds = 0.480;
 constexpr double kCardTransitionDurationSeconds = 0.180;
 constexpr double kSelectionTransitionDurationSeconds = 0.140;
+constexpr double kViewportTransitionDurationSeconds = 0.170;
+constexpr double kViewportTransitionDistance = 72.0;
 constexpr double kCardTransitionDistance = 18.0;
 constexpr double kCardDragThresholdPixels = 8.0;
 constexpr double kCompactCardRadius = 11.0;
@@ -189,6 +191,11 @@ constexpr std::array<RealmStyle, 4> kRealms{{
         760.0, -18.0, 430.0, -2.0, -35.0,
     },
 }};
+
+
+const RealmStyle& realm_style_for_workspace(int workspace_id) {
+    return kRealms[style_index_for_workspace_id(workspace_id)];
+}
 
 constexpr std::size_t kBoundarySampleCount = 65;
 using BoundaryPoints = std::array<Point, kBoundarySampleCount>;
@@ -1144,7 +1151,8 @@ void append_identity_layout(
 }
 
 [[nodiscard]] GskRenderNode* create_separator_node(
-    std::size_t boundary_index
+    std::size_t boundary_index,
+    std::size_t boundary_style_index
 ) {
     constexpr std::array<std::pair<double, double>, 4> kLayerOffsets{{
         {-9.5, 9.5},
@@ -1152,26 +1160,33 @@ void append_identity_layout(
         {-7.4, -5.4},
         {5.4, 7.4},
     }};
-    constexpr std::array<GdkRGBA, 3> kBodyColors{{
+    constexpr std::array<GdkRGBA, 4> kBodyColors{{
         {0.14F, 0.085F, 0.050F, 0.72F},
         {0.035F, 0.095F, 0.115F, 0.72F},
         {0.075F, 0.095F, 0.055F, 0.72F},
+        {0.115F, 0.080F, 0.048F, 0.72F},
     }};
-    constexpr std::array<GdkRGBA, 3> kUpperAccentColors{{
+    constexpr std::array<GdkRGBA, 4> kUpperAccentColors{{
         {0.86F, 0.53F, 0.27F, 0.58F},
         {0.60F, 0.85F, 0.90F, 0.56F},
         {0.62F, 0.72F, 0.50F, 0.54F},
+        {0.90F, 0.67F, 0.36F, 0.56F},
     }};
-    constexpr std::array<GdkRGBA, 3> kLowerAccentColors{{
+    constexpr std::array<GdkRGBA, 4> kLowerAccentColors{{
         {0.55F, 0.30F, 0.16F, 0.22F},
         {0.30F, 0.58F, 0.66F, 0.22F},
         {0.36F, 0.46F, 0.28F, 0.20F},
+        {0.52F, 0.38F, 0.20F, 0.21F},
     }};
+    if (boundary_index >= 3 ||
+        boundary_style_index >= kWorkspaceOverviewRealmCount) {
+        return nullptr;
+    }
     const std::array<GdkRGBA, 4> colors{{
         {0.0F, 0.0F, 0.0F, 0.07F},
-        kBodyColors[boundary_index],
-        kUpperAccentColors[boundary_index],
-        kLowerAccentColors[boundary_index],
+        kBodyColors[boundary_style_index],
+        kUpperAccentColors[boundary_style_index],
+        kLowerAccentColors[boundary_style_index],
     }};
 
     GtkSnapshot* separator_snapshot = gtk_snapshot_new();
@@ -1684,15 +1699,24 @@ WorkspaceOverviewOverlay::~WorkspaceOverviewOverlay() {
 
 void WorkspaceOverviewOverlay::initialize_separator_nodes() {
     for (std::size_t boundary = 0; boundary < separator_nodes_.size(); ++boundary) {
-        separator_nodes_[boundary] = create_separator_node(boundary);
+        for (std::size_t style = 0;
+             style < separator_nodes_[boundary].size();
+             ++style) {
+            separator_nodes_[boundary][style] = create_separator_node(
+                boundary,
+                style
+            );
+        }
     }
 }
 
 void WorkspaceOverviewOverlay::release_separator_nodes() noexcept {
-    for (auto*& node : separator_nodes_) {
-        if (node != nullptr) {
-            gsk_render_node_unref(node);
-            node = nullptr;
+    for (auto& boundary : separator_nodes_) {
+        for (auto*& node : boundary) {
+            if (node != nullptr) {
+                gsk_render_node_unref(node);
+                node = nullptr;
+            }
         }
     }
 }
@@ -1745,11 +1769,12 @@ void WorkspaceOverviewOverlay::prepare_card_transition(
         const auto& previous_realm = workspace_state_[realm];
         const auto& next_realm = next[realm];
 
+        const bool same_workspace = previous_realm.workspace_id ==
+            next_realm.workspace_id;
         for (std::size_t slot = 0; slot < next_realm.card_count; ++slot) {
-            const auto previous_slot = find_card_slot(
-                previous_realm,
-                next_realm.cards[slot]
-            );
+            const auto previous_slot = same_workspace
+                ? find_card_slot(previous_realm, next_realm.cards[slot])
+                : std::nullopt;
             if (previous_slot.has_value()) {
                 card_from_slots_[realm][slot] =
                     static_cast<int>(*previous_slot);
@@ -1762,14 +1787,18 @@ void WorkspaceOverviewOverlay::prepare_card_transition(
         }
 
         std::size_t outgoing_index = 0;
+        const std::size_t previous_style = style_index_for_workspace_id(
+            previous_realm.workspace_id
+        );
         for (std::size_t slot = 0; slot < previous_realm.card_count; ++slot) {
-            if (find_card_slot(next_realm, previous_realm.cards[slot]).has_value()) {
+            if (same_workspace &&
+                find_card_slot(next_realm, previous_realm.cards[slot]).has_value()) {
                 continue;
             }
             if (outgoing_index >= outgoing_cards_[realm].size()) break;
 
             auto& outgoing = outgoing_cards_[realm][outgoing_index++];
-            const auto& previous_assets = assets_[realm].cards[slot];
+            const auto& previous_assets = assets_[previous_style].cards[slot];
             if (previous_assets.compact != nullptr) {
                 outgoing.assets.compact = GDK_TEXTURE(
                     g_object_ref(previous_assets.compact)
@@ -1791,6 +1820,38 @@ void WorkspaceOverviewOverlay::prepare_card_transition(
     card_animation_active_ = true;
     card_animation_progress_ = 0.0;
     card_animation_start_time_us_ = 0;
+    ensure_animation_tick();
+}
+
+std::size_t WorkspaceOverviewOverlay::style_index_for_realm(
+    std::size_t realm_index
+) const noexcept {
+    if (realm_index >= workspace_state_.size()) {
+        return realm_index % kWorkspaceOverviewRealmCount;
+    }
+    return style_index_for_workspace_id(
+        workspace_state_[realm_index].workspace_id
+    );
+}
+
+double WorkspaceOverviewOverlay::viewport_visual_offset() const noexcept {
+    if (!viewport_animation_active_) return 0.0;
+    return static_cast<double>(viewport_transition_direction_) *
+        kViewportTransitionDistance * (1.0 - viewport_animation_progress_);
+}
+
+void WorkspaceOverviewOverlay::begin_viewport_transition(int direction) {
+    if (!visible() || direction == 0) {
+        viewport_transition_direction_ = 0;
+        viewport_animation_start_time_us_ = 0;
+        viewport_animation_progress_ = 1.0;
+        viewport_animation_active_ = false;
+        return;
+    }
+    viewport_transition_direction_ = direction > 0 ? 1 : -1;
+    viewport_animation_start_time_us_ = 0;
+    viewport_animation_progress_ = 0.0;
+    viewport_animation_active_ = true;
     ensure_animation_tick();
 }
 
@@ -1931,47 +1992,71 @@ void WorkspaceOverviewOverlay::clear_icon_cache() noexcept {
 
 bool WorkspaceOverviewOverlay::rebuild_dirty_overlays() {
     bool success = true;
-    for (std::size_t index = 0; index < assets_.size(); ++index) {
+    for (std::size_t index = 0; index < workspace_state_.size(); ++index) {
         if (!overlay_dirty_[index]) continue;
-        if (assets_[index].background == nullptr ||
-            assets_[index].character == nullptr ||
-            assets_[index].roman_layout == nullptr ||
-            assets_[index].element_layout == nullptr ||
-            assets_[index].place_layout == nullptr) {
+
+        const std::size_t style_index = style_index_for_realm(index);
+        auto& style_assets = assets_[style_index];
+        const auto& realm_state = workspace_state_[index];
+        if (style_assets.background == nullptr ||
+            style_assets.character == nullptr ||
+            style_assets.element_layout == nullptr ||
+            style_assets.place_layout == nullptr) {
             success = false;
             continue;
         }
 
         std::string render_error;
-        GdkTexture* compact = assets_[index].compact_overlay != nullptr
-            ? GDK_TEXTURE(g_object_ref(assets_[index].compact_overlay))
+        if (style_assets.roman_layout == nullptr ||
+            style_assets.roman_workspace_id != realm_state.workspace_id) {
+            g_clear_object(&style_assets.roman_layout);
+            const std::string roman = workspace_roman_numeral(
+                realm_state.workspace_id
+            );
+            style_assets.roman_layout = create_identity_layout(
+                canvas_,
+                roman,
+                60.0,
+                "Georgia",
+                0,
+                render_error
+            );
+            style_assets.roman_workspace_id =
+                style_assets.roman_layout != nullptr
+                ? realm_state.workspace_id
+                : 0;
+        }
+
+        GdkTexture* compact = style_assets.compact_overlay != nullptr
+            ? GDK_TEXTURE(g_object_ref(style_assets.compact_overlay))
             : render_realm_overlay_texture(
-                index,
-                workspace_state_[index],
+                style_index,
+                realm_state,
                 false,
                 render_error
             );
-        GdkTexture* expanded = assets_[index].expanded_overlay != nullptr
-            ? GDK_TEXTURE(g_object_ref(assets_[index].expanded_overlay))
+        GdkTexture* expanded = style_assets.expanded_overlay != nullptr
+            ? GDK_TEXTURE(g_object_ref(style_assets.expanded_overlay))
             : compact != nullptr
                 ? render_realm_overlay_texture(
-                    index,
-                    workspace_state_[index],
+                    style_index,
+                    realm_state,
                     true,
                     render_error
                 )
                 : nullptr;
         std::array<CardAssets, kWorkspaceOverviewCardLimit> cards{};
-        bool cards_ready = compact != nullptr && expanded != nullptr;
+        bool cards_ready = style_assets.roman_layout != nullptr &&
+            compact != nullptr && expanded != nullptr;
         for (std::size_t slot = 0;
-             cards_ready && slot < workspace_state_[index].card_count;
+             cards_ready && slot < realm_state.card_count;
              ++slot) {
             cards[slot].compact = render_card_texture(
-                index,
-                workspace_state_[index].cards[slot],
+                style_index,
+                realm_state.cards[slot],
                 application_icon_surface(
-                    workspace_state_[index].cards[slot].icon_name,
-                    workspace_state_[index].cards[slot].app_name
+                    realm_state.cards[slot].icon_name,
+                    realm_state.cards[slot].app_name
                 ),
                 slot,
                 false,
@@ -1979,11 +2064,11 @@ bool WorkspaceOverviewOverlay::rebuild_dirty_overlays() {
             );
             cards[slot].expanded = cards[slot].compact != nullptr
                 ? render_card_texture(
-                    index,
-                    workspace_state_[index].cards[slot],
+                    style_index,
+                    realm_state.cards[slot],
                     application_icon_surface(
-                        workspace_state_[index].cards[slot].icon_name,
-                        workspace_state_[index].cards[slot].app_name
+                        realm_state.cards[slot].icon_name,
+                        realm_state.cards[slot].app_name
                     ),
                     slot,
                     true,
@@ -2003,23 +2088,22 @@ bool WorkspaceOverviewOverlay::rebuild_dirty_overlays() {
             }
             std::cerr
                 << "[WorkspaceOverview] unable to refresh workspace "
-                << workspace_state_[index].workspace_id
-                << " cards";
+                << realm_state.workspace_id << " cards";
             if (!render_error.empty()) std::cerr << ": " << render_error;
             std::cerr << '\n';
             success = false;
             continue;
         }
 
-        g_clear_object(&assets_[index].compact_overlay);
-        g_clear_object(&assets_[index].expanded_overlay);
-        for (auto& card : assets_[index].cards) {
+        g_clear_object(&style_assets.compact_overlay);
+        g_clear_object(&style_assets.expanded_overlay);
+        for (auto& card : style_assets.cards) {
             g_clear_object(&card.compact);
             g_clear_object(&card.expanded);
         }
-        assets_[index].compact_overlay = compact;
-        assets_[index].expanded_overlay = expanded;
-        assets_[index].cards = cards;
+        style_assets.compact_overlay = compact;
+        style_assets.expanded_overlay = expanded;
+        style_assets.cards = cards;
         overlay_dirty_[index] = false;
     }
     return success;
@@ -2028,7 +2112,25 @@ bool WorkspaceOverviewOverlay::rebuild_dirty_overlays() {
 void WorkspaceOverviewOverlay::set_workspace_snapshot(
     const services::WorkspaceSnapshot& snapshot
 ) {
-    auto next = build_workspace_overview_state(snapshot);
+    int previous_active_workspace_id = 0;
+    for (const auto& realm : workspace_state_) {
+        if (realm.active) {
+            previous_active_workspace_id = realm.workspace_id;
+            break;
+        }
+    }
+    const int next_viewport_start = visible_workspace_start_for_active(
+        snapshot.active_id
+    );
+    const int viewport_direction = next_viewport_start ==
+            viewport_start_workspace_id_
+        ? 0
+        : next_viewport_start > viewport_start_workspace_id_ ? 1 : -1;
+    auto next = build_workspace_overview_state(
+        snapshot,
+        next_viewport_start
+    );
+
     bool cards_changed = false;
     for (std::size_t index = 0; index < next.size(); ++index) {
         if (!same_workspace_overview_cards(workspace_state_[index], next[index])) {
@@ -2037,12 +2139,41 @@ void WorkspaceOverviewOverlay::set_workspace_snapshot(
         }
     }
     if (cards_changed) prepare_card_transition(next);
+
     workspace_state_ = std::move(next);
+    viewport_start_workspace_id_ = next_viewport_start;
+
+    if (!visible()) {
+        synchronize_active_workspace();
+    } else {
+        const bool active_workspace_changed = snapshot.active_id !=
+            previous_active_workspace_id;
+        if (active_workspace_changed || viewport_direction != 0) {
+            for (std::size_t index = 0;
+                 index < workspace_state_.size();
+                 ++index) {
+                if (!workspace_state_[index].active) continue;
+                select_realm(static_cast<int>(index), 0);
+                break;
+            }
+        }
+        if (viewport_direction != 0) {
+            begin_viewport_transition(viewport_direction);
+        }
+    }
     normalize_selection();
 
-    if (!visible()) synchronize_active_workspace();
     if (visible() && assets_attempted_ && asset_error_.empty()) {
         static_cast<void>(rebuild_dirty_overlays());
+    }
+
+    if (drag_card_.active) {
+        const auto target = realm_index_at_point(
+            drag_card_.current_x,
+            drag_card_.current_y - viewport_visual_offset(),
+            displayed_heights_
+        );
+        drag_target_index_ = target.has_value() ? *target : -1;
     }
     if (canvas_ != nullptr) gtk_widget_queue_draw(canvas_);
 }
@@ -2159,10 +2290,34 @@ gboolean WorkspaceOverviewOverlay::animation_tick_callback(
         }
     }
 
+    if (self->viewport_animation_active_) {
+        if (self->viewport_animation_start_time_us_ == 0) {
+            self->viewport_animation_start_time_us_ = frame_time_us;
+        }
+        const double elapsed_seconds = static_cast<double>(
+            frame_time_us - self->viewport_animation_start_time_us_
+        ) / static_cast<double>(kMicrosecondsPerSecond);
+        const double linear = std::clamp(
+            elapsed_seconds / kViewportTransitionDurationSeconds,
+            0.0,
+            1.0
+        );
+        self->viewport_animation_progress_ = transition_ease(linear);
+        if (linear >= 1.0) {
+            self->viewport_animation_start_time_us_ = 0;
+            self->viewport_animation_progress_ = 1.0;
+            self->viewport_animation_active_ = false;
+            self->viewport_transition_direction_ = 0;
+        } else {
+            keep_running = true;
+        }
+    }
+
     gtk_widget_queue_draw(self->canvas_);
     if (!keep_running && !self->realm_animation_active_ &&
         !self->card_animation_active_ &&
-        !self->selection_animation_active_) {
+        !self->selection_animation_active_ &&
+        !self->viewport_animation_active_) {
         self->animation_tick_id_ = 0;
         return G_SOURCE_REMOVE;
     }
@@ -2453,6 +2608,10 @@ void WorkspaceOverviewOverlay::stop_animation(bool snap_to_target) noexcept {
     realm_animation_active_ = false;
     finish_card_transition();
     finish_selection_transition();
+    viewport_animation_start_time_us_ = 0;
+    viewport_animation_progress_ = 1.0;
+    viewport_animation_active_ = false;
+    viewport_transition_direction_ = 0;
     if (snap_to_target) {
         displayed_heights_ = animation_target_heights_;
         animation_start_heights_ = animation_target_heights_;
@@ -2527,8 +2686,29 @@ void WorkspaceOverviewOverlay::snapshot(
 
     const auto& heights = displayed_heights_;
     const auto tops = realm_tops(heights);
+    const bool viewport_transition = viewport_animation_active_;
+    const double viewport_progress = viewport_transition
+        ? viewport_animation_progress_
+        : 1.0;
+    const double viewport_offset = viewport_visual_offset();
 
-    for (std::size_t index = 0; index < kRealms.size(); ++index) {
+    gtk_snapshot_save(snapshot);
+    const graphene_point_t viewport_translation = GRAPHENE_POINT_INIT(
+        0.0F,
+        static_cast<float>(viewport_offset)
+    );
+    gtk_snapshot_translate(snapshot, &viewport_translation);
+    if (viewport_transition) {
+        gtk_snapshot_push_opacity(
+            snapshot,
+            static_cast<float>(lerp(0.42, 1.0, viewport_progress))
+        );
+    }
+
+    for (std::size_t index = 0; index < workspace_state_.size(); ++index) {
+        const std::size_t style_index = style_index_for_realm(index);
+        const auto& style = kRealms[style_index];
+        const auto& style_assets = assets_[style_index];
         const double realm_height = heights[index];
         const double activity = realm_activity(realm_height);
         const Rect texture_bounds{
@@ -2546,9 +2726,9 @@ void WorkspaceOverviewOverlay::snapshot(
         gtk_snapshot_push_clip(snapshot, &realm_clip);
         append_texture_with_opacity(
             snapshot,
-            assets_[index].background,
+            style_assets.background,
             background_bounds(
-                assets_[index].background,
+                style_assets.background,
                 tops[index],
                 realm_height,
                 activity
@@ -2563,10 +2743,10 @@ void WorkspaceOverviewOverlay::snapshot(
         );
         append_texture_with_opacity(
             snapshot,
-            assets_[index].character,
+            style_assets.character,
             character_bounds(
-                assets_[index].character,
-                kRealms[index],
+                style_assets.character,
+                style,
                 tops[index],
                 realm_height,
                 activity
@@ -2575,13 +2755,13 @@ void WorkspaceOverviewOverlay::snapshot(
         );
         append_texture_with_opacity(
             snapshot,
-            assets_[index].compact_overlay,
+            style_assets.compact_overlay,
             texture_bounds,
             1.0 - activity
         );
         append_texture_with_opacity(
             snapshot,
-            assets_[index].expanded_overlay,
+            style_assets.expanded_overlay,
             texture_bounds,
             activity
         );
@@ -2589,17 +2769,17 @@ void WorkspaceOverviewOverlay::snapshot(
         if (drag_card_.active &&
             drag_target_index_ == static_cast<int>(index)) {
             const GdkRGBA target_tint{
-                static_cast<float>(kRealms[index].accent.red),
-                static_cast<float>(kRealms[index].accent.green),
-                static_cast<float>(kRealms[index].accent.blue),
+                static_cast<float>(style.accent.red),
+                static_cast<float>(style.accent.green),
+                static_cast<float>(style.accent.blue),
                 0.105F,
             };
             gtk_snapshot_append_color(snapshot, &target_tint, &realm_clip);
 
             const GdkRGBA target_edge{
-                static_cast<float>(kRealms[index].accent_soft.red),
-                static_cast<float>(kRealms[index].accent_soft.green),
-                static_cast<float>(kRealms[index].accent_soft.blue),
+                static_cast<float>(style.accent_soft.red),
+                static_cast<float>(style.accent_soft.green),
+                static_cast<float>(style.accent_soft.blue),
                 0.46F,
             };
             const graphene_rect_t top_edge = GRAPHENE_RECT_INIT(
@@ -2623,7 +2803,7 @@ void WorkspaceOverviewOverlay::snapshot(
             : 1.0;
         const auto card_count = std::min(
             workspace_state_[index].card_count,
-            assets_[index].cards.size()
+            style_assets.cards.size()
         );
         for (std::size_t slot = 0; slot < card_count; ++slot) {
             const int configured_from = card_from_slots_[index][slot];
@@ -2663,8 +2843,9 @@ void WorkspaceOverviewOverlay::snapshot(
                     realm_height
                 );
             const bool dragged_source = drag_card_.active &&
-                drag_card_.realm_index == index &&
-                drag_card_.card_index == slot;
+                drag_card_.source_workspace_id ==
+                    workspace_state_[index].workspace_id &&
+                drag_card_.address == workspace_state_[index].cards[slot].address;
             const double card_opacity = entering ? card_progress : 1.0;
             const Rect compact_current = lerp_rect(
                 compact_start,
@@ -2678,8 +2859,8 @@ void WorkspaceOverviewOverlay::snapshot(
             );
             append_card_texture_pair(
                 snapshot,
-                assets_[index].cards[slot].compact,
-                assets_[index].cards[slot].expanded,
+                style_assets.cards[slot].compact,
+                style_assets.cards[slot].expanded,
                 compact_current,
                 expanded_current,
                 activity,
@@ -2729,24 +2910,41 @@ void WorkspaceOverviewOverlay::snapshot(
         }
 
         const Color identity_shadow{
-            kRealms[index].accent.red,
-            kRealms[index].accent.green,
-            kRealms[index].accent.blue,
+            style.accent.red,
+            style.accent.green,
+            style.accent.blue,
             0.22,
         };
+        int roman_width = 0;
+        pango_layout_get_pixel_size(
+            style_assets.roman_layout,
+            &roman_width,
+            nullptr
+        );
+        constexpr double kRomanRightEdge = 194.0;
+        constexpr double kIdentityTextX = 218.0;
+        constexpr double kIdentityGap = 24.0;
+        const double roman_x = std::max(
+            32.0,
+            kRomanRightEdge - static_cast<double>(roman_width)
+        );
+        const double identity_text_x = std::max(
+            kIdentityTextX,
+            roman_x + static_cast<double>(roman_width) + kIdentityGap
+        );
         append_identity_layout(
             snapshot,
-            assets_[index].roman_layout,
-            112.0,
+            style_assets.roman_layout,
+            roman_x,
             tops[index] + realm_height * 0.5,
-            kRealms[index].accent_soft,
+            style.accent_soft,
             &identity_shadow,
             0.70
         );
         append_identity_layout(
             snapshot,
-            assets_[index].element_layout,
-            190.0,
+            style_assets.element_layout,
+            identity_text_x,
             tops[index] + realm_height * 0.5 - 14.0,
             {1.0, 1.0, 1.0, 0.90},
             &identity_shadow,
@@ -2754,8 +2952,8 @@ void WorkspaceOverviewOverlay::snapshot(
         );
         append_identity_layout(
             snapshot,
-            assets_[index].place_layout,
-            190.0,
+            style_assets.place_layout,
+            identity_text_x,
             tops[index] + realm_height * 0.5 + 17.0,
             {1.0, 1.0, 1.0, 0.52},
             &identity_shadow,
@@ -2788,9 +2986,20 @@ void WorkspaceOverviewOverlay::snapshot(
         selection_current = *selection_target;
     }
 
-    const bool selected_card_is_dragged = drag_card_.active &&
-        active_index_ == static_cast<int>(drag_card_.realm_index) &&
-        selected_card_index_ == static_cast<int>(drag_card_.card_index);
+    bool selected_card_is_dragged = false;
+    if (drag_card_.active && active_index_ >= 0 &&
+        active_index_ < static_cast<int>(workspace_state_.size()) &&
+        selected_card_index_ >= 0) {
+        const auto& selected_realm = workspace_state_[
+            static_cast<std::size_t>(active_index_)
+        ];
+        const auto selected_slot = static_cast<std::size_t>(
+            selected_card_index_
+        );
+        selected_card_is_dragged = selected_slot < selected_realm.card_count &&
+            selected_realm.workspace_id == drag_card_.source_workspace_id &&
+            selected_realm.cards[selected_slot].address == drag_card_.address;
+    }
     if (selection_current.has_value() && !selected_card_is_dragged &&
         active_index_ >= 0 &&
         active_index_ < static_cast<int>(displayed_heights_.size())) {
@@ -2800,16 +3009,33 @@ void WorkspaceOverviewOverlay::snapshot(
         append_card_selection_outline(
             snapshot,
             rect_from_graphene(*selection_current),
-            kRealms[static_cast<std::size_t>(active_index_)].accent_soft,
+            realm_style_for_workspace(
+                workspace_state_[static_cast<std::size_t>(active_index_)]
+                    .workspace_id
+            ).accent_soft,
             selection_opacity,
             lerp(kCompactCardRadius, kExpandedCardRadius, selection_activity)
         );
     }
 
-    append_ripple_separator(snapshot, separator_nodes_[0], tops[1]);
-    append_ripple_separator(snapshot, separator_nodes_[1], tops[2]);
-    append_ripple_separator(snapshot, separator_nodes_[2], tops[3]);
+    append_ripple_separator(
+        snapshot,
+        separator_nodes_[0][style_index_for_realm(0)],
+        tops[1]
+    );
+    append_ripple_separator(
+        snapshot,
+        separator_nodes_[1][style_index_for_realm(1)],
+        tops[2]
+    );
+    append_ripple_separator(
+        snapshot,
+        separator_nodes_[2][style_index_for_realm(2)],
+        tops[3]
+    );
     append_global_vignette(snapshot);
+    if (viewport_transition) gtk_snapshot_pop(snapshot);
+    gtk_snapshot_restore(snapshot);
 
     if (drag_card_.active) {
         const double delta_x = drag_card_.current_x - drag_card_.start_x;
@@ -2864,7 +3090,7 @@ void WorkspaceOverviewOverlay::handle_drag_begin(double x, double y) {
     if (card_animation_active_) return;
     const auto hit = hit_realm_card(
         drag_card_.start_x,
-        drag_card_.start_y,
+        drag_card_.start_y - viewport_visual_offset(),
         displayed_heights_,
         workspace_state_
     );
@@ -2876,19 +3102,24 @@ void WorkspaceOverviewOverlay::handle_drag_begin(double x, double y) {
 
     const auto tops = realm_tops(displayed_heights_);
     const double realm_height = displayed_heights_[hit->realm_index];
-    const Rect compact = scaled_card_rect(
+    Rect compact = scaled_card_rect(
         hit->card_index,
         false,
         tops[hit->realm_index],
         realm_height
     );
-    const Rect expanded = scaled_card_rect(
+    Rect expanded = scaled_card_rect(
         hit->card_index,
         true,
         tops[hit->realm_index],
         realm_height
     );
-    const auto& source_assets = assets_[hit->realm_index].cards[hit->card_index];
+    const double viewport_offset = viewport_visual_offset();
+    compact.y += viewport_offset;
+    expanded.y += viewport_offset;
+    const auto& source_assets = assets_[
+        style_index_for_realm(hit->realm_index)
+    ].cards[hit->card_index];
     if (source_assets.compact == nullptr && source_assets.expanded == nullptr) return;
 
     if (source_assets.compact != nullptr) {
@@ -2904,7 +3135,7 @@ void WorkspaceOverviewOverlay::handle_drag_begin(double x, double y) {
         expanded.x, expanded.y, expanded.width, expanded.height,
     };
     drag_card_.address = card.address;
-    drag_card_.realm_index = hit->realm_index;
+    drag_card_.source_workspace_id = realm.workspace_id;
     drag_card_.card_index = hit->card_index;
     drag_card_.activity = realm_activity(realm_height);
     drag_card_.armed = true;
@@ -2938,7 +3169,7 @@ void WorkspaceOverviewOverlay::handle_drag_update(
 
     const auto target = realm_index_at_point(
         drag_card_.current_x,
-        drag_card_.current_y,
+        drag_card_.current_y - viewport_visual_offset(),
         displayed_heights_
     );
     if (target.has_value()) {
@@ -2965,18 +3196,18 @@ void WorkspaceOverviewOverlay::handle_drag_end(
     if (drag_card_.active) {
         handle_drag_update(offset_x, offset_y);
         const int target_index = drag_target_index_;
-        const std::size_t source_index = drag_card_.realm_index;
+        const int source_workspace = drag_card_.source_workspace_id;
         const std::string address = drag_card_.address;
-        const int destination_workspace = target_index >= 0
-            ? workspace_id_for_realm_index(
-                static_cast<std::size_t>(target_index)
-            )
+        const int destination_workspace = target_index >= 0 &&
+            target_index < static_cast<int>(workspace_state_.size())
+            ? workspace_state_[static_cast<std::size_t>(target_index)]
+                .workspace_id
             : 0;
         reset_drag();
         gtk_widget_queue_draw(canvas_);
 
         if (target_index >= 0 &&
-            static_cast<std::size_t>(target_index) != source_index &&
+            destination_workspace != source_workspace &&
             destination_workspace > 0 && !address.empty() && move_window_) {
             move_window_(destination_workspace, address);
         }
@@ -3008,7 +3239,7 @@ void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
     const double scale_x = static_cast<double>(width) / kReferenceWidth;
     const double scale_y = static_cast<double>(height) / kReferenceHeight;
     const double reference_x = x / scale_x;
-    const double reference_y = y / scale_y;
+    const double reference_y = y / scale_y - viewport_visual_offset();
     const auto card_realm = hit_realm_card(
         reference_x,
         reference_y,
@@ -3048,7 +3279,7 @@ void WorkspaceOverviewOverlay::handle_hover(double x, double y) {
     const double scale_x = static_cast<double>(width) / kReferenceWidth;
     const double scale_y = static_cast<double>(height) / kReferenceHeight;
     const double reference_x = x / scale_x;
-    const double reference_y = y / scale_y;
+    const double reference_y = y / scale_y - viewport_visual_offset();
     const auto card = hit_realm_card(
         reference_x,
         reference_y,
@@ -3100,14 +3331,28 @@ bool WorkspaceOverviewOverlay::ensure_assets() {
             );
         }
         if (assets_[index].character != nullptr) {
+            int roman_workspace_id = static_cast<int>(index) + 1;
+            for (const auto& realm : workspace_state_) {
+                if (style_index_for_workspace_id(realm.workspace_id) == index) {
+                    roman_workspace_id = realm.workspace_id;
+                    break;
+                }
+            }
+            const std::string roman = workspace_roman_numeral(
+                roman_workspace_id
+            );
             assets_[index].roman_layout = create_identity_layout(
                 canvas_,
-                kRealms[index].roman,
+                roman,
                 60.0,
                 "Georgia",
                 0,
                 asset_error_
             );
+            assets_[index].roman_workspace_id =
+                assets_[index].roman_layout != nullptr
+                ? roman_workspace_id
+                : 0;
         }
         if (assets_[index].roman_layout != nullptr) {
             assets_[index].element_layout = create_identity_layout(
@@ -3161,6 +3406,7 @@ void WorkspaceOverviewOverlay::release_assets() noexcept {
         g_clear_object(&realm.background);
         g_clear_object(&realm.character);
         g_clear_object(&realm.roman_layout);
+        realm.roman_workspace_id = 0;
         g_clear_object(&realm.element_layout);
         g_clear_object(&realm.place_layout);
         g_clear_object(&realm.compact_overlay);

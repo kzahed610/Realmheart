@@ -33,7 +33,8 @@ using WorkspaceOverviewState =
     std::array<WorkspaceOverviewRealm, kWorkspaceOverviewRealmCount>;
 
 [[nodiscard]] WorkspaceOverviewState build_workspace_overview_state(
-    const services::WorkspaceSnapshot& snapshot
+    const services::WorkspaceSnapshot& snapshot,
+    int first_workspace_id = 1
 );
 
 [[nodiscard]] bool same_workspace_overview_cards(
@@ -41,7 +42,16 @@ using WorkspaceOverviewState =
     const WorkspaceOverviewRealm& right
 ) noexcept;
 
-[[nodiscard]] int realm_index_for_workspace_id(int workspace_id) noexcept;
-[[nodiscard]] int workspace_id_for_realm_index(std::size_t realm_index) noexcept;
+[[nodiscard]] int visible_workspace_start_for_active(int workspace_id) noexcept;
+[[nodiscard]] std::size_t style_index_for_workspace_id(int workspace_id) noexcept;
+[[nodiscard]] std::string workspace_roman_numeral(int workspace_id);
+[[nodiscard]] int realm_index_for_workspace_id(
+    int workspace_id,
+    int first_workspace_id = 1
+) noexcept;
+[[nodiscard]] int workspace_id_for_realm_index(
+    std::size_t realm_index,
+    int first_workspace_id = 1
+) noexcept;
 
 } // namespace realmheart::ui::workspace

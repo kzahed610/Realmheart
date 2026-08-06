@@ -1,6 +1,7 @@
 #include "ui/workspace/WorkspaceOverviewModel.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <string_view>
 
@@ -46,26 +47,76 @@ WorkspaceOverviewCard make_window_card(const services::WorkspaceWindow& window) 
 
 } // namespace
 
-int workspace_id_for_realm_index(std::size_t realm_index) noexcept {
+int visible_workspace_start_for_active(int workspace_id) noexcept {
+    const int active = std::max(1, workspace_id);
+    return std::max(
+        1,
+        active - static_cast<int>(kWorkspaceOverviewRealmCount) + 1
+    );
+}
+
+std::size_t style_index_for_workspace_id(int workspace_id) noexcept {
+    const int normalized = std::max(1, workspace_id) - 1;
+    return static_cast<std::size_t>(
+        normalized % static_cast<int>(kWorkspaceOverviewRealmCount)
+    );
+}
+
+std::string workspace_roman_numeral(int workspace_id) {
+    if (workspace_id <= 0) return std::to_string(workspace_id);
+    if (workspace_id > 3999) return std::to_string(workspace_id);
+
+    struct RomanToken {
+        int value;
+        std::string_view text;
+    };
+    constexpr std::array<RomanToken, 13> kTokens{{
+        {1000, "M"}, {900, "CM"}, {500, "D"}, {400, "CD"},
+        {100, "C"}, {90, "XC"}, {50, "L"}, {40, "XL"},
+        {10, "X"}, {9, "IX"}, {5, "V"}, {4, "IV"}, {1, "I"},
+    }};
+
+    std::string result;
+    int remaining = workspace_id;
+    for (const auto& token : kTokens) {
+        while (remaining >= token.value) {
+            result.append(token.text);
+            remaining -= token.value;
+        }
+    }
+    return result;
+}
+
+int workspace_id_for_realm_index(
+    std::size_t realm_index,
+    int first_workspace_id
+) noexcept {
     return realm_index < kWorkspaceOverviewRealmCount
-        ? static_cast<int>(realm_index) + 1
+        ? std::max(1, first_workspace_id) + static_cast<int>(realm_index)
         : 0;
 }
 
-int realm_index_for_workspace_id(int workspace_id) noexcept {
-    return workspace_id >= 1 &&
-        workspace_id <= static_cast<int>(kWorkspaceOverviewRealmCount)
-        ? workspace_id - 1
+int realm_index_for_workspace_id(
+    int workspace_id,
+    int first_workspace_id
+) noexcept {
+    const int first = std::max(1, first_workspace_id);
+    const int offset = workspace_id - first;
+    return offset >= 0 &&
+        offset < static_cast<int>(kWorkspaceOverviewRealmCount)
+        ? offset
         : -1;
 }
 
 WorkspaceOverviewState build_workspace_overview_state(
-    const services::WorkspaceSnapshot& snapshot
+    const services::WorkspaceSnapshot& snapshot,
+    int first_workspace_id
 ) {
     WorkspaceOverviewState result{};
+    const int first = std::max(1, first_workspace_id);
     for (std::size_t index = 0; index < result.size(); ++index) {
         auto& realm = result[index];
-        realm.workspace_id = workspace_id_for_realm_index(index);
+        realm.workspace_id = workspace_id_for_realm_index(index, first);
         realm.active = snapshot.available && snapshot.active_id == realm.workspace_id;
 
         const auto workspace = std::find_if(
@@ -78,8 +129,6 @@ WorkspaceOverviewState build_workspace_overview_state(
 
         if (workspace == snapshot.workspaces.end() ||
             workspace->window_details.empty()) {
-            // Empty realms intentionally render no card at all. The landscape,
-            // identity, and character are the empty-workspace state.
             realm.card_count = 0;
             realm.total_windows = workspace == snapshot.workspaces.end()
                 ? 0
