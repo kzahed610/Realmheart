@@ -34,7 +34,8 @@ public:
         std::function<void()> toggle_sidebar,
         std::function<void()> launch_launcher,
         std::function<void()> toggle_workspace_overview = {},
-        std::function<void(double, double)> open_power_menu = {}
+        std::function<void(double, double)> open_power_menu = {},
+        std::function<void(services::WorkspaceSnapshot)> workspace_snapshot_changed = {}
     );
     ~VerticalBar();
 
@@ -100,6 +101,7 @@ private:
     std::function<void()> launch_launcher_;
     std::function<void()> toggle_workspace_overview_;
     std::function<void(double, double)> open_power_menu_;
+    std::function<void(services::WorkspaceSnapshot)> workspace_snapshot_changed_;
     std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
     services::NotificationHistory::Subscription notification_subscription_;
     services::MediaService::Subscription media_subscription_;
