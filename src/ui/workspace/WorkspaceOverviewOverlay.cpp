@@ -96,8 +96,12 @@ constexpr double kActiveFraction = 0.56;
 constexpr double kInactiveFraction = (1.0 - kActiveFraction) / 3.0;
 constexpr double kTransitionDurationSeconds = 0.480;
 constexpr double kCardTransitionDurationSeconds = 0.180;
+constexpr double kSelectionTransitionDurationSeconds = 0.140;
 constexpr double kCardTransitionDistance = 18.0;
 constexpr double kCardDragThresholdPixels = 8.0;
+constexpr double kCompactCardRadius = 11.0;
+constexpr double kExpandedCardRadius = 15.0;
+constexpr int kDefaultCardSelection = -2;
 constexpr double kDraggedCardScale = 1.025;
 constexpr double kInactiveBackgroundZoom = 1.62;
 constexpr double kActiveBackgroundZoom = 1.10;
@@ -218,6 +222,37 @@ Rect lerp_rect(const Rect& from, const Rect& to, double progress) {
         lerp(from.width, to.width, progress),
         lerp(from.height, to.height, progress),
     };
+}
+
+graphene_rect_t rect_to_graphene(const Rect& rect) {
+    const graphene_rect_t result = GRAPHENE_RECT_INIT(
+        static_cast<float>(rect.x),
+        static_cast<float>(rect.y),
+        static_cast<float>(rect.width),
+        static_cast<float>(rect.height)
+    );
+    return result;
+}
+
+Rect rect_from_graphene(const graphene_rect_t& rect) {
+    return {
+        static_cast<double>(rect.origin.x),
+        static_cast<double>(rect.origin.y),
+        static_cast<double>(rect.size.width),
+        static_cast<double>(rect.size.height),
+    };
+}
+
+graphene_rect_t lerp_graphene_rect(
+    const graphene_rect_t& from,
+    const graphene_rect_t& to,
+    double progress
+) {
+    return rect_to_graphene(lerp_rect(
+        rect_from_graphene(from),
+        rect_from_graphene(to),
+        progress
+    ));
 }
 
 double cubic_bezier_coordinate(double t, double first, double second) {
@@ -1255,44 +1290,18 @@ void append_card_selection_outline(
     GtkSnapshot* snapshot,
     const Rect& bounds,
     const Color& accent,
-    double opacity
+    double opacity,
+    double radius
 ) {
     if (bounds.width <= 0.0 || bounds.height <= 0.0 || opacity <= 0.001) return;
 
-    const auto append_edges = [snapshot, &bounds](
-        double thickness,
-        const GdkRGBA& color
-    ) {
-        const std::array<graphene_rect_t, 4> edges{{
-            GRAPHENE_RECT_INIT(
-                static_cast<float>(bounds.x),
-                static_cast<float>(bounds.y),
-                static_cast<float>(bounds.width),
-                static_cast<float>(thickness)
-            ),
-            GRAPHENE_RECT_INIT(
-                static_cast<float>(bounds.x),
-                static_cast<float>(bounds.y + bounds.height - thickness),
-                static_cast<float>(bounds.width),
-                static_cast<float>(thickness)
-            ),
-            GRAPHENE_RECT_INIT(
-                static_cast<float>(bounds.x),
-                static_cast<float>(bounds.y),
-                static_cast<float>(thickness),
-                static_cast<float>(bounds.height)
-            ),
-            GRAPHENE_RECT_INIT(
-                static_cast<float>(bounds.x + bounds.width - thickness),
-                static_cast<float>(bounds.y),
-                static_cast<float>(thickness),
-                static_cast<float>(bounds.height)
-            ),
-        }};
-        for (const auto& edge : edges) {
-            gtk_snapshot_append_color(snapshot, &color, &edge);
-        }
-    };
+    const graphene_rect_t border_bounds = rect_to_graphene(bounds);
+    GskRoundedRect outline{};
+    gsk_rounded_rect_init_from_rect(
+        &outline,
+        &border_bounds,
+        static_cast<float>(std::max(0.0, radius))
+    );
 
     const GdkRGBA glow{
         static_cast<float>(accent.red),
@@ -1306,8 +1315,23 @@ void append_card_selection_outline(
         static_cast<float>(accent.blue),
         static_cast<float>(0.88 * opacity),
     };
-    append_edges(4.0, glow);
-    append_edges(1.5, line);
+    const std::array<float, 4> glow_widths{{4.0F, 4.0F, 4.0F, 4.0F}};
+    const std::array<float, 4> line_widths{{1.5F, 1.5F, 1.5F, 1.5F}};
+    const std::array<GdkRGBA, 4> glow_colors{{glow, glow, glow, glow}};
+    const std::array<GdkRGBA, 4> line_colors{{line, line, line, line}};
+
+    gtk_snapshot_append_border(
+        snapshot,
+        &outline,
+        glow_widths.data(),
+        glow_colors.data()
+    );
+    gtk_snapshot_append_border(
+        snapshot,
+        &outline,
+        line_widths.data(),
+        line_colors.data()
+    );
 }
 
 Rect background_bounds(
@@ -2115,9 +2139,30 @@ gboolean WorkspaceOverviewOverlay::animation_tick_callback(
         }
     }
 
+    if (self->selection_animation_active_) {
+        if (self->selection_animation_start_time_us_ == 0) {
+            self->selection_animation_start_time_us_ = frame_time_us;
+        }
+        const double elapsed_seconds = static_cast<double>(
+            frame_time_us - self->selection_animation_start_time_us_
+        ) / static_cast<double>(kMicrosecondsPerSecond);
+        const double linear = std::clamp(
+            elapsed_seconds / kSelectionTransitionDurationSeconds,
+            0.0,
+            1.0
+        );
+        self->selection_animation_progress_ = transition_ease(linear);
+        if (linear >= 1.0) {
+            self->finish_selection_transition();
+        } else {
+            keep_running = true;
+        }
+    }
+
     gtk_widget_queue_draw(self->canvas_);
     if (!keep_running && !self->realm_animation_active_ &&
-        !self->card_animation_active_) {
+        !self->card_animation_active_ &&
+        !self->selection_animation_active_) {
         self->animation_tick_id_ = 0;
         return G_SOURCE_REMOVE;
     }
@@ -2181,15 +2226,13 @@ void WorkspaceOverviewOverlay::move_card_selection(int delta) {
 
     const auto& realm = workspace_state_[static_cast<std::size_t>(active_index_)];
     const int count = static_cast<int>(realm.card_count);
-    if (count <= 0) {
-        selected_card_index_ = -1;
-    } else if (selected_card_index_ < 0) {
-        selected_card_index_ = delta > 0 ? 0 : count - 1;
-    } else {
-        selected_card_index_ =
-            (selected_card_index_ + delta % count + count) % count;
+    int next_card = -1;
+    if (count > 0 && selected_card_index_ < 0) {
+        next_card = delta > 0 ? 0 : count - 1;
+    } else if (count > 0) {
+        next_card = (selected_card_index_ + delta % count + count) % count;
     }
-    if (canvas_ != nullptr) gtk_widget_queue_draw(canvas_);
+    transition_selection(active_index_, next_card);
 }
 
 void WorkspaceOverviewOverlay::activate_selected() {
@@ -2231,26 +2274,174 @@ void WorkspaceOverviewOverlay::normalize_selection() noexcept {
     }
 }
 
-void WorkspaceOverviewOverlay::select_realm(int index) {
+void WorkspaceOverviewOverlay::select_realm(
+    int index,
+    int preferred_card_index
+) {
     if (index < 0 || index >= static_cast<int>(displayed_heights_.size())) return;
 
+    const int card_count = static_cast<int>(
+        workspace_state_[static_cast<std::size_t>(index)].card_count
+    );
+    int next_card = card_count > 0 ? 0 : -1;
+    if (preferred_card_index != kDefaultCardSelection) {
+        next_card = card_count > 0
+            ? std::clamp(preferred_card_index, 0, card_count - 1)
+            : -1;
+    }
+
     // Motion events arrive continuously while the pointer moves inside a realm.
-    // Do not restart an in-flight transition that is already targeting it.
+    // Do not restart an in-flight realm transition that is already targeting it.
     if (index == active_index_) {
-        normalize_selection();
+        if (preferred_card_index == kDefaultCardSelection) {
+            normalize_selection();
+        } else {
+            transition_selection(index, next_card);
+        }
         return;
     }
 
-    active_index_ = index;
-    selected_card_index_ = workspace_state_[static_cast<std::size_t>(index)].card_count > 0
-        ? 0
-        : -1;
+    transition_selection(index, next_card);
     const auto target = target_realm_heights(index);
     animation_start_heights_ = displayed_heights_;
     animation_target_heights_ = target;
     animation_start_time_us_ = 0;
     realm_animation_active_ = true;
     ensure_animation_tick();
+}
+
+std::optional<graphene_rect_t>
+WorkspaceOverviewOverlay::selected_card_outline_bounds() const {
+    if (active_index_ < 0 ||
+        active_index_ >= static_cast<int>(workspace_state_.size()) ||
+        selected_card_index_ < 0) {
+        return std::nullopt;
+    }
+
+    const std::size_t realm_index = static_cast<std::size_t>(active_index_);
+    const std::size_t slot = static_cast<std::size_t>(selected_card_index_);
+    if (slot >= workspace_state_[realm_index].card_count ||
+        slot >= kWorkspaceOverviewCardLimit) {
+        return std::nullopt;
+    }
+
+    const auto tops = realm_tops(displayed_heights_);
+    const double realm_height = displayed_heights_[realm_index];
+    const double activity = realm_activity(realm_height);
+    const double card_progress = card_animation_active_
+        ? card_animation_progress_
+        : 1.0;
+    const int configured_from = card_from_slots_[realm_index][slot];
+    const std::size_t from_slot = configured_from >= 0
+        ? static_cast<std::size_t>(configured_from)
+        : slot;
+    const bool entering = card_animation_active_ &&
+        card_entering_[realm_index][slot];
+
+    const Rect compact_target = scaled_card_rect(
+        slot,
+        false,
+        tops[realm_index],
+        realm_height
+    );
+    const Rect expanded_target = scaled_card_rect(
+        slot,
+        true,
+        tops[realm_index],
+        realm_height
+    );
+    const Rect compact_start = entering
+        ? translated_rect(compact_target, -kCardTransitionDistance)
+        : scaled_card_rect(
+            from_slot,
+            false,
+            tops[realm_index],
+            realm_height
+        );
+    const Rect expanded_start = entering
+        ? translated_rect(expanded_target, -kCardTransitionDistance)
+        : scaled_card_rect(
+            from_slot,
+            true,
+            tops[realm_index],
+            realm_height
+        );
+    const Rect compact_current = lerp_rect(
+        compact_start,
+        compact_target,
+        card_progress
+    );
+    const Rect expanded_current = lerp_rect(
+        expanded_start,
+        expanded_target,
+        card_progress
+    );
+    return rect_to_graphene(lerp_rect(
+        compact_current,
+        expanded_current,
+        activity
+    ));
+}
+
+void WorkspaceOverviewOverlay::transition_selection(
+    int realm_index,
+    int card_index
+) {
+    if (realm_index == active_index_ && card_index == selected_card_index_) return;
+
+    const auto old_target = selected_card_outline_bounds();
+    std::optional<graphene_rect_t> current_bounds;
+    double current_opacity = old_target.has_value() ? 1.0 : 0.0;
+    if (selection_animation_active_) {
+        if (selection_outline_has_start_bounds_) {
+            current_bounds = old_target.has_value()
+                ? lerp_graphene_rect(
+                    selection_outline_start_bounds_,
+                    *old_target,
+                    selection_animation_progress_
+                )
+                : selection_outline_start_bounds_;
+        } else if (old_target.has_value()) {
+            current_bounds = *old_target;
+        }
+        current_opacity = lerp(
+            selection_outline_start_opacity_,
+            old_target.has_value() ? 1.0 : 0.0,
+            selection_animation_progress_
+        );
+    } else if (old_target.has_value()) {
+        current_bounds = *old_target;
+    }
+
+    active_index_ = realm_index;
+    selected_card_index_ = card_index;
+    const auto next_target = selected_card_outline_bounds();
+
+    if (current_bounds.has_value()) {
+        selection_outline_start_bounds_ = *current_bounds;
+        selection_outline_has_start_bounds_ = true;
+    } else if (next_target.has_value()) {
+        selection_outline_start_bounds_ = *next_target;
+        selection_outline_has_start_bounds_ = true;
+    } else {
+        finish_selection_transition();
+        if (canvas_ != nullptr) gtk_widget_queue_draw(canvas_);
+        return;
+    }
+
+    selection_outline_start_opacity_ = current_opacity;
+    selection_animation_progress_ = 0.0;
+    selection_animation_start_time_us_ = 0;
+    selection_animation_active_ = true;
+    ensure_animation_tick();
+}
+
+void WorkspaceOverviewOverlay::finish_selection_transition() noexcept {
+    selection_animation_start_time_us_ = 0;
+    selection_animation_progress_ = 1.0;
+    selection_animation_active_ = false;
+    selection_outline_has_start_bounds_ = false;
+    selection_outline_start_opacity_ = 0.0;
 }
 
 void WorkspaceOverviewOverlay::stop_animation(bool snap_to_target) noexcept {
@@ -2261,6 +2452,7 @@ void WorkspaceOverviewOverlay::stop_animation(bool snap_to_target) noexcept {
     animation_start_time_us_ = 0;
     realm_animation_active_ = false;
     finish_card_transition();
+    finish_selection_transition();
     if (snap_to_target) {
         displayed_heights_ = animation_target_heights_;
         animation_start_heights_ = animation_target_heights_;
@@ -2493,16 +2685,6 @@ void WorkspaceOverviewOverlay::snapshot(
                 activity,
                 dragged_source ? card_opacity * 0.14 : card_opacity
             );
-            if (!dragged_source &&
-                active_index_ == static_cast<int>(index) &&
-                selected_card_index_ == static_cast<int>(slot)) {
-                append_card_selection_outline(
-                    snapshot,
-                    lerp_rect(compact_current, expanded_current, activity),
-                    kRealms[index].accent_soft,
-                    card_opacity
-                );
-            }
         }
 
         if (card_animation_active_) {
@@ -2580,6 +2762,48 @@ void WorkspaceOverviewOverlay::snapshot(
             0.36
         );
         gtk_snapshot_pop(snapshot);
+    }
+
+    const auto selection_target = selected_card_outline_bounds();
+    std::optional<graphene_rect_t> selection_current;
+    double selection_opacity = selection_target.has_value() ? 1.0 : 0.0;
+    if (selection_animation_active_) {
+        if (selection_outline_has_start_bounds_) {
+            selection_current = selection_target.has_value()
+                ? lerp_graphene_rect(
+                    selection_outline_start_bounds_,
+                    *selection_target,
+                    selection_animation_progress_
+                )
+                : selection_outline_start_bounds_;
+        } else if (selection_target.has_value()) {
+            selection_current = *selection_target;
+        }
+        selection_opacity = lerp(
+            selection_outline_start_opacity_,
+            selection_target.has_value() ? 1.0 : 0.0,
+            selection_animation_progress_
+        );
+    } else if (selection_target.has_value()) {
+        selection_current = *selection_target;
+    }
+
+    const bool selected_card_is_dragged = drag_card_.active &&
+        active_index_ == static_cast<int>(drag_card_.realm_index) &&
+        selected_card_index_ == static_cast<int>(drag_card_.card_index);
+    if (selection_current.has_value() && !selected_card_is_dragged &&
+        active_index_ >= 0 &&
+        active_index_ < static_cast<int>(displayed_heights_.size())) {
+        const double selection_activity = realm_activity(
+            displayed_heights_[static_cast<std::size_t>(active_index_)]
+        );
+        append_card_selection_outline(
+            snapshot,
+            rect_from_graphene(*selection_current),
+            kRealms[static_cast<std::size_t>(active_index_)].accent_soft,
+            selection_opacity,
+            lerp(kCompactCardRadius, kExpandedCardRadius, selection_activity)
+        );
     }
 
     append_ripple_separator(snapshot, separator_nodes_[0], tops[1]);
@@ -2832,9 +3056,10 @@ void WorkspaceOverviewOverlay::handle_hover(double x, double y) {
         workspace_state_
     );
     if (card.has_value()) {
-        select_realm(static_cast<int>(card->realm_index));
-        selected_card_index_ = static_cast<int>(card->card_index);
-        gtk_widget_queue_draw(canvas_);
+        select_realm(
+            static_cast<int>(card->realm_index),
+            static_cast<int>(card->card_index)
+        );
         return;
     }
 
