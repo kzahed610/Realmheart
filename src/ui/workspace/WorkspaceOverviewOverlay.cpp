@@ -461,7 +461,12 @@ std::optional<int> hit_realm_identity(
     return std::nullopt;
 }
 
-std::optional<int> hit_realm_card(
+struct WorkspaceCardHit {
+    std::size_t realm_index = 0;
+    std::size_t card_index = 0;
+};
+
+std::optional<WorkspaceCardHit> hit_realm_card(
     double x,
     double y,
     const std::array<double, 4>& heights,
@@ -478,7 +483,7 @@ std::optional<int> hit_realm_card(
         for (std::size_t card_index = 0; card_index < count; ++card_index) {
             const auto& card = cards[card_index];
             if (card.opacity > 0.05 && card.rect.contains(x, y)) {
-                return static_cast<int>(index);
+                return WorkspaceCardHit{index, card_index};
             }
         }
     }
@@ -1177,8 +1182,10 @@ void append_global_vignette(GtkSnapshot* snapshot) {
 
 WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(
     GtkApplication* app,
-    std::function<void(int)> activate_workspace
-) : activate_workspace_(std::move(activate_workspace)) {
+    std::function<void(int)> activate_workspace,
+    std::function<void(int, std::string)> activate_window
+) : activate_workspace_(std::move(activate_workspace)),
+    activate_window_(std::move(activate_window)) {
     workspace_state_ = build_workspace_overview_state({});
     initialize_separator_nodes();
     displayed_heights_ = target_realm_heights(active_index_);
@@ -1673,8 +1680,13 @@ void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
         workspace_state_
     );
     if (card_realm.has_value()) {
-        const auto& realm = workspace_state_[static_cast<std::size_t>(*card_realm)];
-        if (activate_workspace_) activate_workspace_(realm.workspace_id);
+        const auto& realm = workspace_state_[card_realm->realm_index];
+        const auto& card = realm.cards[card_realm->card_index];
+        if (!card.summary && !card.address.empty() && activate_window_) {
+            activate_window_(realm.workspace_id, card.address);
+        } else if (activate_workspace_) {
+            activate_workspace_(realm.workspace_id);
+        }
         hide();
         return;
     }

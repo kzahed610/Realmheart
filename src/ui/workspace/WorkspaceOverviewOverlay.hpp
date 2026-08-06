@@ -14,7 +14,8 @@ class WorkspaceOverviewOverlay {
 public:
     explicit WorkspaceOverviewOverlay(
         GtkApplication* app,
-        std::function<void(int)> activate_workspace = {}
+        std::function<void(int)> activate_workspace = {},
+        std::function<void(int, std::string)> activate_window = {}
     );
     ~WorkspaceOverviewOverlay();
 
@@ -74,6 +75,7 @@ private:
     std::array<double, 4> animation_start_heights_{};
     std::array<double, 4> animation_target_heights_{};
     std::function<void(int)> activate_workspace_;
+    std::function<void(int, std::string)> activate_window_;
     std::string asset_error_;
     int active_index_ = 1;
     guint animation_tick_id_ = 0;
