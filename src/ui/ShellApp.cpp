@@ -595,6 +595,24 @@ public:
         ));
     }
 
+    void move_overview_window(int workspace_id, std::string address) {
+        if (workspace_id <= 0 || address.empty()) return;
+
+        static_cast<void>(realmheart::core::shared_task_executor().post(
+            [workspace_id, address = std::move(address)] {
+                if (services::HyprlandSession::move_window_to_workspace(
+                        address,
+                        workspace_id
+                    )) {
+                    return;
+                }
+                std::cerr
+                    << "[WorkspaceOverview] unable to move window "
+                    << address << " to workspace " << workspace_id << '\n';
+            }
+        ));
+    }
+
     void toggle_workspace_overview() {
         ensure_core_initialized();
         if (!workspace_overview_) {
@@ -606,6 +624,12 @@ public:
                     },
                     [this](int workspace_id, std::string address) {
                         activate_overview_window(
+                            workspace_id,
+                            std::move(address)
+                        );
+                    },
+                    [this](int workspace_id, std::string address) {
+                        move_overview_window(
                             workspace_id,
                             std::move(address)
                         );

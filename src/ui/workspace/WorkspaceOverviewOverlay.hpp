@@ -15,7 +15,8 @@ public:
     explicit WorkspaceOverviewOverlay(
         GtkApplication* app,
         std::function<void(int)> activate_workspace = {},
-        std::function<void(int, std::string)> activate_window = {}
+        std::function<void(int, std::string)> activate_window = {},
+        std::function<void(int, std::string)> move_window = {}
     );
     ~WorkspaceOverviewOverlay();
 
@@ -38,6 +39,30 @@ private:
     struct OutgoingCard {
         CardAssets assets{};
         std::size_t slot = 0;
+        bool active = false;
+    };
+
+    struct DragBounds {
+        double x = 0.0;
+        double y = 0.0;
+        double width = 0.0;
+        double height = 0.0;
+    };
+
+    struct DragCard {
+        CardAssets assets{};
+        DragBounds compact_bounds{};
+        DragBounds expanded_bounds{};
+        std::string address;
+        std::size_t realm_index = 0;
+        std::size_t card_index = 0;
+        double start_x = 0.0;
+        double start_y = 0.0;
+        double current_x = 0.0;
+        double current_y = 0.0;
+        double activity = 0.0;
+        bool gesture_active = false;
+        bool armed = false;
         bool active = false;
     };
 
@@ -66,6 +91,10 @@ private:
     void snapshot(GtkWidget* widget, GtkSnapshot* snapshot);
     void handle_primary_click(double x, double y);
     void handle_hover(double x, double y);
+    void handle_drag_begin(double x, double y);
+    void handle_drag_update(double offset_x, double offset_y);
+    void handle_drag_end(double offset_x, double offset_y);
+    void reset_drag() noexcept;
     void select_realm(int index);
     void stop_animation(bool snap_to_target) noexcept;
     void prepare_card_transition(const WorkspaceOverviewState& next);
@@ -97,6 +126,9 @@ private:
         kWorkspaceOverviewRealmCount> outgoing_cards_{};
     std::function<void(int)> activate_workspace_;
     std::function<void(int, std::string)> activate_window_;
+    std::function<void(int, std::string)> move_window_;
+    DragCard drag_card_{};
+    int drag_target_index_ = -1;
     std::string asset_error_;
     int active_index_ = 1;
     guint animation_tick_id_ = 0;
