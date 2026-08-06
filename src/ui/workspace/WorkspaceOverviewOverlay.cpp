@@ -94,6 +94,8 @@ constexpr double kInactiveFraction = (1.0 - kActiveFraction) / 3.0;
 constexpr double kTransitionDurationSeconds = 0.480;
 constexpr double kCardTransitionDurationSeconds = 0.180;
 constexpr double kCardTransitionDistance = 18.0;
+constexpr double kCardDragThresholdPixels = 8.0;
+constexpr double kDraggedCardScale = 1.025;
 constexpr double kInactiveBackgroundZoom = 1.62;
 constexpr double kActiveBackgroundZoom = 1.10;
 constexpr gint64 kMicrosecondsPerSecond = 1'000'000;
@@ -533,6 +535,23 @@ std::optional<WorkspaceCardHit> hit_realm_card(
                 return WorkspaceCardHit{index, card_index};
             }
         }
+    }
+    return std::nullopt;
+}
+
+std::optional<int> realm_index_at_point(
+    double x,
+    double y,
+    const std::array<double, 4>& heights
+) {
+    if (x < 0.0 || x > kReferenceWidth || y < 0.0 || y > kReferenceHeight) {
+        return std::nullopt;
+    }
+
+    double bottom = 0.0;
+    for (std::size_t index = 0; index < heights.size(); ++index) {
+        bottom += heights[index];
+        if (y <= bottom) return static_cast<int>(index);
     }
     return std::nullopt;
 }
@@ -1095,8 +1114,23 @@ void append_texture_with_opacity(
     if (translucent) gtk_snapshot_pop(snapshot);
 }
 
-Rect translated_rect(Rect rect, double delta_y) {
+Rect translated_rect(Rect rect, double delta_x, double delta_y) {
+    rect.x += delta_x;
     rect.y += delta_y;
+    return rect;
+}
+
+Rect translated_rect(Rect rect, double delta_y) {
+    return translated_rect(rect, 0.0, delta_y);
+}
+
+Rect scaled_around_center(Rect rect, double scale) {
+    const double scaled_width = rect.width * scale;
+    const double scaled_height = rect.height * scale;
+    rect.x -= (scaled_width - rect.width) * 0.5;
+    rect.y -= (scaled_height - rect.height) * 0.5;
+    rect.width = scaled_width;
+    rect.height = scaled_height;
     return rect;
 }
 
@@ -1312,9 +1346,11 @@ void append_global_vignette(GtkSnapshot* snapshot) {
 WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(
     GtkApplication* app,
     std::function<void(int)> activate_workspace,
-    std::function<void(int, std::string)> activate_window
+    std::function<void(int, std::string)> activate_window,
+    std::function<void(int, std::string)> move_window
 ) : activate_workspace_(std::move(activate_workspace)),
-    activate_window_(std::move(activate_window)) {
+    activate_window_(std::move(activate_window)),
+    move_window_(std::move(move_window)) {
     workspace_state_ = build_workspace_overview_state({});
     initialize_separator_nodes();
     displayed_heights_ = target_realm_heights(active_index_);
@@ -1378,23 +1414,68 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(
     );
     gtk_widget_add_controller(GTK_WIDGET(window_), keys);
 
-    GtkGesture* click = gtk_gesture_click_new();
-    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click), GDK_BUTTON_PRIMARY);
+    GtkGesture* drag = gtk_gesture_drag_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag), GDK_BUTTON_PRIMARY);
     g_signal_connect(
-        click,
-        "released",
+        drag,
+        "drag-begin",
         G_CALLBACK(+[](
-            GtkGestureClick*,
-            int,
+            GtkGestureDrag*,
             double x,
             double y,
             gpointer data
         ) {
-            static_cast<WorkspaceOverviewOverlay*>(data)->handle_primary_click(x, y);
+            static_cast<WorkspaceOverviewOverlay*>(data)->handle_drag_begin(x, y);
         }),
         this
     );
-    gtk_widget_add_controller(canvas_, GTK_EVENT_CONTROLLER(click));
+    g_signal_connect(
+        drag,
+        "drag-update",
+        G_CALLBACK(+[](
+            GtkGestureDrag*,
+            double offset_x,
+            double offset_y,
+            gpointer data
+        ) {
+            static_cast<WorkspaceOverviewOverlay*>(data)->handle_drag_update(
+                offset_x,
+                offset_y
+            );
+        }),
+        this
+    );
+    g_signal_connect(
+        drag,
+        "drag-end",
+        G_CALLBACK(+[](
+            GtkGestureDrag*,
+            double offset_x,
+            double offset_y,
+            gpointer data
+        ) {
+            static_cast<WorkspaceOverviewOverlay*>(data)->handle_drag_end(
+                offset_x,
+                offset_y
+            );
+        }),
+        this
+    );
+    g_signal_connect(
+        drag,
+        "cancel",
+        G_CALLBACK(+[](
+            GtkGesture*,
+            GdkEventSequence*,
+            gpointer data
+        ) {
+            auto* self = static_cast<WorkspaceOverviewOverlay*>(data);
+            self->reset_drag();
+            if (self->canvas_ != nullptr) gtk_widget_queue_draw(self->canvas_);
+        }),
+        this
+    );
+    gtk_widget_add_controller(canvas_, GTK_EVENT_CONTROLLER(drag));
 
     GtkEventController* motion = gtk_event_controller_motion_new();
     g_signal_connect(
@@ -1418,6 +1499,7 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(
 
 WorkspaceOverviewOverlay::~WorkspaceOverviewOverlay() {
     stop_animation(false);
+    reset_drag();
     overview_canvas_clear(canvas_);
     release_assets();
     release_separator_nodes();
@@ -1440,6 +1522,16 @@ void WorkspaceOverviewOverlay::release_separator_nodes() noexcept {
             gsk_render_node_unref(node);
             node = nullptr;
         }
+    }
+}
+
+void WorkspaceOverviewOverlay::reset_drag() noexcept {
+    g_clear_object(&drag_card_.assets.compact);
+    g_clear_object(&drag_card_.assets.expanded);
+    drag_card_ = DragCard{};
+    drag_target_index_ = -1;
+    if (canvas_ != nullptr) {
+        gtk_widget_set_cursor_from_name(canvas_, "default");
     }
 }
 
@@ -1661,6 +1753,7 @@ void WorkspaceOverviewOverlay::show() {
 }
 
 void WorkspaceOverviewOverlay::hide() {
+    reset_drag();
     stop_animation(true);
     gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
 }
@@ -1907,6 +2000,38 @@ void WorkspaceOverviewOverlay::snapshot(
             activity
         );
 
+        if (drag_card_.active &&
+            drag_target_index_ == static_cast<int>(index)) {
+            const GdkRGBA target_tint{
+                static_cast<float>(kRealms[index].accent.red),
+                static_cast<float>(kRealms[index].accent.green),
+                static_cast<float>(kRealms[index].accent.blue),
+                0.105F,
+            };
+            gtk_snapshot_append_color(snapshot, &target_tint, &realm_clip);
+
+            const GdkRGBA target_edge{
+                static_cast<float>(kRealms[index].accent_soft.red),
+                static_cast<float>(kRealms[index].accent_soft.green),
+                static_cast<float>(kRealms[index].accent_soft.blue),
+                0.46F,
+            };
+            const graphene_rect_t top_edge = GRAPHENE_RECT_INIT(
+                0.0F,
+                static_cast<float>(tops[index] + 2.0),
+                static_cast<float>(kReferenceWidth),
+                2.0F
+            );
+            const graphene_rect_t bottom_edge = GRAPHENE_RECT_INIT(
+                0.0F,
+                static_cast<float>(tops[index] + realm_height - 4.0),
+                static_cast<float>(kReferenceWidth),
+                2.0F
+            );
+            gtk_snapshot_append_color(snapshot, &target_edge, &top_edge);
+            gtk_snapshot_append_color(snapshot, &target_edge, &bottom_edge);
+        }
+
         const double card_progress = card_animation_active_
             ? card_animation_progress_
             : 1.0;
@@ -1951,6 +2076,10 @@ void WorkspaceOverviewOverlay::snapshot(
                     tops[index],
                     realm_height
                 );
+            const bool dragged_source = drag_card_.active &&
+                drag_card_.realm_index == index &&
+                drag_card_.card_index == slot;
+            const double card_opacity = entering ? card_progress : 1.0;
             append_card_texture_pair(
                 snapshot,
                 assets_[index].cards[slot].compact,
@@ -1958,7 +2087,7 @@ void WorkspaceOverviewOverlay::snapshot(
                 lerp_rect(compact_start, compact_target, card_progress),
                 lerp_rect(expanded_start, expanded_target, card_progress),
                 activity,
-                entering ? card_progress : 1.0
+                dragged_source ? card_opacity * 0.14 : card_opacity
             );
         }
 
@@ -2043,7 +2172,194 @@ void WorkspaceOverviewOverlay::snapshot(
     append_ripple_separator(snapshot, separator_nodes_[1], tops[2]);
     append_ripple_separator(snapshot, separator_nodes_[2], tops[3]);
     append_global_vignette(snapshot);
+
+    if (drag_card_.active) {
+        const double delta_x = drag_card_.current_x - drag_card_.start_x;
+        const double delta_y = drag_card_.current_y - drag_card_.start_y;
+        const Rect compact_origin{
+            drag_card_.compact_bounds.x,
+            drag_card_.compact_bounds.y,
+            drag_card_.compact_bounds.width,
+            drag_card_.compact_bounds.height,
+        };
+        const Rect expanded_origin{
+            drag_card_.expanded_bounds.x,
+            drag_card_.expanded_bounds.y,
+            drag_card_.expanded_bounds.width,
+            drag_card_.expanded_bounds.height,
+        };
+        append_card_texture_pair(
+            snapshot,
+            drag_card_.assets.compact,
+            drag_card_.assets.expanded,
+            scaled_around_center(
+                translated_rect(compact_origin, delta_x, delta_y),
+                kDraggedCardScale
+            ),
+            scaled_around_center(
+                translated_rect(expanded_origin, delta_x, delta_y),
+                kDraggedCardScale
+            ),
+            drag_card_.activity,
+            0.97
+        );
+    }
     gtk_snapshot_restore(snapshot);
+}
+
+void WorkspaceOverviewOverlay::handle_drag_begin(double x, double y) {
+    reset_drag();
+    drag_card_.gesture_active = true;
+    if (canvas_ == nullptr) return;
+
+    const int width = gtk_widget_get_width(canvas_);
+    const int height = gtk_widget_get_height(canvas_);
+    if (width <= 0 || height <= 0) return;
+
+    const double scale_x = static_cast<double>(width) / kReferenceWidth;
+    const double scale_y = static_cast<double>(height) / kReferenceHeight;
+    drag_card_.start_x = x / scale_x;
+    drag_card_.start_y = y / scale_y;
+    drag_card_.current_x = drag_card_.start_x;
+    drag_card_.current_y = drag_card_.start_y;
+
+    if (card_animation_active_) return;
+    const auto hit = hit_realm_card(
+        drag_card_.start_x,
+        drag_card_.start_y,
+        displayed_heights_,
+        workspace_state_
+    );
+    if (!hit.has_value()) return;
+
+    const auto& realm = workspace_state_[hit->realm_index];
+    const auto& card = realm.cards[hit->card_index];
+    if (card.summary || card.address.empty()) return;
+
+    const auto tops = realm_tops(displayed_heights_);
+    const double realm_height = displayed_heights_[hit->realm_index];
+    const Rect compact = scaled_card_rect(
+        hit->card_index,
+        false,
+        tops[hit->realm_index],
+        realm_height
+    );
+    const Rect expanded = scaled_card_rect(
+        hit->card_index,
+        true,
+        tops[hit->realm_index],
+        realm_height
+    );
+    const auto& source_assets = assets_[hit->realm_index].cards[hit->card_index];
+    if (source_assets.compact == nullptr && source_assets.expanded == nullptr) return;
+
+    if (source_assets.compact != nullptr) {
+        drag_card_.assets.compact = GDK_TEXTURE(g_object_ref(source_assets.compact));
+    }
+    if (source_assets.expanded != nullptr) {
+        drag_card_.assets.expanded = GDK_TEXTURE(g_object_ref(source_assets.expanded));
+    }
+    drag_card_.compact_bounds = {
+        compact.x, compact.y, compact.width, compact.height,
+    };
+    drag_card_.expanded_bounds = {
+        expanded.x, expanded.y, expanded.width, expanded.height,
+    };
+    drag_card_.address = card.address;
+    drag_card_.realm_index = hit->realm_index;
+    drag_card_.card_index = hit->card_index;
+    drag_card_.activity = realm_activity(realm_height);
+    drag_card_.armed = true;
+}
+
+void WorkspaceOverviewOverlay::handle_drag_update(
+    double offset_x,
+    double offset_y
+) {
+    if (!drag_card_.gesture_active || !drag_card_.armed || canvas_ == nullptr) {
+        return;
+    }
+
+    const int width = gtk_widget_get_width(canvas_);
+    const int height = gtk_widget_get_height(canvas_);
+    if (width <= 0 || height <= 0) return;
+
+    if (!drag_card_.active &&
+        std::hypot(offset_x, offset_y) < kCardDragThresholdPixels) {
+        return;
+    }
+    if (!drag_card_.active) {
+        drag_card_.active = true;
+        gtk_widget_set_cursor_from_name(canvas_, "grabbing");
+    }
+
+    const double scale_x = static_cast<double>(width) / kReferenceWidth;
+    const double scale_y = static_cast<double>(height) / kReferenceHeight;
+    drag_card_.current_x = drag_card_.start_x + offset_x / scale_x;
+    drag_card_.current_y = drag_card_.start_y + offset_y / scale_y;
+
+    const auto target = realm_index_at_point(
+        drag_card_.current_x,
+        drag_card_.current_y,
+        displayed_heights_
+    );
+    if (target.has_value() &&
+        *target != static_cast<int>(drag_card_.realm_index)) {
+        drag_target_index_ = *target;
+        select_realm(*target);
+    } else {
+        drag_target_index_ = -1;
+    }
+    gtk_widget_queue_draw(canvas_);
+}
+
+void WorkspaceOverviewOverlay::handle_drag_end(
+    double offset_x,
+    double offset_y
+) {
+    if (!drag_card_.gesture_active || canvas_ == nullptr) return;
+
+    const double distance = std::hypot(offset_x, offset_y);
+    if (drag_card_.armed && !drag_card_.active &&
+        distance >= kCardDragThresholdPixels) {
+        handle_drag_update(offset_x, offset_y);
+    }
+
+    if (drag_card_.active) {
+        handle_drag_update(offset_x, offset_y);
+        const int target_index = drag_target_index_;
+        const std::size_t source_index = drag_card_.realm_index;
+        const std::string address = drag_card_.address;
+        const int destination_workspace = target_index >= 0
+            ? workspace_id_for_realm_index(
+                static_cast<std::size_t>(target_index)
+            )
+            : 0;
+        reset_drag();
+        gtk_widget_queue_draw(canvas_);
+
+        if (target_index >= 0 &&
+            static_cast<std::size_t>(target_index) != source_index &&
+            destination_workspace > 0 && !address.empty() && move_window_) {
+            move_window_(destination_workspace, address);
+        }
+        return;
+    }
+
+    const int width = gtk_widget_get_width(canvas_);
+    const int height = gtk_widget_get_height(canvas_);
+    const double scale_x = width > 0
+        ? static_cast<double>(width) / kReferenceWidth
+        : 1.0;
+    const double scale_y = height > 0
+        ? static_cast<double>(height) / kReferenceHeight
+        : 1.0;
+    const double end_x = drag_card_.start_x * scale_x + offset_x;
+    const double end_y = drag_card_.start_y * scale_y + offset_y;
+    reset_drag();
+    if (distance < kCardDragThresholdPixels) {
+        handle_primary_click(end_x, end_y);
+    }
 }
 
 void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
@@ -2087,7 +2403,7 @@ void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
 }
 
 void WorkspaceOverviewOverlay::handle_hover(double, double y) {
-    if (canvas_ == nullptr) return;
+    if (canvas_ == nullptr || drag_card_.active) return;
     const int width = gtk_widget_get_width(canvas_);
     const int height = gtk_widget_get_height(canvas_);
     if (width <= 0 || height <= 0) return;

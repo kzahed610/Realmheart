@@ -165,4 +165,36 @@ bool HyprlandSession::focus_window(
     return fallback.succeeded() && fallback.output.find("error:") == std::string::npos;
 }
 
+bool HyprlandSession::move_window_to_workspace(
+    std::string_view address,
+    int workspace_id,
+    const realmheart::core::CommandOptions& options
+) {
+    const std::string normalized = normalize_address(address);
+    if (workspace_id <= 0 || normalized.empty()) return false;
+    if (!realmheart::core::command_exists("hyprctl")) return false;
+
+    const std::string expression =
+        "hl.dsp.window.move({ workspace = " + std::to_string(workspace_id) +
+        ", follow = false, window = \"address:" + normalized + "\" })";
+    const auto result = realmheart::core::run_capture(
+        {"hyprctl", "dispatch", expression},
+        options
+    );
+    if (result.succeeded() && result.output.find("error:") == std::string::npos) {
+        return true;
+    }
+
+    // Hyprland 0.54 and older use the legacy named dispatcher. Keep the
+    // fallback so Realmheart remains compatible across both dispatcher APIs.
+    const std::string legacy_target = std::to_string(workspace_id) +
+        ",address:" + normalized;
+    const auto fallback = realmheart::core::run_capture(
+        {"hyprctl", "dispatch", "movetoworkspacesilent", legacy_target},
+        options
+    );
+    return fallback.succeeded() &&
+        fallback.output.find("error:") == std::string::npos;
+}
+
 } // namespace realmheart::services
