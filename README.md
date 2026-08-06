@@ -2,7 +2,7 @@
   <img
     src="assets/Realmheart-Icons/realmheart-icon.png"
     alt="Realmheart sigil"
-    width="128"
+    width="256"
   />
 </p>
 
