@@ -33,6 +33,7 @@
 #include "ui/sidebar/SidebarFrame.hpp"
 #include "ui/wallpaper/WallpaperBackend.hpp"
 #include "ui/wallpaper/WallpaperController.hpp"
+#include "ui/workspace/WorkspaceOverviewOverlay.hpp"
 
 #include <gtk/gtk.h>
 
@@ -369,6 +370,7 @@ public:
         audio_monitor_.reset();
 
         wallpaper_controller_.reset();
+        workspace_overview_.reset();
         launcher_overlay_.reset();
         command_receipts_.reset();
         notes_overlay_.reset();
@@ -546,6 +548,14 @@ public:
     void launch_launcher_query(const std::string& query) {
         ensure_launcher_initialized();
         launcher_overlay_->show_with_query(query);
+    }
+
+    void toggle_workspace_overview() {
+        if (!workspace_overview_) {
+            workspace_overview_ =
+                std::make_unique<workspace::WorkspaceOverviewOverlay>(application_);
+        }
+        workspace_overview_->toggle();
     }
 
     void set_wallpaper(const std::string& path = {}) {
@@ -1347,6 +1357,7 @@ private:
     bool sidebar_character_exit_complete_ = true;
     std::unique_ptr<CommandReceiptOverlay> command_receipts_;
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
+    std::unique_ptr<workspace::WorkspaceOverviewOverlay> workspace_overview_;
     powermenu::PowerMenuProcess power_menu_process_;
     std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;
 
@@ -1415,6 +1426,14 @@ void launch_launcher_query_action(
     static_cast<ShellRuntime*>(user_data)->launch_launcher_query(
         g_variant_get_string(parameter, nullptr)
     );
+}
+
+void toggle_workspace_overview_action(
+    GSimpleAction*,
+    GVariant*,
+    gpointer user_data
+) {
+    static_cast<ShellRuntime*>(user_data)->toggle_workspace_overview();
 }
 
 void set_wallpaper_action(GSimpleAction*, GVariant*, gpointer user_data) {
@@ -1489,6 +1508,7 @@ constexpr GActionEntry kShellActions[] = {
     {"generate-theme", generate_theme_action, nullptr, nullptr, nullptr, {}},
     {"launch-launcher", launch_launcher_action, nullptr, nullptr, nullptr, {}},
     {"launch-launcher-query", launch_launcher_query_action, "s", nullptr, nullptr, {}},
+    {"workspace-overview-toggle", toggle_workspace_overview_action, nullptr, nullptr, nullptr, {}},
     {"quit", quit_action, nullptr, nullptr, nullptr, {}},
 };
 

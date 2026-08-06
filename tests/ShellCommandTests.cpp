@@ -34,6 +34,8 @@ void parses_supported_shell_commands() {
             "set-wallpaper-backend should parse");
     require(parse_shell_command("launch-launcher-query") == ShellCommand::LaunchLauncherQuery,
             "launch-launcher-query should parse");
+    require(parse_shell_command("workspace-overview-toggle") == ShellCommand::ToggleWorkspaceOverview,
+            "workspace-overview-toggle should parse");
     require(parse_shell_command("restart") == ShellCommand::Restart,
             "restart should parse");
     require(parse_shell_command("quit") == ShellCommand::Quit,
@@ -64,6 +66,8 @@ void maps_commands_to_stable_action_names() {
             "wallpaper backend action name should be stable");
     require(shell_action_name(ShellCommand::LaunchLauncherQuery) == "launch-launcher-query",
             "launcher query action name should be stable");
+    require(shell_action_name(ShellCommand::ToggleWorkspaceOverview) == "workspace-overview-toggle",
+            "workspace overview action name should be stable");
     require(shell_action_name(ShellCommand::Restart) == "restart",
             "restart action name should be stable");
     require(shell_action_name(ShellCommand::Quit) == "quit",
@@ -88,6 +92,8 @@ void identifies_commands_that_require_arguments() {
             "ordinary shell commands should remain parameterless");
     require(!shell_command_requires_argument(ShellCommand::ToggleCharacter),
             "character toggle should remain parameterless");
+    require(!shell_command_requires_argument(ShellCommand::ToggleWorkspaceOverview),
+            "workspace overview toggle should remain parameterless");
     require(!shell_command_requires_argument(ShellCommand::Restart),
             "restart should remain parameterless");
 }
