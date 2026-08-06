@@ -30,8 +30,8 @@ void test_maps_real_clients_into_realms() {
             "reverse-DNS classes must show their final component");
     require(state[1].cards[0].title == "Realmheart · GitHub",
             "real client titles must be retained");
-    require(state[2].card_count == 1 && state[2].cards[0].summary,
-            "missing workspaces must receive an explicit empty-state card");
+    require(state[2].card_count == 0,
+            "missing workspaces must render as an unobstructed empty realm");
 }
 
 void test_limits_cards_and_reports_overflow() {
