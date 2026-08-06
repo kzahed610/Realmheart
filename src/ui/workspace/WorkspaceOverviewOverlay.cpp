@@ -2,8 +2,8 @@
 
 #include "ui/AssetResolver.hpp"
 #include "ui/LayerSurface.hpp"
+#include "ui/bar/BarGeometry.hpp"
 
-#include <gtk4-layer-shell/gtk4-layer-shell.h>
 #include <pango/pangocairo.h>
 
 #include <algorithm>
@@ -27,6 +27,18 @@ constexpr double kInactiveFraction = (1.0 - kActiveFraction) / 3.0;
 struct Point {
     double x = 0.0;
     double y = 0.0;
+};
+
+struct Rect {
+    double x = 0.0;
+    double y = 0.0;
+    double width = 0.0;
+    double height = 0.0;
+
+    [[nodiscard]] bool contains(double point_x, double point_y) const noexcept {
+        return point_x >= x && point_x <= x + width &&
+            point_y >= y && point_y <= y + height;
+    }
 };
 
 struct Color {
@@ -254,6 +266,43 @@ std::array<Point, 13> flat_boundary(double y) {
         };
     }
     return points;
+}
+
+std::array<Rect, 3> window_card_rects(
+    double top,
+    double realm_height,
+    bool active
+) {
+    if (active) {
+        const double windows_top = top + 68.0;
+        const double windows_height = std::max(360.0, realm_height - 118.0);
+        return {{
+            {355.0, windows_top + windows_height * 0.02, 520.0, 255.0},
+            {903.0, windows_top + windows_height * 0.12, 350.0, 220.0},
+            {640.0, windows_top + windows_height * 0.57, 430.0, 160.0},
+        }};
+    }
+
+    const double windows_top = top + std::max(18.0, (realm_height - 72.0) * 0.5);
+    return {{
+        {355.0, windows_top, 320.0, 72.0},
+        {697.0, windows_top, 270.0, 72.0},
+        {},
+    }};
+}
+
+bool point_hits_window_card(double x, double y, int active_index) {
+    const auto heights = realm_heights(active_index);
+    const auto tops = realm_tops(heights);
+    for (std::size_t index = 0; index < kRealms.size(); ++index) {
+        const bool active = static_cast<int>(index) == active_index;
+        const auto cards = window_card_rects(tops[index], heights[index], active);
+        const std::size_t count = active ? cards.size() : cards.size() - 1U;
+        for (std::size_t card_index = 0; card_index < count; ++card_index) {
+            if (cards[card_index].contains(x, y)) return true;
+        }
+    }
+    return false;
 }
 
 void polygon_path(
@@ -612,14 +661,14 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(GtkApplication* app) {
 
     LayerSurfaceSpec spec;
     spec.surface_namespace = "realmheart-workspace-overview";
-    spec.layer = LayerSurfaceLevel::Overlay;
-    spec.keyboard_mode = LayerKeyboardMode::Exclusive;
+    spec.layer = LayerSurfaceLevel::Top;
+    spec.keyboard_mode = LayerKeyboardMode::OnDemand;
     spec.anchor_left = true;
     spec.anchor_right = true;
     spec.anchor_top = true;
     spec.anchor_bottom = true;
+    spec.margin_left = 0;
     apply_layer_surface(window_, spec);
-    gtk_layer_set_exclusive_zone(window_, -1);
 
     canvas_ = gtk_drawing_area_new();
     gtk_widget_set_hexpand(canvas_, TRUE);
@@ -672,7 +721,7 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(GtkApplication* app) {
             double y,
             gpointer data
         ) {
-            static_cast<WorkspaceOverviewOverlay*>(data)->activate_at(x, y);
+            static_cast<WorkspaceOverviewOverlay*>(data)->handle_primary_click(x, y);
         }),
         this
     );
@@ -828,22 +877,23 @@ void WorkspaceOverviewOverlay::draw(cairo_t* cr, int width, int height) {
             active
         );
 
-        if (active) {
-            const double windows_top = top + 68.0;
-            const double windows_height = std::max(360.0, realm_height - 118.0);
+        const auto cards = window_card_rects(top, realm_height, active);
+        const std::size_t card_count = active ? cards.size() : cards.size() - 1U;
+        for (std::size_t card_index = 0; card_index < card_count; ++card_index) {
+            const auto& card = cards[card_index];
             draw_window_card(
-                cr, 355.0, windows_top + windows_height * 0.02,
-                520.0, 255.0, style, kFakeWindows[index][0], false
+                cr,
+                card.x,
+                card.y,
+                card.width,
+                card.height,
+                style,
+                kFakeWindows[index][card_index],
+                !active
             );
-            draw_window_card(
-                cr, 903.0, windows_top + windows_height * 0.12,
-                350.0, 220.0, style, kFakeWindows[index][1], false
-            );
-            draw_window_card(
-                cr, 640.0, windows_top + windows_height * 0.57,
-                430.0, 160.0, style, kFakeWindows[index][2], false
-            );
+        }
 
+        if (active) {
             draw_text(
                 cr,
                 style.character,
@@ -867,17 +917,6 @@ void WorkspaceOverviewOverlay::draw(cairo_t* cr, int width, int height) {
                 "Inter",
                 true,
                 2
-            );
-        } else {
-            const double windows_top =
-                top + std::max(18.0, (realm_height - 72.0) * 0.5);
-            draw_window_card(
-                cr, 355.0, windows_top,
-                320.0, 72.0, style, kFakeWindows[index][0], true
-            );
-            draw_window_card(
-                cr, 697.0, windows_top,
-                270.0, 72.0, style, kFakeWindows[index][1], true
             );
         }
 
@@ -937,7 +976,7 @@ void WorkspaceOverviewOverlay::draw(cairo_t* cr, int width, int height) {
     cairo_restore(cr);
 }
 
-void WorkspaceOverviewOverlay::activate_at(double x, double y) {
+void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
     if (canvas_ == nullptr) return;
     const int width = gtk_widget_get_width(canvas_);
     const int height = gtk_widget_get_height(canvas_);
@@ -953,20 +992,14 @@ void WorkspaceOverviewOverlay::activate_at(double x, double y) {
     const double offset_y = (static_cast<double>(height) - stage_height) * 0.5;
     if (x < offset_x || x > offset_x + stage_width ||
         y < offset_y || y > offset_y + stage_height) {
+        hide();
         return;
     }
 
+    const double reference_x = (x - offset_x) / scale;
     const double reference_y = (y - offset_y) / scale;
-    const auto heights = realm_heights(active_index_);
-    double bottom = 0.0;
-    for (int index = 0; index < 4; ++index) {
-        bottom += heights[static_cast<std::size_t>(index)];
-        if (reference_y < bottom) {
-            active_index_ = index;
-            gtk_widget_queue_draw(canvas_);
-            return;
-        }
-    }
+    if (point_hits_window_card(reference_x, reference_y, active_index_)) return;
+    hide();
 }
 
 bool WorkspaceOverviewOverlay::ensure_assets() {

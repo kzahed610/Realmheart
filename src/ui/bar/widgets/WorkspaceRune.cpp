@@ -83,6 +83,8 @@ WorkspaceRune::WorkspaceRune(
         GtkGestureClick*, int, double, double, gpointer data
     ) {
         auto* self = static_cast<WorkspaceRune*>(data);
+        self->cancel_preview_hide();
+        gtk_popover_popdown(GTK_POPOVER(self->popover_));
         if (self->on_right_click_) self->on_right_click_();
     }), this);
     gtk_widget_add_controller(button_, GTK_EVENT_CONTROLLER(right_click));

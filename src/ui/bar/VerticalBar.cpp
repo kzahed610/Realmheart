@@ -3,6 +3,7 @@
 #include "core/TaskExecutor.hpp"
 #include "services/HyprlandWorkspaces.hpp"
 #include "ui/LayerSurface.hpp"
+#include "ui/bar/BarGeometry.hpp"
 #include "ui/bar/VerticalBarModel.hpp"
 
 #include <algorithm>
@@ -12,13 +13,6 @@
 
 namespace realmheart::ui::bar {
 namespace {
-
-// The compositor reserves only the straight rail. The extra surface width is
-// transparent through the middle and exists solely for the two outward caps.
-constexpr int kRailWidth = 56;
-constexpr int kCapExtension = 20;
-constexpr int kVisualWidth = kRailWidth + kCapExtension;
-constexpr int kCurveHeight = 35;
 
 int monitor_height_or_fallback(GtkWidget* widget) {
     constexpr int fallback_height = 1080;
@@ -59,6 +53,7 @@ VerticalBar::VerticalBar(
     services::MediaService& media_service,
     std::function<void()> toggle_sidebar,
     std::function<void()> launch_launcher,
+    std::function<void()> toggle_workspace_overview,
     std::function<void(double, double)> open_power_menu
 ) : app_(app),
     notification_history_(notification_history),
@@ -66,6 +61,7 @@ VerticalBar::VerticalBar(
     media_service_(media_service),
     toggle_sidebar_(std::move(toggle_sidebar)),
     launch_launcher_(std::move(launch_launcher)),
+    toggle_workspace_overview_(std::move(toggle_workspace_overview)),
     open_power_menu_(std::move(open_power_menu)) {
     g_weak_ref_init(&active_popover_ref_, nullptr);
     window_ = gtk_application_window_new(app_);
@@ -442,6 +438,20 @@ void VerticalBar::open_exclusive_system() {
     g_weak_ref_set(&active_popover_ref_, nullptr);
 }
 
+void VerticalBar::request_workspace_overview_toggle() {
+    if (media_widget_ != nullptr) media_widget_->close();
+    if (system_monitor_widget_ != nullptr) system_monitor_widget_->close();
+
+    GObject* current = static_cast<GObject*>(g_weak_ref_get(&active_popover_ref_));
+    if (current != nullptr) {
+        gtk_popover_popdown(GTK_POPOVER(current));
+    }
+    g_clear_object(&current);
+    g_weak_ref_set(&active_popover_ref_, nullptr);
+
+    if (toggle_workspace_overview_) toggle_workspace_overview_();
+}
+
 
 void VerticalBar::activate_workspace(int workspace_id) {
     constexpr int kMinimumWorkspaceId = 1;
@@ -612,7 +622,7 @@ void VerticalBar::apply_workspaces(services::WorkspaceSnapshot snapshot) {
         auto rune = std::make_unique<widgets::WorkspaceRune>(
             state,
             [this](int workspace_id) { activate_workspace(workspace_id); },
-            toggle_sidebar_,
+            [this] { request_workspace_overview_toggle(); },
             [this](GtkPopover* popover) { open_exclusive_popover(popover); }
         );
         gtk_box_append(GTK_BOX(workspace_box_), rune->widget());
