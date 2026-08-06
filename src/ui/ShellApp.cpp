@@ -8,6 +8,7 @@
 #include "services/AudioMonitor.hpp"
 #include "services/BatteryService.hpp"
 #include "services/Brightness.hpp"
+#include "services/HyprlandSession.hpp"
 #include "services/HyprlandWorkspaces.hpp"
 #include "services/LauncherService.hpp"
 #include "services/MediaService.hpp"
@@ -571,6 +572,29 @@ public:
         ));
     }
 
+    void activate_overview_window(int workspace_id, std::string address) {
+        if (workspace_id <= 0 || address.empty()) {
+            activate_overview_workspace(workspace_id);
+            return;
+        }
+
+        static_cast<void>(realmheart::core::shared_task_executor().post(
+            [workspace_id, address = std::move(address)] {
+                const bool workspace_activated =
+                    services::HyprlandWorkspaces::switch_to(workspace_id);
+                if (services::HyprlandSession::focus_window(address)) return;
+
+                std::cerr
+                    << "[WorkspaceOverview] unable to focus window "
+                    << address << " on workspace " << workspace_id;
+                if (!workspace_activated) {
+                    std::cerr << " (workspace activation also failed)";
+                }
+                std::cerr << '\n';
+            }
+        ));
+    }
+
     void toggle_workspace_overview() {
         ensure_core_initialized();
         if (!workspace_overview_) {
@@ -579,6 +603,12 @@ public:
                     application_,
                     [this](int workspace_id) {
                         activate_overview_workspace(workspace_id);
+                    },
+                    [this](int workspace_id, std::string address) {
+                        activate_overview_window(
+                            workspace_id,
+                            std::move(address)
+                        );
                     }
                 );
             workspace_overview_->set_workspace_snapshot(workspace_snapshot_);
