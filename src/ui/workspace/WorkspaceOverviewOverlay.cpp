@@ -121,6 +121,7 @@ constexpr double kActiveFraction = 0.56;
 constexpr double kInactiveFraction = (1.0 - kActiveFraction) / 3.0;
 constexpr double kTransitionDurationSeconds = 0.480;
 constexpr double kCardTransitionDurationSeconds = 0.180;
+constexpr double kOverflowTransitionDurationSeconds = 0.200;
 constexpr double kSelectionTransitionDurationSeconds = 0.140;
 constexpr double kViewportTransitionDurationSeconds = 0.170;
 constexpr double kViewportTransitionDistance = 72.0;
@@ -762,6 +763,97 @@ Rect scaled_card_rect(
     };
 }
 
+std::size_t overflow_grid_columns(std::size_t count) noexcept {
+    if (count <= 4U) return 2U;
+    if (count <= 6U) return 3U;
+    if (count <= 8U) return 4U;
+    if (count == 9U) return 3U;
+    if (count <= 12U) return 4U;
+    if (count <= 15U) return 5U;
+    if (count <= 16U) return 4U;
+    return std::clamp<std::size_t>(
+        static_cast<std::size_t>(std::ceil(std::sqrt(
+            static_cast<double>(count) * 1.65
+        ))),
+        4U,
+        7U
+    );
+}
+
+std::vector<Rect> overflow_card_rects(
+    double top,
+    double realm_height,
+    std::size_t count
+) {
+    std::vector<Rect> result;
+    if (count == 0U || realm_height <= 0.0) return result;
+
+    constexpr double kLeft = 355.0;
+    constexpr double kRight = 1270.0;
+    constexpr double kTopInset = 68.0;
+    constexpr double kBottomInset = 54.0;
+    constexpr double kGapX = 18.0;
+    constexpr double kGapY = 16.0;
+
+    const std::size_t columns = std::min(overflow_grid_columns(count), count);
+    const std::size_t rows = (count + columns - 1U) / columns;
+    const double available_width = kRight - kLeft;
+    const double available_height = std::max(
+        96.0,
+        realm_height - kTopInset - kBottomInset
+    );
+    const double card_width = std::max(
+        96.0,
+        (available_width - kGapX * static_cast<double>(columns - 1U)) /
+            static_cast<double>(columns)
+    );
+    const double card_height = std::max(
+        52.0,
+        (available_height - kGapY * static_cast<double>(rows - 1U)) /
+            static_cast<double>(rows)
+    );
+
+    result.reserve(count);
+    for (std::size_t row = 0; row < rows; ++row) {
+        const std::size_t first = row * columns;
+        const std::size_t row_count = std::min(columns, count - first);
+        const double row_width = card_width * static_cast<double>(row_count) +
+            kGapX * static_cast<double>(row_count - 1U);
+        const double row_x = kLeft + (available_width - row_width) * 0.5;
+        for (std::size_t column = 0; column < row_count; ++column) {
+            result.push_back({
+                row_x + static_cast<double>(column) * (card_width + kGapX),
+                top + kTopInset + static_cast<double>(row) *
+                    (card_height + kGapY),
+                card_width,
+                card_height,
+            });
+        }
+    }
+    return result;
+}
+
+Rect overflow_control_rect(double top) noexcept {
+    return {1148.0, top + 22.0, 122.0, 34.0};
+}
+
+Rect overflow_card_current_rect(
+    std::size_t slot,
+    std::size_t count,
+    double top,
+    double realm_height,
+    double activity,
+    double progress
+) {
+    const auto targets = overflow_card_rects(top, realm_height, count);
+    if (slot >= targets.size()) return {};
+    const auto preview = window_card_visuals(top, realm_height, activity);
+    const std::size_t origin_slot = slot < 2U ? slot : 2U;
+    const Rect origin = preview[origin_slot].rect;
+    return lerp_rect(origin, targets[slot], std::clamp(progress, 0.0, 1.0));
+}
+
+
 bool same_card_identity(
     const WorkspaceOverviewCard& left,
     const WorkspaceOverviewCard& right
@@ -812,26 +904,52 @@ std::optional<int> hit_realm_identity(
 struct WorkspaceCardHit {
     std::size_t realm_index = 0;
     std::size_t card_index = 0;
+    bool overflow = false;
 };
 
 std::optional<WorkspaceCardHit> hit_realm_card(
     double x,
     double y,
     const std::array<double, 4>& heights,
-    const WorkspaceOverviewState& workspace_state
+    const WorkspaceOverviewState& workspace_state,
+    int overflow_workspace_id,
+    double overflow_progress
 ) {
     const auto tops = realm_tops(heights);
     for (std::size_t index = 0; index < kRealms.size(); ++index) {
+        const auto& realm = workspace_state[index];
         const double activity = realm_activity(heights[index]);
+        const bool overflow = realm.workspace_id == overflow_workspace_id &&
+            realm.windows.size() > kWorkspaceOverviewPreviewCardLimit &&
+            overflow_progress > 0.01;
+        if (overflow) {
+            for (std::size_t card_index = 0;
+                 card_index < realm.windows.size();
+                 ++card_index) {
+                const Rect rect = overflow_card_current_rect(
+                    card_index,
+                    realm.windows.size(),
+                    tops[index],
+                    heights[index],
+                    activity,
+                    overflow_progress
+                );
+                const double opacity = card_index < 2U
+                    ? 1.0
+                    : std::clamp((overflow_progress - 0.06) / 0.54, 0.0, 1.0);
+                if (opacity > 0.05 && rect.contains(x, y)) {
+                    return WorkspaceCardHit{index, card_index, true};
+                }
+            }
+            continue;
+        }
+
         const auto cards = window_card_visuals(tops[index], heights[index], activity);
-        const auto count = std::min(
-            workspace_state[index].card_count,
-            cards.size()
-        );
+        const auto count = std::min(realm.card_count, cards.size());
         for (std::size_t card_index = 0; card_index < count; ++card_index) {
             const auto& card = cards[card_index];
             if (card.opacity > 0.05 && card.rect.contains(x, y)) {
-                return WorkspaceCardHit{index, card_index};
+                return WorkspaceCardHit{index, card_index, false};
             }
         }
     }
@@ -1288,6 +1406,71 @@ void append_identity_layout(
     return texture;
 }
 
+[[nodiscard]] GdkTexture* render_overflow_card_texture(
+    std::size_t realm_index,
+    const WorkspaceOverviewCard& content,
+    cairo_surface_t* icon_surface,
+    double width,
+    double height,
+    std::string& error_message
+) {
+    if (realm_index >= kRealms.size() || width <= 0.0 || height <= 0.0) {
+        error_message = "Invalid overflow workspace card render request";
+        return nullptr;
+    }
+
+    const int pixel_width = std::max(1, static_cast<int>(std::ceil(width)));
+    const int pixel_height = std::max(1, static_cast<int>(std::ceil(height)));
+    cairo_surface_t* surface = cairo_image_surface_create(
+        CAIRO_FORMAT_ARGB32,
+        pixel_width,
+        pixel_height
+    );
+    const cairo_status_t surface_status = cairo_surface_status(surface);
+    if (surface_status != CAIRO_STATUS_SUCCESS) {
+        error_message = "Unable to allocate overflow workspace card surface: ";
+        error_message += cairo_status_to_string(surface_status);
+        cairo_surface_destroy(surface);
+        return nullptr;
+    }
+
+    cairo_t* cr = cairo_create(surface);
+    const cairo_status_t context_status = cairo_status(cr);
+    if (context_status != CAIRO_STATUS_SUCCESS) {
+        error_message = "Unable to create overflow workspace card renderer: ";
+        error_message += cairo_status_to_string(context_status);
+        cairo_destroy(cr);
+        cairo_surface_destroy(surface);
+        return nullptr;
+    }
+
+    cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+    const bool roomy = width >= 260.0;
+    const std::string_view title = roomy
+        ? std::string_view(content.title)
+        : std::string_view{};
+    draw_window_card(
+        cr,
+        0.0,
+        0.0,
+        width,
+        height,
+        kRealms[realm_index],
+        {content.app_name, title},
+        icon_surface,
+        1.0,
+        1.0
+    );
+
+    cairo_destroy(cr);
+    cairo_surface_flush(surface);
+    GdkTexture* texture = texture_from_surface(surface, error_message);
+    cairo_surface_destroy(surface);
+    return texture;
+}
+
 [[nodiscard]] GdkTexture* render_realm_overlay_texture(
     std::size_t realm_index,
     const WorkspaceOverviewRealm&,
@@ -1602,6 +1785,66 @@ void append_card_selection_outline(
         line_widths.data(),
         line_colors.data()
     );
+}
+
+void append_overflow_collapse_control(
+    GtkWidget* widget,
+    GtkSnapshot* snapshot,
+    const Rect& bounds,
+    const RealmStyle& style,
+    double opacity
+) {
+    if (widget == nullptr || snapshot == nullptr || opacity <= 0.001) return;
+
+    const graphene_rect_t rect = rect_to_graphene(bounds);
+    GskRoundedRect rounded{};
+    gsk_rounded_rect_init_from_rect(&rounded, &rect, 11.0F);
+    gtk_snapshot_push_rounded_clip(snapshot, &rounded);
+    const GdkRGBA fill{0.025F, 0.032F, 0.040F,
+        static_cast<float>(0.90 * opacity)};
+    gtk_snapshot_append_color(snapshot, &fill, &rect);
+    gtk_snapshot_pop(snapshot);
+
+    const GdkRGBA border{
+        static_cast<float>(style.accent_soft.red),
+        static_cast<float>(style.accent_soft.green),
+        static_cast<float>(style.accent_soft.blue),
+        static_cast<float>(0.58 * opacity),
+    };
+    const std::array<float, 4> widths{{1.0F, 1.0F, 1.0F, 1.0F}};
+    const std::array<GdkRGBA, 4> colors{{border, border, border, border}};
+    gtk_snapshot_append_border(
+        snapshot,
+        &rounded,
+        widths.data(),
+        colors.data()
+    );
+
+    PangoLayout* layout = gtk_widget_create_pango_layout(widget, "Collapse");
+    if (layout == nullptr) return;
+    PangoFontDescription* font = pango_font_description_from_string(
+        "Inter SemiBold 12"
+    );
+    pango_layout_set_font_description(layout, font);
+    pango_font_description_free(font);
+    int text_width = 0;
+    int text_height = 0;
+    pango_layout_get_pixel_size(layout, &text_width, &text_height);
+    const graphene_point_t offset = GRAPHENE_POINT_INIT(
+        static_cast<float>(
+            bounds.x + (bounds.width - static_cast<double>(text_width)) * 0.5
+        ),
+        static_cast<float>(
+            bounds.y + (bounds.height - static_cast<double>(text_height)) * 0.5
+        )
+    );
+    gtk_snapshot_save(snapshot);
+    gtk_snapshot_translate(snapshot, &offset);
+    const GdkRGBA text{0.96F, 0.95F, 0.92F,
+        static_cast<float>(0.90 * opacity)};
+    gtk_snapshot_append_layout(snapshot, layout, &text);
+    gtk_snapshot_restore(snapshot);
+    g_object_unref(layout);
 }
 
 Rect background_bounds(
@@ -2027,6 +2270,62 @@ void WorkspaceOverviewOverlay::reset_drag() noexcept {
     if (canvas_ != nullptr) {
         gtk_widget_set_cursor_from_name(canvas_, "default");
     }
+}
+
+bool WorkspaceOverviewOverlay::overflow_expanded_for(
+    std::size_t realm_index
+) const noexcept {
+    return realm_index < workspace_state_.size() &&
+        workspace_state_[realm_index].workspace_id == overflow_workspace_id_ &&
+        workspace_state_[realm_index].windows.size() >
+            kWorkspaceOverviewPreviewCardLimit &&
+        (overflow_animation_progress_ > 0.001 ||
+         overflow_animation_target_ > 0.5);
+}
+
+void WorkspaceOverviewOverlay::expand_overflow(std::size_t realm_index) {
+    if (realm_index >= workspace_state_.size()) return;
+    const auto& realm = workspace_state_[realm_index];
+    if (realm.windows.size() <= kWorkspaceOverviewPreviewCardLimit) return;
+
+    if (overflow_workspace_id_ != realm.workspace_id) {
+        overflow_workspace_id_ = realm.workspace_id;
+        overflow_animation_progress_ = 0.0;
+    }
+    overflow_animation_start_progress_ = overflow_animation_progress_;
+    overflow_animation_target_ = 1.0;
+    overflow_animation_start_time_us_ = 0;
+    overflow_animation_active_ = true;
+
+    const int preferred = static_cast<int>(std::min<std::size_t>(
+        2U,
+        realm.windows.size() - 1U
+    ));
+    transition_selection(static_cast<int>(realm_index), preferred);
+    ensure_animation_tick();
+    if (canvas_ != nullptr) gtk_widget_queue_draw(canvas_);
+}
+
+void WorkspaceOverviewOverlay::collapse_overflow(bool snap) noexcept {
+    if (overflow_workspace_id_ == 0) return;
+    if (snap) {
+        overflow_workspace_id_ = 0;
+        overflow_animation_progress_ = 0.0;
+        overflow_animation_start_progress_ = 0.0;
+        overflow_animation_target_ = 0.0;
+        overflow_animation_start_time_us_ = 0;
+        overflow_animation_active_ = false;
+        normalize_selection();
+        if (canvas_ != nullptr) gtk_widget_queue_draw(canvas_);
+        return;
+    }
+
+    overflow_animation_start_progress_ = overflow_animation_progress_;
+    overflow_animation_target_ = 0.0;
+    overflow_animation_start_time_us_ = 0;
+    overflow_animation_active_ = true;
+    ensure_animation_tick();
+    if (canvas_ != nullptr) gtk_widget_queue_draw(canvas_);
 }
 
 void WorkspaceOverviewOverlay::finish_card_transition() noexcept {
@@ -2530,6 +2829,7 @@ bool WorkspaceOverviewOverlay::rebuild_dirty_overlays() {
                 )
                 : nullptr;
         std::array<CardAssets, kWorkspaceOverviewCardLimit> cards{};
+        std::vector<GdkTexture*> spread_cards;
         bool cards_ready = style_assets.roman_layout != nullptr &&
             compact != nullptr && expanded != nullptr;
         for (std::size_t slot = 0;
@@ -2563,6 +2863,32 @@ bool WorkspaceOverviewOverlay::rebuild_dirty_overlays() {
                 cards[slot].expanded != nullptr;
         }
 
+        if (cards_ready && realm_state.windows.size() >
+                kWorkspaceOverviewPreviewCardLimit) {
+            const auto target_rects = overflow_card_rects(
+                0.0,
+                kActiveFraction * kReferenceHeight,
+                realm_state.windows.size()
+            );
+            spread_cards.reserve(realm_state.windows.size());
+            for (std::size_t slot = 0;
+                 cards_ready && slot < realm_state.windows.size();
+                 ++slot) {
+                const auto& window = realm_state.windows[slot];
+                const auto& rect = target_rects[slot];
+                GdkTexture* texture = render_overflow_card_texture(
+                    style_index,
+                    window,
+                    application_icon_surface(window.icon_name, window.app_name),
+                    rect.width,
+                    rect.height,
+                    render_error
+                );
+                spread_cards.push_back(texture);
+                cards_ready = texture != nullptr;
+            }
+        }
+
         if (!cards_ready) {
             g_clear_object(&compact);
             g_clear_object(&expanded);
@@ -2570,6 +2896,7 @@ bool WorkspaceOverviewOverlay::rebuild_dirty_overlays() {
                 g_clear_object(&card.compact);
                 g_clear_object(&card.expanded);
             }
+            for (auto*& card : spread_cards) g_clear_object(&card);
             std::cerr
                 << "[WorkspaceOverview] unable to refresh workspace "
                 << realm_state.workspace_id << " cards";
@@ -2585,9 +2912,12 @@ bool WorkspaceOverviewOverlay::rebuild_dirty_overlays() {
             g_clear_object(&card.compact);
             g_clear_object(&card.expanded);
         }
+        for (auto*& card : style_assets.spread_cards) g_clear_object(&card);
+        style_assets.spread_cards.clear();
         style_assets.compact_overlay = compact;
         style_assets.expanded_overlay = expanded;
         style_assets.cards = cards;
+        style_assets.spread_cards = std::move(spread_cards);
         overlay_dirty_[index] = false;
     }
     return success;
@@ -2626,6 +2956,20 @@ void WorkspaceOverviewOverlay::set_workspace_snapshot(
 
     workspace_state_ = std::move(next);
     viewport_start_workspace_id_ = next_viewport_start;
+
+    if (overflow_workspace_id_ != 0) {
+        const auto spread_realm = std::find_if(
+            workspace_state_.begin(),
+            workspace_state_.end(),
+            [this](const WorkspaceOverviewRealm& realm) {
+                return realm.workspace_id == overflow_workspace_id_;
+            }
+        );
+        if (spread_realm == workspace_state_.end() ||
+            spread_realm->windows.size() <= kWorkspaceOverviewPreviewCardLimit) {
+            collapse_overflow(true);
+        }
+    }
 
     if (!morph_interactive()) {
         synchronize_active_workspace();
@@ -2719,6 +3063,7 @@ void WorkspaceOverviewOverlay::hide() {
     }
     morph_diagnostics_.set_direction(false);
     reset_drag();
+    collapse_overflow(true);
     stop_content_animations(true);
     if (morph_timeline_.state() == effects::TransitionState::Visible) {
         capture_morph_geometry();
@@ -2831,6 +3176,45 @@ gboolean WorkspaceOverviewOverlay::animation_tick_callback(
         }
     }
 
+    if (self->overflow_animation_active_) {
+        if (self->overflow_animation_start_time_us_ == 0) {
+            self->overflow_animation_start_time_us_ = frame_time_us;
+        }
+        const double elapsed_seconds = static_cast<double>(
+            frame_time_us - self->overflow_animation_start_time_us_
+        ) / static_cast<double>(kMicrosecondsPerSecond);
+        const double distance = std::max(
+            0.001,
+            std::abs(
+                self->overflow_animation_target_ -
+                self->overflow_animation_start_progress_
+            )
+        );
+        const double linear = std::clamp(
+            elapsed_seconds /
+                (kOverflowTransitionDurationSeconds * distance),
+            0.0,
+            1.0
+        );
+        self->overflow_animation_progress_ = lerp(
+            self->overflow_animation_start_progress_,
+            self->overflow_animation_target_,
+            transition_ease(linear)
+        );
+        if (linear >= 1.0) {
+            self->overflow_animation_progress_ =
+                self->overflow_animation_target_;
+            self->overflow_animation_start_time_us_ = 0;
+            self->overflow_animation_active_ = false;
+            if (self->overflow_animation_target_ <= 0.001) {
+                self->overflow_workspace_id_ = 0;
+                self->normalize_selection();
+            }
+        } else {
+            keep_running = true;
+        }
+    }
+
     if (self->selection_animation_active_) {
         if (self->selection_animation_start_time_us_ == 0) {
             self->selection_animation_start_time_us_ = frame_time_us;
@@ -2877,6 +3261,7 @@ gboolean WorkspaceOverviewOverlay::animation_tick_callback(
     gtk_widget_queue_draw(self->canvas_);
     if (!keep_running && !self->realm_animation_active_ &&
         !self->card_animation_active_ &&
+        !self->overflow_animation_active_ &&
         !self->selection_animation_active_ &&
         !self->viewport_animation_active_ &&
         !self->morph_timeline_.active()) {
@@ -2888,7 +3273,11 @@ gboolean WorkspaceOverviewOverlay::animation_tick_callback(
 
 bool WorkspaceOverviewOverlay::handle_key_pressed(guint keyval) {
     if (keyval == GDK_KEY_Escape) {
-        hide();
+        if (overflow_workspace_id_ != 0) {
+            collapse_overflow(false);
+        } else {
+            hide();
+        }
         return true;
     }
     if (!morph_interactive()) return true;
@@ -2942,8 +3331,13 @@ void WorkspaceOverviewOverlay::move_card_selection(int delta) {
         return;
     }
 
-    const auto& realm = workspace_state_[static_cast<std::size_t>(active_index_)];
-    const int count = static_cast<int>(realm.card_count);
+    const std::size_t realm_index = static_cast<std::size_t>(active_index_);
+    const auto& realm = workspace_state_[realm_index];
+    const int count = static_cast<int>(
+        overflow_expanded_for(realm_index)
+            ? realm.windows.size()
+            : realm.card_count
+    );
     int next_card = -1;
     if (count > 0 && selected_card_index_ < 0) {
         next_card = delta > 0 ? 0 : count - 1;
@@ -2959,13 +3353,32 @@ void WorkspaceOverviewOverlay::activate_selected() {
         return;
     }
 
-    const auto& realm = workspace_state_[static_cast<std::size_t>(active_index_)];
+    const std::size_t realm_index = static_cast<std::size_t>(active_index_);
+    const auto& realm = workspace_state_[realm_index];
+    if (overflow_expanded_for(realm_index)) {
+        if (selected_card_index_ >= 0 &&
+            selected_card_index_ < static_cast<int>(realm.windows.size())) {
+            const auto& card = realm.windows[
+                static_cast<std::size_t>(selected_card_index_)
+            ];
+            if (!card.address.empty() && activate_window_) {
+                activate_window_(realm.workspace_id, card.address);
+                hide();
+            }
+        }
+        return;
+    }
+
     if (selected_card_index_ >= 0 &&
         selected_card_index_ < static_cast<int>(realm.card_count)) {
         const auto& card = realm.cards[
             static_cast<std::size_t>(selected_card_index_)
         ];
-        if (!card.summary && !card.address.empty() && activate_window_) {
+        if (card.summary) {
+            expand_overflow(realm_index);
+            return;
+        }
+        if (!card.address.empty() && activate_window_) {
             activate_window_(realm.workspace_id, card.address);
         } else if (activate_workspace_) {
             activate_workspace_(realm.workspace_id);
@@ -2982,8 +3395,12 @@ void WorkspaceOverviewOverlay::normalize_selection() noexcept {
         selected_card_index_ = -1;
         return;
     }
+    const std::size_t realm_index = static_cast<std::size_t>(active_index_);
+    const auto& realm = workspace_state_[realm_index];
     const int count = static_cast<int>(
-        workspace_state_[static_cast<std::size_t>(active_index_)].card_count
+        overflow_expanded_for(realm_index)
+            ? realm.windows.size()
+            : realm.card_count
     );
     if (count <= 0) {
         selected_card_index_ = -1;
@@ -2998,8 +3415,15 @@ void WorkspaceOverviewOverlay::select_realm(
 ) {
     if (index < 0 || index >= static_cast<int>(displayed_heights_.size())) return;
 
+    if (index != active_index_ && overflow_workspace_id_ != 0) {
+        collapse_overflow(false);
+    }
+    const std::size_t realm_index = static_cast<std::size_t>(index);
+    const auto& realm = workspace_state_[realm_index];
     const int card_count = static_cast<int>(
-        workspace_state_[static_cast<std::size_t>(index)].card_count
+        overflow_expanded_for(realm_index)
+            ? realm.windows.size()
+            : realm.card_count
     );
     int next_card = card_count > 0 ? 0 : -1;
     if (preferred_card_index != kDefaultCardSelection) {
@@ -3038,14 +3462,26 @@ WorkspaceOverviewOverlay::selected_card_outline_bounds() const {
 
     const std::size_t realm_index = static_cast<std::size_t>(active_index_);
     const std::size_t slot = static_cast<std::size_t>(selected_card_index_);
+    const auto tops = realm_tops(displayed_heights_);
+    const double realm_height = displayed_heights_[realm_index];
+    const double activity = realm_activity(realm_height);
+    if (overflow_expanded_for(realm_index)) {
+        const auto& realm = workspace_state_[realm_index];
+        if (slot >= realm.windows.size()) return std::nullopt;
+        return rect_to_graphene(overflow_card_current_rect(
+            slot,
+            realm.windows.size(),
+            tops[realm_index],
+            realm_height,
+            activity,
+            overflow_animation_progress_
+        ));
+    }
     if (slot >= workspace_state_[realm_index].card_count ||
         slot >= kWorkspaceOverviewCardLimit) {
         return std::nullopt;
     }
 
-    const auto tops = realm_tops(displayed_heights_);
-    const double realm_height = displayed_heights_[realm_index];
-    const double activity = realm_activity(realm_height);
     const double card_progress = card_animation_active_
         ? card_animation_progress_
         : 1.0;
@@ -3523,112 +3959,191 @@ void WorkspaceOverviewOverlay::snapshot(
         const double card_progress = card_animation_active_
             ? card_animation_progress_
             : 1.0;
-        const auto card_count = std::min(
-            workspace_state_[index].card_count,
-            style_assets.cards.size()
-        );
-        for (std::size_t slot = 0; slot < card_count; ++slot) {
-            const int configured_from = card_from_slots_[index][slot];
-            const std::size_t from_slot = configured_from >= 0 &&
-                configured_from < static_cast<int>(kWorkspaceOverviewCardLimit)
-                ? static_cast<std::size_t>(configured_from)
-                : slot;
-            const bool entering = card_animation_active_ &&
-                card_entering_[index][slot];
+        const bool overflow_mode = overflow_expanded_for(index);
+        if (overflow_mode) {
+            const auto& realm = workspace_state_[index];
+            const double overflow_progress = std::clamp(
+                overflow_animation_progress_,
+                0.0,
+                1.0
+            );
+            const auto spread_count = std::min(
+                realm.windows.size(),
+                style_assets.spread_cards.size()
+            );
+            for (std::size_t slot = 0; slot < spread_count; ++slot) {
+                const Rect current = overflow_card_current_rect(
+                    slot,
+                    realm.windows.size(),
+                    tops[index],
+                    realm_height,
+                    activity,
+                    overflow_progress
+                );
+                double opacity = 1.0;
+                if (slot >= 2U) {
+                    opacity = transition_ease(std::clamp(
+                        (overflow_progress - 0.06) / 0.54,
+                        0.0,
+                        1.0
+                    ));
+                }
+                const bool dragged_source = drag_card_.active &&
+                    drag_card_.source_workspace_id == realm.workspace_id &&
+                    drag_card_.address == realm.windows[slot].address;
+                append_texture_with_opacity(
+                    snapshot,
+                    style_assets.spread_cards[slot],
+                    current,
+                    (dragged_source ? opacity * 0.14 : opacity) *
+                        morph_band.card_opacity
+                );
+            }
 
-            const Rect compact_target = scaled_card_rect(
-                slot,
-                false,
-                tops[index],
-                realm_height
-            );
-            const Rect expanded_target = scaled_card_rect(
-                slot,
-                true,
-                tops[index],
-                realm_height
-            );
-            const Rect compact_start = entering
-                ? translated_rect(compact_target, -kCardTransitionDistance)
-                : scaled_card_rect(
-                    from_slot,
-                    false,
-                    tops[index],
-                    realm_height
+            // The +N summary becomes the visual source/sink for hidden cards.
+            // Keep it underneath the fan-out for the first half of the motion
+            // instead of popping it away on the click frame.
+            if (realm.card_count >= kWorkspaceOverviewCardLimit &&
+                realm.cards[2].summary && style_assets.cards[2].expanded != nullptr) {
+                const double summary_opacity = 1.0 - transition_ease(
+                    std::clamp(overflow_progress / 0.62, 0.0, 1.0)
                 );
-            const Rect expanded_start = entering
-                ? translated_rect(expanded_target, -kCardTransitionDistance)
-                : scaled_card_rect(
-                    from_slot,
-                    true,
-                    tops[index],
-                    realm_height
-                );
-            const bool dragged_source = drag_card_.active &&
-                drag_card_.source_workspace_id ==
-                    workspace_state_[index].workspace_id &&
-                drag_card_.address == workspace_state_[index].cards[slot].address;
-            const double card_opacity = entering ? card_progress : 1.0;
-            const Rect compact_current = lerp_rect(
-                compact_start,
-                compact_target,
-                card_progress
-            );
-            const Rect expanded_current = lerp_rect(
-                expanded_start,
-                expanded_target,
-                card_progress
-            );
-            append_card_texture_pair(
+                if (summary_opacity > 0.001) {
+                    const auto preview = window_card_visuals(
+                        tops[index],
+                        realm_height,
+                        activity
+                    );
+                    append_texture_with_opacity(
+                        snapshot,
+                        style_assets.cards[2].expanded,
+                        preview[2].rect,
+                        summary_opacity * morph_band.card_opacity
+                    );
+                }
+            }
+
+            const double control_opacity = transition_ease(std::clamp(
+                (overflow_progress - 0.48) / 0.34,
+                0.0,
+                1.0
+            ));
+            append_overflow_collapse_control(
+                widget,
                 snapshot,
-                style_assets.cards[slot].compact,
-                style_assets.cards[slot].expanded,
-                compact_current,
-                expanded_current,
-                activity,
-                (dragged_source ? card_opacity * 0.14 : card_opacity) *
-                    morph_band.card_opacity
+                overflow_control_rect(tops[index]),
+                style,
+                control_opacity * morph_band.card_opacity
             );
-        }
+        } else {
+            const auto card_count = std::min(
+                workspace_state_[index].card_count,
+                style_assets.cards.size()
+            );
+            for (std::size_t slot = 0; slot < card_count; ++slot) {
+                const int configured_from = card_from_slots_[index][slot];
+                const std::size_t from_slot = configured_from >= 0 &&
+                    configured_from < static_cast<int>(kWorkspaceOverviewCardLimit)
+                    ? static_cast<std::size_t>(configured_from)
+                    : slot;
+                const bool entering = card_animation_active_ &&
+                    card_entering_[index][slot];
 
-        if (card_animation_active_) {
-            for (const auto& outgoing : outgoing_cards_[index]) {
-                if (!outgoing.active) continue;
-                const Rect compact_start = scaled_card_rect(
-                    outgoing.slot,
+                const Rect compact_target = scaled_card_rect(
+                    slot,
                     false,
                     tops[index],
                     realm_height
                 );
-                const Rect expanded_start = scaled_card_rect(
-                    outgoing.slot,
+                const Rect expanded_target = scaled_card_rect(
+                    slot,
                     true,
                     tops[index],
                     realm_height
+                );
+                const Rect compact_start = entering
+                    ? translated_rect(compact_target, -kCardTransitionDistance)
+                    : scaled_card_rect(
+                        from_slot,
+                        false,
+                        tops[index],
+                        realm_height
+                    );
+                const Rect expanded_start = entering
+                    ? translated_rect(expanded_target, -kCardTransitionDistance)
+                    : scaled_card_rect(
+                        from_slot,
+                        true,
+                        tops[index],
+                        realm_height
+                    );
+                const bool dragged_source = drag_card_.active &&
+                    drag_card_.source_workspace_id ==
+                        workspace_state_[index].workspace_id &&
+                    drag_card_.address ==
+                        workspace_state_[index].cards[slot].address;
+                const double card_opacity = entering ? card_progress : 1.0;
+                const Rect compact_current = lerp_rect(
+                    compact_start,
+                    compact_target,
+                    card_progress
+                );
+                const Rect expanded_current = lerp_rect(
+                    expanded_start,
+                    expanded_target,
+                    card_progress
                 );
                 append_card_texture_pair(
                     snapshot,
-                    outgoing.assets.compact,
-                    outgoing.assets.expanded,
-                    lerp_rect(
-                        compact_start,
-                        translated_rect(
-                            compact_start,
-                            kCardTransitionDistance
-                        ),
-                        card_progress
-                    ),
-                    lerp_rect(
-                        expanded_start,
-                        translated_rect(
-                            expanded_start,
-                            kCardTransitionDistance
-                        ),
-                        card_progress
-                    ),
+                    style_assets.cards[slot].compact,
+                    style_assets.cards[slot].expanded,
+                    compact_current,
+                    expanded_current,
                     activity,
-                    (1.0 - card_progress) * morph_band.card_opacity
+                    (dragged_source ? card_opacity * 0.14 : card_opacity) *
+                        morph_band.card_opacity
                 );
+            }
+
+            if (card_animation_active_) {
+                for (const auto& outgoing : outgoing_cards_[index]) {
+                    if (!outgoing.active) continue;
+                    const Rect compact_start = scaled_card_rect(
+                        outgoing.slot,
+                        false,
+                        tops[index],
+                        realm_height
+                    );
+                    const Rect expanded_start = scaled_card_rect(
+                        outgoing.slot,
+                        true,
+                        tops[index],
+                        realm_height
+                    );
+                    append_card_texture_pair(
+                        snapshot,
+                        outgoing.assets.compact,
+                        outgoing.assets.expanded,
+                        lerp_rect(
+                            compact_start,
+                            translated_rect(
+                                compact_start,
+                                kCardTransitionDistance
+                            ),
+                            card_progress
+                        ),
+                        lerp_rect(
+                            expanded_start,
+                            translated_rect(
+                                expanded_start,
+                                kCardTransitionDistance
+                            ),
+                            card_progress
+                        ),
+                        activity,
+                        (1.0 - card_progress) * morph_band.card_opacity
+                    );
+                }
             }
         }
 
@@ -3739,9 +4254,15 @@ void WorkspaceOverviewOverlay::snapshot(
         const auto selected_slot = static_cast<std::size_t>(
             selected_card_index_
         );
-        selected_card_is_dragged = selected_slot < selected_realm.card_count &&
-            selected_realm.workspace_id == drag_card_.source_workspace_id &&
-            selected_realm.cards[selected_slot].address == drag_card_.address;
+        if (overflow_expanded_for(static_cast<std::size_t>(active_index_))) {
+            selected_card_is_dragged = selected_slot < selected_realm.windows.size() &&
+                selected_realm.workspace_id == drag_card_.source_workspace_id &&
+                selected_realm.windows[selected_slot].address == drag_card_.address;
+        } else {
+            selected_card_is_dragged = selected_slot < selected_realm.card_count &&
+                selected_realm.workspace_id == drag_card_.source_workspace_id &&
+                selected_realm.cards[selected_slot].address == drag_card_.address;
+        }
     }
     if (morph_terminal_visible && selection_current.has_value() &&
         !selected_card_is_dragged &&
@@ -3874,46 +4395,89 @@ void WorkspaceOverviewOverlay::handle_drag_begin(double x, double y) {
     drag_card_.current_x = drag_card_.start_x;
     drag_card_.current_y = drag_card_.start_y;
 
-    if (card_animation_active_) return;
+    if (card_animation_active_ || overflow_animation_active_) return;
     const auto hit = hit_realm_card(
         drag_card_.start_x,
         drag_card_.start_y - viewport_visual_offset(),
         displayed_heights_,
-        workspace_state_
+        workspace_state_,
+        overflow_workspace_id_,
+        overflow_animation_progress_
     );
     if (!hit.has_value()) return;
 
     const auto& realm = workspace_state_[hit->realm_index];
-    const auto& card = realm.cards[hit->card_index];
-    if (card.summary || card.address.empty()) return;
-
+    const WorkspaceOverviewCard* card = nullptr;
+    GdkTexture* spread_texture = nullptr;
+    Rect compact{};
+    Rect expanded{};
+    double drag_activity = 1.0;
     const auto tops = realm_tops(displayed_heights_);
     const double realm_height = displayed_heights_[hit->realm_index];
-    Rect compact = scaled_card_rect(
-        hit->card_index,
-        false,
-        tops[hit->realm_index],
-        realm_height
-    );
-    Rect expanded = scaled_card_rect(
-        hit->card_index,
-        true,
-        tops[hit->realm_index],
-        realm_height
-    );
+
+    if (hit->overflow) {
+        if (hit->card_index >= realm.windows.size()) return;
+        const auto& spread_assets = assets_[
+            style_index_for_realm(hit->realm_index)
+        ].spread_cards;
+        if (hit->card_index >= spread_assets.size() ||
+            spread_assets[hit->card_index] == nullptr) {
+            return;
+        }
+        card = &realm.windows[hit->card_index];
+        spread_texture = spread_assets[hit->card_index];
+        compact = overflow_card_current_rect(
+            hit->card_index,
+            realm.windows.size(),
+            tops[hit->realm_index],
+            realm_height,
+            realm_activity(realm_height),
+            overflow_animation_progress_
+        );
+        expanded = compact;
+    } else {
+        if (hit->card_index >= realm.card_count) return;
+        card = &realm.cards[hit->card_index];
+        if (card->summary) return;
+        compact = scaled_card_rect(
+            hit->card_index,
+            false,
+            tops[hit->realm_index],
+            realm_height
+        );
+        expanded = scaled_card_rect(
+            hit->card_index,
+            true,
+            tops[hit->realm_index],
+            realm_height
+        );
+        drag_activity = realm_activity(realm_height);
+    }
+    if (card == nullptr || card->address.empty()) return;
+
     const double viewport_offset = viewport_visual_offset();
     compact.y += viewport_offset;
     expanded.y += viewport_offset;
-    const auto& source_assets = assets_[
-        style_index_for_realm(hit->realm_index)
-    ].cards[hit->card_index];
-    if (source_assets.compact == nullptr && source_assets.expanded == nullptr) return;
-
-    if (source_assets.compact != nullptr) {
-        drag_card_.assets.compact = GDK_TEXTURE(g_object_ref(source_assets.compact));
-    }
-    if (source_assets.expanded != nullptr) {
-        drag_card_.assets.expanded = GDK_TEXTURE(g_object_ref(source_assets.expanded));
+    if (hit->overflow) {
+        drag_card_.assets.expanded = GDK_TEXTURE(g_object_ref(spread_texture));
+    } else {
+        const auto& source_assets = assets_[
+            style_index_for_realm(hit->realm_index)
+        ].cards[hit->card_index];
+        if (source_assets.compact == nullptr &&
+            source_assets.expanded == nullptr) {
+            return;
+        }
+        if (source_assets.compact != nullptr) {
+            drag_card_.assets.compact = GDK_TEXTURE(
+                g_object_ref(source_assets.compact)
+            );
+        }
+        if (source_assets.expanded != nullptr) {
+            drag_card_.assets.expanded = GDK_TEXTURE(
+                g_object_ref(source_assets.expanded)
+            );
+        }
     }
     drag_card_.compact_bounds = {
         compact.x, compact.y, compact.width, compact.height,
@@ -3921,10 +4485,10 @@ void WorkspaceOverviewOverlay::handle_drag_begin(double x, double y) {
     drag_card_.expanded_bounds = {
         expanded.x, expanded.y, expanded.width, expanded.height,
     };
-    drag_card_.address = card.address;
+    drag_card_.address = card->address;
     drag_card_.source_workspace_id = realm.workspace_id;
     drag_card_.card_index = hit->card_index;
-    drag_card_.activity = realm_activity(realm_height);
+    drag_card_.activity = drag_activity;
     drag_card_.armed = true;
 }
 
@@ -4032,16 +4596,46 @@ void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
     const double scale_y = static_cast<double>(height) / kReferenceHeight;
     const double reference_x = x / scale_x;
     const double reference_y = y / scale_y - viewport_visual_offset();
+    const auto tops = realm_tops(displayed_heights_);
+
+    if (overflow_workspace_id_ != 0 && overflow_animation_progress_ > 0.55) {
+        for (std::size_t index = 0; index < workspace_state_.size(); ++index) {
+            if (!overflow_expanded_for(index)) continue;
+            if (overflow_control_rect(tops[index]).contains(
+                    reference_x, reference_y)) {
+                collapse_overflow(false);
+                return;
+            }
+        }
+    }
+
     const auto card_realm = hit_realm_card(
         reference_x,
         reference_y,
         displayed_heights_,
-        workspace_state_
+        workspace_state_,
+        overflow_workspace_id_,
+        overflow_animation_progress_
     );
     if (card_realm.has_value()) {
         const auto& realm = workspace_state_[card_realm->realm_index];
+        if (card_realm->overflow) {
+            if (card_realm->card_index < realm.windows.size()) {
+                const auto& card = realm.windows[card_realm->card_index];
+                if (!card.address.empty() && activate_window_) {
+                    activate_window_(realm.workspace_id, card.address);
+                    hide();
+                }
+            }
+            return;
+        }
+
         const auto& card = realm.cards[card_realm->card_index];
-        if (!card.summary && !card.address.empty() && activate_window_) {
+        if (card.summary) {
+            expand_overflow(card_realm->realm_index);
+            return;
+        }
+        if (!card.address.empty() && activate_window_) {
             activate_window_(realm.workspace_id, card.address);
         } else if (activate_workspace_) {
             activate_workspace_(realm.workspace_id);
@@ -4058,6 +4652,18 @@ void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
     if (identity_realm.has_value()) {
         if (*identity_realm != active_index_) select_realm(*identity_realm);
         return;
+    }
+
+    if (overflow_workspace_id_ != 0) {
+        const auto realm = realm_index_at_point(
+            reference_x,
+            reference_y,
+            displayed_heights_
+        );
+        if (realm.has_value()) {
+            if (*realm != active_index_) select_realm(*realm);
+            return;
+        }
     }
     hide();
 }
@@ -4081,7 +4687,9 @@ void WorkspaceOverviewOverlay::handle_hover(double x, double y) {
         reference_x,
         reference_y,
         displayed_heights_,
-        workspace_state_
+        workspace_state_,
+        overflow_workspace_id_,
+        overflow_animation_progress_
     );
     if (card.has_value()) {
         select_realm(
@@ -4212,6 +4820,8 @@ void WorkspaceOverviewOverlay::release_assets() noexcept {
             g_clear_object(&card.compact);
             g_clear_object(&card.expanded);
         }
+        for (auto*& card : realm.spread_cards) g_clear_object(&card);
+        realm.spread_cards.clear();
     }
 }
 

@@ -140,19 +140,23 @@ WorkspaceOverviewState build_workspace_overview_state(
             workspace->windows,
             static_cast<int>(workspace->window_details.size())
         );
+        realm.windows.reserve(workspace->window_details.size());
+        for (const auto& window : workspace->window_details) {
+            realm.windows.push_back(make_window_card(window));
+        }
 
-        if (workspace->window_details.size() <= kWorkspaceOverviewCardLimit) {
-            realm.card_count = workspace->window_details.size();
+        if (realm.windows.size() <= kWorkspaceOverviewCardLimit) {
+            realm.card_count = realm.windows.size();
             for (std::size_t card = 0; card < realm.card_count; ++card) {
-                realm.cards[card] = make_window_card(workspace->window_details[card]);
+                realm.cards[card] = realm.windows[card];
             }
             continue;
         }
 
         realm.card_count = kWorkspaceOverviewCardLimit;
-        realm.cards[0] = make_window_card(workspace->window_details[0]);
-        realm.cards[1] = make_window_card(workspace->window_details[1]);
-        const auto hidden = workspace->window_details.size() - 2U;
+        realm.cards[0] = realm.windows[0];
+        realm.cards[1] = realm.windows[1];
+        const auto hidden = realm.windows.size() - 2U;
         realm.cards[2] = {
             {},
             "view-more-symbolic",
@@ -171,7 +175,8 @@ bool same_workspace_overview_cards(
 ) noexcept {
     if (left.workspace_id != right.workspace_id ||
         left.total_windows != right.total_windows ||
-        left.card_count != right.card_count) {
+        left.card_count != right.card_count ||
+        left.windows != right.windows) {
         return false;
     }
     for (std::size_t index = 0; index < left.card_count; ++index) {
