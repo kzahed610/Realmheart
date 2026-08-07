@@ -1,6 +1,10 @@
 #pragma once
 
+#include "effects/core/TransitionTimeline.hpp"
 #include "ui/workspace/WorkspaceOverviewModel.hpp"
+#include "ui/workspace/animation/WorkspaceMorphDiagnostics.hpp"
+#include "ui/workspace/animation/WorkspaceMorphModel.hpp"
+#include "ui/workspace/animation/WorkspaceOverviewMorphRenderer.hpp"
 
 #include <array>
 #include <functional>
@@ -9,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace realmheart::ui::workspace {
 
@@ -19,7 +24,9 @@ public:
         GtkApplication* app,
         std::function<void(int)> activate_workspace = {},
         std::function<void(int, std::string)> activate_window = {},
-        std::function<void(int, std::string)> move_window = {}
+        std::function<void(int, std::string)> move_window = {},
+        std::function<void(bool)> set_taskbar_morph_active = {},
+        std::function<void(double)> set_taskbar_morph_progress = {}
     );
     ~WorkspaceOverviewOverlay();
 
@@ -30,6 +37,9 @@ public:
     void hide();
     void toggle();
     void set_workspace_snapshot(const services::WorkspaceSnapshot& snapshot);
+    void set_morph_sources(
+        std::vector<animation::WorkspaceMorphSource> sources
+    );
 
     [[nodiscard]] bool visible() const;
 
@@ -109,10 +119,22 @@ private:
     [[nodiscard]] std::optional<graphene_rect_t>
         selected_card_outline_bounds() const;
     void finish_selection_transition() noexcept;
+    void stop_content_animations(bool snap_to_target) noexcept;
     void stop_animation(bool snap_to_target) noexcept;
     void prepare_card_transition(const WorkspaceOverviewState& next);
     void finish_card_transition() noexcept;
     void ensure_animation_tick();
+    void set_morph_input_enabled(bool enabled) noexcept;
+    void capture_morph_geometry() noexcept;
+    void schedule_morph_shader_capture() noexcept;
+    void try_begin_morph_shader() noexcept;
+    void update_morph_shader() noexcept;
+    void finish_morph_endpoint() noexcept;
+    [[nodiscard]] bool morph_interactive() const noexcept;
+    [[nodiscard]] animation::WorkspaceMorphLayout morph_layout(
+        double scale_x,
+        double scale_y
+    ) const noexcept;
     void initialize_separator_nodes();
     void release_separator_nodes() noexcept;
     void synchronize_active_workspace();
@@ -131,7 +153,10 @@ private:
     void release_assets() noexcept;
 
     GtkWindow* window_ = nullptr;
+    GtkWidget* overlay_stack_ = nullptr;
     GtkWidget* canvas_ = nullptr;
+    animation::WorkspaceOverviewMorphRenderer morph_renderer_{};
+    animation::WorkspaceMorphDiagnostics morph_diagnostics_{};
     std::array<RealmAssets, kWorkspaceOverviewRealmCount> assets_{};
     WorkspaceOverviewState workspace_state_{};
     std::array<bool, kWorkspaceOverviewRealmCount> overlay_dirty_{{
@@ -151,6 +176,13 @@ private:
     std::function<void(int)> activate_workspace_;
     std::function<void(int, std::string)> activate_window_;
     std::function<void(int, std::string)> move_window_;
+    std::function<void(bool)> set_taskbar_morph_active_;
+    std::function<void(double)> set_taskbar_morph_progress_;
+    std::vector<animation::WorkspaceMorphSource> morph_sources_;
+    std::array<int, animation::kWorkspaceMorphBandCount> morph_workspace_ids_{};
+    std::array<double, animation::kWorkspaceMorphBandCount>
+        morph_destination_heights_{};
+    effects::TransitionTimeline morph_timeline_{{0.50, 0.34}};
     std::unordered_map<std::string, cairo_surface_t*> icon_surfaces_;
     DragCard drag_card_{};
     int drag_target_index_ = -1;
@@ -164,6 +196,7 @@ private:
     gint64 card_animation_start_time_us_ = 0;
     gint64 selection_animation_start_time_us_ = 0;
     gint64 viewport_animation_start_time_us_ = 0;
+    gint64 morph_last_frame_time_us_ = 0;
     graphene_rect_t selection_outline_start_bounds_{};
     double card_animation_progress_ = 1.0;
     double selection_animation_progress_ = 1.0;
@@ -175,6 +208,11 @@ private:
     bool viewport_animation_active_ = false;
     bool selection_outline_has_start_bounds_ = false;
     bool assets_attempted_ = false;
+    bool taskbar_morph_active_ = false;
+    bool morph_geometry_frozen_ = false;
+    bool morph_shader_capture_pending_ = false;
+    bool morph_shader_failed_for_transition_ = false;
+    bool force_native_capture_ = false;
 };
 
 } // namespace realmheart::ui::workspace

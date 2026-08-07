@@ -71,6 +71,7 @@ WorkspaceRune::WorkspaceRune(
 
     g_signal_connect(button_, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
         auto* self = static_cast<WorkspaceRune*>(data);
+        if (self->morph_suppressed_) return;
         if (self->on_activate_) self->on_activate_(self->state_.id);
     }), this);
 
@@ -83,6 +84,7 @@ WorkspaceRune::WorkspaceRune(
         GtkGestureClick*, int, double, double, gpointer data
     ) {
         auto* self = static_cast<WorkspaceRune*>(data);
+        if (self->morph_suppressed_) return;
         self->cancel_preview_hide();
         gtk_popover_popdown(GTK_POPOVER(self->popover_));
         if (self->on_right_click_) self->on_right_click_();
@@ -106,6 +108,7 @@ WorkspaceRune::WorkspaceRune(
         GtkEventControllerMotion*, double, double, gpointer data
     ) {
         auto* self = static_cast<WorkspaceRune*>(data);
+        if (self->morph_suppressed_) return;
         self->set_hovered(true);
         self->show_preview();
     }), this);
@@ -164,6 +167,42 @@ void WorkspaceRune::update(const services::WorkspaceState& state) {
     // the pointer rests on the rune, so explicitly leave tooltips disabled.
     gtk_widget_set_tooltip_text(button_, nullptr);
     rebuild_preview();
+}
+
+void WorkspaceRune::set_morph_suppressed(bool suppressed) {
+    if (morph_suppressed_ == suppressed) return;
+    morph_suppressed_ = suppressed;
+
+    if (suppressed) {
+        cancel_preview_hide();
+        gtk_popover_popdown(GTK_POPOVER(popover_));
+        hover_target_ = 0.0;
+        hover_progress_ = 0.0;
+        hover_last_frame_us_ = 0;
+        if (hover_tick_id_ != 0) {
+            gtk_widget_remove_tick_callback(drawing_area_, hover_tick_id_);
+            hover_tick_id_ = 0;
+        }
+    }
+
+    gtk_widget_set_can_target(button_, !suppressed);
+    gtk_widget_queue_draw(drawing_area_);
+}
+
+void WorkspaceRune::set_morph_visual_opacity(double opacity) {
+    if (drawing_area_ == nullptr) return;
+    const double clamped = std::clamp(opacity, 0.0, 1.0);
+    gtk_widget_set_opacity(drawing_area_, clamped);
+}
+
+bool WorkspaceRune::compute_artwork_bounds(
+    GtkWidget* target,
+    graphene_rect_t* bounds
+) const {
+    if (drawing_area_ == nullptr || target == nullptr || bounds == nullptr) {
+        return false;
+    }
+    return gtk_widget_compute_bounds(drawing_area_, target, bounds);
 }
 
 void WorkspaceRune::draw(GtkDrawingArea* area, cairo_t* cr, int width, int height, gpointer data) {
@@ -230,6 +269,7 @@ void WorkspaceRune::draw(GtkDrawingArea* area, cairo_t* cr, int width, int heigh
 }
 
 void WorkspaceRune::set_hovered(bool hovered) {
+    if (morph_suppressed_) return;
     hover_target_ = hovered ? 1.0 : 0.0;
     start_hover_animation();
 }
@@ -306,12 +346,14 @@ void WorkspaceRune::rebuild_preview() {
 }
 
 void WorkspaceRune::show_preview() {
+    if (morph_suppressed_) return;
     cancel_preview_hide();
     if (request_exclusive_open_) request_exclusive_open_(GTK_POPOVER(popover_));
     reveal_popover(GTK_POPOVER(popover_), kPreviewOffsetX, kPreviewOffsetY);
 }
 
 void WorkspaceRune::schedule_preview_hide() {
+    if (morph_suppressed_) return;
     cancel_preview_hide();
     hide_timer_id_ = g_timeout_add(140, +[](gpointer data) -> gboolean {
         auto* self = static_cast<WorkspaceRune*>(data);

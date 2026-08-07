@@ -454,11 +454,70 @@ void VerticalBar::request_workspace_overview_toggle() {
     if (toggle_workspace_overview_) toggle_workspace_overview_();
 }
 
+std::vector<workspace::animation::WorkspaceMorphSource>
+VerticalBar::workspace_morph_sources() const {
+    std::vector<workspace::animation::WorkspaceMorphSource> sources;
+    sources.reserve(workspace_runes_.size());
+    if (window_ == nullptr) return sources;
+
+    for (const auto& rune : workspace_runes_) {
+        if (rune == nullptr) continue;
+        graphene_rect_t bounds{};
+        if (!rune->compute_artwork_bounds(window_, &bounds)) continue;
+        sources.push_back({
+            rune->workspace_id(),
+            {
+                static_cast<double>(bounds.origin.x),
+                static_cast<double>(bounds.origin.y),
+                static_cast<double>(bounds.size.width),
+                static_cast<double>(bounds.size.height),
+            },
+            rune->active(),
+            rune->occupied(),
+        });
+    }
+    return sources;
+}
+
+void VerticalBar::set_workspace_morph_active(bool active) {
+    workspace_morph_active_ = active;
+    if (!active) {
+        set_workspace_morph_progress(0.0);
+    }
+    if (active) {
+        if (media_widget_ != nullptr) media_widget_->close();
+        if (system_monitor_widget_ != nullptr) system_monitor_widget_->close();
+
+        GObject* current = static_cast<GObject*>(
+            g_weak_ref_get(&active_popover_ref_)
+        );
+        if (current != nullptr) {
+            gtk_popover_popdown(GTK_POPOVER(current));
+        }
+        g_clear_object(&current);
+        g_weak_ref_set(&active_popover_ref_, nullptr);
+    }
+
+    for (const auto& rune : workspace_runes_) {
+        if (rune != nullptr) rune->set_morph_suppressed(active);
+    }
+}
+
+
+void VerticalBar::set_workspace_morph_progress(double progress) {
+    workspace_morph_progress_ = std::clamp(progress, 0.0, 1.0);
+    const double opacity =
+        workspace::animation::workspace_morph_rune_opacity(
+            workspace_morph_progress_
+        );
+    for (const auto& rune : workspace_runes_) {
+        if (rune != nullptr) rune->set_morph_visual_opacity(opacity);
+    }
+}
 
 void VerticalBar::activate_workspace(int workspace_id) {
     constexpr int kMinimumWorkspaceId = 1;
-    constexpr int kMaximumWorkspaceId = 5;
-    if (workspace_id < kMinimumWorkspaceId || workspace_id > kMaximumWorkspaceId) return;
+    if (workspace_id < kMinimumWorkspaceId) return;
 
     // Dispatch outside GTK's main loop. hyprctl normally returns quickly, but
     // a compositor IPC hiccup must never stall pointer handling or animation.
@@ -627,6 +686,12 @@ void VerticalBar::apply_workspaces(services::WorkspaceSnapshot snapshot) {
             [this](int workspace_id) { activate_workspace(workspace_id); },
             [this] { request_workspace_overview_toggle(); },
             [this](GtkPopover* popover) { open_exclusive_popover(popover); }
+        );
+        rune->set_morph_suppressed(workspace_morph_active_);
+        rune->set_morph_visual_opacity(
+            workspace::animation::workspace_morph_rune_opacity(
+                workspace_morph_progress_
+            )
         );
         gtk_box_append(GTK_BOX(workspace_box_), rune->widget());
         workspace_runes_.push_back(std::move(rune));

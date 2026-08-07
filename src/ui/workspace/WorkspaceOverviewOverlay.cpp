@@ -2,6 +2,8 @@
 #include "ui/AssetResolver.hpp"
 #include "ui/LayerSurface.hpp"
 #include "ui/bar/BarGeometry.hpp"
+#include "ui/workspace/animation/WorkspaceMorphFrontier.hpp"
+#include "ui/workspace/animation/WorkspaceMorphPresentation.hpp"
 
 #include <pango/pangocairo.h>
 
@@ -66,6 +68,29 @@ void realmheart_workspace_overview_canvas_init(
 ) {
     self->draw_func = nullptr;
     self->user_data = nullptr;
+}
+
+void install_workspace_overview_transparency(GtkWidget* widget) {
+    if (widget == nullptr) return;
+    GdkDisplay* display = gtk_widget_get_display(widget);
+    if (display == nullptr) return;
+
+    GtkCssProvider* provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(
+        provider,
+        animation::kWorkspaceOverviewTransparentCss.data()
+    );
+    gtk_style_context_add_provider_for_display(
+        display,
+        GTK_STYLE_PROVIDER(provider),
+        GTK_STYLE_PROVIDER_PRIORITY_USER + 1U
+    );
+    g_object_unref(provider);
+}
+
+[[nodiscard]] double monotonic_seconds() noexcept {
+    return static_cast<double>(g_get_monotonic_time()) /
+        static_cast<double>(G_USEC_PER_SEC);
 }
 
 GtkWidget* overview_canvas_new(
@@ -340,6 +365,235 @@ void rounded_rectangle(
     );
     cairo_close_path(cr);
 }
+
+[[nodiscard]] GskPath* create_workspace_frontier_reveal_path(
+    const animation::WorkspaceMorphFrontier& frontier
+) {
+    if (frontier.points.empty()) return nullptr;
+    GskPathBuilder* builder = gsk_path_builder_new();
+    gsk_path_builder_move_to(
+        builder,
+        static_cast<float>(frontier.reveal_left_x),
+        static_cast<float>(frontier.points.front().y)
+    );
+    for (const auto& point : frontier.points) {
+        gsk_path_builder_line_to(
+            builder,
+            static_cast<float>(point.x),
+            static_cast<float>(point.y)
+        );
+    }
+    gsk_path_builder_line_to(
+        builder,
+        static_cast<float>(frontier.reveal_left_x),
+        static_cast<float>(frontier.points.back().y)
+    );
+    gsk_path_builder_close(builder);
+    return gsk_path_builder_free_to_path(builder);
+}
+
+[[nodiscard]] GskPath* create_workspace_frontier_band_path(
+    const animation::WorkspaceMorphFrontier& frontier,
+    double half_width
+) {
+    if (frontier.points.empty() || half_width <= 0.0) return nullptr;
+
+    // A blunt closed band leaves a horizontal cap at the top and bottom of
+    // every realm frontier. Once blurred, those caps read as the tiny pale
+    // separator bars visible during Opening/Closing. Taper both ends to a
+    // single point instead: the travelling edge stays just as bright, but
+    // there is no horizontal segment for the blur to illuminate.
+    const auto& first = frontier.points.front();
+    const auto& last = frontier.points.back();
+    const double taper = std::max(half_width * 1.35, 2.0);
+
+    GskPathBuilder* builder = gsk_path_builder_new();
+    gsk_path_builder_move_to(
+        builder,
+        static_cast<float>(first.x),
+        static_cast<float>(first.y - taper)
+    );
+    gsk_path_builder_line_to(
+        builder,
+        static_cast<float>(first.x - half_width),
+        static_cast<float>(first.y)
+    );
+    for (std::size_t index = 1; index < frontier.points.size(); ++index) {
+        const auto& point = frontier.points[index];
+        gsk_path_builder_line_to(
+            builder,
+            static_cast<float>(point.x - half_width),
+            static_cast<float>(point.y)
+        );
+    }
+    gsk_path_builder_line_to(
+        builder,
+        static_cast<float>(last.x),
+        static_cast<float>(last.y + taper)
+    );
+    for (std::size_t index = frontier.points.size(); index > 0; --index) {
+        const auto& point = frontier.points[index - 1U];
+        gsk_path_builder_line_to(
+            builder,
+            static_cast<float>(point.x + half_width),
+            static_cast<float>(point.y)
+        );
+    }
+    gsk_path_builder_close(builder);
+    return gsk_path_builder_free_to_path(builder);
+}
+
+void append_workspace_frontier_particles(
+    GtkSnapshot* snapshot,
+    const animation::WorkspaceMorphFrontier& frontier,
+    const RealmStyle& style,
+    std::size_t style_index
+) {
+    for (std::size_t index = 0; index < frontier.particles.size(); ++index) {
+        const auto& particle = frontier.particles[index];
+        if (particle.opacity <= 0.001 || particle.width <= 0.0 ||
+            particle.height <= 0.0) {
+            continue;
+        }
+        const GdkRGBA color{
+            static_cast<float>(index % 3U == 0U
+                ? style.accent_soft.red
+                : style.accent.red),
+            static_cast<float>(index % 3U == 0U
+                ? style.accent_soft.green
+                : style.accent.green),
+            static_cast<float>(index % 3U == 0U
+                ? style.accent_soft.blue
+                : style.accent.blue),
+            static_cast<float>(particle.opacity),
+        };
+
+        if (style_index % 4U == 3U && index % 3U == 0U) {
+            GskPathBuilder* builder = gsk_path_builder_new();
+            gsk_path_builder_move_to(
+                builder,
+                static_cast<float>(particle.x),
+                static_cast<float>(particle.y - particle.height * 0.5)
+            );
+            gsk_path_builder_line_to(
+                builder,
+                static_cast<float>(particle.x + particle.width * 0.65),
+                static_cast<float>(particle.y)
+            );
+            gsk_path_builder_line_to(
+                builder,
+                static_cast<float>(particle.x),
+                static_cast<float>(particle.y + particle.height * 0.5)
+            );
+            gsk_path_builder_line_to(
+                builder,
+                static_cast<float>(particle.x - particle.width * 0.35),
+                static_cast<float>(particle.y)
+            );
+            gsk_path_builder_close(builder);
+            GskPath* shard = gsk_path_builder_free_to_path(builder);
+            gtk_snapshot_append_fill(
+                snapshot,
+                shard,
+                GSK_FILL_RULE_WINDING,
+                &color
+            );
+            gsk_path_unref(shard);
+            continue;
+        }
+
+        const graphene_rect_t bounds = GRAPHENE_RECT_INIT(
+            static_cast<float>(particle.x),
+            static_cast<float>(particle.y - particle.height * 0.5),
+            static_cast<float>(particle.width),
+            static_cast<float>(particle.height)
+        );
+        gtk_snapshot_append_color(snapshot, &color, &bounds);
+    }
+}
+
+void append_workspace_native_frontier(
+    GtkSnapshot* snapshot,
+    const animation::WorkspaceMorphFrontier& frontier,
+    const RealmStyle& style,
+    std::size_t style_index
+) {
+    if (frontier.glow_opacity <= 0.001 &&
+        frontier.core_opacity <= 0.001) {
+        return;
+    }
+
+    GskPath* glow = create_workspace_frontier_band_path(
+        frontier,
+        frontier.glow_half_width
+    );
+    GskPath* core = create_workspace_frontier_band_path(
+        frontier,
+        frontier.core_half_width
+    );
+    GskPath* highlight = create_workspace_frontier_band_path(
+        frontier,
+        std::max(0.7, frontier.core_half_width * 0.34)
+    );
+    if (glow == nullptr || core == nullptr || highlight == nullptr) {
+        if (glow != nullptr) gsk_path_unref(glow);
+        if (core != nullptr) gsk_path_unref(core);
+        if (highlight != nullptr) gsk_path_unref(highlight);
+        return;
+    }
+
+    const GdkRGBA glow_color{
+        static_cast<float>(style.accent.red),
+        static_cast<float>(style.accent.green),
+        static_cast<float>(style.accent.blue),
+        static_cast<float>(frontier.glow_opacity * 0.48),
+    };
+    gtk_snapshot_push_blur(snapshot, 11.0F);
+    gtk_snapshot_append_fill(
+        snapshot,
+        glow,
+        GSK_FILL_RULE_WINDING,
+        &glow_color
+    );
+    gtk_snapshot_pop(snapshot);
+
+    const GdkRGBA core_color{
+        static_cast<float>(style.accent.red),
+        static_cast<float>(style.accent.green),
+        static_cast<float>(style.accent.blue),
+        static_cast<float>(frontier.core_opacity * 0.86),
+    };
+    gtk_snapshot_append_fill(
+        snapshot,
+        core,
+        GSK_FILL_RULE_WINDING,
+        &core_color
+    );
+
+    const GdkRGBA highlight_color{
+        static_cast<float>(style.accent_soft.red),
+        static_cast<float>(style.accent_soft.green),
+        static_cast<float>(style.accent_soft.blue),
+        static_cast<float>(frontier.core_opacity),
+    };
+    gtk_snapshot_append_fill(
+        snapshot,
+        highlight,
+        GSK_FILL_RULE_WINDING,
+        &highlight_color
+    );
+
+    gsk_path_unref(glow);
+    gsk_path_unref(core);
+    gsk_path_unref(highlight);
+    append_workspace_frontier_particles(
+        snapshot,
+        frontier,
+        style,
+        style_index
+    );
+}
+
 
 void draw_text(
     cairo_t* cr,
@@ -1154,10 +1408,9 @@ void append_identity_layout(
     std::size_t boundary_index,
     std::size_t boundary_style_index
 ) {
-    constexpr std::array<std::pair<double, double>, 4> kLayerOffsets{{
+    constexpr std::array<std::pair<double, double>, 3> kLayerOffsets{{
         {-9.5, 9.5},
         {-7.4, 7.4},
-        {-7.4, -5.4},
         {5.4, 7.4},
     }};
     constexpr std::array<GdkRGBA, 4> kBodyColors{{
@@ -1165,12 +1418,6 @@ void append_identity_layout(
         {0.035F, 0.095F, 0.115F, 0.72F},
         {0.075F, 0.095F, 0.055F, 0.72F},
         {0.115F, 0.080F, 0.048F, 0.72F},
-    }};
-    constexpr std::array<GdkRGBA, 4> kUpperAccentColors{{
-        {0.86F, 0.53F, 0.27F, 0.58F},
-        {0.60F, 0.85F, 0.90F, 0.56F},
-        {0.62F, 0.72F, 0.50F, 0.54F},
-        {0.90F, 0.67F, 0.36F, 0.56F},
     }};
     constexpr std::array<GdkRGBA, 4> kLowerAccentColors{{
         {0.55F, 0.30F, 0.16F, 0.22F},
@@ -1182,10 +1429,9 @@ void append_identity_layout(
         boundary_style_index >= kWorkspaceOverviewRealmCount) {
         return nullptr;
     }
-    const std::array<GdkRGBA, 4> colors{{
+    const std::array<GdkRGBA, 3> colors{{
         {0.0F, 0.0F, 0.0F, 0.07F},
         kBodyColors[boundary_style_index],
-        kUpperAccentColors[boundary_style_index],
         kLowerAccentColors[boundary_style_index],
     }};
 
@@ -1287,17 +1533,26 @@ void append_card_texture_pair(
     double activity,
     double opacity
 ) {
-    append_texture_with_opacity(
-        snapshot,
-        compact,
+    if (opacity <= 0.001) return;
+
+    const double t = std::clamp(activity, 0.0, 1.0);
+    const Rect current_bounds = lerp_rect(
         compact_bounds,
-        opacity * (1.0 - activity)
+        expanded_bounds,
+        t
     );
+
+    // Never crossfade two differently-sized card textures during realm hover.
+    // Their simultaneous resampling is the soft/ghosted "blur" visible while
+    // a workspace expands or contracts. Pick the texture whose native state is
+    // closest to the current geometry and scale exactly one image instead.
+    GdkTexture* texture = t < 0.5 ? compact : expanded;
+    if (texture == nullptr) texture = compact != nullptr ? compact : expanded;
     append_texture_with_opacity(
         snapshot,
-        expanded,
-        expanded_bounds,
-        opacity * activity
+        texture,
+        current_bounds,
+        opacity
     );
 }
 
@@ -1539,10 +1794,14 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(
     GtkApplication* app,
     std::function<void(int)> activate_workspace,
     std::function<void(int, std::string)> activate_window,
-    std::function<void(int, std::string)> move_window
+    std::function<void(int, std::string)> move_window,
+    std::function<void(bool)> set_taskbar_morph_active,
+    std::function<void(double)> set_taskbar_morph_progress
 ) : activate_workspace_(std::move(activate_workspace)),
     activate_window_(std::move(activate_window)),
-    move_window_(std::move(move_window)) {
+    move_window_(std::move(move_window)),
+    set_taskbar_morph_active_(std::move(set_taskbar_morph_active)),
+    set_taskbar_morph_progress_(std::move(set_taskbar_morph_progress)) {
     workspace_state_ = build_workspace_overview_state({});
     initialize_separator_nodes();
     displayed_heights_ = target_realm_heights(active_index_);
@@ -1558,16 +1817,33 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(
     gtk_window_set_title(window_, "Realmheart Workspace Overview");
     gtk_window_set_decorated(window_, FALSE);
     gtk_window_set_resizable(window_, TRUE);
-    gtk_widget_add_css_class(GTK_WIDGET(window_), "realmheart-workspace-overview-window");
+    gtk_widget_add_css_class(
+        GTK_WIDGET(window_),
+        "realmheart-workspace-overview-window"
+    );
+    gtk_widget_remove_css_class(GTK_WIDGET(window_), "background");
+    install_workspace_overview_transparency(GTK_WIDGET(window_));
+    morph_diagnostics_.set_enabled(
+        animation::workspace_morph_diagnostics_enabled()
+    );
 
     LayerSurfaceSpec spec;
     spec.surface_namespace = "realmheart-workspace-overview";
+    // The Aether Spine owns the overlay layer and must remain visible while
+    // the realms materialize.  Keep the overview one layer below it while
+    // still using the full-output coordinate space, so captured rune x/y
+    // coordinates remain exact without allowing the overview to cover the bar.
     spec.layer = LayerSurfaceLevel::Top;
     spec.keyboard_mode = LayerKeyboardMode::OnDemand;
     spec.anchor_left = true;
     spec.anchor_right = true;
     spec.anchor_top = true;
     spec.anchor_bottom = true;
+    // The morph must share the monitor coordinate space with the Aether Spine.
+    // A normal zone-0 layer surface is laid out inside the bar's 56 px
+    // exclusive zone, which visibly kicks every captured rune to the right.
+    // -1 asks layer-shell to use the full output, including reserved edges.
+    spec.exclusive_zone = -1;
     spec.margin_left = 0;
     apply_layer_surface(window_, spec);
 
@@ -1578,6 +1854,7 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(
     gtk_widget_set_hexpand(canvas_, TRUE);
     gtk_widget_set_vexpand(canvas_, TRUE);
     gtk_widget_set_focusable(canvas_, TRUE);
+    gtk_widget_add_css_class(canvas_, "realmheart-workspace-overview-canvas");
 
     GtkEventController* keys = gtk_event_controller_key_new();
     gtk_event_controller_set_propagation_phase(keys, GTK_PHASE_CAPTURE);
@@ -1679,12 +1956,36 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(
     );
     gtk_widget_add_controller(canvas_, motion);
 
-    gtk_window_set_child(window_, canvas_);
+    overlay_stack_ = gtk_overlay_new();
+    gtk_widget_add_css_class(
+        overlay_stack_,
+        "realmheart-workspace-overview-stack"
+    );
+    gtk_widget_set_hexpand(overlay_stack_, TRUE);
+    gtk_widget_set_vexpand(overlay_stack_, TRUE);
+    gtk_overlay_set_child(GTK_OVERLAY(overlay_stack_), canvas_);
+    gtk_overlay_add_overlay(
+        GTK_OVERLAY(overlay_stack_),
+        morph_renderer_.widget()
+    );
+    gtk_overlay_set_measure_overlay(
+        GTK_OVERLAY(overlay_stack_),
+        morph_renderer_.widget(),
+        FALSE
+    );
+    gtk_window_set_child(window_, overlay_stack_);
+    set_morph_input_enabled(false);
     gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
 }
 
 WorkspaceOverviewOverlay::~WorkspaceOverviewOverlay() {
+    if (set_taskbar_morph_progress_) set_taskbar_morph_progress_(0.0);
+    if (taskbar_morph_active_ && set_taskbar_morph_active_) {
+        set_taskbar_morph_active_(false);
+        taskbar_morph_active_ = false;
+    }
     stop_animation(false);
+    morph_renderer_.finish();
     reset_drag();
     overview_canvas_clear(canvas_);
     release_assets();
@@ -1694,6 +1995,7 @@ WorkspaceOverviewOverlay::~WorkspaceOverviewOverlay() {
         gtk_window_destroy(window_);
         window_ = nullptr;
     }
+    overlay_stack_ = nullptr;
     canvas_ = nullptr;
 }
 
@@ -1758,11 +2060,197 @@ void WorkspaceOverviewOverlay::ensure_animation_tick() {
     );
 }
 
+void WorkspaceOverviewOverlay::set_morph_sources(
+    std::vector<animation::WorkspaceMorphSource> sources
+) {
+    if (morph_timeline_.active()) return;
+    morph_sources_ = std::move(sources);
+}
+
+void WorkspaceOverviewOverlay::set_morph_input_enabled(bool enabled) noexcept {
+    if (canvas_ == nullptr) return;
+    gtk_widget_set_can_target(canvas_, enabled);
+}
+
+bool WorkspaceOverviewOverlay::morph_interactive() const noexcept {
+    return morph_timeline_.state() == effects::TransitionState::Visible;
+}
+
+animation::WorkspaceMorphLayout WorkspaceOverviewOverlay::morph_layout(
+    double scale_x,
+    double scale_y
+) const noexcept {
+    std::array<int, animation::kWorkspaceMorphBandCount> workspace_ids{};
+    std::array<double, animation::kWorkspaceMorphBandCount>
+        destination_heights{};
+    if (morph_geometry_frozen_) {
+        workspace_ids = morph_workspace_ids_;
+        destination_heights = morph_destination_heights_;
+    } else {
+        for (std::size_t index = 0; index < workspace_ids.size(); ++index) {
+            workspace_ids[index] = workspace_state_[index].workspace_id;
+        }
+        destination_heights = displayed_heights_;
+    }
+
+    return animation::build_workspace_morph_layout(
+        workspace_ids,
+        destination_heights,
+        animation::scale_workspace_morph_sources_to_reference(
+            morph_sources_,
+            scale_x,
+            scale_y
+        ),
+        kReferenceWidth,
+        kReferenceHeight
+    );
+}
+
+void WorkspaceOverviewOverlay::capture_morph_geometry() noexcept {
+    for (std::size_t index = 0; index < morph_workspace_ids_.size(); ++index) {
+        morph_workspace_ids_[index] = workspace_state_[index].workspace_id;
+    }
+    morph_destination_heights_ = displayed_heights_;
+    morph_geometry_frozen_ = true;
+}
+
+void WorkspaceOverviewOverlay::schedule_morph_shader_capture() noexcept {
+    if (morph_renderer_.active()) return;
+    morph_shader_capture_pending_ = true;
+    morph_shader_failed_for_transition_ = false;
+}
+
+void WorkspaceOverviewOverlay::try_begin_morph_shader() noexcept {
+    if (!morph_shader_capture_pending_ || morph_renderer_.active() ||
+        morph_shader_failed_for_transition_ || canvas_ == nullptr ||
+        overlay_stack_ == nullptr) {
+        return;
+    }
+
+    const int width = gtk_widget_get_width(canvas_);
+    const int height = gtk_widget_get_height(canvas_);
+    GtkNative* native = gtk_widget_get_native(overlay_stack_);
+    if (width <= 0 || height <= 0 || native == nullptr ||
+        gtk_native_get_renderer(native) == nullptr) {
+        return;
+    }
+
+    const double scale_x = static_cast<double>(width) / kReferenceWidth;
+    const double scale_y = static_cast<double>(height) / kReferenceHeight;
+    const auto layout = morph_layout(scale_x, scale_y);
+    const auto geometry = animation::build_workspace_morph_shader_geometry(
+        layout
+    );
+
+    force_native_capture_ = true;
+    std::string error;
+    const bool started = morph_renderer_.begin(
+        overlay_stack_,
+        canvas_,
+        morph_timeline_.target_visible(),
+        geometry,
+        {},
+        &error
+    );
+    force_native_capture_ = false;
+    morph_shader_capture_pending_ = false;
+
+    if (!started) {
+        morph_shader_failed_for_transition_ = true;
+        morph_diagnostics_.note_shader_failed();
+        std::cerr << "[Realmheart workspace morph] Geometry fallback: "
+                  << error << '\n';
+        return;
+    }
+    morph_diagnostics_.note_shader_started(
+        morph_renderer_.transient_source_bytes()
+    );
+    update_morph_shader();
+}
+
+void WorkspaceOverviewOverlay::update_morph_shader() noexcept {
+    if (morph_renderer_.failed()) {
+        morph_diagnostics_.note_shader_failed();
+        return;
+    }
+    if (!morph_renderer_.active() || canvas_ == nullptr) return;
+    const int width = gtk_widget_get_width(canvas_);
+    const int height = gtk_widget_get_height(canvas_);
+    if (width <= 0 || height <= 0) return;
+
+    const double scale_x = static_cast<double>(width) / kReferenceWidth;
+    const double scale_y = static_cast<double>(height) / kReferenceHeight;
+    const auto layout = morph_layout(scale_x, scale_y);
+    const auto frame = animation::sample_workspace_morph_frame(
+        layout,
+        morph_timeline_.progress()
+    );
+    morph_renderer_.update(
+        morph_timeline_.progress(),
+        morph_timeline_.target_visible(),
+        animation::build_workspace_morph_shader_frame(layout, frame)
+    );
+    morph_diagnostics_.note_transient_bytes(
+        morph_renderer_.transient_source_bytes()
+    );
+    if (morph_renderer_.frame_ready()) {
+        morph_diagnostics_.note_shader_ready(
+            morph_renderer_.transient_source_bytes()
+        );
+    }
+}
+
+void WorkspaceOverviewOverlay::finish_morph_endpoint() noexcept {
+    morph_last_frame_time_us_ = 0;
+    morph_shader_capture_pending_ = false;
+    morph_shader_failed_for_transition_ = false;
+    force_native_capture_ = false;
+    morph_diagnostics_.note_transient_bytes(
+        morph_renderer_.transient_source_bytes()
+    );
+    if (morph_renderer_.failed()) {
+        morph_diagnostics_.note_shader_failed();
+    }
+    morph_renderer_.finish();
+    if (morph_diagnostics_.active()) {
+        const auto diagnostics = morph_diagnostics_.finish(
+            morph_timeline_.state() == effects::TransitionState::Visible,
+            monotonic_seconds(),
+            animation::workspace_morph_process_rss_kib(),
+            morph_renderer_.transient_source_bytes()
+        );
+        std::cerr << "[Realmheart workspace morph] "
+                  << animation::format_workspace_morph_diagnostics(diagnostics)
+                  << '\n';
+    }
+    morph_geometry_frozen_ = false;
+    if (set_taskbar_morph_progress_) {
+        set_taskbar_morph_progress_(morph_timeline_.progress());
+    }
+    if (morph_timeline_.state() == effects::TransitionState::Visible) {
+        set_morph_input_enabled(true);
+        if (canvas_ != nullptr) gtk_widget_grab_focus(canvas_);
+        return;
+    }
+    if (morph_timeline_.state() != effects::TransitionState::Hidden) return;
+
+    set_morph_input_enabled(false);
+    if (window_ != nullptr) {
+        gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
+    }
+    if (taskbar_morph_active_) {
+        if (set_taskbar_morph_active_) set_taskbar_morph_active_(false);
+        taskbar_morph_active_ = false;
+    }
+}
+
 void WorkspaceOverviewOverlay::prepare_card_transition(
     const WorkspaceOverviewState& next
 ) {
     finish_card_transition();
-    if (!visible() || !assets_attempted_ || !asset_error_.empty()) return;
+    if (!morph_interactive() || !assets_attempted_ || !asset_error_.empty()) {
+        return;
+    }
 
     bool has_motion = false;
     for (std::size_t realm = 0; realm < workspace_state_.size(); ++realm) {
@@ -1841,7 +2329,7 @@ double WorkspaceOverviewOverlay::viewport_visual_offset() const noexcept {
 }
 
 void WorkspaceOverviewOverlay::begin_viewport_transition(int direction) {
-    if (!visible() || direction == 0) {
+    if (!morph_interactive() || direction == 0) {
         viewport_transition_direction_ = 0;
         viewport_animation_start_time_us_ = 0;
         viewport_animation_progress_ = 1.0;
@@ -1859,7 +2347,7 @@ void WorkspaceOverviewOverlay::synchronize_active_workspace() {
     for (std::size_t index = 0; index < workspace_state_.size(); ++index) {
         if (!workspace_state_[index].active) continue;
         active_index_ = static_cast<int>(index);
-        stop_animation(false);
+        stop_content_animations(false);
         displayed_heights_ = target_realm_heights(active_index_);
         animation_start_heights_ = displayed_heights_;
         animation_target_heights_ = displayed_heights_;
@@ -2143,7 +2631,7 @@ void WorkspaceOverviewOverlay::set_workspace_snapshot(
     workspace_state_ = std::move(next);
     viewport_start_workspace_id_ = next_viewport_start;
 
-    if (!visible()) {
+    if (!morph_interactive()) {
         synchronize_active_workspace();
     } else {
         const bool active_workspace_changed = snapshot.active_id !=
@@ -2179,23 +2667,77 @@ void WorkspaceOverviewOverlay::set_workspace_snapshot(
 }
 
 void WorkspaceOverviewOverlay::show() {
-    synchronize_active_workspace();
-    normalize_selection();
-    static_cast<void>(ensure_assets());
-    static_cast<void>(rebuild_dirty_overlays());
+    const auto state = morph_timeline_.state();
+    if (state == effects::TransitionState::Visible ||
+        state == effects::TransitionState::Opening) {
+        return;
+    }
+
+    if (state == effects::TransitionState::Hidden) {
+        if (morph_diagnostics_.enabled()) {
+            morph_diagnostics_.begin(
+                true,
+                monotonic_seconds(),
+                animation::workspace_morph_process_rss_kib()
+            );
+        }
+        synchronize_active_workspace();
+        normalize_selection();
+        static_cast<void>(ensure_assets());
+        static_cast<void>(rebuild_dirty_overlays());
+        stop_content_animations(true);
+        capture_morph_geometry();
+        if (!taskbar_morph_active_) {
+            if (set_taskbar_morph_active_) set_taskbar_morph_active_(true);
+            taskbar_morph_active_ = true;
+        }
+        if (set_taskbar_morph_progress_) {
+            set_taskbar_morph_progress_(morph_timeline_.progress());
+        }
+        gtk_window_present(window_);
+        schedule_morph_shader_capture();
+    }
+
+    morph_diagnostics_.set_direction(true);
+    set_morph_input_enabled(false);
+    morph_timeline_.open();
+    morph_last_frame_time_us_ = 0;
+    ensure_animation_tick();
     gtk_widget_queue_draw(canvas_);
-    gtk_window_present(window_);
     gtk_widget_grab_focus(canvas_);
+    if (!morph_timeline_.active()) finish_morph_endpoint();
 }
 
 void WorkspaceOverviewOverlay::hide() {
+    if (morph_timeline_.state() == effects::TransitionState::Hidden ||
+        morph_timeline_.state() == effects::TransitionState::Closing) {
+        return;
+    }
+    if (morph_timeline_.state() == effects::TransitionState::Visible &&
+        morph_diagnostics_.enabled()) {
+        morph_diagnostics_.begin(
+            false,
+            monotonic_seconds(),
+            animation::workspace_morph_process_rss_kib()
+        );
+    }
+    morph_diagnostics_.set_direction(false);
     reset_drag();
-    stop_animation(true);
-    gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
+    stop_content_animations(true);
+    if (morph_timeline_.state() == effects::TransitionState::Visible) {
+        capture_morph_geometry();
+        schedule_morph_shader_capture();
+    }
+    set_morph_input_enabled(false);
+    morph_timeline_.close();
+    morph_last_frame_time_us_ = 0;
+    ensure_animation_tick();
+    if (canvas_ != nullptr) gtk_widget_queue_draw(canvas_);
+    if (!morph_timeline_.active()) finish_morph_endpoint();
 }
 
 void WorkspaceOverviewOverlay::toggle() {
-    if (visible()) hide(); else show();
+    if (morph_timeline_.target_visible()) hide(); else show();
 }
 
 bool WorkspaceOverviewOverlay::visible() const {
@@ -2218,6 +2760,29 @@ gboolean WorkspaceOverviewOverlay::animation_tick_callback(
     auto* self = static_cast<WorkspaceOverviewOverlay*>(data);
     const gint64 frame_time_us = gdk_frame_clock_get_frame_time(frame_clock);
     bool keep_running = false;
+
+    self->try_begin_morph_shader();
+    if (self->morph_timeline_.active()) {
+        if (self->morph_last_frame_time_us_ == 0) {
+            self->morph_last_frame_time_us_ = frame_time_us;
+            keep_running = true;
+        } else {
+            const double elapsed_seconds = static_cast<double>(
+                frame_time_us - self->morph_last_frame_time_us_
+            ) / static_cast<double>(kMicrosecondsPerSecond);
+            self->morph_last_frame_time_us_ = frame_time_us;
+            self->morph_diagnostics_.record_frame(elapsed_seconds);
+            if (self->morph_timeline_.advance(elapsed_seconds)) {
+                keep_running = true;
+            } else {
+                self->finish_morph_endpoint();
+            }
+        }
+    }
+    if (self->set_taskbar_morph_progress_ && self->taskbar_morph_active_) {
+        self->set_taskbar_morph_progress_(self->morph_timeline_.progress());
+    }
+    self->update_morph_shader();
 
     if (self->realm_animation_active_) {
         if (self->animation_start_time_us_ == 0) {
@@ -2317,7 +2882,8 @@ gboolean WorkspaceOverviewOverlay::animation_tick_callback(
     if (!keep_running && !self->realm_animation_active_ &&
         !self->card_animation_active_ &&
         !self->selection_animation_active_ &&
-        !self->viewport_animation_active_) {
+        !self->viewport_animation_active_ &&
+        !self->morph_timeline_.active()) {
         self->animation_tick_id_ = 0;
         return G_SOURCE_REMOVE;
     }
@@ -2329,6 +2895,7 @@ bool WorkspaceOverviewOverlay::handle_key_pressed(guint keyval) {
         hide();
         return true;
     }
+    if (!morph_interactive()) return true;
     if (keyval >= GDK_KEY_1 && keyval <= GDK_KEY_4) {
         select_realm(static_cast<int>(keyval - GDK_KEY_1));
         return true;
@@ -2599,11 +3166,9 @@ void WorkspaceOverviewOverlay::finish_selection_transition() noexcept {
     selection_outline_start_opacity_ = 0.0;
 }
 
-void WorkspaceOverviewOverlay::stop_animation(bool snap_to_target) noexcept {
-    if (animation_tick_id_ != 0 && canvas_ != nullptr) {
-        gtk_widget_remove_tick_callback(canvas_, animation_tick_id_);
-        animation_tick_id_ = 0;
-    }
+void WorkspaceOverviewOverlay::stop_content_animations(
+    bool snap_to_target
+) noexcept {
     animation_start_time_us_ = 0;
     realm_animation_active_ = false;
     finish_card_transition();
@@ -2616,6 +3181,15 @@ void WorkspaceOverviewOverlay::stop_animation(bool snap_to_target) noexcept {
         displayed_heights_ = animation_target_heights_;
         animation_start_heights_ = animation_target_heights_;
     }
+}
+
+void WorkspaceOverviewOverlay::stop_animation(bool snap_to_target) noexcept {
+    if (animation_tick_id_ != 0 && canvas_ != nullptr) {
+        gtk_widget_remove_tick_callback(canvas_, animation_tick_id_);
+        animation_tick_id_ = 0;
+    }
+    stop_content_animations(snap_to_target);
+    morph_last_frame_time_us_ = 0;
 }
 
 void WorkspaceOverviewOverlay::snapshot(
@@ -2633,7 +3207,18 @@ void WorkspaceOverviewOverlay::snapshot(
         static_cast<float>(height)
     );
     const GdkRGBA black{0.0, 0.0, 0.0, 1.0};
-    gtk_snapshot_append_color(snapshot, &black, &widget_bounds);
+    const double morph_progress = force_native_capture_
+        ? 1.0
+        : morph_timeline_.progress();
+    const bool morph_terminal_visible = morph_interactive();
+    const bool draw_full_stage =
+        animation::workspace_morph_draw_opaque_stage(
+            morph_terminal_visible,
+            force_native_capture_
+        );
+    if (draw_full_stage) {
+        gtk_snapshot_append_color(snapshot, &black, &widget_bounds);
+    }
 
     const double scale_x = static_cast<double>(width) / kReferenceWidth;
     const double scale_y = static_cast<double>(height) / kReferenceHeight;
@@ -2652,9 +3237,12 @@ void WorkspaceOverviewOverlay::snapshot(
         static_cast<float>(kReferenceHeight)
     );
     const GdkRGBA stage_color{0.008, 0.012, 0.016, 1.0};
-    gtk_snapshot_append_color(snapshot, &stage_color, &stage_bounds);
+    if (draw_full_stage) {
+        gtk_snapshot_append_color(snapshot, &stage_color, &stage_bounds);
+    }
 
     if (!ensure_assets()) {
+        gtk_snapshot_append_color(snapshot, &stage_color, &stage_bounds);
         const std::string message = asset_error_.empty()
             ? "Workspace overview assets unavailable"
             : asset_error_;
@@ -2691,6 +3279,13 @@ void WorkspaceOverviewOverlay::snapshot(
         ? viewport_animation_progress_
         : 1.0;
     const double viewport_offset = viewport_visual_offset();
+    const auto workspace_morph_layout = morph_layout(scale_x, scale_y);
+    const auto workspace_morph_frame =
+        animation::sample_workspace_morph_frame(
+            workspace_morph_layout,
+            morph_progress
+        );
+    const bool morph_transition = !morph_terminal_visible;
 
     gtk_snapshot_save(snapshot);
     const graphene_point_t viewport_translation = GRAPHENE_POINT_INIT(
@@ -2711,19 +3306,111 @@ void WorkspaceOverviewOverlay::snapshot(
         const auto& style_assets = assets_[style_index];
         const double realm_height = heights[index];
         const double activity = realm_activity(realm_height);
+        const auto& morph_band = workspace_morph_frame.bands[index];
         const Rect texture_bounds{
             0.0,
             tops[index],
             kReferenceWidth,
             realm_height,
         };
+        // During the morph the elemental seed is allowed to exist at the
+        // taskbar rune's real Y coordinate, which can be far outside its final
+        // destination band. The frontier/reveal path below owns the actual
+        // clipping. Keeping the old destination-only clip is what made the
+        // first visible frame suddenly appear at full monitor height.
         const graphene_rect_t realm_clip = GRAPHENE_RECT_INIT(
             0.0F,
-            static_cast<float>(tops[index]),
+            static_cast<float>(morph_transition ? 0.0 : tops[index]),
             static_cast<float>(kReferenceWidth),
-            static_cast<float>(realm_height)
+            static_cast<float>(morph_transition
+                ? kReferenceHeight
+                : realm_height)
         );
         gtk_snapshot_push_clip(snapshot, &realm_clip);
+        animation::WorkspaceMorphFrontier native_frontier{};
+        if (morph_transition) {
+            const double native_reveal_width =
+                animation::workspace_morph_native_reveal_width(
+                    morph_band.reveal_clip.width,
+                    morph_renderer_.frame_ready(),
+                    workspace_morph_frame.exact_visible
+                );
+            auto native_reveal = morph_band.reveal_clip;
+            native_reveal.width = native_reveal_width;
+
+            // Adjacent morph bands meet on fractional Y coordinates while the
+            // overview unfolds. Their antialiased clip edges can otherwise
+            // leave a one-pixel pale seam exactly where the settled separator
+            // will live. Once unfolding is underway, overlap neighbouring
+            // bands by a hair so there is never transparent coverage between
+            // them. The overlap is subpixel-small and does not alter the final
+            // layout.
+            const double seam_overlap = 1.25 * std::clamp(
+                (morph_progress - 0.28) / 0.18,
+                0.0,
+                1.0
+            );
+            double reveal_top = native_reveal.y;
+            double reveal_bottom = native_reveal.y + native_reveal.height;
+            if (index > 0U) {
+                reveal_top = std::max(0.0, reveal_top - seam_overlap);
+            }
+            if (index + 1U < workspace_state_.size()) {
+                reveal_bottom = std::min(
+                    kReferenceHeight,
+                    reveal_bottom + seam_overlap
+                );
+            }
+            native_reveal.y = reveal_top;
+            native_reveal.height = std::max(0.0, reveal_bottom - reveal_top);
+
+            native_frontier = animation::build_workspace_morph_frontier(
+                style_index,
+                native_reveal,
+                morph_band.rune.x + morph_band.rune.width,
+                kReferenceWidth,
+                morph_progress
+            );
+            GskPath* reveal_path = create_workspace_frontier_reveal_path(
+                native_frontier
+            );
+            if (reveal_path != nullptr) {
+                // Do not blur the complete reveal polygon. Its top/bottom
+                // edges are horizontal by definition, so blurring that fill
+                // manufactures pale separator-like bars while the seed unfolds.
+                // The dedicated native frontier below already supplies the
+                // soft elemental birth/glow without lighting those edges.
+                gtk_snapshot_push_fill(
+                    snapshot,
+                    reveal_path,
+                    GSK_FILL_RULE_WINDING
+                );
+                gsk_path_unref(reveal_path);
+            } else {
+                const graphene_rect_t morph_clip = GRAPHENE_RECT_INIT(
+                    static_cast<float>(native_reveal.x),
+                    static_cast<float>(native_reveal.y),
+                    static_cast<float>(native_reveal.width),
+                    static_cast<float>(native_reveal.height)
+                );
+                gtk_snapshot_push_clip(snapshot, &morph_clip);
+            }
+            gtk_snapshot_push_opacity(
+                snapshot,
+                static_cast<float>(morph_band.realm_opacity)
+            );
+            const graphene_rect_t revealed_stage = GRAPHENE_RECT_INIT(
+                0.0F,
+                static_cast<float>(tops[index]),
+                static_cast<float>(kReferenceWidth),
+                static_cast<float>(realm_height)
+            );
+            gtk_snapshot_append_color(
+                snapshot,
+                &stage_color,
+                &revealed_stage
+            );
+        }
         append_texture_with_opacity(
             snapshot,
             style_assets.background,
@@ -2751,19 +3438,20 @@ void WorkspaceOverviewOverlay::snapshot(
                 realm_height,
                 activity
             ),
-            lerp(0.92, 1.0, activity)
+            lerp(0.92, 1.0, activity) *
+                morph_band.character_opacity
         );
         append_texture_with_opacity(
             snapshot,
             style_assets.compact_overlay,
             texture_bounds,
-            1.0 - activity
+            (1.0 - activity) * morph_band.card_opacity
         );
         append_texture_with_opacity(
             snapshot,
             style_assets.expanded_overlay,
             texture_bounds,
-            activity
+            activity * morph_band.card_opacity
         );
 
         if (drag_card_.active &&
@@ -2864,7 +3552,8 @@ void WorkspaceOverviewOverlay::snapshot(
                 compact_current,
                 expanded_current,
                 activity,
-                dragged_source ? card_opacity * 0.14 : card_opacity
+                (dragged_source ? card_opacity * 0.14 : card_opacity) *
+                    morph_band.card_opacity
             );
         }
 
@@ -2904,7 +3593,7 @@ void WorkspaceOverviewOverlay::snapshot(
                         card_progress
                     ),
                     activity,
-                    1.0 - card_progress
+                    (1.0 - card_progress) * morph_band.card_opacity
                 );
             }
         }
@@ -2932,6 +3621,12 @@ void WorkspaceOverviewOverlay::snapshot(
             kIdentityTextX,
             roman_x + static_cast<double>(roman_width) + kIdentityGap
         );
+        if (morph_transition) {
+            gtk_snapshot_push_opacity(
+                snapshot,
+                static_cast<float>(morph_band.identity_opacity)
+            );
+        }
         append_identity_layout(
             snapshot,
             style_assets.roman_layout,
@@ -2959,6 +3654,19 @@ void WorkspaceOverviewOverlay::snapshot(
             &identity_shadow,
             0.36
         );
+        if (morph_transition) gtk_snapshot_pop(snapshot);
+        if (morph_transition) {
+            gtk_snapshot_pop(snapshot);
+            gtk_snapshot_pop(snapshot);
+            if (!morph_renderer_.frame_ready()) {
+                append_workspace_native_frontier(
+                    snapshot,
+                    native_frontier,
+                    style,
+                    style_index
+                );
+            }
+        }
         gtk_snapshot_pop(snapshot);
     }
 
@@ -3000,7 +3708,8 @@ void WorkspaceOverviewOverlay::snapshot(
             selected_realm.workspace_id == drag_card_.source_workspace_id &&
             selected_realm.cards[selected_slot].address == drag_card_.address;
     }
-    if (selection_current.has_value() && !selected_card_is_dragged &&
+    if (morph_terminal_visible && selection_current.has_value() &&
+        !selected_card_is_dragged &&
         active_index_ >= 0 &&
         active_index_ < static_cast<int>(displayed_heights_.size())) {
         const double selection_activity = realm_activity(
@@ -3018,22 +3727,33 @@ void WorkspaceOverviewOverlay::snapshot(
         );
     }
 
-    append_ripple_separator(
-        snapshot,
-        separator_nodes_[0][style_index_for_realm(0)],
-        tops[1]
-    );
-    append_ripple_separator(
-        snapshot,
-        separator_nodes_[1][style_index_for_realm(1)],
-        tops[2]
-    );
-    append_ripple_separator(
-        snapshot,
-        separator_nodes_[2][style_index_for_realm(2)],
-        tops[3]
-    );
-    append_global_vignette(snapshot);
+    // Separators are stable-overview decoration, not transition geometry.
+    // Keeping them completely out of Opening/Closing prevents a short bright
+    // horizontal segment from flashing as the endpoint handoff occurs.
+    if (morph_terminal_visible) {
+        append_ripple_separator(
+            snapshot,
+            separator_nodes_[0][style_index_for_realm(0)],
+            tops[1]
+        );
+        append_ripple_separator(
+            snapshot,
+            separator_nodes_[1][style_index_for_realm(1)],
+            tops[2]
+        );
+        append_ripple_separator(
+            snapshot,
+            separator_nodes_[2][style_index_for_realm(2)],
+            tops[3]
+        );
+    }
+    if (workspace_morph_frame.exact_visible) {
+        append_global_vignette(snapshot);
+    }
+
+    // The real taskbar rune artwork is faded by the Aether Spine itself.
+    // Drawing another proxy here would sit below the bar and create a ghosted
+    // duplicate through its translucent backdrop.
     if (viewport_transition) gtk_snapshot_pop(snapshot);
     gtk_snapshot_restore(snapshot);
 
@@ -3073,6 +3793,7 @@ void WorkspaceOverviewOverlay::snapshot(
 
 void WorkspaceOverviewOverlay::handle_drag_begin(double x, double y) {
     reset_drag();
+    if (!morph_interactive()) return;
     drag_card_.gesture_active = true;
     if (canvas_ == nullptr) return;
 
@@ -3231,7 +3952,7 @@ void WorkspaceOverviewOverlay::handle_drag_end(
 }
 
 void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
-    if (canvas_ == nullptr) return;
+    if (canvas_ == nullptr || !morph_interactive()) return;
     const int width = gtk_widget_get_width(canvas_);
     const int height = gtk_widget_get_height(canvas_);
     if (width <= 0 || height <= 0) return;
@@ -3271,7 +3992,7 @@ void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
 }
 
 void WorkspaceOverviewOverlay::handle_hover(double x, double y) {
-    if (canvas_ == nullptr || drag_card_.active) return;
+    if (canvas_ == nullptr || drag_card_.active || !morph_interactive()) return;
     const int width = gtk_widget_get_width(canvas_);
     const int height = gtk_widget_get_height(canvas_);
     if (width <= 0 || height <= 0) return;

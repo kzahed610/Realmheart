@@ -45,6 +45,26 @@ TEST(ShaderSourceTests, LoadsPowerMenuRippleShaderAndValidatesContract) {
         << missing;
 }
 
+TEST(ShaderSourceTests, LoadsWorkspaceMorphShaderAndValidatesContract) {
+    std::string error;
+    const auto shader = load_shader_source(
+        "workspace/elemental-morph/elemental-morph.frag",
+        &error
+    );
+    ASSERT_TRUE(shader.has_value()) << error;
+
+    std::string missing;
+    EXPECT_TRUE(validate_workspace_morph_shader_contract(
+        shader->text,
+        &missing
+    )) << missing;
+    EXPECT_NE(shader->text.find("progress <= 0.0005"), std::string::npos);
+    EXPECT_NE(shader->text.find("progress >= 0.9995"), std::string::npos);
+    EXPECT_NE(shader->text.find("texture(tex"), std::string::npos);
+    EXPECT_NE(shader->text.find("source_trail"), std::string::npos);
+    EXPECT_NE(shader->text.find("materialized"), std::string::npos);
+}
+
 TEST(ShaderSourceTests, ReportsMissingContractSymbol) {
     std::string missing;
     EXPECT_FALSE(validate_shell_shader_contract(
@@ -52,6 +72,15 @@ TEST(ShaderSourceTests, ReportsMissingContractSymbol) {
         &missing
     ));
     EXPECT_EQ(missing, "uniform vec2 resolution");
+}
+
+TEST(ShaderSourceTests, ReportsMissingWorkspaceMorphContractSymbol) {
+    std::string missing;
+    EXPECT_FALSE(validate_workspace_morph_shader_contract(
+        "uniform float progress; out vec4 fragColor;",
+        &missing
+    ));
+    EXPECT_EQ(missing, "uniform float opening");
 }
 
 } // namespace

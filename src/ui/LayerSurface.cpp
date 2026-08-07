@@ -130,7 +130,10 @@ void apply_layer_surface(GtkWindow* window, const LayerSurfaceSpec& spec) {
     gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_RIGHT, spec.anchor_right);
     gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_TOP, spec.anchor_top);
     gtk_layer_set_anchor(window, GTK_LAYER_SHELL_EDGE_BOTTOM, spec.anchor_bottom);
-    gtk_layer_set_exclusive_zone(window, std::max(spec.exclusive_zone, 0));
+    // The layer-shell protocol reserves -1 for surfaces such as lock screens
+    // that must ignore every other surface's exclusive zone. Preserve that
+    // sentinel while still rejecting values below the protocol range.
+    gtk_layer_set_exclusive_zone(window, std::max(spec.exclusive_zone, -1));
     gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_LEFT, std::max(spec.margin_left, 0));
     gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_RIGHT, std::max(spec.margin_right, 0));
     gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_TOP, std::max(spec.margin_top, 0));

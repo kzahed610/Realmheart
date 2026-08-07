@@ -13,6 +13,7 @@
 #include "ui/bar/widgets/MediaWidget.hpp"
 #include "ui/bar/widgets/SystemMonitorWidget.hpp"
 #include "ui/bar/widgets/WorkspaceRune.hpp"
+#include "ui/workspace/animation/WorkspaceMorphModel.hpp"
 
 #include <atomic>
 #include <functional>
@@ -44,6 +45,11 @@ public:
 
     GtkWidget* get_window() const { return window_; }
     void refresh();
+    [[nodiscard]] std::vector<
+        workspace::animation::WorkspaceMorphSource
+    > workspace_morph_sources() const;
+    void set_workspace_morph_active(bool active);
+    void set_workspace_morph_progress(double progress);
 
 private:
     struct AsyncState {
@@ -110,6 +116,8 @@ private:
     GWeakRef active_popover_ref_{};
     guint refresh_timer_id_ = 0;
     unsigned refresh_tick_ = 0;
+    bool workspace_morph_active_ = false;
+    double workspace_morph_progress_ = 0.0;
 };
 
 } // namespace realmheart::ui::bar

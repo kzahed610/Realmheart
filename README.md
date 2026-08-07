@@ -439,6 +439,28 @@ realmheart --command osd-volume
 realmheart --command osd-brightness
 ```
 
+### Workspace morph diagnostics
+
+The rune-to-realm transition is transparent outside its geometry-owned reveal
+clips and falls back to the native geometry animation if its optional shader
+host fails. Opt-in timing and memory diagnostics are available without adding
+idle work:
+
+```fish
+systemctl --user set-environment REALMHEART_WORKSPACE_MORPH_DIAGNOSTICS=1
+systemctl --user restart realmheart.service
+./tools/workspace-morph-profile.fish --cycles 30 --rapid 20
+```
+
+Each completed transition reports its endpoint, elapsed time, frame count,
+worst frame interval, reversal count, shader state, peak transition texture
+bytes, retained transition bytes, and process RSS delta. Disable the logs with:
+
+```fish
+systemctl --user unset-environment REALMHEART_WORKSPACE_MORPH_DIAGNOSTICS
+systemctl --user restart realmheart.service
+```
+
 The workspace overview is also toggled by right-clicking any workspace rune in
 the Aether Spine. It docks beside the bar and presents a four-workspace viewport
 that follows Hyprland beyond workspace 4. For example, activating workspace 5
@@ -547,6 +569,7 @@ Useful environment overrides:
 | `REALMHEART_THEME_CACHE` | Override palette cache file. |
 | `REALMHEART_EMOJI_DATA` | Override launcher emoji data source. |
 | `REALMHEART_CHARACTER_DEBUG` | Enable character compositor diagnostics. |
+| `REALMHEART_WORKSPACE_MORPH_DIAGNOSTICS` | Log workspace morph timing, reversal, shader, texture, and RSS diagnostics. |
 
 ---
 
