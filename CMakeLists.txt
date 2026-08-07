@@ -180,6 +180,13 @@ add_library(realmheart_ui STATIC
     src/ui/powermenu/PowerMenuOverlay.cpp
     src/ui/workspace/WorkspaceOverviewModel.cpp
     src/ui/workspace/WorkspaceOverviewOverlay.cpp
+    src/ui/workspace/animation/WorkspaceMorphDiagnostics.cpp
+    src/ui/workspace/animation/WorkspaceMorphFrontier.cpp
+    src/ui/workspace/animation/WorkspaceMorphModel.cpp
+    src/ui/workspace/animation/WorkspaceMorphPresentation.cpp
+    src/ui/workspace/animation/WorkspaceMorphRendererState.cpp
+    src/ui/workspace/animation/WorkspaceMorphShaderData.cpp
+    src/ui/workspace/animation/WorkspaceOverviewMorphRenderer.cpp
     src/ui/launcher/LauncherOverlay.cpp
     src/ui/launcher/CommandReceiptOverlay.cpp
     src/services/LauncherService.cpp
@@ -594,6 +601,56 @@ if(BUILD_TESTING)
         src/ui/workspace/WorkspaceOverviewModel.cpp
     )
     realmheart_register_test(realmheart_workspace_overview_model_tests)
+
+    add_executable(
+        realmheart_workspace_morph_model_tests
+        tests/WorkspaceMorphModelTests.cpp
+        src/ui/workspace/animation/WorkspaceMorphModel.cpp
+    )
+    realmheart_register_test(realmheart_workspace_morph_model_tests)
+
+    add_executable(
+        realmheart_workspace_morph_frontier_tests
+        tests/WorkspaceMorphFrontierTests.cpp
+        src/ui/workspace/animation/WorkspaceMorphFrontier.cpp
+    )
+    realmheart_register_test(realmheart_workspace_morph_frontier_tests)
+
+    add_executable(
+        realmheart_workspace_morph_viewport_tests
+        tests/WorkspaceMorphViewportTests.cpp
+        src/ui/bar/VerticalBarModel.cpp
+    )
+    realmheart_register_test(realmheart_workspace_morph_viewport_tests)
+
+    add_executable(
+        realmheart_workspace_morph_shader_data_tests
+        tests/WorkspaceMorphShaderDataTests.cpp
+        src/ui/workspace/animation/WorkspaceMorphModel.cpp
+        src/ui/workspace/animation/WorkspaceMorphShaderData.cpp
+    )
+    realmheart_register_test(realmheart_workspace_morph_shader_data_tests)
+
+    add_executable(
+        realmheart_workspace_morph_renderer_state_tests
+        tests/WorkspaceMorphRendererStateTests.cpp
+        src/ui/workspace/animation/WorkspaceMorphRendererState.cpp
+    )
+    realmheart_register_test(realmheart_workspace_morph_renderer_state_tests)
+
+    add_executable(
+        realmheart_workspace_morph_presentation_tests
+        tests/WorkspaceMorphPresentationTests.cpp
+        src/ui/workspace/animation/WorkspaceMorphPresentation.cpp
+    )
+    realmheart_register_test(realmheart_workspace_morph_presentation_tests)
+
+    add_executable(
+        realmheart_workspace_morph_diagnostics_tests
+        tests/WorkspaceMorphDiagnosticsTests.cpp
+        src/ui/workspace/animation/WorkspaceMorphDiagnostics.cpp
+    )
+    realmheart_register_test(realmheart_workspace_morph_diagnostics_tests)
 
     add_executable(realmheart_hyprland_event_monitor_tests tests/HyprlandEventMonitorTests.cpp src/services/HyprlandEventMonitor.cpp)
     realmheart_register_test(realmheart_hyprland_event_monitor_tests)

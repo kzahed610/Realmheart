@@ -56,6 +56,7 @@
 #include <sys/types.h>
 #include <thread>
 #include <utility>
+#include <vector>
 #include <unistd.h>
 
 namespace realmheart::ui {
@@ -633,10 +634,25 @@ public:
                             workspace_id,
                             std::move(address)
                         );
+                    },
+                    [this](bool active) {
+                        if (bar_ != nullptr) {
+                            bar_->set_workspace_morph_active(active);
+                        }
+                    },
+                    [this](double progress) {
+                        if (bar_ != nullptr) {
+                            bar_->set_workspace_morph_progress(progress);
+                        }
                     }
                 );
             workspace_overview_->set_workspace_snapshot(workspace_snapshot_);
         }
+        workspace_overview_->set_morph_sources(
+            bar_ != nullptr
+                ? bar_->workspace_morph_sources()
+                : std::vector<workspace::animation::WorkspaceMorphSource>{}
+        );
         workspace_overview_->toggle();
     }
 

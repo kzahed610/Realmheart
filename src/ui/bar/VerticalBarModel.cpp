@@ -9,10 +9,15 @@ std::vector<realmheart::services::WorkspaceState> build_workspace_pills(
     const realmheart::services::WorkspaceSnapshot& snapshot
 ) {
     constexpr int kVisibleWorkspaceCount = 4;
-    constexpr int kMaximumWorkspaceId = 5;
 
-    const int active_id = snapshot.available ? snapshot.active_id : 1;
-    const int first_visible = active_id >= kMaximumWorkspaceId ? 2 : 1;
+    const int active_id = std::max(
+        1,
+        snapshot.available ? snapshot.active_id : 1
+    );
+    const int first_visible = std::max(
+        1,
+        active_id - kVisibleWorkspaceCount + 1
+    );
 
     std::vector<realmheart::services::WorkspaceState> workspaces;
     workspaces.reserve(kVisibleWorkspaceCount);

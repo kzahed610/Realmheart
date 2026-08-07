@@ -28,6 +28,8 @@ struct LayerSurfaceSpec {
     bool anchor_right = false;
     bool anchor_top = false;
     bool anchor_bottom = false;
+    // 0 respects existing exclusive zones; -1 ignores them and uses the full
+    // output (appropriate for fullscreen shell surfaces such as the overview).
     int exclusive_zone = 0;
     int margin_left = 0;
     int margin_right = 0;
