@@ -481,6 +481,16 @@ VerticalBar::workspace_morph_sources() const {
 
 void VerticalBar::set_workspace_morph_active(bool active) {
     workspace_morph_active_ = active;
+    // Hyprland hides normal Top-layer panels behind true fullscreen clients.
+    // The workspace overview is also Top-layer, so temporarily lift the Aether
+    // Spine to Overlay only while the overview owns the morph/visible state.
+    // Returning to Top restores the bar's original fullscreen behavior.
+    if (window_ != nullptr) {
+        set_layer_surface_level(
+            GTK_WINDOW(window_),
+            active ? LayerSurfaceLevel::Overlay : LayerSurfaceLevel::Top
+        );
+    }
     if (!active) {
         set_workspace_morph_progress(0.0);
     }

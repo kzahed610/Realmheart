@@ -48,6 +48,7 @@ GdkMonitor* resolve_layer_surface_monitor(
     GtkWidget* widget,
     int requested_index = -1
 );
+void set_layer_surface_level(GtkWindow* window, LayerSurfaceLevel layer);
 void apply_layer_surface(GtkWindow* window, const LayerSurfaceSpec& spec);
 
 } // namespace realmheart::ui
