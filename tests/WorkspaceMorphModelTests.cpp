@@ -216,7 +216,7 @@ void test_stages_overlap_without_early_cards() {
     require_near(structural.bands[0].card_opacity, 0.0,
                  "cards must not appear during structural unfolding");
     require_near(structural.separator_opacity, 0.0,
-                 "full-width separators must not grow across the transition");
+                 "separators must remain hidden during structural unfolding");
 
     const auto late =
         realmheart::ui::workspace::animation::sample_workspace_morph_frame(
@@ -228,6 +228,10 @@ void test_stages_overlap_without_early_cards() {
             "characters must emerge after their realms");
     require(late.bands[0].card_opacity > 0.2,
             "cards must arrive during the final phase");
+    require(late.separator_opacity > 0.5,
+            "separators must already be visibly joining the late morph");
+    require(late.separator_opacity < 1.0,
+            "separators must not snap to full opacity before the endpoint");
 }
 
 void test_frontier_starts_at_the_exact_captured_rune_edge() {
@@ -299,6 +303,7 @@ void test_frontier_starts_at_the_exact_captured_rune_edge() {
     require_near(propagating.bands[0].proxy_opacity, 0.0,
                  "no detached rail may appear between rune and frontier");
 }
+
 
 
 void test_close_topology_returns_to_the_rune_not_a_left_edge_line() {

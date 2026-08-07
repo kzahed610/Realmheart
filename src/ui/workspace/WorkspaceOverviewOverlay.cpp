@@ -1666,7 +1666,7 @@ Rect character_bounds(
     };
 }
 
-void append_realm_atmosphere(
+void append_realm_horizontal_atmosphere(
     GtkSnapshot* snapshot,
     double top,
     double height,
@@ -1715,28 +1715,24 @@ void append_realm_atmosphere(
         horizontal_stops.data(),
         horizontal_stops.size()
     );
+}
 
-    const graphene_point_t vertical_start = GRAPHENE_POINT_INIT(
-        0.0F,
-        static_cast<float>(top)
-    );
-    const graphene_point_t vertical_end = GRAPHENE_POINT_INIT(
-        0.0F,
-        static_cast<float>(top + height)
-    );
-    const std::array<GskColorStop, 3> vertical_stops{{
-        {0.0F, GdkRGBA{0.0F, 0.0F, 0.0F, static_cast<float>(lerp(0.18, 0.08, activity))}},
-        {0.45F, GdkRGBA{0.0F, 0.0F, 0.0F, 0.0F}},
-        {1.0F, GdkRGBA{0.0F, 0.0F, 0.0F, static_cast<float>(lerp(0.33, 0.24, activity))}},
-    }};
-    gtk_snapshot_append_linear_gradient(
-        snapshot,
-        &bounds,
-        &vertical_start,
-        &vertical_end,
-        vertical_stops.data(),
-        vertical_stops.size()
-    );
+void append_realm_atmosphere(
+    GtkSnapshot* snapshot,
+    double top,
+    double height,
+    double activity
+) {
+    if (height <= 0.0) return;
+
+    // Keep the settled grading identical to the morph-safe grading. The old
+    // per-realm vertical gradient reset at every boundary and was only enabled
+    // after the morph reached its terminal frame. That created a broad
+    // brightness jump on the exact frame the separators appeared, while also
+    // reintroducing the same texture/atmosphere edge interaction we isolated
+    // earlier. The wavy separator artwork already owns boundary depth, so the
+    // atmosphere only needs the continuous left-to-right grade.
+    append_realm_horizontal_atmosphere(snapshot, top, height, activity);
 }
 
 void append_global_vignette(GtkSnapshot* snapshot) {
@@ -3286,6 +3282,17 @@ void WorkspaceOverviewOverlay::snapshot(
             morph_progress
         );
     const bool morph_transition = !morph_terminal_visible;
+    // The overview intentionally spans the full output so the elemental seed
+    // can share coordinates with the taskbar runes. The Aether Spine is
+    // translucent, though, so normal realm content must stop at the actual
+    // 56 px rail edge while the morph is moving. The extra 20 px cap extension
+    // is curved artwork, not a permanent opaque column; clipping to it creates
+    // a visible dead strip beside the bar.
+    const double morph_content_safe_left = std::clamp(
+        static_cast<double>(bar::kRailWidth) / std::max(scale_x, 0.000001),
+        0.0,
+        kReferenceWidth
+    );
 
     gtk_snapshot_save(snapshot);
     const graphene_point_t viewport_translation = GRAPHENE_POINT_INIT(
@@ -3399,6 +3406,15 @@ void WorkspaceOverviewOverlay::snapshot(
                 snapshot,
                 static_cast<float>(morph_band.realm_opacity)
             );
+            const graphene_rect_t morph_content_clip = GRAPHENE_RECT_INIT(
+                static_cast<float>(morph_content_safe_left),
+                0.0F,
+                static_cast<float>(
+                    std::max(0.0, kReferenceWidth - morph_content_safe_left)
+                ),
+                static_cast<float>(kReferenceHeight)
+            );
+            gtk_snapshot_push_clip(snapshot, &morph_content_clip);
             const graphene_rect_t revealed_stage = GRAPHENE_RECT_INIT(
                 0.0F,
                 static_cast<float>(tops[index]),
@@ -3422,12 +3438,30 @@ void WorkspaceOverviewOverlay::snapshot(
             ),
             1.0
         );
-        append_realm_atmosphere(
-            snapshot,
-            tops[index],
-            realm_height,
-            activity
-        );
+        if (morph_transition && !force_native_capture_) {
+            // The settled atmosphere is deliberately very dark on the left
+            // and almost clear on the right. Removing it during Opening and
+            // Closing avoids the old horizontal compositing artifact, but it
+            // also makes the overview visibly brighten until the terminal
+            // frame restores the grading. Preserve that horizontal grading
+            // throughout the morph using a full-height node. The existing
+            // morph reveal path owns all Y clipping, so this atmosphere has no
+            // per-realm top/bottom rectangle edges that can turn into bright
+            // or dark separator-like bands when combined with the texture.
+            append_realm_horizontal_atmosphere(
+                snapshot,
+                0.0,
+                kReferenceHeight,
+                activity
+            );
+        } else {
+            append_realm_atmosphere(
+                snapshot,
+                tops[index],
+                realm_height,
+                activity
+            );
+        }
         append_texture_with_opacity(
             snapshot,
             style_assets.character,
@@ -3656,8 +3690,9 @@ void WorkspaceOverviewOverlay::snapshot(
         );
         if (morph_transition) gtk_snapshot_pop(snapshot);
         if (morph_transition) {
-            gtk_snapshot_pop(snapshot);
-            gtk_snapshot_pop(snapshot);
+            gtk_snapshot_pop(snapshot); // morph-content safe clip
+            gtk_snapshot_pop(snapshot); // realm opacity
+            gtk_snapshot_pop(snapshot); // frontier reveal path/clip
             if (!morph_renderer_.frame_ready()) {
                 append_workspace_native_frontier(
                     snapshot,
@@ -3727,10 +3762,40 @@ void WorkspaceOverviewOverlay::snapshot(
         );
     }
 
-    // Separators are stable-overview decoration, not transition geometry.
-    // Keeping them completely out of Opening/Closing prevents a short bright
-    // horizontal segment from flashing as the endpoint handoff occurs.
-    if (morph_terminal_visible) {
+    // Separators and the subtle global vignette are part of the late morph,
+    // not a terminal-frame switch. Clip them to the already-revealed width so
+    // the wavy lines grow behind the elemental frontier instead of appearing
+    // full-width over unrevealed desktop. The same opacity curve runs in
+    // reverse on close.
+    const double decor_opacity = std::clamp(
+        workspace_morph_frame.separator_opacity,
+        0.0,
+        1.0
+    );
+    if (decor_opacity > 0.001) {
+        gtk_snapshot_push_opacity(
+            snapshot,
+            static_cast<float>(decor_opacity)
+        );
+        bool decor_clipped = false;
+        if (!workspace_morph_frame.exact_visible) {
+            const double decor_right = std::clamp(
+                workspace_morph_frame.reveal_right,
+                morph_content_safe_left,
+                kReferenceWidth
+            );
+            const graphene_rect_t decor_clip = GRAPHENE_RECT_INIT(
+                static_cast<float>(morph_content_safe_left),
+                0.0F,
+                static_cast<float>(
+                    std::max(0.0, decor_right - morph_content_safe_left)
+                ),
+                static_cast<float>(kReferenceHeight)
+            );
+            gtk_snapshot_push_clip(snapshot, &decor_clip);
+            decor_clipped = true;
+        }
+
         append_ripple_separator(
             snapshot,
             separator_nodes_[0][style_index_for_realm(0)],
@@ -3746,9 +3811,10 @@ void WorkspaceOverviewOverlay::snapshot(
             separator_nodes_[2][style_index_for_realm(2)],
             tops[3]
         );
-    }
-    if (workspace_morph_frame.exact_visible) {
         append_global_vignette(snapshot);
+
+        if (decor_clipped) gtk_snapshot_pop(snapshot);
+        gtk_snapshot_pop(snapshot);
     }
 
     // The real taskbar rune artwork is faded by the Aether Spine itself.
@@ -3793,7 +3859,7 @@ void WorkspaceOverviewOverlay::snapshot(
 
 void WorkspaceOverviewOverlay::handle_drag_begin(double x, double y) {
     reset_drag();
-    if (!morph_interactive()) return;
+    if (!morph_interactive() || x < static_cast<double>(bar::kVisualWidth)) return;
     drag_card_.gesture_active = true;
     if (canvas_ == nullptr) return;
 
@@ -3888,11 +3954,15 @@ void WorkspaceOverviewOverlay::handle_drag_update(
     drag_card_.current_x = drag_card_.start_x + offset_x / scale_x;
     drag_card_.current_y = drag_card_.start_y + offset_y / scale_y;
 
-    const auto target = realm_index_at_point(
-        drag_card_.current_x,
-        drag_card_.current_y - viewport_visual_offset(),
-        displayed_heights_
-    );
+    const bool over_taskbar =
+        drag_card_.current_x * scale_x < static_cast<double>(bar::kVisualWidth);
+    const auto target = over_taskbar
+        ? std::optional<int>{}
+        : realm_index_at_point(
+            drag_card_.current_x,
+            drag_card_.current_y - viewport_visual_offset(),
+            displayed_heights_
+        );
     if (target.has_value()) {
         drag_target_index_ = *target;
         select_realm(*target);
@@ -3952,7 +4022,8 @@ void WorkspaceOverviewOverlay::handle_drag_end(
 }
 
 void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
-    if (canvas_ == nullptr || !morph_interactive()) return;
+    if (canvas_ == nullptr || !morph_interactive() ||
+        x < static_cast<double>(bar::kVisualWidth)) return;
     const int width = gtk_widget_get_width(canvas_);
     const int height = gtk_widget_get_height(canvas_);
     if (width <= 0 || height <= 0) return;
@@ -3992,7 +4063,12 @@ void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
 }
 
 void WorkspaceOverviewOverlay::handle_hover(double x, double y) {
-    if (canvas_ == nullptr || drag_card_.active || !morph_interactive()) return;
+    // The overview deliberately spans the full output so its morph geometry can
+    // share coordinates with the Aether Spine. The visible bar still owns its
+    // entire 76 px strip; never let the surface underneath interpret pointer
+    // motion there as a realm hover.
+    if (canvas_ == nullptr || drag_card_.active || !morph_interactive() ||
+        x < static_cast<double>(bar::kVisualWidth)) return;
     const int width = gtk_widget_get_width(canvas_);
     const int height = gtk_widget_get_height(canvas_);
     if (width <= 0 || height <= 0) return;

@@ -192,9 +192,12 @@ WorkspaceMorphFrame sample_workspace_morph_frame(
     const double card_opacity = smooth(workspace_morph_stage(p, 0.60, 1.00));
     const double rune_fade = workspace_morph_rune_opacity(p);
 
-    // Transition separators remain forbidden. The stable overview owns them
-    // only after the terminal handoff.
-    frame.separator_opacity = 0.0;
+    // Let the separators belong to the morph instead of popping in at the
+    // terminal handoff. They start only after the realm structure is already
+    // readable, then settle before the frontier finishes crossing the output.
+    // Closing samples the same curve backwards, so they dissolve naturally
+    // rather than disappearing on the first closing frame.
+    frame.separator_opacity = smooth(workspace_morph_stage(p, 0.58, 0.92));
     frame.reveal_right = 0.0;
 
     for (std::size_t index = 0; index < layout.bands.size(); ++index) {
