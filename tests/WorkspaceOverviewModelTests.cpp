@@ -64,6 +64,44 @@ void test_limits_cards_and_reports_overflow() {
             "the final card must become an overflow summary");
     require(state[0].cards[2].app_name == "+3 more",
             "overflow summary must report the hidden client count");
+    require(state[0].windows.size() == 5,
+            "overflow realms must retain every real window for expansion");
+    require(state[0].windows[2].address == "c" &&
+            state[0].windows[4].address == "e",
+            "overflow expansion must preserve hidden window identities");
+}
+
+
+void test_hidden_window_changes_invalidate_overflow_assets() {
+    realmheart::services::WorkspaceSnapshot first;
+    first.available = true;
+    first.active_id = 1;
+    first.workspaces = {{
+        1,
+        "1",
+        5,
+        true,
+        {
+            {"a", "kitty", "one"},
+            {"b", "zen-browser", "two"},
+            {"c", "code", "three"},
+            {"d", "spotify", "four"},
+            {"e", "dolphin", "five"},
+        },
+    }};
+    auto second = first;
+    second.workspaces[0].window_details[4].title = "five changed";
+
+    const auto left =
+        realmheart::ui::workspace::build_workspace_overview_state(first);
+    const auto right =
+        realmheart::ui::workspace::build_workspace_overview_state(second);
+    require(
+        !realmheart::ui::workspace::same_workspace_overview_cards(
+            left[0], right[0]
+        ),
+        "hidden window changes must refresh overflow card assets"
+    );
 }
 
 void test_card_comparison_ignores_active_state() {
@@ -143,6 +181,7 @@ int main() {
     try {
         test_maps_real_clients_into_realms();
         test_limits_cards_and_reports_overflow();
+        test_hidden_window_changes_invalidate_overflow_assets();
         test_card_comparison_ignores_active_state();
         test_viewport_tracks_workspaces_beyond_four();
         test_elemental_styles_and_numerals_cycle();

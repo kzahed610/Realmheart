@@ -89,6 +89,7 @@ private:
         GdkTexture* compact_overlay = nullptr;
         GdkTexture* expanded_overlay = nullptr;
         std::array<CardAssets, kWorkspaceOverviewCardLimit> cards{};
+        std::vector<GdkTexture*> spread_cards{};
     };
 
     static void snapshot_callback(
@@ -114,6 +115,11 @@ private:
     void handle_drag_update(double offset_x, double offset_y);
     void handle_drag_end(double offset_x, double offset_y);
     void reset_drag() noexcept;
+    void expand_overflow(std::size_t realm_index);
+    void collapse_overflow(bool snap = false) noexcept;
+    [[nodiscard]] bool overflow_expanded_for(
+        std::size_t realm_index
+    ) const noexcept;
     void select_realm(int index, int preferred_card_index = -2);
     void transition_selection(int realm_index, int card_index);
     [[nodiscard]] std::optional<graphene_rect_t>
@@ -186,6 +192,7 @@ private:
     std::unordered_map<std::string, cairo_surface_t*> icon_surfaces_;
     DragCard drag_card_{};
     int drag_target_index_ = -1;
+    int overflow_workspace_id_ = 0;
     std::string asset_error_;
     int viewport_start_workspace_id_ = 1;
     int viewport_transition_direction_ = 0;
@@ -194,16 +201,21 @@ private:
     guint animation_tick_id_ = 0;
     gint64 animation_start_time_us_ = 0;
     gint64 card_animation_start_time_us_ = 0;
+    gint64 overflow_animation_start_time_us_ = 0;
     gint64 selection_animation_start_time_us_ = 0;
     gint64 viewport_animation_start_time_us_ = 0;
     gint64 morph_last_frame_time_us_ = 0;
     graphene_rect_t selection_outline_start_bounds_{};
     double card_animation_progress_ = 1.0;
+    double overflow_animation_progress_ = 0.0;
+    double overflow_animation_start_progress_ = 0.0;
+    double overflow_animation_target_ = 0.0;
     double selection_animation_progress_ = 1.0;
     double viewport_animation_progress_ = 1.0;
     double selection_outline_start_opacity_ = 0.0;
     bool realm_animation_active_ = false;
     bool card_animation_active_ = false;
+    bool overflow_animation_active_ = false;
     bool selection_animation_active_ = false;
     bool viewport_animation_active_ = false;
     bool selection_outline_has_start_bounds_ = false;

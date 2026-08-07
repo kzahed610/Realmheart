@@ -5,11 +5,14 @@
 #include <array>
 #include <cstddef>
 #include <string>
+#include <vector>
 
 namespace realmheart::ui::workspace {
 
 inline constexpr std::size_t kWorkspaceOverviewRealmCount = 4;
-inline constexpr std::size_t kWorkspaceOverviewCardLimit = 3;
+inline constexpr std::size_t kWorkspaceOverviewPreviewCardLimit = 3;
+inline constexpr std::size_t kWorkspaceOverviewCardLimit =
+    kWorkspaceOverviewPreviewCardLimit;
 
 struct WorkspaceOverviewCard {
     std::string address;
@@ -27,6 +30,7 @@ struct WorkspaceOverviewRealm {
     int total_windows = 0;
     std::array<WorkspaceOverviewCard, kWorkspaceOverviewCardLimit> cards{};
     std::size_t card_count = 0;
+    std::vector<WorkspaceOverviewCard> windows{};
 };
 
 using WorkspaceOverviewState =
