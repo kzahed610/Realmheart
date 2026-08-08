@@ -39,4 +39,14 @@ struct ShaderSource {
     std::string* missing_symbol = nullptr
 ) noexcept;
 
+[[nodiscard]] bool validate_worldscar_reference_shader_contract(
+    std::string_view source,
+    std::string* missing_symbol = nullptr
+) noexcept;
+
+[[nodiscard]] bool validate_worldscar_shader_contract(
+    std::string_view source,
+    std::string* missing_symbol = nullptr
+) noexcept;
+
 } // namespace realmheart::effects

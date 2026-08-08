@@ -177,9 +177,8 @@ transitioning while another Realmheart effect is active. A skipped opening
 remains normally visible; a skipped close proceeds normally.
 
 An eligible opening window receives only the reconstruction/open half of its
-selected effect. The lifecycle now follows the target-only design used by
-/HyprFX: Realmheart suppresses the native target, waits only until the
-client has a usable coherent surface, and then samples that live surface texture
+selected effect. The lifecycle now follows Realmheart's target-only design: the shell suppresses the native target, waits only until
+the client has a usable coherent surface, and then samples that live surface texture
 and the current Hyprland render box on every frame. It does not freeze a geometry
 sample or hand a retained opening snapshot back to the live client. Late client
 configures therefore move or resize the effect and the real target together,
@@ -291,6 +290,6 @@ native reflow restarts in the target-only backend.
 
 ## Licensing
 
-The plugin is GPL-3.0-or-later. Render-pass and target-only lifecycle ideas are
-adapted from  hyprfx, sandwichfarm/hyprfx, and xhos/hyprfx; see
-`ATTRIBUTION.md` and `LICENSE`.
+The plugin is GPL-3.0-or-later. Upstream provenance for the render-pass and
+target-only lifecycle work is consolidated in `ATTRIBUTION.md`; see also
+`LICENSE`.

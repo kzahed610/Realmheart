@@ -24,11 +24,26 @@ public:
         const std::filesystem::path& path,
         std::string* error_message = nullptr
     ) override;
+    [[nodiscard]] bool prepare_wallpaper(
+        const std::filesystem::path& path,
+        std::string* error_message = nullptr
+    ) override;
+    [[nodiscard]] bool commit_prepared_wallpaper(
+        std::string* error_message = nullptr
+    ) override;
+    void discard_prepared_wallpaper() noexcept override;
 
 private:
     [[nodiscard]] bool initialize_locked(std::string* error_message = nullptr);
     [[nodiscard]] bool set_wallpaper_locked(
         const std::filesystem::path& path,
+        std::string* error_message = nullptr
+    );
+    [[nodiscard]] bool prepare_wallpaper_locked(
+        const std::filesystem::path& path,
+        std::string* error_message = nullptr
+    );
+    [[nodiscard]] bool commit_prepared_wallpaper_locked(
         std::string* error_message = nullptr
     );
     [[nodiscard]] std::string find_renderer_executable() const;

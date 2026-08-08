@@ -41,8 +41,8 @@ realmheart::core::ModuleRegistry build_confirmed_module_registry() {
     });
 
     registry.add(ModuleDescriptor{
-        "lockscreen.-faithful",
-        "Native C++ lock screen preserving the current  behavior and visual design",
+        "lockscreen.centered-clock",
+        "Native C++ lock screen with Realmheart's centered-clock visual design",
         ModulePhase::Lock,
         {"auth", "background", "clock", "animations"},
         true

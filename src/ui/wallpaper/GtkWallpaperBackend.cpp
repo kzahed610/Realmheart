@@ -97,8 +97,41 @@ bool GtkWallpaperBackend::set_wallpaper(
     if (error_message != nullptr) error_message->clear();
     if (!initialized_ && !initialize(error_message)) return false;
 
+    prepared_wallpaper_.reset();
     auto decoded = decode_wallpaper(path, error_message);
     return decoded && apply_decoded_wallpaper(std::move(*decoded), error_message);
+}
+
+bool GtkWallpaperBackend::prepare_wallpaper(
+    const std::filesystem::path& path,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!initialized_ && !initialize(error_message)) return false;
+
+    prepared_wallpaper_.reset();
+    auto decoded = decode_wallpaper(path, error_message);
+    if (!decoded) return false;
+    prepared_wallpaper_ = std::move(*decoded);
+    return true;
+}
+
+bool GtkWallpaperBackend::commit_prepared_wallpaper(
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!prepared_wallpaper_) {
+        set_error(error_message, "GTK wallpaper backend has no prepared wallpaper");
+        return false;
+    }
+
+    auto prepared = std::move(*prepared_wallpaper_);
+    prepared_wallpaper_.reset();
+    return apply_decoded_wallpaper(std::move(prepared), error_message);
+}
+
+void GtkWallpaperBackend::discard_prepared_wallpaper() noexcept {
+    prepared_wallpaper_.reset();
 }
 
 std::optional<GtkWallpaperBackend::DecodedWallpaper>
@@ -246,6 +279,7 @@ void GtkWallpaperBackend::reset() noexcept {
     }
 
     surfaces_.clear();
+    prepared_wallpaper_.reset();
     if (texture_ != nullptr) {
         g_object_unref(texture_);
         texture_ = nullptr;

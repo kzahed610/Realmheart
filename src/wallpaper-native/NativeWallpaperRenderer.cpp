@@ -12,6 +12,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <optional>
 #include <poll.h>
 #include <string_view>
 #include <unistd.h>
@@ -36,6 +37,8 @@ varying vec2 v_uv;
 uniform sampler2D u_current;
 uniform sampler2D u_next;
 uniform float u_progress;
+uniform float u_transition_mode;
+uniform float u_aspect;
 uniform vec4 u_current_uv;
 uniform vec4 u_next_uv;
 
@@ -43,9 +46,55 @@ vec2 crop_uv(vec4 rect, vec2 base_uv) {
     return mix(rect.xy, rect.zw, base_uv);
 }
 
+float saturate(float value) {
+    return clamp(value, 0.0, 1.0);
+}
+
+float ease_out_cubic(float value) {
+    float inverse = 1.0 - saturate(value);
+    return 1.0 - inverse * inverse * inverse;
+}
+
+float segment_distance(vec2 point, vec2 start, vec2 end) {
+    vec2 axis = end - start;
+    float denominator = max(dot(axis, axis), 0.000001);
+    float along = saturate(dot(point - start, axis) / denominator);
+    return length(point - (start + axis * along));
+}
+
+float worldscar_reveal_mask(vec2 uv, float progress) {
+    // NativeWallpaperRenderer's fullscreen quad uses V=1 at screen-top, while
+    // Worldscar's GTK shader authors Y=0 at screen-top. Convert ONLY the reveal
+    // geometry here; wallpaper sampling keeps the existing upright crop UV.
+    vec2 authored_uv = vec2(uv.x, 1.0 - uv.y);
+    vec2 point = vec2(authored_uv.x * u_aspect, authored_uv.y);
+
+    vec2 a = vec2(0.455 * u_aspect, 0.055);
+    vec2 b = vec2(0.405 * u_aspect, 0.205);
+    vec2 c = vec2(0.325 * u_aspect, 0.485);
+    vec2 d = vec2(0.205 * u_aspect, 0.755);
+    vec2 e = vec2(0.070 * u_aspect, 0.955);
+    float distance_to_slash = min(
+        min(segment_distance(point, a, b), segment_distance(point, b, c)),
+        min(segment_distance(point, c, d), segment_distance(point, d, e))
+    );
+
+    float reveal = ease_out_cubic(progress);
+    float radius = mix(0.006, 1.68, reveal);
+    float feather = mix(0.004, 0.020, reveal);
+    return 1.0 - smoothstep(radius, radius + feather, distance_to_slash);
+}
+
 void main() {
     vec4 from_color = texture2D(u_current, crop_uv(u_current_uv, v_uv));
     vec4 to_color = texture2D(u_next, crop_uv(u_next_uv, v_uv));
+
+    if (u_transition_mode > 0.5) {
+        float reveal = worldscar_reveal_mask(v_uv, u_progress);
+        gl_FragColor = mix(from_color, to_color, reveal);
+        return;
+    }
+
     gl_FragColor = mix(from_color, to_color, u_progress);
 }
 )";
@@ -278,11 +327,14 @@ bool NativeWallpaperRenderer::initialize_gl(std::string* error_message) {
     progress_uniform_ = glGetUniformLocation(program_, "u_progress");
     current_uv_uniform_ = glGetUniformLocation(program_, "u_current_uv");
     next_uv_uniform_ = glGetUniformLocation(program_, "u_next_uv");
+    transition_mode_uniform_ = glGetUniformLocation(program_, "u_transition_mode");
+    aspect_uniform_ = glGetUniformLocation(program_, "u_aspect");
 
     if (position_attribute_ < 0 || uv_attribute_ < 0 ||
         current_sampler_uniform_ < 0 || next_sampler_uniform_ < 0 ||
         progress_uniform_ < 0 || current_uv_uniform_ < 0 ||
-        next_uv_uniform_ < 0) {
+        next_uv_uniform_ < 0 || transition_mode_uniform_ < 0 ||
+        aspect_uniform_ < 0) {
         set_error(error_message, "native wallpaper shader interface is incomplete");
         return false;
     }
@@ -303,6 +355,8 @@ bool NativeWallpaperRenderer::set_wallpaper(
         return false;
     }
 
+    discard_prepared_wallpaper();
+
     Texture candidate;
     if (!upload_texture(path, candidate, error_message)) return false;
 
@@ -314,10 +368,76 @@ bool NativeWallpaperRenderer::set_wallpaper(
 
     destroy_texture(next_texture_);
     next_texture_ = candidate;
+    transition_mode_ = TransitionMode::Crossfade;
+    active_transition_duration_ = transition_duration_;
     animation_started_ = std::chrono::steady_clock::now();
     animating_ = true;
     draw_all();
     return true;
+}
+
+bool NativeWallpaperRenderer::prepare_wallpaper(
+    const std::string& path,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!initialized_) {
+        set_error(error_message, "native wallpaper renderer is not initialized");
+        return false;
+    }
+    if (animating_) {
+        set_error(error_message, "native wallpaper renderer is still transitioning");
+        return false;
+    }
+
+    // PREPARE is authoritative for the next transaction. Never retain a stale
+    // full-resolution candidate if this decode fails or the selection changed.
+    discard_prepared_wallpaper();
+    Texture candidate;
+    if (!upload_texture(path, candidate, error_message)) return false;
+    prepared_texture_ = candidate;
+    return true;
+}
+
+bool NativeWallpaperRenderer::commit_prepared_wallpaper(
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!initialized_) {
+        set_error(error_message, "native wallpaper renderer is not initialized");
+        return false;
+    }
+    if (prepared_texture_.id == 0) {
+        set_error(error_message, "native wallpaper renderer has no prepared wallpaper");
+        return false;
+    }
+    if (animating_) {
+        set_error(error_message, "native wallpaper renderer is already transitioning");
+        return false;
+    }
+
+    if (current_texture_.id == 0) {
+        current_texture_ = prepared_texture_;
+        prepared_texture_ = {};
+        draw_all();
+        return true;
+    }
+
+    destroy_texture(next_texture_);
+    next_texture_ = prepared_texture_;
+    prepared_texture_ = {};
+    transition_mode_ = TransitionMode::WorldscarReveal;
+    active_transition_duration_ = std::chrono::milliseconds{520};
+    animation_started_ = std::chrono::steady_clock::now();
+    animating_ = true;
+    draw_all();
+    return true;
+}
+
+void NativeWallpaperRenderer::discard_prepared_wallpaper() noexcept {
+    if (!initialized_ || prepared_texture_.id == 0) return;
+    if (!make_pbuffer_current()) return;
+    destroy_texture(prepared_texture_);
 }
 
 int NativeWallpaperRenderer::run_stdio() {
@@ -853,7 +973,7 @@ void NativeWallpaperRenderer::draw_all() {
         const auto elapsed = std::chrono::steady_clock::now() - animation_started_;
         progress = std::clamp(
             std::chrono::duration<float, std::milli>(elapsed).count() /
-                static_cast<float>(transition_duration_.count()),
+                static_cast<float>(active_transition_duration_.count()),
             0.0F,
             1.0F
         );
@@ -940,6 +1060,14 @@ void NativeWallpaperRenderer::draw_output(OutputSurface& output, float progress)
     glUniform1i(next_sampler_uniform_, 1);
 
     glUniform1f(progress_uniform_, next_texture_.id != 0 ? progress : 1.0F);
+    glUniform1f(
+        transition_mode_uniform_,
+        transition_mode_ == TransitionMode::WorldscarReveal ? 1.0F : 0.0F
+    );
+    glUniform1f(
+        aspect_uniform_,
+        static_cast<float>(pixel_width) / static_cast<float>(pixel_height)
+    );
     glUniform4fv(current_uv_uniform_, 1, current_uv.data());
     glUniform4fv(next_uv_uniform_, 1, next_uv.data());
 
@@ -953,7 +1081,7 @@ void NativeWallpaperRenderer::draw_output(OutputSurface& output, float progress)
 
 void NativeWallpaperRenderer::advance_animation() {
     const auto elapsed = std::chrono::steady_clock::now() - animation_started_;
-    const bool complete = elapsed >= transition_duration_;
+    const bool complete = elapsed >= active_transition_duration_;
     draw_all();
 
     if (!complete) return;
@@ -963,7 +1091,25 @@ void NativeWallpaperRenderer::advance_animation() {
     current_texture_ = next_texture_;
     next_texture_ = {};
     animating_ = false;
+    transition_mode_ = TransitionMode::Crossfade;
+    active_transition_duration_ = transition_duration_;
     draw_all();
+
+    // SET / WORLDSCAR-COMMIT is acknowledged only after the final wallpaper frame has been
+    // submitted. Worldscar can therefore treat the existing backend callback
+    // as a real visual-ready signal instead of guessing with a sleep.
+    if (set_response_pending_) {
+        set_response_pending_ = false;
+        // Synchronize once after the final buffer commit so the acknowledgement
+        // cannot overtake that commit on the Wayland connection. This is a
+        // protocol readiness boundary, not a timing guess.
+        if (wl_display_roundtrip(display_) < 0) {
+            send_error("Wayland failed while confirming final wallpaper frame");
+            running_ = false;
+            return;
+        }
+        send_ok();
+    }
 }
 
 void NativeWallpaperRenderer::destroy_texture(Texture& texture) noexcept {
@@ -1046,34 +1192,84 @@ void NativeWallpaperRenderer::process_command(const std::string& command) {
         running_ = false;
         return;
     }
-
-    constexpr std::string_view prefix = "SET ";
-    if (!command.starts_with(prefix)) {
-        send_error("unknown native wallpaper command");
+    if (command == "DISCARD") {
+        discard_prepared_wallpaper();
+        send_ok();
+        return;
+    }
+    if (command == "WORLDSCAR-COMMIT") {
+        std::string error;
+        if (!commit_prepared_wallpaper(&error)) {
+            send_error(error);
+            return;
+        }
+        if (animating_) {
+            set_response_pending_ = true;
+            return;
+        }
+        if (wl_display_roundtrip(display_) < 0) {
+            send_error("Wayland failed while confirming prepared wallpaper commit");
+            running_ = false;
+            return;
+        }
+        send_ok();
         return;
     }
 
-    const std::string encoded = command.substr(prefix.size());
-    gsize decoded_size = 0;
-    guchar* decoded = g_base64_decode(encoded.c_str(), &decoded_size);
-    if (decoded == nullptr || decoded_size == 0) {
-        if (decoded != nullptr) g_free(decoded);
-        send_error("invalid encoded wallpaper path");
+    const auto decode_path = [&](std::string_view prefix) -> std::optional<std::string> {
+        if (!command.starts_with(prefix)) return std::nullopt;
+        const std::string encoded = command.substr(prefix.size());
+        gsize decoded_size = 0;
+        guchar* decoded = g_base64_decode(encoded.c_str(), &decoded_size);
+        if (decoded == nullptr || decoded_size == 0) {
+            if (decoded != nullptr) g_free(decoded);
+            return std::nullopt;
+        }
+        std::string path(
+            reinterpret_cast<const char*>(decoded),
+            static_cast<std::size_t>(decoded_size)
+        );
+        g_free(decoded);
+        return path;
+    };
+
+    constexpr std::string_view prepare_prefix = "PREPARE ";
+    if (command.starts_with(prepare_prefix)) {
+        const auto path = decode_path(prepare_prefix);
+        if (!path) {
+            send_error("invalid encoded wallpaper path");
+            return;
+        }
+        std::string error;
+        if (!prepare_wallpaper(*path, &error)) {
+            send_error(error);
+            return;
+        }
+        std::cout << "PREPARED\n" << std::flush;
         return;
     }
 
-    std::string path(
-        reinterpret_cast<const char*>(decoded),
-        static_cast<std::size_t>(decoded_size)
-    );
-    g_free(decoded);
-
-    std::string error;
-    if (!set_wallpaper(path, &error)) {
-        send_error(error);
+    constexpr std::string_view set_prefix = "SET ";
+    if (command.starts_with(set_prefix)) {
+        const auto path = decode_path(set_prefix);
+        if (!path) {
+            send_error("invalid encoded wallpaper path");
+            return;
+        }
+        std::string error;
+        if (!set_wallpaper(*path, &error)) {
+            send_error(error);
+            return;
+        }
+        if (animating_) {
+            set_response_pending_ = true;
+            return;
+        }
+        send_ok();
         return;
     }
-    send_ok();
+
+    send_error("unknown native wallpaper command");
 }
 
 void NativeWallpaperRenderer::send_ok() const {
@@ -1125,6 +1321,7 @@ void NativeWallpaperRenderer::cleanup() noexcept {
             pbuffer_surface_,
             egl_context_
         );
+        destroy_texture(prepared_texture_);
         destroy_texture(next_texture_);
         destroy_texture(current_texture_);
         if (program_ != 0) {
@@ -1170,6 +1367,7 @@ void NativeWallpaperRenderer::cleanup() noexcept {
 
     initialized_ = false;
     running_ = false;
+    set_response_pending_ = false;
 }
 
 } // namespace realmheart::wallpaper_native

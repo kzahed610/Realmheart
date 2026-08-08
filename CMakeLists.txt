@@ -175,6 +175,8 @@ add_library(realmheart_ui STATIC
     src/ui/powermenu/PowerMenuLayout.cpp
     src/ui/powermenu/PowerMenuVideoState.cpp
     src/ui/powermenu/PowerMenuProcess.cpp
+    src/ui/worldscar/WorldscarProcess.cpp
+    src/worldscar/WorldscarProtocol.cpp
     src/ui/powermenu/animation/PowerMenuRippleRenderer.cpp
     src/ui/powermenu/PowerMenuScene.cpp
     src/ui/powermenu/PowerMenuOverlay.cpp
@@ -245,7 +247,36 @@ target_link_libraries(realmheart_power_menu_renderer PRIVATE
     Threads::Threads
 )
 
-add_dependencies(realmheart realmheart_power_menu_renderer)
+add_executable(realmheart_worldscar_renderer
+    src/worldscar-renderer/main.cpp
+    src/core/TaskExecutor.cpp
+    src/worldscar/WallpaperLibrary.cpp
+    src/worldscar/WorldscarOverlay.cpp
+    src/worldscar/WorldscarSelection.cpp
+    src/worldscar/WorldscarProtocol.cpp
+    src/worldscar/WorldscarReferenceRenderer.cpp
+    src/effects/core/ShaderSource.cpp
+    src/ui/LayerSurface.cpp
+)
+set_target_properties(realmheart_worldscar_renderer PROPERTIES
+    OUTPUT_NAME "realmheart-worldscar-renderer"
+)
+target_include_directories(realmheart_worldscar_renderer PRIVATE src third_party)
+target_compile_definitions(realmheart_worldscar_renderer PRIVATE
+    REALMHEART_INSTALL_EFFECT_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/effects"
+    REALMHEART_SOURCE_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects"
+)
+target_compile_options(realmheart_worldscar_renderer PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_link_libraries(realmheart_worldscar_renderer PRIVATE
+    PkgConfig::GIO
+    PkgConfig::GTK4
+    PkgConfig::GTK4_LAYER_SHELL
+    PkgConfig::GDK_PIXBUF
+    PkgConfig::EPOXY
+    Threads::Threads
+)
+
+add_dependencies(realmheart realmheart_power_menu_renderer realmheart_worldscar_renderer)
 
 set(REALMHEART_NATIVE_WALLPAPER_BUILT OFF)
 if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
@@ -336,7 +367,7 @@ if(TARGET realmheart_fx)
     install(TARGETS realmheart_fx LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/realmheart)
 endif()
 
-install(TARGETS realmheart realmheart_power_menu_renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS realmheart realmheart_power_menu_renderer realmheart_worldscar_renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(REALMHEART_NATIVE_WALLPAPER_BUILT)
     install(TARGETS realmheart-wallpaper-renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
@@ -816,6 +847,39 @@ if(BUILD_TESTING)
     add_executable(realmheart_wallpaper_service_tests tests/WallpaperServiceTests.cpp src/services/WallpaperService.cpp src/core/Command.cpp)
     target_link_libraries(realmheart_wallpaper_service_tests PRIVATE GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_wallpaper_service_tests)
+
+    add_executable(
+        realmheart_worldscar_wallpaper_library_tests
+        tests/WallpaperLibraryTests.cpp
+        src/worldscar/WallpaperLibrary.cpp
+    )
+    target_link_libraries(
+        realmheart_worldscar_wallpaper_library_tests
+        PRIVATE GTest::gtest GTest::gtest_main PkgConfig::GDK_PIXBUF
+    )
+    realmheart_register_test(realmheart_worldscar_wallpaper_library_tests)
+
+    add_executable(
+        realmheart_worldscar_selection_tests
+        tests/WorldscarSelectionTests.cpp
+        src/worldscar/WorldscarSelection.cpp
+    )
+    target_link_libraries(
+        realmheart_worldscar_selection_tests
+        PRIVATE GTest::gtest GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_worldscar_selection_tests)
+
+    add_executable(
+        realmheart_worldscar_protocol_tests
+        tests/WorldscarProtocolTests.cpp
+        src/worldscar/WorldscarProtocol.cpp
+    )
+    target_link_libraries(
+        realmheart_worldscar_protocol_tests
+        PRIVATE GTest::gtest GTest::gtest_main PkgConfig::GIO
+    )
+    realmheart_register_test(realmheart_worldscar_protocol_tests)
 
     add_executable(realmheart_wifi_tests tests/WifiTests.cpp src/core/Command.cpp src/services/Wifi.cpp)
     realmheart_register_test(realmheart_wifi_tests)

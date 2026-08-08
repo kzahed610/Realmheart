@@ -18,6 +18,29 @@ void set_error(std::string* destination, const std::string& message) {
     if (destination != nullptr) *destination = message;
 }
 
+std::string encoded_path_command(
+    std::string_view verb,
+    const std::filesystem::path& path,
+    std::string* error_message
+) {
+    const std::string raw_path = path.string();
+    gchar* encoded = g_base64_encode(
+        reinterpret_cast<const guchar*>(raw_path.data()),
+        raw_path.size()
+    );
+    if (encoded == nullptr) {
+        set_error(error_message, "unable to encode wallpaper path");
+        return {};
+    }
+
+    std::string command(verb);
+    command.push_back(' ');
+    command += encoded;
+    command.push_back('\n');
+    g_free(encoded);
+    return command;
+}
+
 std::string decode_error(std::string_view encoded) {
     gsize decoded_size = 0;
     guchar* decoded = g_base64_decode(std::string(encoded).c_str(), &decoded_size);
@@ -134,6 +157,30 @@ bool NativeWallpaperBackend::set_wallpaper(
     return set_wallpaper_locked(path, error_message);
 }
 
+bool NativeWallpaperBackend::prepare_wallpaper(
+    const std::filesystem::path& path,
+    std::string* error_message
+) {
+    std::lock_guard lock(operation_mutex_);
+    return prepare_wallpaper_locked(path, error_message);
+}
+
+bool NativeWallpaperBackend::commit_prepared_wallpaper(
+    std::string* error_message
+) {
+    std::lock_guard lock(operation_mutex_);
+    return commit_prepared_wallpaper_locked(error_message);
+}
+
+void NativeWallpaperBackend::discard_prepared_wallpaper() noexcept {
+    std::lock_guard lock(operation_mutex_);
+    if (!initialized_) return;
+    std::string ignored;
+    if (!send_line("DISCARD\n", &ignored) || !read_response("OK", &ignored)) {
+        stop_locked();
+    }
+}
+
 bool NativeWallpaperBackend::set_wallpaper_locked(
     const std::filesystem::path& path,
     std::string* error_message
@@ -141,22 +188,44 @@ bool NativeWallpaperBackend::set_wallpaper_locked(
     if (error_message != nullptr) error_message->clear();
     if (!initialized_ && !initialize_locked(error_message)) return false;
 
-    const std::string raw_path = path.string();
-    gchar* encoded = g_base64_encode(
-        reinterpret_cast<const guchar*>(raw_path.data()),
-        raw_path.size()
-    );
-    if (encoded == nullptr) {
-        set_error(error_message, "unable to encode wallpaper path");
-        return false;
-    }
-
-    std::string command = "SET ";
-    command += encoded;
-    command.push_back('\n');
-    g_free(encoded);
+    const std::string command = encoded_path_command("SET", path, error_message);
+    if (command.empty()) return false;
 
     if (!send_line(command, error_message) || !read_response("OK", error_message)) {
+        stop_locked();
+        return false;
+    }
+    return true;
+}
+
+bool NativeWallpaperBackend::prepare_wallpaper_locked(
+    const std::filesystem::path& path,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!initialized_ && !initialize_locked(error_message)) return false;
+
+    const std::string command = encoded_path_command("PREPARE", path, error_message);
+    if (command.empty()) return false;
+    if (!send_line(command, error_message) ||
+        !read_response("PREPARED", error_message)) {
+        stop_locked();
+        return false;
+    }
+    return true;
+}
+
+bool NativeWallpaperBackend::commit_prepared_wallpaper_locked(
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!initialized_ && !initialize_locked(error_message)) return false;
+
+    // WORLDSCAR-COMMIT keeps the old and prepared full-resolution textures in
+    // the native renderer and performs the final diagonal reveal there. No
+    // preview thumbnail is ever stretched fullscreen.
+    if (!send_line("WORLDSCAR-COMMIT\n", error_message) ||
+        !read_response("OK", error_message)) {
         stop_locked();
         return false;
     }
