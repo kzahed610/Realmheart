@@ -186,4 +186,67 @@ bool validate_workspace_morph_shader_contract(
     return true;
 }
 
+bool validate_worldscar_reference_shader_contract(
+    std::string_view source,
+    std::string* missing_symbol
+) noexcept {
+    constexpr std::array<std::string_view, 6> kRequiredSymbols{{
+        "uniform sampler2D candidateTex",
+        "uniform vec2 resolution",
+        "uniform float openProgress",
+        "uniform float commitProgress",
+        "uniform vec4 candidateUv",
+        "out vec4 fragColor",
+    }};
+
+    for (const auto symbol : kRequiredSymbols) {
+        if (!contains_symbol(source, symbol)) {
+            if (missing_symbol != nullptr) *missing_symbol = std::string{symbol};
+            return false;
+        }
+    }
+
+    if (missing_symbol != nullptr) missing_symbol->clear();
+    return true;
+}
+
+bool validate_worldscar_shader_contract(
+    std::string_view source,
+    std::string* missing_symbol
+) noexcept {
+    constexpr std::array<std::string_view, 21> kRequiredSymbols{{
+        "uniform sampler2D previousTex",
+        "uniform sampler2D candidateTex",
+        "uniform sampler2D nextTex",
+        "uniform sampler2D previousFarTex",
+        "uniform sampler2D nextFarTex",
+        "uniform vec2 resolution",
+        "uniform float openProgress",
+        "uniform float commitProgress",
+        "uniform float finishProgress",
+        "uniform float navigationProgress",
+        "uniform float navigationDirection",
+        "uniform float previousReady",
+        "uniform float nextReady",
+        "uniform float previousFarReady",
+        "uniform float nextFarReady",
+        "uniform vec4 previousUv",
+        "uniform vec4 candidateUv",
+        "uniform vec4 nextUv",
+        "uniform vec4 previousFarUv",
+        "uniform vec4 nextFarUv",
+        "out vec4 fragColor",
+    }};
+
+    for (const auto symbol : kRequiredSymbols) {
+        if (!contains_symbol(source, symbol)) {
+            if (missing_symbol != nullptr) *missing_symbol = std::string{symbol};
+            return false;
+        }
+    }
+
+    if (missing_symbol != nullptr) missing_symbol->clear();
+    return true;
+}
+
 } // namespace realmheart::effects

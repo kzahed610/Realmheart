@@ -659,7 +659,7 @@ Realmheart is intentionally **not** trying to become:
 - a complete desktop environment;
 - a compositor replacement;
 - a universal shell for every Wayland compositor;
-- a drop-in clone of Quickshell, AGS, Waybar, or any existing shell;
+- a drop-in clone of another shell or status-bar stack;
 - a generic framework that sacrifices identity for configurability.
 
 It is a focused Hyprland shell built around one desktop, one design language,

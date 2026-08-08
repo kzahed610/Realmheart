@@ -65,6 +65,60 @@ TEST(ShaderSourceTests, LoadsWorkspaceMorphShaderAndValidatesContract) {
     EXPECT_NE(shader->text.find("materialized"), std::string::npos);
 }
 
+TEST(ShaderSourceTests, LoadsWorldscarReferenceShaderAndValidatesContract) {
+    std::string error;
+    const auto shader = load_shader_source(
+        "worldscar/reference/reference.frag",
+        &error
+    );
+    ASSERT_TRUE(shader.has_value()) << error;
+
+    std::string missing;
+    EXPECT_TRUE(validate_worldscar_reference_shader_contract(
+        shader->text,
+        &missing
+    )) << missing;
+    EXPECT_NE(shader->text.find("openProgress <= 0.0005"), std::string::npos);
+    EXPECT_NE(shader->text.find("commitProgress >= 0.9995"), std::string::npos);
+    EXPECT_EQ(shader->text.find("baseTex"), std::string::npos);
+    EXPECT_NE(shader->text.find("vec2(0.355, 0.50)"), std::string::npos);
+}
+
+TEST(ShaderSourceTests, LoadsWorldscarProductionShaderAndValidatesContract) {
+    std::string error;
+    const auto shader = load_shader_source(
+        "worldscar/worldscar.frag",
+        &error
+    );
+    ASSERT_TRUE(shader.has_value()) << error;
+
+    std::string missing;
+    EXPECT_TRUE(validate_worldscar_shader_contract(
+        shader->text,
+        &missing
+    )) << missing;
+    EXPECT_NE(shader->text.find("openProgress <= 0.0005"), std::string::npos);
+    EXPECT_NE(shader->text.find("finishProgress >= 0.9995"), std::string::npos);
+    EXPECT_EQ(shader->text.find("baseTex"), std::string::npos);
+    EXPECT_NE(shader->text.find("selected_world_field"), std::string::npos);
+    EXPECT_NE(shader->text.find("previous_world_field"), std::string::npos);
+    EXPECT_NE(shader->text.find("next_world_field"), std::string::npos);
+    EXPECT_NE(shader->text.find("connective_fracture_field"), std::string::npos);
+    EXPECT_NE(shader->text.find("navigationProgress"), std::string::npos);
+    EXPECT_NE(shader->text.find("preview_local_uv"), std::string::npos);
+    EXPECT_NE(shader->text.find("residual_slash_field"), std::string::npos);
+    EXPECT_NE(shader->text.find("opening_frontier"), std::string::npos);
+    EXPECT_NE(shader->text.find("previousFarTex"), std::string::npos);
+    EXPECT_NE(shader->text.find("nextFarTex"), std::string::npos);
+    EXPECT_EQ(
+        shader->text.find("float previous_open = smoothstep"),
+        std::string::npos
+    );
+    // Verify the authored terminal geometry itself instead of coupling the
+    // test to prose in a shader comment.
+    EXPECT_NE(shader->text.find("scar_point(vec2(0.070, 0.955), aspect)"), std::string::npos);
+}
+
 TEST(ShaderSourceTests, ReportsMissingContractSymbol) {
     std::string missing;
     EXPECT_FALSE(validate_shell_shader_contract(

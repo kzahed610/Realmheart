@@ -1,8 +1,8 @@
 #pragma once
 
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Render-pass structure adapted from  hyprfx (commit
-// d680dabdd2d9362626ecedcad9bd396508163468), itself derived from xhos/hyprfx.
+// Upstream provenance for the render-pass structure lives in
+// ATTRIBUTION.md.
 
 #include <hyprland/src/render/pass/PassElement.hpp>
 #include <hyprland/src/render/Shader.hpp>

@@ -31,6 +31,14 @@ public:
         const std::string& path,
         std::string* error_message = nullptr
     );
+    [[nodiscard]] bool prepare_wallpaper(
+        const std::string& path,
+        std::string* error_message = nullptr
+    );
+    [[nodiscard]] bool commit_prepared_wallpaper(
+        std::string* error_message = nullptr
+    );
+    void discard_prepared_wallpaper() noexcept;
     int run_stdio();
 
 private:
@@ -38,6 +46,11 @@ private:
         GLuint id = 0;
         int width = 0;
         int height = 0;
+    };
+
+    enum class TransitionMode {
+        Crossfade,
+        WorldscarReveal,
     };
 
     struct OutputSurface {
@@ -168,15 +181,21 @@ private:
     GLint progress_uniform_ = -1;
     GLint current_uv_uniform_ = -1;
     GLint next_uv_uniform_ = -1;
+    GLint transition_mode_uniform_ = -1;
+    GLint aspect_uniform_ = -1;
 
     Texture current_texture_;
     Texture next_texture_;
+    Texture prepared_texture_;
     bool animating_ = false;
     std::chrono::steady_clock::time_point animation_started_{};
     std::chrono::milliseconds transition_duration_{350};
+    std::chrono::milliseconds active_transition_duration_{350};
+    TransitionMode transition_mode_ = TransitionMode::Crossfade;
 
     bool initialized_ = false;
     bool running_ = false;
+    bool set_response_pending_ = false;
     std::string stdin_buffer_;
 };
 

@@ -36,6 +36,7 @@
 #include "ui/wallpaper/WallpaperBackend.hpp"
 #include "ui/wallpaper/WallpaperController.hpp"
 #include "ui/workspace/WorkspaceOverviewOverlay.hpp"
+#include "ui/worldscar/WorldscarProcess.hpp"
 
 #include <gtk/gtk.h>
 
@@ -48,6 +49,7 @@
 #include <ctime>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -81,6 +83,7 @@ std::filesystem::path user_media_directory(GUserDirectory directory, const char*
 }
 
 constexpr int kHotspotHitWidth = 16;
+constexpr std::string_view kWorldscarWorkspaceName = "realmheart-worldscar";
 
 template <typename... Args>
 void sidebar_input_debug(Args&&... args) {
@@ -357,6 +360,7 @@ public:
     }
 
     ~ShellRuntime() {
+        worldscar_process_.shutdown();
         power_menu_process_.close();
 
         // Stop callbacks that capture this before tearing down UI/controllers.
@@ -405,11 +409,17 @@ public:
 
     void activate() {
         ensure_core_initialized();
+        static_cast<void>(worldscar_process_.warm());
         state_.show_bar();
         apply_bar_visibility();
         const std::string current_path = utilities_->load_wallpaper_path();
         if (current_path.empty()) return;
 
+        // Prime the Worldscar working set as soon as the shell knows the
+        // current wallpaper instead of waiting for the user's first summon.
+        // The warm helper can decode/cache adjacent previews during ordinary
+        // desktop idle time.
+        worldscar_process_.prepare(current_path);
         request_wallpaper(current_path, "Unable to restore wallpaper");
     }
 
@@ -656,8 +666,113 @@ public:
         workspace_overview_->toggle();
     }
 
+    void toggle_worldscar() {
+        ensure_core_initialized();
+
+        if (worldscar_apply_pending_ || worldscar_launch_pending_ ||
+            worldscar_restore_pending_) {
+            return;
+        }
+        if (worldscar_process_.session_active()) {
+            worldscar_process_.close();
+            return;
+        }
+
+        const std::string current_path = utilities_->load_wallpaper_path();
+        if (current_path.empty()) {
+            std::cerr << "[Worldscar] current wallpaper path is unavailable\n";
+            return;
+        }
+
+        // Start candidate decode before Hyprland begins moving the current
+        // workspace away. The workspace/bar transition now doubles as useful
+        // loading time, so the first visible scar can start from progress 0.
+        worldscar_process_.prepare(current_path);
+
+        // Worldscar owns the screen while active. Dismiss other transient shell
+        // surfaces and temporarily hide the bar so transparent scar pixels see
+        // only the actual wallpaper on the empty workspace.
+        power_menu_process_.close();
+        if (launcher_overlay_) launcher_overlay_->hide();
+        if (workspace_overview_ && workspace_overview_->visible()) {
+            workspace_overview_->hide();
+        }
+        if (state_.right_sidebar_visible()) toggle_right_sidebar();
+
+        worldscar_bar_was_visible_ = bar_ != nullptr && state_.bar_visible();
+        if (worldscar_bar_was_visible_) {
+            gtk_widget_set_visible(bar_->get_window(), FALSE);
+        }
+
+        worldscar_launch_pending_ = true;
+        const std::uint64_t generation = ++worldscar_launch_generation_;
+        const int cached_workspace = workspace_snapshot_.available
+            ? workspace_snapshot_.active_id
+            : 0;
+        const auto async_state = runtime_async_state_;
+
+        const bool posted = core::shared_task_executor().post([
+            async_state,
+            generation,
+            cached_workspace,
+            current_path
+        ] {
+            const auto active = services::HyprlandWorkspaces::active_workspace_id();
+            const int original_workspace = active.value_or(cached_workspace);
+            const bool switched = original_workspace > 0 &&
+                services::HyprlandWorkspaces::switch_to_named(
+                    kWorldscarWorkspaceName
+                );
+
+            struct Payload {
+                std::shared_ptr<RuntimeAsyncState> state;
+                std::uint64_t generation = 0;
+                std::string current_path;
+                int original_workspace = 0;
+                bool switched = false;
+            };
+
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,
+                +[](gpointer raw) -> gboolean {
+                    auto* payload = static_cast<Payload*>(raw);
+                    ShellRuntime* owner = payload->state->owner.load();
+                    if (payload->state->alive.load() && owner != nullptr) {
+                        owner->finish_worldscar_launch(
+                            payload->generation,
+                            std::move(payload->current_path),
+                            payload->original_workspace,
+                            payload->switched
+                        );
+                    }
+                    return G_SOURCE_REMOVE;
+                },
+                new Payload{
+                    async_state,
+                    generation,
+                    current_path,
+                    original_workspace,
+                    switched,
+                },
+                +[](gpointer raw) { delete static_cast<Payload*>(raw); }
+            );
+        });
+
+        if (!posted) {
+            worldscar_launch_pending_ = false;
+            restore_worldscar_chrome();
+            std::cerr << "[Worldscar] unable to queue workspace handoff\n";
+        }
+    }
+
     void set_wallpaper(const std::string& path = {}) {
         ensure_core_initialized();
+        if (worldscar_process_.session_active() || worldscar_apply_pending_ ||
+            worldscar_launch_pending_ || worldscar_restore_pending_) {
+            std::cerr
+                << "[Worldscar] wallpaper changes are locked during an active transaction\n";
+            return;
+        }
         if (path.empty()) {
             choose_wallpaper_native();
             return;
@@ -668,6 +783,12 @@ public:
 
     void switch_wallpaper_backend(const std::string& backend_name) {
         ensure_core_initialized();
+        if (worldscar_process_.session_active() || worldscar_apply_pending_ ||
+            worldscar_launch_pending_ || worldscar_restore_pending_) {
+            std::cerr
+                << "[Worldscar] wallpaper backend changes are locked during an active transaction\n";
+            return;
+        }
         const auto backend = wallpaper::parse_wallpaper_backend_type(backend_name);
         if (!backend) {
             std::cerr << "Unknown wallpaper backend: " << backend_name
@@ -928,17 +1049,234 @@ private:
         now_playing_->show(title, artist);
     }
 
-    void request_wallpaper(const std::string& path, const char* failure_prefix) {
-        if (path.empty() || wallpaper_controller_ == nullptr) return;
+    void finish_worldscar_launch(
+        std::uint64_t generation,
+        std::string current_path,
+        int original_workspace,
+        bool switched
+    ) {
+        if (generation != worldscar_launch_generation_) return;
+        worldscar_launch_pending_ = false;
+
+        if (!switched || original_workspace <= 0) {
+            restore_worldscar_chrome();
+            std::cerr << "[Worldscar] unable to enter the empty Worldscar workspace\n";
+            return;
+        }
+
+        worldscar_restore_workspace_id_ = original_workspace;
+        const auto async_state = runtime_async_state_;
+        if (!worldscar_process_.open(
+                std::move(current_path),
+                [async_state](realmheart::worldscar::WorldscarResult result) {
+                    ShellRuntime* owner = async_state->owner.load();
+                    if (!async_state->alive.load() || owner == nullptr) return;
+                    owner->handle_worldscar_result(std::move(result));
+                })) {
+            std::cerr << "[Worldscar] warm helper rejected the open request\n";
+            restore_worldscar_workspace();
+        }
+    }
+
+    void handle_worldscar_result(
+        realmheart::worldscar::WorldscarResult result
+    ) {
+        using realmheart::worldscar::WorldscarResultKind;
+
+        switch (result.kind) {
+        case WorldscarResultKind::Cancel:
+            if (wallpaper_controller_ != nullptr) {
+                wallpaper_controller_->discard_prepared_wallpaper();
+            }
+            worldscar_apply_pending_ = false;
+            worldscar_apply_path_.clear();
+            restore_worldscar_workspace();
+            return;
+
+        case WorldscarResultKind::Complete:
+            worldscar_apply_pending_ = false;
+            worldscar_apply_path_.clear();
+            restore_worldscar_workspace();
+            return;
+
+        case WorldscarResultKind::Error:
+            if (wallpaper_controller_ != nullptr) {
+                wallpaper_controller_->discard_prepared_wallpaper();
+            }
+            worldscar_apply_pending_ = false;
+            worldscar_apply_path_.clear();
+            std::cerr << "[Worldscar] " << result.payload << '\n';
+            restore_worldscar_workspace();
+            return;
+
+        case WorldscarResultKind::Apply:
+            break;
+
+        case WorldscarResultKind::Commit: {
+            if (!worldscar_apply_pending_ || worldscar_apply_path_.empty() ||
+                wallpaper_controller_ == nullptr) {
+                return;
+            }
+            if (!result.payload.empty() && result.payload != worldscar_apply_path_) {
+                worldscar_process_.apply_failed(
+                    "Worldscar commit path changed after wallpaper preparation"
+                );
+                return;
+            }
+
+            const auto async_state = runtime_async_state_;
+            const std::string path = worldscar_apply_path_;
+            wallpaper_controller_->commit_prepared_wallpaper_async(
+                [async_state, path](bool success, std::string error_message) {
+                    ShellRuntime* owner = async_state->owner.load();
+                    if (!async_state->alive.load() || owner == nullptr) return;
+
+                    if (!success) {
+                        owner->worldscar_process_.apply_failed(
+                            error_message.empty()
+                                ? "prepared wallpaper commit failed"
+                                : std::move(error_message)
+                        );
+                        return;
+                    }
+
+                    // The real wallpaper renderer has now completed its
+                    // full-resolution diagonal reveal. Persist/theme only after
+                    // that authoritative visual-ready boundary.
+                    if (services::WallpaperService* service =
+                            owner->utilities_->get_wallpaper_service()) {
+                        if (!service->update_state(path)) {
+                            std::cerr
+                                << "Wallpaper changed, but its path could not be persisted\n";
+                        }
+                    }
+                    owner->generate_theme_for(path);
+                    owner->worldscar_process_.apply_committed();
+                    // Do NOT restore the workspace yet. The helper still owns a
+                    // short purple/gold damage-line fade and will emit COMPLETE.
+                }
+            );
+            return;
+        }
+        }
+
+        if (worldscar_apply_pending_ || result.payload.empty() ||
+            wallpaper_controller_ == nullptr) {
+            return;
+        }
+
+        worldscar_apply_pending_ = true;
+        worldscar_apply_path_ = result.payload;
+        const auto async_state = runtime_async_state_;
+        wallpaper_controller_->prepare_wallpaper_async(
+            result.payload,
+            [async_state](bool success, std::string error_message) {
+                ShellRuntime* owner = async_state->owner.load();
+                if (!async_state->alive.load() || owner == nullptr) return;
+
+                if (success) {
+                    owner->worldscar_process_.apply_prepared();
+                    return;
+                }
+
+                owner->worldscar_process_.apply_failed(
+                    error_message.empty()
+                        ? "wallpaper backend prepare failed"
+                        : std::move(error_message)
+                );
+            }
+        );
+    }
+
+    void restore_worldscar_workspace() {
+        const int workspace_id = worldscar_restore_workspace_id_;
+        worldscar_restore_workspace_id_ = 0;
+        ++worldscar_launch_generation_;
+        worldscar_launch_pending_ = false;
+
+        if (workspace_id <= 0) {
+            worldscar_restore_pending_ = false;
+            restore_worldscar_chrome();
+            return;
+        }
+
+        worldscar_restore_pending_ = true;
+        const auto async_state = runtime_async_state_;
+        const bool posted = core::shared_task_executor().post([
+            async_state,
+            workspace_id
+        ] {
+            const bool restored =
+                services::HyprlandWorkspaces::switch_to(workspace_id);
+
+            struct Payload {
+                std::shared_ptr<RuntimeAsyncState> state;
+                int workspace_id = 0;
+                bool restored = false;
+            };
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,
+                +[](gpointer raw) -> gboolean {
+                    auto* payload = static_cast<Payload*>(raw);
+                    ShellRuntime* owner = payload->state->owner.load();
+                    if (payload->state->alive.load() && owner != nullptr) {
+                        owner->worldscar_restore_pending_ = false;
+                        if (!payload->restored) {
+                            std::cerr
+                                << "[Worldscar] unable to restore workspace "
+                                << payload->workspace_id << '\n';
+                        }
+                        owner->restore_worldscar_chrome();
+                    }
+                    return G_SOURCE_REMOVE;
+                },
+                new Payload{async_state, workspace_id, restored},
+                +[](gpointer raw) { delete static_cast<Payload*>(raw); }
+            );
+        });
+
+        if (!posted) {
+            worldscar_restore_pending_ = false;
+            restore_worldscar_chrome();
+        }
+    }
+
+    void restore_worldscar_chrome() {
+        if (worldscar_bar_was_visible_ && bar_ != nullptr &&
+            state_.bar_visible()) {
+            bar_->refresh();
+            gtk_window_present(GTK_WINDOW(bar_->get_window()));
+        }
+        worldscar_bar_was_visible_ = false;
+    }
+
+    using WallpaperRequestCompletion =
+        std::function<void(bool, std::string)>;
+
+    void request_wallpaper(
+        const std::string& path,
+        const char* failure_prefix,
+        WallpaperRequestCompletion completion = {}
+    ) {
+        if (path.empty() || wallpaper_controller_ == nullptr) {
+            if (completion) completion(false, "wallpaper controller is unavailable");
+            return;
+        }
         const auto utilities = utilities_;
         wallpaper_controller_->set_wallpaper_async(
             path,
-            [this, utilities, path, failure_prefix = std::string(failure_prefix)](
-                bool success,
-                std::string error_message
-            ) {
+            [
+                this,
+                utilities,
+                path,
+                failure_prefix = std::string(failure_prefix),
+                completion = std::move(completion)
+            ](bool success, std::string error_message) mutable {
                 if (!success) {
                     std::cerr << failure_prefix << ": " << error_message << '\n';
+                    if (completion) {
+                        completion(false, std::move(error_message));
+                    }
                     return;
                 }
 
@@ -948,6 +1286,7 @@ private:
                     }
                 }
                 generate_theme_for(path);
+                if (completion) completion(true, {});
             }
         );
     }
@@ -1462,6 +1801,14 @@ private:
     std::unique_ptr<workspace::WorkspaceOverviewOverlay> workspace_overview_;
     services::WorkspaceSnapshot workspace_snapshot_;
     powermenu::PowerMenuProcess power_menu_process_;
+    worldscar::WorldscarProcess worldscar_process_;
+    bool worldscar_launch_pending_ = false;
+    bool worldscar_apply_pending_ = false;
+    std::string worldscar_apply_path_;
+    bool worldscar_restore_pending_ = false;
+    bool worldscar_bar_was_visible_ = false;
+    int worldscar_restore_workspace_id_ = 0;
+    std::uint64_t worldscar_launch_generation_ = 0;
     std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;
 
     ShellState state_;
@@ -1539,6 +1886,14 @@ void toggle_workspace_overview_action(
     static_cast<ShellRuntime*>(user_data)->toggle_workspace_overview();
 }
 
+void toggle_worldscar_action(
+    GSimpleAction*,
+    GVariant*,
+    gpointer user_data
+) {
+    static_cast<ShellRuntime*>(user_data)->toggle_worldscar();
+}
+
 void set_wallpaper_action(GSimpleAction*, GVariant*, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->set_wallpaper();
 }
@@ -1612,6 +1967,7 @@ constexpr GActionEntry kShellActions[] = {
     {"launch-launcher", launch_launcher_action, nullptr, nullptr, nullptr, {}},
     {"launch-launcher-query", launch_launcher_query_action, "s", nullptr, nullptr, {}},
     {"workspace-overview-toggle", toggle_workspace_overview_action, nullptr, nullptr, nullptr, {}},
+    {"worldscar-toggle", toggle_worldscar_action, nullptr, nullptr, nullptr, {}},
     {"quit", quit_action, nullptr, nullptr, nullptr, {}},
 };
 

@@ -36,6 +36,8 @@ void parses_supported_shell_commands() {
             "launch-launcher-query should parse");
     require(parse_shell_command("workspace-overview-toggle") == ShellCommand::ToggleWorkspaceOverview,
             "workspace-overview-toggle should parse");
+    require(parse_shell_command("worldscar-toggle") == ShellCommand::ToggleWorldscar,
+            "worldscar-toggle should parse");
     require(parse_shell_command("restart") == ShellCommand::Restart,
             "restart should parse");
     require(parse_shell_command("quit") == ShellCommand::Quit,
@@ -68,6 +70,8 @@ void maps_commands_to_stable_action_names() {
             "launcher query action name should be stable");
     require(shell_action_name(ShellCommand::ToggleWorkspaceOverview) == "workspace-overview-toggle",
             "workspace overview action name should be stable");
+    require(shell_action_name(ShellCommand::ToggleWorldscar) == "worldscar-toggle",
+            "worldscar action name should be stable");
     require(shell_action_name(ShellCommand::Restart) == "restart",
             "restart action name should be stable");
     require(shell_action_name(ShellCommand::Quit) == "quit",
@@ -94,6 +98,8 @@ void identifies_commands_that_require_arguments() {
             "character toggle should remain parameterless");
     require(!shell_command_requires_argument(ShellCommand::ToggleWorkspaceOverview),
             "workspace overview toggle should remain parameterless");
+    require(!shell_command_requires_argument(ShellCommand::ToggleWorldscar),
+            "worldscar toggle should remain parameterless");
     require(!shell_command_requires_argument(ShellCommand::Restart),
             "restart should remain parameterless");
 }
