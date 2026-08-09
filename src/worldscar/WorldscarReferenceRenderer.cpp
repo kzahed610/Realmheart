@@ -660,10 +660,9 @@ struct WorldscarReferenceRenderer::State {
     std::shared_ptr<CacheWarmControl> cache_warm_control =
         std::make_shared<CacheWarmControl>();
 
-    std::array<TextureEntry, 5> entries;
+    std::array<TextureEntry, 6> entries;
     std::string fragment_source;
     WorldscarPreviewSet preview;
-    WorldscarPreviewSet pending_preview;
 
     GLuint program = 0;
     GLuint vertex_array = 0;
@@ -673,6 +672,7 @@ struct WorldscarReferenceRenderer::State {
     int selected_entry = 2;
     int next_entry = 3;
     int next_far_entry = 4;
+    int previous_far_far_entry = 5;
     int navigation_direction = 0;
     bool navigation_active = false;
 
@@ -683,12 +683,58 @@ struct WorldscarReferenceRenderer::State {
     float commit_progress = 0.0F;
     float finish_progress = 0.0F;
     float navigation_progress = 0.0F;
+    float fx_time_seconds = 0.0F;
+    guint fx_tick_id = 0;
+    gint64 fx_epoch_us = 0;
     std::string failure_message;
     std::uint64_t rendered_frames = 0;
     std::uint64_t generation_counter = 0;
 
     [[nodiscard]] bool gl_ready() const noexcept {
         return gl_area != nullptr && gtk_widget_get_realized(gl_area);
+    }
+
+    void start_fx_tick() noexcept {
+        if (gl_area == nullptr || fx_tick_id != 0) return;
+
+        fx_epoch_us = g_get_monotonic_time();
+        fx_time_seconds = 0.0F;
+        fx_tick_id = gtk_widget_add_tick_callback(
+            gl_area,
+            +[](
+                GtkWidget*,
+                GdkFrameClock* frame_clock,
+                gpointer data
+            ) -> gboolean {
+                auto* state = static_cast<State*>(data);
+                if (state == nullptr || !state->active ||
+                    state->gl_area == nullptr) {
+                    if (state != nullptr) state->fx_tick_id = 0;
+                    return G_SOURCE_REMOVE;
+                }
+
+                const gint64 frame_us = gdk_frame_clock_get_frame_time(
+                    frame_clock
+                );
+                state->fx_time_seconds = static_cast<float>(
+                    static_cast<double>(frame_us - state->fx_epoch_us) /
+                    1'000'000.0
+                );
+                gtk_gl_area_queue_render(GTK_GL_AREA(state->gl_area));
+                return G_SOURCE_CONTINUE;
+            },
+            this,
+            nullptr
+        );
+    }
+
+    void stop_fx_tick() noexcept {
+        if (fx_tick_id != 0 && gl_area != nullptr) {
+            gtk_widget_remove_tick_callback(gl_area, fx_tick_id);
+        }
+        fx_tick_id = 0;
+        fx_epoch_us = 0;
+        fx_time_seconds = 0.0F;
     }
 
     void delete_texture(TextureEntry& entry) noexcept {
@@ -1157,6 +1203,25 @@ struct WorldscarReferenceRenderer::State {
         const auto next_far_uv = role_uv(
             next_far_entry, width, height, 0.4844F, 0.375F
         );
+        const auto previous_far_far_uv = role_uv(
+            previous_far_far_entry, width, height, 0.4375F, 0.340F
+        );
+
+        // Pass 39 navigation crop targets. The shader interpolates toward these
+        // while the role geometry morphs, so complete_navigation() can rotate
+        // entries without a final-frame crop/framing snap.
+        const auto previous_as_selected_uv = role_uv(
+            previous_entry, width, height, 0.7266F, 0.525F
+        );
+        const auto selected_as_previous_uv = role_uv(
+            selected_entry, width, height, 0.4375F, 0.340F
+        );
+        const auto selected_as_next_uv = role_uv(
+            selected_entry, width, height, 0.4844F, 0.375F
+        );
+        const auto next_as_selected_uv = role_uv(
+            next_entry, width, height, 0.7266F, 0.525F
+        );
 
         const bool previous_ready = preview.previous_visible &&
             role_ready(previous_entry, preview.previous);
@@ -1166,6 +1231,9 @@ struct WorldscarReferenceRenderer::State {
             role_ready(previous_far_entry, preview.previous_far);
         const bool next_far_ready = preview.next_far_visible &&
             role_ready(next_far_entry, preview.next_far);
+        const bool previous_far_far_ready =
+            preview.previous_far_far_available &&
+            role_ready(previous_far_far_entry, preview.previous_far_far);
 
         glUseProgram(program);
         glBindVertexArray(vertex_array);
@@ -1174,6 +1242,7 @@ struct WorldscarReferenceRenderer::State {
         bind_role_texture(2, next_entry, "nextTex");
         bind_role_texture(3, previous_far_entry, "previousFarTex");
         bind_role_texture(4, next_far_entry, "nextFarTex");
+        bind_role_texture(5, previous_far_far_entry, "previousFarFarTex");
 
         glUniform2f(
             glGetUniformLocation(program, "resolution"),
@@ -1201,6 +1270,10 @@ struct WorldscarReferenceRenderer::State {
             static_cast<float>(navigation_direction)
         );
         glUniform1f(
+            glGetUniformLocation(program, "timeSeconds"),
+            fx_time_seconds
+        );
+        glUniform1f(
             glGetUniformLocation(program, "previousReady"),
             previous_ready ? 1.0F : 0.0F
         );
@@ -1215,6 +1288,10 @@ struct WorldscarReferenceRenderer::State {
         glUniform1f(
             glGetUniformLocation(program, "nextFarReady"),
             next_far_ready ? 1.0F : 0.0F
+        );
+        glUniform1f(
+            glGetUniformLocation(program, "previousFarFarReady"),
+            previous_far_far_ready ? 1.0F : 0.0F
         );
         glUniform4fv(
             glGetUniformLocation(program, "previousUv"),
@@ -1241,10 +1318,35 @@ struct WorldscarReferenceRenderer::State {
             1,
             next_far_uv.data()
         );
+        glUniform4fv(
+            glGetUniformLocation(program, "previousFarFarUv"),
+            1,
+            previous_far_far_uv.data()
+        );
+        glUniform4fv(
+            glGetUniformLocation(program, "previousAsSelectedUv"),
+            1,
+            previous_as_selected_uv.data()
+        );
+        glUniform4fv(
+            glGetUniformLocation(program, "selectedAsPreviousUv"),
+            1,
+            selected_as_previous_uv.data()
+        );
+        glUniform4fv(
+            glGetUniformLocation(program, "selectedAsNextUv"),
+            1,
+            selected_as_next_uv.data()
+        );
+        glUniform4fv(
+            glGetUniformLocation(program, "nextAsSelectedUv"),
+            1,
+            next_as_selected_uv.data()
+        );
 
         glDrawArrays(GL_TRIANGLES, 0, 3);
 
-        for (int unit = 0; unit < 5; ++unit) {
+        for (int unit = 0; unit < 6; ++unit) {
             glActiveTexture(static_cast<GLenum>(GL_TEXTURE0 + unit));
             glBindTexture(GL_TEXTURE_2D, 0);
         }
@@ -1274,10 +1376,11 @@ struct WorldscarReferenceRenderer::State {
         previous_entry = 1;
         next_entry = 3;
         next_far_entry = 4;
+        previous_far_far_entry = 5;
 
         for (std::size_t index : {
                  std::size_t{0}, std::size_t{1},
-                 std::size_t{3}, std::size_t{4}}) {
+                 std::size_t{3}, std::size_t{4}, std::size_t{5}}) {
             reset_pending(entries[index]);
             delete_texture(entries[index]);
         }
@@ -1329,6 +1432,7 @@ WorldscarReferenceRenderer::WorldscarReferenceRenderer()
 
 WorldscarReferenceRenderer::~WorldscarReferenceRenderer() {
     if (state_ == nullptr) return;
+    state_->stop_fx_tick();
     state_->active = false;
     state_->cache_warm_control->interactive.store(false);
     state_->cache_warm_control->alive.store(false);
@@ -1466,6 +1570,11 @@ bool WorldscarReferenceRenderer::preload_preview(
     if (preview.previous_far_visible && !preview.previous_far.empty()) {
         static_cast<void>(state_->start_decode(0, preview.previous_far, false, nullptr));
     }
+    if (preview.previous_far_far_available && !preview.previous_far_far.empty()) {
+        static_cast<void>(state_->start_decode(
+            5, preview.previous_far_far, false, nullptr
+        ));
+    }
     if (preview.next_far_visible && !preview.next_far.empty()) {
         static_cast<void>(state_->start_decode(4, preview.next_far, false, nullptr));
     }
@@ -1501,12 +1610,12 @@ bool WorldscarReferenceRenderer::begin(
     state_->navigation_direction = 0;
     state_->navigation_active = false;
     state_->preview = preview;
-    state_->pending_preview = {};
     state_->previous_far_entry = 0;
     state_->previous_entry = 1;
     state_->selected_entry = 2;
     state_->next_entry = 3;
     state_->next_far_entry = 4;
+    state_->previous_far_far_entry = 5;
 
     state_->poll_async();
     if (state_->failed) {
@@ -1547,6 +1656,11 @@ bool WorldscarReferenceRenderer::begin(
             0, preview.previous_far, false, nullptr
         ));
     }
+    if (preview.previous_far_far_available && !preview.previous_far_far.empty()) {
+        static_cast<void>(state_->start_decode(
+            5, preview.previous_far_far, false, nullptr
+        ));
+    }
     if (preview.next_far_visible && !preview.next_far.empty()) {
         static_cast<void>(state_->start_decode(
             4, preview.next_far, false, nullptr
@@ -1554,6 +1668,7 @@ bool WorldscarReferenceRenderer::begin(
     }
 
     gtk_widget_set_opacity(state_->gl_area, 1.0);
+    state_->start_fx_tick();
     gtk_gl_area_queue_render(GTK_GL_AREA(state_->gl_area));
     if (error != nullptr) error->clear();
     return true;
@@ -1561,6 +1676,7 @@ bool WorldscarReferenceRenderer::begin(
 
 void WorldscarReferenceRenderer::end_session() noexcept {
     if (state_ == nullptr) return;
+    state_->stop_fx_tick();
     state_->active = false;
     state_->cache_warm_control->interactive.store(false);
     state_->navigation_active = false;
@@ -1578,7 +1694,6 @@ void WorldscarReferenceRenderer::end_session() noexcept {
     }
     state_->canonicalize_selected_for_idle();
     state_->preview = {};
-    state_->pending_preview = {};
 }
 
 void WorldscarReferenceRenderer::invalidate_candidate_cache() noexcept {
@@ -1622,33 +1737,35 @@ bool WorldscarReferenceRenderer::begin_navigation(
 
     if (state_->role_ready(state_->next_entry, future_preview.selected)) {
         direction = 1;
-        dropped_entry = state_->previous_far_entry;
+        // The hidden look-behind falls off on Down and becomes the new nextFar.
+        dropped_entry = state_->previous_far_far_entry;
         far_path = future_preview.next_far;
         far_visible = future_preview.next_far_visible;
     } else if (state_->role_ready(
                    state_->previous_entry,
                    future_preview.selected)) {
         direction = -1;
+        // The hidden look-ahead falls off on Up and becomes the new look-behind.
         dropped_entry = state_->next_far_entry;
-        far_path = future_preview.previous_far;
-        far_visible = future_preview.previous_far_visible;
+        far_path = future_preview.previous_far_far;
+        far_visible = future_preview.previous_far_far_available;
     } else {
         set_error(error, "Worldscar neighbour is still preparing");
         return false;
     }
 
     if (far_visible && !far_path.empty() && dropped_entry >= 0) {
-        auto& dropped = state_->entries[static_cast<std::size_t>(dropped_entry)];
-        const bool preserve_old_texture = dropped.texture != 0;
+        // Pass 41 only ever reuses a HIDDEN edge slot. The visible incoming
+        // chamber is already resident on both directions, so no texture needs
+        // to be preserved or held hostage until complete_navigation().
         static_cast<void>(state_->start_decode(
             static_cast<std::size_t>(dropped_entry),
             far_path,
-            preserve_old_texture,
+            false,
             nullptr
         ));
     }
 
-    state_->pending_preview = future_preview;
     state_->navigation_active = true;
     state_->navigation_direction = direction;
     state_->navigation_progress = 0.0F;
@@ -1673,7 +1790,8 @@ void WorldscarReferenceRenderer::complete_navigation(
     if (state_ == nullptr || !state_->active || !state_->navigation_active) return;
 
     if (state_->navigation_direction > 0) {
-        const int dropped = state_->previous_far_entry;
+        const int dropped = state_->previous_far_far_entry;
+        state_->previous_far_far_entry = state_->previous_far_entry;
         state_->previous_far_entry = state_->previous_entry;
         state_->previous_entry = state_->selected_entry;
         state_->selected_entry = state_->next_entry;
@@ -1685,17 +1803,17 @@ void WorldscarReferenceRenderer::complete_navigation(
         state_->next_entry = state_->selected_entry;
         state_->selected_entry = state_->previous_entry;
         state_->previous_entry = state_->previous_far_entry;
-        state_->previous_far_entry = dropped;
+        state_->previous_far_entry = state_->previous_far_far_entry;
+        state_->previous_far_far_entry = dropped;
     }
 
     state_->preview = preview;
-    state_->pending_preview = {};
     state_->navigation_progress = 0.0F;
     state_->navigation_direction = 0;
     state_->navigation_active = false;
 
-    // The dropped old-neighbour texture stayed intact during the morph while
-    // its replacement decoded into CPU memory. It is now safe to overwrite.
+    // No visible role is sacrificed during Pass 41 navigation. Clear any stale
+    // defer flag left by older/coalesced work before returning to Browsing.
     for (auto& entry : state_->entries) entry.defer_upload = false;
     gtk_gl_area_queue_render(GTK_GL_AREA(state_->gl_area));
 }
@@ -1764,7 +1882,24 @@ bool WorldscarReferenceRenderer::preview_available_for_navigation(
         return !visible || path.empty() || state_->find_ready_entry(path) >= 0 ||
             state_->failed_for_path(path);
     };
-    return state_->find_ready_entry(preview.selected) >= 0 &&
+    bool incoming_edge_ready = true;
+    if (state_->role_ready(state_->previous_entry, preview.selected)) {
+        incoming_edge_ready =
+            !state_->preview.previous_far_far_available ||
+            state_->role_ready(
+                state_->previous_far_far_entry,
+                state_->preview.previous_far_far
+            ) || state_->failed_for_path(state_->preview.previous_far_far);
+    } else if (state_->role_ready(state_->next_entry, preview.selected)) {
+        incoming_edge_ready = !state_->preview.next_far_visible ||
+            state_->role_ready(
+                state_->next_far_entry,
+                state_->preview.next_far
+            ) || state_->failed_for_path(state_->preview.next_far);
+    }
+
+    return incoming_edge_ready &&
+        state_->find_ready_entry(preview.selected) >= 0 &&
         ready_or_failed(preview.previous, preview.previous_visible) &&
         ready_or_failed(preview.next, preview.next_visible);
 }

@@ -107,6 +107,13 @@ WorldscarPreviewSet WorldscarSelection::preview() const {
     if (count >= 4) {
         result.previous_far = candidates_[(selected_index + count - 2) % count];
         result.next_far = candidates_[(selected_index + 2) % count];
+        // The extra look-behind may alias another role in small libraries. That
+        // is intentional: keeping a dedicated GPU slot makes the six-role ring
+        // deterministic while still giving Up the same resident cushion Down
+        // already had through next_far.
+        result.previous_far_far =
+            candidates_[(selected_index + count - 3) % count];
+        result.previous_far_far_available = true;
         result.previous_far_visible = true;
         result.next_far_visible = true;
     }

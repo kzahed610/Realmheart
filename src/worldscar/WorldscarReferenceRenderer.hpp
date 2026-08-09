@@ -48,9 +48,9 @@ public:
     void invalidate_candidate_cache() noexcept;
     void poll_async() noexcept;
 
-    // Starts a selection redistribution. The incoming selected texture must
-    // already be one of the visible neighbour slots; the newly exposed far
-    // neighbour begins decoding while the transition is running.
+    // Starts a selection redistribution. The incoming selected texture and the
+    // incoming edge chamber are already resident in the six-slot ring; only the
+    // newly exposed hidden far neighbour decodes while the transition runs.
     [[nodiscard]] bool begin_navigation(
         const WorldscarPreviewSet& future_preview,
         int* visual_direction = nullptr,
