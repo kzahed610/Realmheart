@@ -19,3 +19,7 @@ __pycache__/
 # Krita temporary files
 *.kra~
 *.kra-autosave.kra
+
+# Private session context (never publish)
+AGENTS.md
+docs/current-state.md

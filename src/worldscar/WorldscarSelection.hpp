@@ -8,13 +8,17 @@
 namespace realmheart::worldscar {
 
 struct WorldscarPreviewSet {
-    // Only previous / selected / next are visible. The two far neighbours are
-    // warm-cache slots so one navigation step never has to wait for a decode.
+    // Worldscar currently renders previous_far as the tiny top chamber, then
+    // previous / selected / next below it. next_far is the hidden look-ahead
+    // slot for Down; previous_far_far is the matching hidden look-behind slot
+    // for Up so either direction can begin with its incoming wallpaper resident.
+    std::filesystem::path previous_far_far;
     std::filesystem::path previous_far;
     std::filesystem::path previous;
     std::filesystem::path selected;
     std::filesystem::path next;
     std::filesystem::path next_far;
+    bool previous_far_far_available = false;
     bool previous_far_visible = false;
     bool previous_visible = false;
     bool next_visible = false;

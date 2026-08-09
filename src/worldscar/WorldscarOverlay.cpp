@@ -18,7 +18,7 @@ constexpr double kCancelDurationMs = 250.0;
 constexpr double kApplyDurationMs = 520.0;
 constexpr double kFinishDurationMs = 170.0;
 constexpr int kMaxQueuedNavigationSteps = 6;
-constexpr double kSurfaceWidthFraction = 0.54;
+constexpr double kSurfaceWidthFraction = 0.62;
 
 void set_error(std::string* destination, std::string message) {
     if (destination != nullptr) *destination = std::move(message);
@@ -85,7 +85,7 @@ WorldscarOverlay::WorldscarOverlay(
     // Worldscar only owns the left-side wound. A fullscreen GtkGLArea was
     // allocating several monitor-sized EGL buffers for transparent pixels and
     // dominated active PSS even after previews became thumbnails. Keep the
-    // layer surface to the authored 54% screen region instead.
+    // layer surface to the authored 62% screen region instead.
     gtk_window_set_default_size(
         window_, preferred_worldscar_width(GTK_WIDGET(window_)), 1
     );

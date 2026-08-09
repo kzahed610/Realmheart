@@ -27,6 +27,7 @@ TEST(WorldscarSelectionTests, ExcludesCommittedWallpaperAndStartsAfterIt) {
     EXPECT_EQ(preview.next, std::filesystem::path("/walls/d.jpg"));
     EXPECT_TRUE(preview.previous_visible);
     EXPECT_TRUE(preview.next_visible);
+    EXPECT_FALSE(preview.previous_far_far_available);
     EXPECT_FALSE(preview.previous_far_visible);
     EXPECT_FALSE(preview.next_far_visible);
 }
@@ -49,8 +50,10 @@ TEST(WorldscarSelectionTests, FiveCandidatesExposeInvisibleFarNeighbours) {
     EXPECT_EQ(preview.selected, std::filesystem::path("/walls/a.jpg"));
     EXPECT_EQ(preview.previous, std::filesystem::path("/walls/e.jpg"));
     EXPECT_EQ(preview.next, std::filesystem::path("/walls/b.jpg"));
+    EXPECT_EQ(preview.previous_far_far, std::filesystem::path("/walls/c.jpg"));
     EXPECT_EQ(preview.previous_far, std::filesystem::path("/walls/d.jpg"));
     EXPECT_EQ(preview.next_far, std::filesystem::path("/walls/c.jpg"));
+    EXPECT_TRUE(preview.previous_far_far_available);
     EXPECT_TRUE(preview.previous_far_visible);
     EXPECT_TRUE(preview.next_far_visible);
 }
