@@ -300,6 +300,70 @@ float worldscar_fbm(vec2 p) {
     return value;
 }
 
+vec2 worldscar_domain_warp(vec2 point, float time_seconds) {
+    // Two decorrelated low-frequency channels bend the FX sampling domain in
+    // both axes. The maximum displacement stays below one percent of normalized
+    // screen height, so the locked cavity masks never inherit this damage.
+    vec2 drift = vec2(time_seconds * 0.012, -time_seconds * 0.009);
+    float warp_x = worldscar_fbm(
+        point * vec2(8.5, 6.5) + drift + vec2(7.3, 19.1)
+    );
+    float warp_y = worldscar_fbm(
+        point.yx * vec2(7.2, 9.4) - drift.yx + vec2(31.7, 11.3)
+    );
+    return (vec2(warp_x, warp_y) - vec2(0.48)) * vec2(0.016, 0.013);
+}
+
+vec3 content_reactive_rim(vec3 content) {
+    // The exterior stays Aether-violet while the inner ridge borrows a bounded
+    // amount of warmth and luminance from the world revealed beneath it.
+    float luma = dot(content, vec3(0.2126, 0.7152, 0.0722));
+    float warmth = smoothstep(
+        -0.08,
+        0.32,
+        content.r - content.b * 0.75 + (content.r - content.g) * 0.15
+    );
+    vec3 violet_response = vec3(0.66, 0.30, 1.00);
+    vec3 warm_response = vec3(1.00, 0.42, 0.20);
+    vec3 response = mix(violet_response, warm_response, warmth * 0.54);
+    return mix(
+        response,
+        vec3(0.985, 0.940, 1.00),
+        smoothstep(0.68, 1.00, luma) * 0.28
+    );
+}
+
+float worldscar_ember_field(
+    vec2 point,
+    float outside_distance,
+    float time_seconds
+) {
+    // Sparse one-pixel motes drift upward through a narrow exterior band. Cells
+    // are stable in screen space; only their tiny local centers move, avoiding
+    // the crawling full-screen grain that would flatten the wound again.
+    if (outside_distance <= 0.006 || outside_distance >= 0.070) return 0.0;
+
+    vec2 grid = vec2(38.0, 32.0);
+    vec2 cell = floor(point * grid);
+    vec2 local = fract(point * grid) - 0.5;
+    float seed = worldscar_hash12(cell + vec2(13.2, 7.9));
+    float enabled = smoothstep(0.940, 0.985, seed);
+    float phase = fract(time_seconds * 0.055 + seed);
+    vec2 center = vec2(
+        (worldscar_hash12(cell + vec2(2.7, 19.4)) - 0.5) * 0.70,
+        mix(0.34, -0.34, phase) +
+            (worldscar_hash12(cell + vec2(29.1, 4.6)) - 0.5) * 0.12
+    );
+    float mote_distance = length(local - center);
+    float core = 1.0 - smoothstep(0.018, 0.050, mote_distance);
+    float aura = 1.0 - smoothstep(0.045, 0.140, mote_distance);
+    float lifecycle = smoothstep(0.0, 0.14, phase) *
+        (1.0 - smoothstep(0.76, 1.0, phase));
+    float edge_fade = smoothstep(0.006, 0.014, outside_distance) *
+        (1.0 - smoothstep(0.046, 0.070, outside_distance));
+    return enabled * lifecycle * edge_fade * (core + aura * 0.22);
+}
+
 float procedural_edge_fractures(
     float along,
     float outside_distance,
@@ -308,19 +372,19 @@ float procedural_edge_fractures(
 ) {
     // Work in edge-phase/distance space so branches grow *away* from the
     // existing locked silhouette instead of inventing new cavity geometry.
-    const float reach = 0.082;
+    const float reach = 0.095;
     if (outside_distance <= 0.00001 || outside_distance >= reach) {
         return 0.0;
     }
     float distance01 = saturate(outside_distance / reach);
-    float scaled = along * 17.0;
+    float scaled = along * 11.0;
     float cell = floor(scaled);
     float local = fract(scaled) - 0.5;
 
     // Only some edge cells sprout a branch. This prevents the old "hairy
     // outline" problem and leaves room for deliberate hot junctions.
     float seed = worldscar_hash11(cell + 4.37);
-    float enabled = smoothstep(0.64, 0.78, seed);
+    float enabled = smoothstep(0.56, 0.72, seed);
 
     float slope = mix(-0.68, 0.68, worldscar_hash11(cell + 11.8));
     float bend = (
@@ -328,36 +392,54 @@ float procedural_edge_fractures(
             point * vec2(19.0, 15.0) +
             vec2(cell * 0.17, time_seconds * 0.055)
         ) - 0.50
-    ) * 0.095;
-
-    float primary_center = slope * distance01 * 0.38 + bend * distance01;
+    ) * 0.060;
+    float curve = mix(-0.34, 0.34, worldscar_hash11(cell + 31.7));
+    float wiggle = sin(
+        distance01 * 5.6 + seed * 12.0 + time_seconds * 0.12
+    ) * 0.052 * distance01;
+    float primary_center =
+        slope * distance01 * 0.25 +
+        curve * distance01 * distance01 +
+        bend * distance01 + wiggle;
+    float primary_width = mix(
+        0.060,
+        0.014,
+        smoothstep(0.0, 1.0, distance01)
+    );
     float primary = 1.0 - smoothstep(
-        0.010,
-        0.033,
+        primary_width * 0.30,
+        primary_width,
         abs(local - primary_center)
     );
 
     // Split some branches after they have left the rim. The second arm is
     // shorter/dimmer, giving the target-reference forked lightning language.
     float split_slope = slope + mix(
-        -0.62,
-        0.62,
+        -0.45,
+        0.45,
         worldscar_hash11(cell + 23.1)
     );
+    float split_age = saturate((distance01 - 0.30) / 0.70);
+    float split_curve = mix(
+        -0.24,
+        0.24,
+        worldscar_hash11(cell + 47.3)
+    );
     float split_center =
-        slope * 0.30 * 0.38 +
-        split_slope * max(distance01 - 0.30, 0.0) * 0.30 +
-        bend * 0.65;
+        primary_center +
+        split_slope * max(distance01 - 0.30, 0.0) * 0.24 +
+        split_curve * split_age * split_age;
+    float split_width = mix(0.044, 0.010, split_age);
     float split = 1.0 - smoothstep(
-        0.008,
-        0.029,
+        split_width * 0.28,
+        split_width,
         abs(local - split_center)
     );
     split *= smoothstep(0.27, 0.42, distance01);
 
     float reach_fade = 1.0 - smoothstep(0.70, 1.0, distance01);
     float flicker = 0.84 + 0.16 * sin(time_seconds * 2.7 + cell * 2.13);
-    return enabled * max(primary, split * 0.72) * reach_fade * flicker;
+    return enabled * max(primary, split * 0.82) * reach_fade * flicker;
 }
 
 // Three readable realities ride ONE broad upper-right -> lower-left wound.
@@ -1127,14 +1209,6 @@ float internal_seam_fork_field(vec2 point, float aspect) {
     return fork;
 }
 
-float connective_fracture_field(vec2 point, float aspect) {
-    // Pass 38: prune the stray gesture set completely. After the silhouette was
-    // locked, the user marked these residual interior/exterior fracture lines as
-    // visual clutter. Keep the main border crack and the one intentional outer
-    // lightning gesture elsewhere, but stop drawing this secondary network.
-    return 10.0;
-}
-
 // Sparse outer-edge lightning. These branches are intentionally authored and
 // directional instead of generated from a noisy outline, so the eye follows
 // sharp fracture gestures rather than the raw rounded mask beneath them.
@@ -1761,33 +1835,110 @@ void main() {
             max(incoming_previous_mask, incoming_next_mask)
         )
     );
-    // Pass 26: the base mask remains untouched. FX redraw the perceived edge
-    // with a thin violent Aether crack, a dark inner tear lip, faint bloom, and
-    // sparse branches. The glow is deliberately NOT a uniform thick outline.
-    float edge_phase = scar_progress_from_point(authored_point, aspect);
-
-    // Keep the expensive coherent noise local to the wound. Worldscar owns
-    // only 62% of the monitor, but at idle that is still a lot of pixels; the
-    // branch avoids spending six FBM octaves on empty transparent space.
+    // The locked masks above remain untouched. Material FX sample a mildly
+    // warped copy of the exact same authored/nav/opening fields, which damages
+    // the perceived edge without moving a single chamber pixel.
     float base_edge_distance = abs(combined_field);
+    vec2 fx_point = authored_point;
+    float fx_field = combined_field;
     float coarse_fbm = 0.50;
     float fine_fbm = 0.50;
     if (base_edge_distance < 0.095) {
+        float warp_gate = 1.0 - smoothstep(0.060, 0.095, base_edge_distance);
+        fx_point += worldscar_domain_warp(authored_point, timeSeconds) * warp_gate;
+
+        float fx_base_top_field = top_world_field(fx_point, aspect, width_scale);
+        float fx_base_previous_field = previous_world_field(
+            fx_point, aspect, width_scale
+        );
+        float fx_base_selected_field = selected_world_field(
+            fx_point, aspect, width_scale
+        );
+        float fx_base_next_field = next_world_field(fx_point, aspect, width_scale);
+        float fx_top_field = fx_base_top_field;
+        float fx_previous_field = fx_base_previous_field;
+        float fx_selected_field = fx_base_selected_field;
+        float fx_next_field = fx_base_next_field;
+
+        if (navigationDirection > 0.5) {
+            fx_previous_field = mix(
+                fx_base_previous_field, fx_base_top_field, nav
+            );
+            fx_selected_field = mix(
+                fx_base_selected_field, fx_base_previous_field, nav
+            );
+            fx_next_field = mix(
+                fx_base_next_field, fx_base_selected_field, nav
+            );
+        } else if (navigationDirection < -0.5) {
+            fx_top_field = mix(fx_base_top_field, fx_base_previous_field, nav);
+            fx_previous_field = mix(
+                fx_base_previous_field, fx_base_selected_field, nav
+            );
+            fx_selected_field = mix(
+                fx_base_selected_field, fx_base_next_field, nav
+            );
+        }
+
+        float fx_opened_top_field = opened_field(
+            fx_top_field, along, trace, widen
+        );
+        float fx_opened_previous_field = opened_field(
+            fx_previous_field, along, trace, widen
+        );
+        float fx_opened_selected_field = opened_field(
+            fx_selected_field, along, trace, widen
+        );
+        float fx_opened_next_field = opened_field(
+            fx_next_field, along, trace, widen
+        );
+        float fx_opened_base_top_field = opened_field(
+            fx_base_top_field, along, trace, widen
+        );
+        float fx_opened_base_next_field = opened_field(
+            fx_base_next_field, along, trace, widen
+        );
+
+        float fx_top_edge_field = mix(
+            10.0, fx_opened_top_field, top_edge_weight
+        );
+        float fx_previous_edge_field = mix(
+            10.0, fx_opened_previous_field, previousReady
+        );
+        float fx_next_edge_field = mix(
+            10.0, fx_opened_next_field, next_edge_weight
+        );
+        float fx_incoming_previous_edge_field = mix(
+            10.0, fx_opened_base_top_field, incoming_previous
+        );
+        float fx_incoming_next_edge_field = mix(
+            10.0, fx_opened_base_next_field, incoming_next
+        );
+        fx_field = min(
+            fx_opened_selected_field,
+            min(
+                min(
+                    fx_top_edge_field,
+                    min(fx_previous_edge_field, fx_next_edge_field)
+                ),
+                min(
+                    fx_incoming_previous_edge_field,
+                    fx_incoming_next_edge_field
+                )
+            )
+        );
+
         coarse_fbm = worldscar_fbm(
-            authored_point * vec2(13.0, 10.0) +
+            fx_point * vec2(13.0, 10.0) +
             vec2(timeSeconds * 0.045, -timeSeconds * 0.060)
         );
         fine_fbm = worldscar_fbm(
-            authored_point * vec2(34.0, 27.0) +
+            fx_point * vec2(34.0, 27.0) +
             vec2(-timeSeconds * 0.090, timeSeconds * 0.075) + 11.0
         );
     }
 
-    float micro_jitter =
-        contour_damage(authored_point, 17.0 + timeSeconds * 0.55) * 0.26 +
-        (coarse_fbm - 0.50) * 0.00155 +
-        (fine_fbm - 0.50) * 0.00060;
-    float fx_field = combined_field + micro_jitter;
+    float edge_phase = scar_progress_from_point(fx_point, aspect);
 
     float outside_distance = max(fx_field, 0.0);
     float inside_distance = max(-fx_field, 0.0);
@@ -1807,7 +1958,7 @@ void main() {
     );
 
     float sine_flow = aether_turbulence(
-        authored_point,
+        fx_point,
         edge_phase * 11.0 + nav * 2.7 + timeSeconds * 0.42
     );
     float structured_flow = saturate(coarse_fbm * fine_fbm * 2.05);
@@ -1828,7 +1979,7 @@ void main() {
     // Mostly 2-5 px pale crack core. Break the intensity into irregular runs
     // rather than varying the width into a fat glowing sticker border.
     float crack_mod = 0.64 + 0.36 * sin(
-        edge_phase * 41.0 + authored_point.y * 47.0 - authored_point.x * 13.0
+        edge_phase * 41.0 + fx_point.y * 47.0 - fx_point.x * 13.0
     );
     crack_mod = smoothstep(0.24, 0.86, crack_mod);
     float rim_break = smoothstep(
@@ -1908,7 +2059,7 @@ void main() {
     float procedural_branch = procedural_edge_fractures(
         edge_phase,
         outside_distance,
-        authored_point,
+        fx_point,
         timeSeconds
     ) * (1.0 - combined_mask) * edge_visibility;
     float procedural_branch_core = procedural_branch *
@@ -2044,28 +2195,131 @@ void main() {
     // Worldscar border itself is strictly violet -> pale-violet -> white.
     vec3 aether_gold = vec3(1.00, 0.69, 0.24);
 
-    // Tint only the very edge of each preview. The dedicated dark lip / crack
-    // layers below are what actually redraw the visible silhouette.
-    float edge_tint = crack_core * 0.10 + inner_sheen * 0.08;
+    // Phase 1 material reset: preserve the authored functions for controlled
+    // rollback, but remove every straight segment family from the visible
+    // compositor while the organic SDF edge becomes the sole topology source.
+    const float authored_segment_alpha = 0.0;
+
+    // Phase 3: one physical cross-section, not twelve overlapping smoothsteps.
+    // The trench is intentionally asymmetric: deeper inside the revealed worlds
+    // and slightly wider outside, so the rim reads as torn depth instead of ink.
+    float trench_outer =
+        (1.0 - smoothstep(0.0010, 0.0140, outside_distance)) *
+        (1.0 - combined_mask);
+    float trench_inner =
+        (1.0 - smoothstep(0.0008, 0.0105, inside_distance)) * combined_mask;
+    float trench_layer_alpha = max(trench_outer * 0.78, trench_inner * 0.92) *
+        edge_visibility * mix(0.82, 1.0, coarse_fbm);
+    vec3 trench_layer_colour = mix(
+        vec3(0.006, 0.001, 0.020),
+        deep_aether * 0.48,
+        0.44 + coarse_fbm * 0.18
+    );
+    vec4 reduced_trench_layer = vec4(
+        trench_layer_colour * trench_layer_alpha,
+        trench_layer_alpha
+    );
+
+    // Saturated violet fracture body. It carries most of the contour, allowing
+    // the white-hot ridge to disappear for long stretches without losing shape.
+    float body_shape = 1.0 - smoothstep(0.0008, 0.0098, edge_distance);
+    float body_texture = smoothstep(
+        0.24,
+        0.76,
+        coarse_fbm * 0.72 + fine_fbm * 0.34
+    );
+    float violet_body_layer_alpha = body_shape * edge_visibility *
+        mix(0.68, 0.94, body_texture);
+    vec3 violet_body_colour = mix(
+        vec3(0.175, 0.024, 0.550),
+        vec3(0.520, 0.125, 1.000),
+        body_texture * 0.66 + hotspot * 0.18
+    );
+    vec4 violet_body_layer = vec4(
+        violet_body_colour * violet_body_layer_alpha,
+        violet_body_layer_alpha
+    );
+
+    // A 1-3 px ridge appears in broken runs. Noise-hot junctions may broaden it
+    // locally, but there is no longer a continuous white tube around every mask.
+    float core_run_signal =
+        0.50 +
+        0.25 * sin(edge_phase * 37.0 + fx_point.y * 31.0) +
+        (fine_fbm - 0.50) * 0.72;
+    float core_run = smoothstep(0.42, 0.64, core_run_signal);
+    float core_ridge = 1.0 - smoothstep(0.00010, 0.00190, edge_distance);
+    float node_ridge =
+        (1.0 - smoothstep(0.0002, 0.0045, edge_distance)) * hot_node;
+    float hot_core_layer_alpha = max(
+        core_ridge * mix(0.30, 1.00, core_run),
+        node_ridge * 0.94
+    ) * edge_visibility * mix(0.90, 1.10, pulse);
+    vec3 hot_core_colour = mix(
+        vec3(0.82, 0.64, 1.00),
+        white_aether,
+        saturate(0.24 + core_run * 0.64 + hot_node * 0.72)
+    );
+    vec4 hot_core_layer = vec4(
+        hot_core_colour * hot_core_layer_alpha,
+        hot_core_layer_alpha
+    );
+
+    // Charged air only where coherent noise says the wound is under stress.
+    // Its reach remains subordinate to the dark trench and saturated body.
+    float corona_presence = smoothstep(
+        0.52,
+        0.78,
+        coarse_fbm * 0.58 + fine_fbm * 0.52
+    );
+    float corona_shape =
+        (1.0 - smoothstep(0.0050, 0.0300, outside_distance)) *
+        (1.0 - combined_mask);
+    float corona_layer_alpha = corona_shape * edge_visibility *
+        corona_presence * (0.18 + motion_energy * 0.08) * idle_breathe;
+    vec3 reduced_corona_colour = mix(aether, hot_aether, hotspot * 0.34);
+    vec4 reduced_corona_layer = vec4(
+        reduced_corona_colour * corona_layer_alpha,
+        corona_layer_alpha
+    );
+
+    float ember_energy = worldscar_ember_field(
+        fx_point,
+        outside_distance,
+        timeSeconds
+    ) * (1.0 - combined_mask) * edge_visibility;
+    float ember_alpha = saturate(ember_energy) * 0.90;
+    vec3 ember_colour = mix(
+        vec3(0.58, 0.20, 1.00),
+        white_aether,
+        smoothstep(0.20, 0.90, ember_energy)
+    );
+    vec4 ember_layer = vec4(ember_colour * ember_alpha, ember_alpha);
+
+    // Preserve a restrained inner reaction without washing the wallpaper edge
+    // into the same pale lavender as the exterior material.
+    float interior_bleed =
+        (1.0 - smoothstep(0.0008, 0.0075, inside_distance)) *
+        combined_mask * edge_visibility;
+    float edge_tint = interior_bleed * (0.08 + hotspot * 0.08);
     selected_layer.rgb = mix(
         selected_layer.rgb,
-        hot_aether * selected_layer.a,
+        content_reactive_rim(selected_colour.rgb) * selected_layer.a,
         edge_tint
     );
     top_layer.rgb = mix(
         top_layer.rgb,
-        hot_aether * top_layer.a,
-        crack_core * 0.07 + inner_sheen * 0.05
+        content_reactive_rim(previous_far_colour.rgb) * top_layer.a,
+        edge_tint * 0.72
     );
     previous_layer.rgb = mix(
         previous_layer.rgb,
-        hot_aether * previous_layer.a,
-        crack_core * 0.07 + inner_sheen * 0.05
+        content_reactive_rim(previous_colour.rgb) * previous_layer.a,
+        edge_tint * 0.72
     );
     next_layer.rgb = mix(
         next_layer.rgb,
-        hot_aether * next_layer.a,
-        crack_core * 0.07 + inner_sheen * 0.05
+        content_reactive_rim(next_colour.rgb) * next_layer.a,
+        edge_tint * 0.72
     );
 
     float depth_alpha = inner_lip * (0.92 + hotspot * 0.06);
@@ -2121,7 +2375,7 @@ void main() {
         border_plasma_alpha
     );
 
-    float seam_trench_alpha = seam_trench * 0.86;
+    float seam_trench_alpha = seam_trench * 0.86 * authored_segment_alpha;
     vec3 seam_trench_colour = mix(
         vec3(0.008, 0.001, 0.025),
         deep_aether * 1.60,
@@ -2132,7 +2386,7 @@ void main() {
         seam_trench_alpha
     );
 
-    float seam_aura_alpha = seam_aura * 0.54;
+    float seam_aura_alpha = seam_aura * 0.54 * authored_segment_alpha;
     vec3 seam_aura_colour = mix(
         deep_aether * 1.45,
         aether * 1.35,
@@ -2143,14 +2397,16 @@ void main() {
         seam_aura_alpha
     );
 
-    float seam_mid_alpha = max(seam_mid * 0.86, seam_aura * 0.20);
+    float seam_mid_alpha = max(seam_mid * 0.86, seam_aura * 0.20) *
+        authored_segment_alpha;
     vec3 seam_mid_colour = mix(aether, hot_aether, 0.52);
     vec4 seam_mid_layer = vec4(
         seam_mid_colour * seam_mid_alpha,
         seam_mid_alpha
     );
 
-    float seam_core_alpha = max(seam_core * 0.98, seam_node_core * 0.92);
+    float seam_core_alpha = max(seam_core * 0.98, seam_node_core * 0.92) *
+        authored_segment_alpha;
     vec3 seam_core_colour = mix(
         hot_aether,
         white_aether,
@@ -2164,28 +2420,31 @@ void main() {
     float seam_node_alpha = max(
         seam_node_aura * 0.42,
         seam_node_core * 1.00
-    ) * (0.88 + 0.12 * sin(timeSeconds * 3.6));
+    ) * (0.88 + 0.12 * sin(timeSeconds * 3.6)) * authored_segment_alpha;
     vec3 seam_node_colour = mix(hot_aether, white_aether, 0.94);
     vec4 seam_node_layer = vec4(
         seam_node_colour * seam_node_alpha,
         seam_node_alpha
     );
 
-    float splinter_trench_alpha = splinter_trench * 0.62;
+    float splinter_trench_alpha = splinter_trench * 0.62 *
+        authored_segment_alpha;
     vec3 splinter_trench_colour = vec3(0.010, 0.002, 0.032);
     vec4 splinter_trench_layer = vec4(
         splinter_trench_colour * splinter_trench_alpha,
         splinter_trench_alpha
     );
     float splinter_core_alpha = splinter_core *
-        (0.82 + 0.18 * sin(timeSeconds * 3.2 + edge_phase * 17.0));
+        (0.82 + 0.18 * sin(timeSeconds * 3.2 + edge_phase * 17.0)) *
+        authored_segment_alpha;
     vec3 splinter_core_colour = mix(hot_aether, white_aether, 0.86);
     vec4 splinter_core_layer = vec4(
         splinter_core_colour * splinter_core_alpha,
         splinter_core_alpha
     );
 
-    float authored_web_shadow_alpha = authored_web_aura * 0.34;
+    float authored_web_shadow_alpha = authored_web_aura * 0.34 *
+        authored_segment_alpha;
     vec3 authored_web_shadow_colour = deep_aether * 1.65;
     vec4 authored_web_shadow_layer = vec4(
         authored_web_shadow_colour * authored_web_shadow_alpha,
@@ -2195,7 +2454,7 @@ void main() {
     float authored_web_mid_alpha = max(
         authored_web_mid * 0.72,
         authored_web_aura * 0.26
-    );
+    ) * authored_segment_alpha;
     vec3 authored_web_mid_colour = mix(aether, hot_aether, 0.38);
     vec4 authored_web_mid_layer = vec4(
         authored_web_mid_colour * authored_web_mid_alpha,
@@ -2203,7 +2462,8 @@ void main() {
     );
 
     float authored_web_core_alpha = authored_web_core *
-        (0.94 + 0.06 * sin(timeSeconds * 5.2 + edge_phase * 23.0));
+        (0.94 + 0.06 * sin(timeSeconds * 5.2 + edge_phase * 23.0)) *
+        authored_segment_alpha;
     vec3 authored_web_core_colour = mix(hot_aether, white_aether, 0.86);
     vec4 authored_web_core_layer = vec4(
         authored_web_core_colour * authored_web_core_alpha,
@@ -2213,24 +2473,35 @@ void main() {
     float authored_node_alpha = max(
         authored_node_aura * 0.56,
         authored_node_core * 1.00
-    ) * authored_node_pulse;
+    ) * authored_node_pulse * authored_segment_alpha;
     vec3 authored_node_colour = mix(hot_aether, white_aether, 0.93);
     vec4 authored_node_layer = vec4(
         authored_node_colour * authored_node_alpha,
         authored_node_alpha
     );
 
-    // Keep procedural exterior scars as secondary texture only; the authored
-    // branches may stay, but random branches should not compete with the border
-    // and internal fracture seams for attention.
+    // Procedural rays use the same physical cross-section as the main wound:
+    // a dark substrate survives busy wallpapers, then a narrower pale core
+    // carries the electrical read. Topology remains sparse and noise-authored.
+    float procedural_branch_trench_alpha = procedural_branch_aura * 0.70;
+    vec3 procedural_branch_trench_colour = vec3(0.008, 0.001, 0.026);
+    vec4 procedural_branch_trench_layer = vec4(
+        procedural_branch_trench_colour * procedural_branch_trench_alpha,
+        procedural_branch_trench_alpha
+    );
+    float procedural_branch_hot = smoothstep(
+        0.38,
+        0.78,
+        procedural_branch_core
+    );
     float procedural_branch_alpha = max(
-        procedural_branch_aura * 0.11,
-        procedural_branch_core * 0.38
+        procedural_branch_aura * 0.12,
+        procedural_branch_hot * 0.95
     );
     vec3 procedural_branch_colour = mix(
-        aether,
-        white_aether,
-        saturate(procedural_branch_core * 0.88 + hot_node * 0.24)
+        vec3(0.72, 0.38, 1.00),
+        vec3(0.98, 0.92, 1.00),
+        saturate(0.26 + procedural_branch_core * 0.68 + hot_node * 0.24)
     );
     vec4 procedural_branch_layer = vec4(
         procedural_branch_colour * procedural_branch_alpha,
@@ -2261,23 +2532,6 @@ void main() {
     );
     vec4 edge_crack_layer = vec4(core_colour * core_alpha, core_alpha);
 
-    // Keep the existing connective cracks, but much thinner/brighter than the
-    // Pass 25 foggy treatment.
-    float fracture_reveal = smoothstep(0.30, 0.84, widen) * wound_visibility;
-    float fracture_field = connective_fracture_field(authored_point, aspect);
-    float fracture_aa = max(fwidth(fracture_field), 0.00045);
-    float fracture_core =
-        (1.0 - smoothstep(0.0, fracture_aa * 1.45, max(fracture_field, 0.0))) *
-        fracture_reveal;
-    float fracture_aura =
-        (1.0 - smoothstep(0.0010, 0.0075, max(fracture_field, 0.0))) *
-        fracture_reveal;
-    float fracture_alpha = max(fracture_aura * 0.10, fracture_core * 0.72);
-    vec3 fracture_colour = mix(hot_aether, white_aether, fracture_core * 0.72);
-    vec4 fracture_layer = vec4(
-        fracture_colour * fracture_alpha,
-        fracture_alpha
-    );
 
     // Sparse lightning that genuinely protrudes away from the mask. This is
     // intentionally separate from the edge distance so it can visually break
@@ -2294,7 +2548,7 @@ void main() {
     float branch_alpha = max(
         branch_aura * (0.14 + motion_energy * 0.05),
         branch_core * (0.90 + motion_energy * 0.08)
-    ) * branch_breathe;
+    ) * branch_breathe * authored_segment_alpha;
     vec3 branch_colour = mix(
         hot_aether,
         white_aether,
@@ -2361,12 +2615,7 @@ void main() {
     );
     vec4 slash_layer = vec4(slash_colour * slash_alpha, slash_alpha);
 
-    vec4 composed = trench_layer + corona_layer * (1.0 - trench_layer.a);
-    composed = glow_layer + composed * (1.0 - glow_layer.a);
-    composed = plasma_layer + composed * (1.0 - plasma_layer.a);
-    composed = authored_web_shadow_layer +
-        composed * (1.0 - authored_web_shadow_layer.a);
-    composed = wisp_layer + composed * (1.0 - wisp_layer.a);
+    vec4 composed = reduced_corona_layer;
     composed = forming_scar_layer + composed * (1.0 - forming_scar_layer.a);
     composed = incoming_previous_layer +
         composed * (1.0 - incoming_previous_layer.a);
@@ -2377,32 +2626,20 @@ void main() {
     composed = selected_layer + composed * (1.0 - selected_layer.a);
     composed = next_layer + composed * (1.0 - next_layer.a);
     composed = top_layer + composed * (1.0 - top_layer.a);
-    // Border body must sit above the wallpaper previews or its inside half gets
-    // hidden. The bright crack/core layers then sit above this darker substrate.
-    composed = border_body_layer + composed * (1.0 - border_body_layer.a);
-    composed = border_plasma_layer + composed * (1.0 - border_plasma_layer.a);
-    composed = depth_layer + composed * (1.0 - depth_layer.a);
-    composed = inner_sheen_layer + composed * (1.0 - inner_sheen_layer.a);
-    composed = seam_trench_layer + composed * (1.0 - seam_trench_layer.a);
-    composed = seam_aura_layer + composed * (1.0 - seam_aura_layer.a);
-    composed = seam_mid_layer + composed * (1.0 - seam_mid_layer.a);
-    composed = splinter_trench_layer + composed * (1.0 - splinter_trench_layer.a);
-    composed = edge_crack_layer + composed * (1.0 - edge_crack_layer.a);
-    composed = splinter_core_layer + composed * (1.0 - splinter_core_layer.a);
-    composed = seam_core_layer + composed * (1.0 - seam_core_layer.a);
-    composed = seam_node_layer + composed * (1.0 - seam_node_layer.a);
-    composed = pulse_layer + composed * (1.0 - pulse_layer.a);
-    composed = node_layer + composed * (1.0 - node_layer.a);
-    composed = fracture_layer + composed * (1.0 - fracture_layer.a);
+    // The four-role cross-section sits above the previews: dark recess,
+    // saturated material, then intermittent hot ridge. No stacked fog bands.
+    composed = reduced_trench_layer +
+        composed * (1.0 - reduced_trench_layer.a);
+    composed = violet_body_layer + composed * (1.0 - violet_body_layer.a);
+    composed = hot_core_layer + composed * (1.0 - hot_core_layer.a);
+    // Rays and motes are exterior-only, so placing them last cannot contaminate
+    // the locked previews; it only prevents busy wallpaper layers from burying
+    // the sparse detail they are meant to support.
+    composed = procedural_branch_trench_layer +
+        composed * (1.0 - procedural_branch_trench_layer.a);
     composed = procedural_branch_layer +
         composed * (1.0 - procedural_branch_layer.a);
-    composed = authored_web_mid_layer +
-        composed * (1.0 - authored_web_mid_layer.a);
-    composed = authored_web_core_layer +
-        composed * (1.0 - authored_web_core_layer.a);
-    composed = authored_node_layer +
-        composed * (1.0 - authored_node_layer.a);
-    composed = branch_layer + composed * (1.0 - branch_layer.a);
+    composed = ember_layer + composed * (1.0 - ember_layer.a);
     composed = slash_layer + composed * (1.0 - slash_layer.a);
 
     fragColor = composed;
