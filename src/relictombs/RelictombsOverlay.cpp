@@ -325,26 +325,24 @@ void draw_wallpaper_cb(
     cairo_paint(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 
-    if (impl->wallpaper_surface != nullptr) {
-        const SceneTransform transform =
-            make_scene_transform(framebuffer_width, framebuffer_height);
-        const double portal_x =
-            kPortalViewport.x * transform.scale + transform.offset_x;
-        const double portal_y =
-            kPortalViewport.y * transform.scale + transform.offset_y;
-        const double portal_width = kPortalViewport.width * transform.scale;
-        const double portal_height = kPortalViewport.height * transform.scale;
-        draw_cover_crop(
-            cr,
-            impl->wallpaper_surface,
-            portal_x,
-            portal_y,
-            portal_width,
-            portal_height
-        );
-    }
-
+    // The base image owns the transparent portal hole; the wallpaper must
+    // render exactly behind that hole at every tier and aspect. Anchor both
+    // draws to one transform: fit the base (scale = min, centered), then map
+    // the design-space portal rect through the same scale + offset.
     if (impl->base_surface != nullptr) {
+        const double image_width =
+            static_cast<double>(cairo_image_surface_get_width(impl->base_surface));
+        const double image_height =
+            static_cast<double>(cairo_image_surface_get_height(impl->base_surface));
+        const double scale = std::min(
+            framebuffer_width / image_width,
+            framebuffer_height / image_height
+        );
+        const double draw_width = image_width * scale;
+        const double draw_height = image_height * scale;
+        const double offset_x = (framebuffer_width - draw_width) * 0.5;
+        const double offset_y = (framebuffer_height - draw_height) * 0.5;
+
         draw_cover_fit(
             cr,
             impl->base_surface,
@@ -353,6 +351,30 @@ void draw_wallpaper_cb(
             framebuffer_width,
             framebuffer_height
         );
+
+        if (impl->wallpaper_surface != nullptr) {
+            // kPortalViewport is measured against the 1920x1080 design space
+            // (== the 1080p tier base). Higher tiers are uniform upscales, so
+            // map design -> base-image pixels first, then base-image ->
+            // framebuffer through the same fit transform as the base.
+            const double design_scale = image_width / kDesignWidth;
+            const double portal_x =
+                offset_x + kPortalViewport.x * design_scale * scale;
+            const double portal_y =
+                offset_y + kPortalViewport.y * design_scale * scale;
+            const double portal_width =
+                kPortalViewport.width * design_scale * scale;
+            const double portal_height =
+                kPortalViewport.height * design_scale * scale;
+            draw_cover_crop(
+                cr,
+                impl->wallpaper_surface,
+                portal_x,
+                portal_y,
+                portal_width,
+                portal_height
+            );
+        }
     }
 }
 
