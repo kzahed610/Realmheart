@@ -21,13 +21,17 @@ struct SceneTransform {
     float offset_y = 0.0F;
 };
 
-// Authored once against the 1920x1080 base. The mask asset owns the curved
-// silhouette inside this rectangle; runtime code owns only cover scaling.
+// Authored once against the 1920x1080 base. This rectangle is the measured
+// non-opaque (alpha<255, AA-inclusive) bounding box of the portal opening in
+// the 1080p tier base (see manifest portal_transparent_bbox per tier). The
+// mask asset owns the curved silhouette inside this rectangle; runtime code
+// owns only cover scaling. Tiers are uniform upscales of the 1080p base, so
+// this single design-space rect scales cleanly to 1440p (x1.3333) and 4k (x2).
 inline constexpr RectF kPortalViewport{
-    750.0F,
-    195.0F,
-    390.0F,
-    450.0F,
+    804.0F,
+    215.0F,
+    313.0F,
+    437.0F,
 };
 
 enum class AssetTier {
