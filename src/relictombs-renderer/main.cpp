@@ -85,13 +85,7 @@ std::optional<Options> parse_options(int argc, char** argv) {
 }
 
 void refresh_library(RendererState& state) {
-    if (state.overlay != nullptr && !state.overlay->active()) {
-        state.overlay->invalidate_candidate_cache();
-    }
     state.discovery = state.library.discover(state.options.library_root);
-    if (state.overlay != nullptr && !state.overlay->active()) {
-        state.overlay->prewarm_thumbnail_cache(state.discovery.paths);
-    }
     for (const auto& diagnostic : state.discovery.diagnostics) {
         std::cerr << "[RelictombsLibrary] " << diagnostic << '\n';
     }
@@ -273,13 +267,13 @@ void handle_command(
         }
 
         std::string preload_error;
-        if (!state.overlay->preload_preview(*selection, &preload_error)) {
-            std::cerr << "[Relictombs] preview preload failed: "
+        if (!state.overlay->preload(*selection, &preload_error)) {
+            std::cerr << "[Relictombs] wallpaper preload failed: "
                       << preload_error << '\n';
             return;
         }
 
-        std::cerr << "[Relictombs] selected preview preload started: "
+        std::cerr << "[Relictombs] selected wallpaper preload started: "
                   << selection->selected() << '\n';
         return;
     }
@@ -449,7 +443,7 @@ void activate(GtkApplication* application, gpointer data) {
 
             // One-shot/manual mode has no real wallpaper backend. Exercise both
             // sides of the helper state machine locally so lifecycle tests can
-            // still complete without pretending a thumbnail became fullscreen.
+            // still complete without pretending a backend applied the arch.
             if (result.kind == RelictombsResultKind::Apply &&
                 state->overlay != nullptr) {
                 state->overlay->backend_prepared();
@@ -478,11 +472,6 @@ void activate(GtkApplication* application, gpointer data) {
         g_application_quit(G_APPLICATION(application));
         return;
     }
-
-    // Start building the persistent raw thumbnail cache immediately while the
-    // warm helper is otherwise idle. One serial worker handles the full
-    // library and automatically pauses once an interactive session begins.
-    state->overlay->prewarm_thumbnail_cache(state->discovery.paths);
 
     if (state->options.stdio) {
         g_application_hold(G_APPLICATION(application));

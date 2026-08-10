@@ -249,6 +249,30 @@ target_link_libraries(realmheart_power_menu_renderer PRIVATE
 
 add_dependencies(realmheart realmheart_power_menu_renderer)
 
+add_executable(realmheart_relictombs_renderer
+    src/relictombs-renderer/main.cpp
+    src/relictombs/RelictombsOverlay.cpp
+    src/relictombs/WallpaperLibrary.cpp
+    src/relictombs/RelictombsSelection.cpp
+    src/core/Command.cpp
+    src/services/SessionManager.cpp
+)
+set_target_properties(realmheart_relictombs_renderer PROPERTIES
+    OUTPUT_NAME "realmheart-relictombs-renderer"
+)
+target_include_directories(realmheart_relictombs_renderer PRIVATE src third_party)
+target_compile_options(realmheart_relictombs_renderer PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_link_libraries(realmheart_relictombs_renderer PRIVATE
+    realmheart_ui
+    PkgConfig::GIO
+    PkgConfig::GTK4
+    PkgConfig::GTK4_LAYER_SHELL
+    PkgConfig::GDK_PIXBUF
+    Threads::Threads
+)
+
+add_dependencies(realmheart realmheart_relictombs_renderer)
+
 set(REALMHEART_NATIVE_WALLPAPER_BUILT OFF)
 if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
     pkg_check_modules(WAYLAND_CLIENT QUIET IMPORTED_TARGET wayland-client)
@@ -338,7 +362,7 @@ if(TARGET realmheart_fx)
     install(TARGETS realmheart_fx LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/realmheart)
 endif()
 
-install(TARGETS realmheart realmheart_power_menu_renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS realmheart realmheart_power_menu_renderer realmheart_relictombs_renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(REALMHEART_NATIVE_WALLPAPER_BUILT)
     install(TARGETS realmheart-wallpaper-renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
