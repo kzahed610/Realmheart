@@ -48,11 +48,6 @@ private:
         int height = 0;
     };
 
-    enum class TransitionMode {
-        Crossfade,
-        WorldscarReveal,
-    };
-
     struct OutputSurface {
         NativeWallpaperRenderer* owner = nullptr;
         std::uint32_t registry_name = 0;
@@ -181,8 +176,7 @@ private:
     GLint progress_uniform_ = -1;
     GLint current_uv_uniform_ = -1;
     GLint next_uv_uniform_ = -1;
-    GLint transition_mode_uniform_ = -1;
-    GLint aspect_uniform_ = -1;
+
 
     Texture current_texture_;
     Texture next_texture_;
@@ -191,8 +185,6 @@ private:
     std::chrono::steady_clock::time_point animation_started_{};
     std::chrono::milliseconds transition_duration_{350};
     std::chrono::milliseconds active_transition_duration_{350};
-    TransitionMode transition_mode_ = TransitionMode::Crossfade;
-
     bool initialized_ = false;
     bool running_ = false;
     bool set_response_pending_ = false;

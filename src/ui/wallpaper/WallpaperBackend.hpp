@@ -38,8 +38,8 @@ public:
         std::string* error_message = nullptr
     ) = 0;
 
-    // Two-phase wallpaper transaction used by Worldscar. prepare_wallpaper()
-    // performs expensive decode/upload work without changing visible pixels.
+    // Generic two-phase wallpaper transaction. prepare_wallpaper() performs
+    // expensive decode/upload work without changing visible pixels;
     // commit_prepared_wallpaper() makes that prepared image authoritative.
     [[nodiscard]] virtual bool prepare_wallpaper(
         const std::filesystem::path& path,

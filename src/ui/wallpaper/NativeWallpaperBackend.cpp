@@ -221,10 +221,9 @@ bool NativeWallpaperBackend::commit_prepared_wallpaper_locked(
     if (error_message != nullptr) error_message->clear();
     if (!initialized_ && !initialize_locked(error_message)) return false;
 
-    // WORLDSCAR-COMMIT keeps the old and prepared full-resolution textures in
-    // the native renderer and performs the final diagonal reveal there. No
-    // preview thumbnail is ever stretched fullscreen.
-    if (!send_line("WORLDSCAR-COMMIT\n", error_message) ||
+    // COMMIT keeps the old and prepared full-resolution textures resident in
+    // the native renderer. No preview thumbnail is ever stretched fullscreen.
+    if (!send_line("COMMIT\n", error_message) ||
         !read_response("OK", error_message)) {
         stop_locked();
         return false;
