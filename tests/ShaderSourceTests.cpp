@@ -103,7 +103,26 @@ TEST(ShaderSourceTests, LoadsWorldscarProductionShaderAndValidatesContract) {
     EXPECT_NE(shader->text.find("selected_world_field"), std::string::npos);
     EXPECT_NE(shader->text.find("previous_world_field"), std::string::npos);
     EXPECT_NE(shader->text.find("next_world_field"), std::string::npos);
-    EXPECT_NE(shader->text.find("connective_fracture_field"), std::string::npos);
+    EXPECT_EQ(shader->text.find("connective_fracture_field"), std::string::npos);
+    EXPECT_EQ(shader->text.find("micro_jitter"), std::string::npos);
+    EXPECT_NE(shader->text.find("vec2 worldscar_domain_warp("), std::string::npos);
+    EXPECT_NE(shader->text.find("vec3 content_reactive_rim("), std::string::npos);
+    EXPECT_NE(shader->text.find("float worldscar_ember_field("), std::string::npos);
+    EXPECT_NE(
+        shader->text.find("const float authored_segment_alpha = 0.0;"),
+        std::string::npos
+    );
+    EXPECT_NE(shader->text.find("float trench_layer_alpha ="), std::string::npos);
+    EXPECT_NE(
+        shader->text.find("float violet_body_layer_alpha ="),
+        std::string::npos
+    );
+    EXPECT_NE(shader->text.find("float hot_core_layer_alpha ="), std::string::npos);
+    EXPECT_NE(shader->text.find("float corona_layer_alpha ="), std::string::npos);
+    EXPECT_NE(
+        shader->text.find("float procedural_branch_trench_alpha ="),
+        std::string::npos
+    );
     EXPECT_NE(shader->text.find("navigationProgress"), std::string::npos);
     EXPECT_NE(shader->text.find("preview_local_uv"), std::string::npos);
     EXPECT_NE(shader->text.find("residual_slash_field"), std::string::npos);
