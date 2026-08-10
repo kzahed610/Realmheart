@@ -67,9 +67,9 @@ bool HyprlandWorkspaces::switch_to_named(
 
     // Named regular workspaces are intentionally used instead of Hyprland
     // special workspaces: a special workspace overlays the current workspace,
-    // so normal application windows would remain visible through Worldscar's
-    // transparent pixels. An empty named regular workspace exposes only the
-    // actual Realmheart wallpaper underneath the layer surface.
+    // so normal application windows would remain visible through Relictombs'
+    // transparent pixels. A named regular workspace also preserves the configured
+    // workspace exit animation while exposing only Realmheart's wallpaper.
     const std::string workspace = "name:" + std::string(workspace_name);
     const std::string dispatcher =
         "hl.dsp.focus({ workspace = " + lua_string_literal(workspace) + " })";

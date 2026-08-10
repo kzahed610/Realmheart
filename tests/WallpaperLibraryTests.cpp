@@ -1,4 +1,4 @@
-#include "worldscar/WallpaperLibrary.hpp"
+#include "relictombs/WallpaperLibrary.hpp"
 
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <gtest/gtest.h>
@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-namespace realmheart::worldscar {
+namespace realmheart::relictombs {
 namespace {
 
 class WallpaperLibraryTest : public ::testing::Test {
@@ -17,7 +17,7 @@ protected:
     void SetUp() override {
         GError* error = nullptr;
         gchar* created = g_dir_make_tmp(
-            "realmheart-worldscar-library-XXXXXX",
+            "realmheart-relictombs-library-XXXXXX",
             &error
         );
         ASSERT_NE(created, nullptr)
@@ -144,4 +144,4 @@ TEST_F(WallpaperLibraryTest, IncludesDirectFileSymlinkButDoesNotTraverseDirector
 }
 
 } // namespace
-} // namespace realmheart::worldscar
+} // namespace realmheart::relictombs
