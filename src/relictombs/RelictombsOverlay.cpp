@@ -187,6 +187,12 @@ struct RelictombsOverlay::Impl {
     cairo_surface_t* wallpaper_surface = nullptr;
     std::string wallpaper_path;
 
+    // Four broken-arch fragment sprites, decoded once at the active tier and
+    // drawn at their authored idle rects (Phase 3: fixed sprites, no motion).
+    AssetTier tier = AssetTier::P1080;
+    std::array<cairo_surface_t*, kFragmentSpecs.size()> fragment_surfaces{};
+    std::array<bool, kFragmentSpecs.size()> fragment_loaded{};
+
     // Async decode pipeline. A generation token guards stale completions, and
     // the cancellable is swept on teardown.
     GTask* decode_task = nullptr;
@@ -215,6 +221,9 @@ struct RelictombsOverlay::Impl {
         g_clear_object(&decode_cancel);
         cairo_surface_destroy(wallpaper_surface);
         cairo_surface_destroy(base_surface);
+        for (cairo_surface_t* surface : fragment_surfaces) {
+            cairo_surface_destroy(surface);
+        }
         g_clear_object(&transparency_provider);
     }
 
@@ -343,15 +352,13 @@ void draw_wallpaper_cb(
         const double offset_x = (framebuffer_width - draw_width) * 0.5;
         const double offset_y = (framebuffer_height - draw_height) * 0.5;
 
-        draw_cover_fit(
-            cr,
-            impl->base_surface,
-            0.0,
-            0.0,
-            framebuffer_width,
-            framebuffer_height
-        );
-
+        // Draw order is z-order: the wallpaper renders BEHIND the arch, the
+        // base image's own alpha carves the portal hole out of it (opaque
+        // stone covers the wallpaper; the transparent opening lets it show
+        // through), and the fragments float above the arch. Painting the
+        // wallpaper after the base would let its square corners cover the
+        // stone surround (25% of the portal rect is opaque), so wallpaper
+        // goes first.
         if (impl->wallpaper_surface != nullptr) {
             // kPortalViewport is measured against the 1920x1080 design space
             // (== the 1080p tier base). Higher tiers are uniform upscales, so
@@ -373,6 +380,42 @@ void draw_wallpaper_cb(
                 portal_y,
                 portal_width,
                 portal_height
+            );
+        }
+
+        draw_cover_fit(
+            cr,
+            impl->base_surface,
+            0.0,
+            0.0,
+            framebuffer_width,
+            framebuffer_height
+        );
+
+        // Phase 3: the four broken fragments rest at their authored idle
+        // rects. They ride the exact same design-space -> framebuffer mapping
+        // as the portal so they can never drift relative to the arch.
+        const double design_scale = image_width / kDesignWidth;
+        for (std::size_t index = 0;
+             index < impl->fragment_surfaces.size();
+             ++index) {
+            if (!impl->fragment_loaded[index]) continue;
+            const auto& spec = kFragmentSpecs[index];
+            const double fragment_x =
+                offset_x + spec.idle_rect.x * design_scale * scale;
+            const double fragment_y =
+                offset_y + spec.idle_rect.y * design_scale * scale;
+            const double fragment_width =
+                spec.idle_rect.width * design_scale * scale;
+            const double fragment_height =
+                spec.idle_rect.height * design_scale * scale;
+            draw_cover_fit(
+                cr,
+                impl->fragment_surfaces[index],
+                fragment_x,
+                fragment_y,
+                fragment_width,
+                fragment_height
             );
         }
     }
@@ -615,6 +658,7 @@ bool RelictombsOverlay::prepare(std::string* error) {
 
     // Load the tiered base arch image.
     const AssetTier tier = select_asset_tier(physical_height);
+    impl_->tier = tier;
     const auto base_path = ui::resolve_project_asset(
         std::string("Relictombs-Broken_Arch/") +
         std::string(base_asset_relative_path(tier))
@@ -653,6 +697,57 @@ bool RelictombsOverlay::prepare(std::string* error) {
         gtk_window_destroy(window);
         return false;
     }
+
+    // Phase 3: decode the four broken fragments at the active tier. A missing
+    // fragment degrades gracefully (logs, stays absent) instead of failing the
+    // whole selector: the arch is still fully usable without loose rocks.
+    for (std::size_t index = 0; index < kFragmentSpecs.size(); ++index) {
+        const auto relative = fragment_asset_relative_path(
+            tier,
+            kFragmentSpecs[index]
+        );
+        const auto fragment_path = ui::resolve_project_asset(
+            std::string("Relictombs-Broken_Arch/") + relative
+        );
+        if (!fragment_path) {
+            std::cerr << "[Relictombs] fragment asset unavailable: "
+                      << relative << '\n';
+            continue;
+        }
+
+        GError* fragment_error = nullptr;
+        GdkPixbuf* fragment_pixbuf = gdk_pixbuf_new_from_file(
+            fragment_path->c_str(),
+            &fragment_error
+        );
+        if (fragment_pixbuf == nullptr) {
+            std::cerr << "[Relictombs] fragment asset failed to decode: "
+                      << relative << ": "
+                      << (fragment_error != nullptr
+                              ? fragment_error->message
+                              : "unknown error")
+                      << '\n';
+            g_clear_error(&fragment_error);
+            continue;
+        }
+        cairo_surface_t* fragment_surface =
+            pixbuf_to_surface(fragment_pixbuf);
+        g_object_unref(fragment_pixbuf);
+        if (fragment_surface == nullptr) {
+            std::cerr << "[Relictombs] fragment asset failed to convert: "
+                      << relative << '\n';
+            continue;
+        }
+        cairo_surface_destroy(impl_->fragment_surfaces[index]);
+        impl_->fragment_surfaces[index] = fragment_surface;
+        impl_->fragment_loaded[index] = true;
+    }
+    std::size_t loaded_fragments = 0;
+    for (const bool loaded : impl_->fragment_loaded) {
+        if (loaded) ++loaded_fragments;
+    }
+    std::cerr << "[Relictombs] fragments loaded: " << loaded_fragments
+              << "/" << kFragmentSpecs.size() << '\n';
 
     impl_->window = window;
     impl_->canvas = canvas;
