@@ -20,6 +20,14 @@ namespace {
 
 constexpr guint kNavigationCooldownMicros = 90'000;
 
+// Phase 4 reconstruction timing (guide §18): 300-450 ms travel, imperceptible
+// stagger per piece, then a short complete-arch hold before wallpaper commit.
+constexpr double kReconstructTravelMicros = 360'000.0;
+constexpr double kReconstructStaggerMicros = 25'000.0;
+constexpr double kRepairedHoldMicros = 120'000.0;
+
+constexpr guint kReconstructTickMs = 16;
+
 constexpr const char* kWindowCssClass = "realmheart-relictombs-window";
 constexpr const char* kCanvasCssClass = "realmheart-relictombs-root";
 constexpr const char* kSurfaceNamespace = "realmheart-relictombs";
@@ -130,6 +138,42 @@ void draw_cover_fit(
     cairo_restore(cr);
 }
 
+// Cover-fit draw with an additional rotation around the destination center.
+// Used for fragment sprites as they lock into their sockets during
+// reconstruction; the rotation is authored per-fragment (socket rotation).
+void draw_cover_fit_rotated(
+    cairo_t* cr,
+    cairo_surface_t* surface,
+    double x,
+    double y,
+    double width,
+    double height,
+    double rotation_deg
+) {
+    const double image_width =
+        static_cast<double>(cairo_image_surface_get_width(surface));
+    const double image_height =
+        static_cast<double>(cairo_image_surface_get_height(surface));
+    if (image_width <= 0.0 || image_height <= 0.0 || width <= 0.0 || height <= 0.0) {
+        return;
+    }
+    const double scale = std::min(width / image_width, height / image_height);
+    const double draw_width = image_width * scale;
+    const double draw_height = image_height * scale;
+    const double center_x = x + width * 0.5;
+    const double center_y = y + height * 0.5;
+    const double offset_x = x + (width - draw_width) * 0.5;
+    const double offset_y = y + (height - draw_height) * 0.5;
+    cairo_save(cr);
+    cairo_translate(cr, center_x, center_y);
+    cairo_rotate(cr, rotation_deg * (G_PI / 180.0));
+    cairo_translate(cr, offset_x - center_x, offset_y - center_y);
+    cairo_scale(cr, scale, scale);
+    cairo_set_source_surface(cr, surface, 0.0, 0.0);
+    cairo_paint(cr);
+    cairo_restore(cr);
+}
+
 // Cover-crop draw: fills the destination (clipped) while preserving aspect,
 // cropping any overflow. Used for the wallpaper inside the portal viewport.
 void draw_cover_crop(
@@ -169,6 +213,7 @@ struct RelictombsOverlay::Impl {
     enum class State {
         Closed,
         Browsing,
+        Reconstructing,
         Applying,
     };
 
@@ -209,6 +254,28 @@ struct RelictombsOverlay::Impl {
     // decoding; the apply handshake starts the moment the swap lands.
     bool apply_requested = false;
 
+    // Phase 4 reconstruction state. Fragments interpolate idle -> socket over
+    // kReconstructionMicros with a staggered start per index; once complete
+    // they stay repaired while the wallpaper commit finishes.
+    bool repaired = false;
+    guint64 reconstruct_started_micros = 0;
+    double reconstruct_progress = 1.0;  // 1.0 = fully repaired
+
+    [[nodiscard]] double fragment_progress(std::size_t index) const {
+        if (repaired) return 1.0;
+        if (reconstruct_started_micros == 0) return 0.0;
+        const double elapsed = static_cast<double>(
+            g_get_monotonic_time() - reconstruct_started_micros
+        );
+        const double stagger = static_cast<double>(index) * kReconstructStaggerMicros;
+        const double t = (elapsed - stagger) / kReconstructTravelMicros;
+        if (t <= 0.0) return 0.0;
+        if (t >= 1.0) return 1.0;
+        // cubic-bezier(0.16, 1.0, 0.3, 1.0)-like smooth deceleration.
+        const double s = 1.0 - t;
+        return 1.0 - s * s * s;
+    }
+
     Impl(GtkApplication* app, ResultCallback result_callback)
         : application(app),
           callback(std::move(result_callback)) {}
@@ -237,6 +304,8 @@ struct RelictombsOverlay::Impl {
     void request_apply();
     void request_wallpaper_decode();
     void begin_apply();
+    void on_reconstruct_tick();
+    void reset_fragments();
     bool handle_key(guint keyval);
     void queue_redraw() const;
 
@@ -392,31 +461,55 @@ void draw_wallpaper_cb(
             framebuffer_height
         );
 
-        // Phase 3: the four broken fragments rest at their authored idle
-        // rects. They ride the exact same design-space -> framebuffer mapping
-        // as the portal so they can never drift relative to the arch.
+        // Phases 3-4: the four broken fragments rest at their authored idle
+        // rects and fly to their socket rects during reconstruction. They
+        // ride the exact same design-space -> framebuffer mapping as the
+        // portal so they can never drift relative to the arch.
         const double design_scale = image_width / kDesignWidth;
         for (std::size_t index = 0;
              index < impl->fragment_surfaces.size();
              ++index) {
             if (!impl->fragment_loaded[index]) continue;
             const auto& spec = kFragmentSpecs[index];
+            const double progress = impl->fragment_progress(index);
+            const float start_x = spec.idle_rect.x;
+            const float start_y = spec.idle_rect.y;
+            const float end_x = spec.socket_rect.x;
+            const float end_y = spec.socket_rect.y;
             const double fragment_x =
-                offset_x + spec.idle_rect.x * design_scale * scale;
+                offset_x +
+                (start_x + (end_x - start_x) * progress) * design_scale * scale;
             const double fragment_y =
-                offset_y + spec.idle_rect.y * design_scale * scale;
+                offset_y +
+                (start_y + (end_y - start_y) * progress) * design_scale * scale;
             const double fragment_width =
                 spec.idle_rect.width * design_scale * scale;
             const double fragment_height =
                 spec.idle_rect.height * design_scale * scale;
-            draw_cover_fit(
-                cr,
-                impl->fragment_surfaces[index],
-                fragment_x,
-                fragment_y,
-                fragment_width,
-                fragment_height
-            );
+            // Rotate the sprite around its own center while it locks into
+            // the socket; idle fragments stay axis-aligned.
+            const double rotation_deg =
+                spec.socket_rotation_deg * progress;
+            if (std::abs(rotation_deg) > 0.1) {
+                draw_cover_fit_rotated(
+                    cr,
+                    impl->fragment_surfaces[index],
+                    fragment_x,
+                    fragment_y,
+                    fragment_width,
+                    fragment_height,
+                    rotation_deg
+                );
+            } else {
+                draw_cover_fit(
+                    cr,
+                    impl->fragment_surfaces[index],
+                    fragment_x,
+                    fragment_y,
+                    fragment_width,
+                    fragment_height
+                );
+            }
         }
     }
 }
@@ -532,9 +625,52 @@ void RelictombsOverlay::Impl::begin_apply() {
     if (state != State::Browsing && state != State::Applying) return;
     if (!wallpaper_is_current()) return;
 
-    state = State::Applying;
+    // Enter: the selected wallpaper is ready. Lock navigation, stop the
+    // idle float, and play the signature Broken Arch reconstruction
+    // (fragments fly idle -> socket, staggered, smooth deceleration). The
+    // wallpaper commit result only fires once the arch is fully repaired
+    // plus a short complete-arch hold (guide §16-§20).
+    state = State::Reconstructing;
     apply_requested = false;
-    send(RelictombsResultKind::Apply, selected_path);
+    repaired = false;
+    reconstruct_started_micros = g_get_monotonic_time();
+    reconstruct_progress = 0.0;
+    std::cerr << "[Relictombs] reconstruction started\n";
+    g_timeout_add(kReconstructTickMs, +[](gpointer data) -> gboolean {
+        auto* impl = static_cast<RelictombsOverlay::Impl*>(data);
+        if (impl == nullptr) return G_SOURCE_REMOVE;
+        impl->on_reconstruct_tick();
+        return G_SOURCE_CONTINUE;
+    }, this);
+}
+
+void RelictombsOverlay::Impl::on_reconstruct_tick() {
+    if (state != State::Reconstructing) return;
+
+    const guint64 now = g_get_monotonic_time();
+    const double elapsed =
+        static_cast<double>(now - reconstruct_started_micros);
+    // All four fragments landed once the last stagger + travel completes.
+    const double total = kReconstructTravelMicros +
+                         (kFragmentSpecs.size() - 1) * kReconstructStaggerMicros;
+    reconstruct_progress = std::clamp(elapsed / total, 0.0, 1.0);
+    queue_redraw();
+
+    if (elapsed >= total + kRepairedHoldMicros) {
+        repaired = true;
+        reconstruct_progress = 1.0;
+        state = State::Applying;
+        queue_redraw();
+        std::cerr << "[Relictombs] arch repaired, committing\n";
+        send(RelictombsResultKind::Apply, selected_path);
+    }
+}
+
+void RelictombsOverlay::Impl::reset_fragments() {
+    repaired = false;
+    reconstruct_started_micros = 0;
+    reconstruct_progress = 1.0;
+    queue_redraw();
 }
 
 void RelictombsOverlay::Impl::request_apply() {
@@ -568,6 +704,21 @@ bool RelictombsOverlay::Impl::handle_key(guint keyval) {
             send(RelictombsResultKind::Cancel);
             hide();
             state = State::Closed;
+            reset_fragments();
+        }
+        return true;
+    case GDK_KEY_x:
+    case GDK_KEY_X:
+        // Phase 4 debug toggle: instantly flip between idle fragments and the
+        // fully repaired arch. Lets socket geometry be tuned without waiting
+        // on the reconstruction animation (guide §36 Phase 4).
+        if (state == State::Browsing) {
+            repaired = !repaired;
+            reconstruct_started_micros = 0;
+            reconstruct_progress = repaired ? 1.0 : 0.0;
+            std::cerr << "[Relictombs] debug toggle: "
+                      << (repaired ? "repaired" : "idle") << '\n';
+            queue_redraw();
         }
         return true;
     default:
@@ -779,6 +930,7 @@ bool RelictombsOverlay::preload(
     impl_->selection = selection;
     impl_->selected_path = selection.selected().string();
     impl_->apply_requested = false;
+    impl_->reset_fragments();
     impl_->request_wallpaper_decode();
     return true;
 }
@@ -801,6 +953,7 @@ bool RelictombsOverlay::show(
     impl_->apply_requested = false;
     impl_->state = Impl::State::Browsing;
     impl_->last_navigation_micros = g_get_monotonic_time();
+    impl_->reset_fragments();
     impl_->request_wallpaper_decode();
     impl_->present();
     std::cerr << "[Relictombs] session open: " << impl_->selected_path << '\n';
@@ -812,6 +965,7 @@ void RelictombsOverlay::cancel() {
         impl_->send(RelictombsResultKind::Cancel);
         impl_->hide();
         impl_->state = Impl::State::Closed;
+        impl_->reset_fragments();
     }
     // Applying owns its lifecycle; Closed is a no-op.
 }
@@ -826,6 +980,7 @@ void RelictombsOverlay::backend_committed() {
     impl_->send(RelictombsResultKind::Complete);
     impl_->hide();
     impl_->state = Impl::State::Closed;
+    impl_->reset_fragments();
 }
 
 void RelictombsOverlay::backend_failed(std::string_view diagnostic) {
@@ -833,10 +988,12 @@ void RelictombsOverlay::backend_failed(std::string_view diagnostic) {
     impl_->send(RelictombsResultKind::Error, std::string(diagnostic));
     impl_->hide();
     impl_->state = Impl::State::Closed;
+    impl_->reset_fragments();
 }
 
 bool RelictombsOverlay::active() const noexcept {
     return impl_->state == Impl::State::Browsing ||
+           impl_->state == Impl::State::Reconstructing ||
            impl_->state == Impl::State::Applying;
 }
 

@@ -849,7 +849,7 @@ if(BUILD_TESTING)
     )
     target_link_libraries(
         realmheart_relictombs_layout_tests
-        PRIVATE GTest::gtest GTest::gtest_main
+        PRIVATE GTest::gtest GTest::gtest_main PkgConfig::GDK_PIXBUF
     )
     realmheart_register_test(realmheart_relictombs_layout_tests)
 

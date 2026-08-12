@@ -45,18 +45,46 @@ struct FragmentSpec {
     std::string_view name;
     // Design-space bounding rect of the full sprite PNG (padding included).
     RectF idle_rect;
+    // Socket (repaired) target for the same sprite, top-left anchored in the
+    // same design space. Authored so the fragment's inner edge rests on the
+    // measured portal rim (alpha==0 boundary) and its body continues the ring
+    // band outward; Phase 4 reconstruction interpolates idle -> socket.
+    RectF socket_rect;
+    // Socket rotation in degrees (positive = clockwise). Fragments hang near
+    // their socket almost axis-aligned; the small tilt aligns the broken edge
+    // with the arch fracture line.
+    float socket_rotation_deg = 0.0F;
     // Tiered asset file name under <tier>/fragments/.
     std::string_view file;
 };
 
 // Idle layout for the four broken fragments. Positions are the authored spot
-// each piece occupies in the source composition (the "fallen/resting" state);
-// Phase 4 adds explicit socket targets for reconstruction.
+// each piece occupies in the source composition (the "fallen/resting" state).
+// Socket targets were derived from the measured portal rim (alpha==0 boundary)
+// and ring-band profile: each fragment hugs the rim with its inner edge while
+// continuing the ring outward, and was validated to keep portal overlap to
+// ~1% (anti-aliased fringe) with zero fragment-to-fragment overlap.
 inline constexpr std::array<FragmentSpec, 4> kFragmentSpecs{{
-    {"top-right", {1097.8F, 184.8F, 101.0F, 100.0F}, "top-right.png"},
-    {"middle-right", {1179.3F, 269.7F, 148.0F, 142.0F}, "middle-right.png"},
-    {"lower-right", {1270.0F, 497.0F, 210.0F, 173.0F}, "lower-right.png"},
-    {"bottom-left", {494.9F, 488.9F, 168.0F, 141.0F}, "bottom-left.png"},
+    {"top-right",
+     {1097.8F, 184.8F, 101.0F, 100.0F},
+     {1015.5F, 215.0F, 101.0F, 100.0F},
+     0.0F,
+     "top-right.png"},
+    {"middle-right",
+     {1179.3F, 269.7F, 148.0F, 142.0F},
+     {1092.0F, 279.0F, 148.0F, 142.0F},
+     -20.0F,
+     "middle-right.png"},
+    {"lower-right",
+     {1270.0F, 497.0F, 210.0F, 173.0F},
+     {1077.5F, 398.4F, 210.0F, 173.0F},
+     10.0F,
+     "lower-right.png"},
+    {"bottom-left",
+     {494.9F, 488.9F, 168.0F, 141.0F},
+     {655.0F, 414.5F, 168.0F, 141.0F},
+     8.0F,
+     "bottom-left.png"},
 }};
 
 enum class AssetTier {

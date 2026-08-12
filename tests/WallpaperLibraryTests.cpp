@@ -98,6 +98,25 @@ TEST_F(WallpaperLibraryTest, RejectsUnsupportedAndCorruptFiles) {
     EXPECT_FALSE(result.diagnostics.empty());
 }
 
+TEST_F(WallpaperLibraryTest, HeaderProbeIsBoundedAndListsTruncatedMagicValidFiles) {
+    // Discovery uses a magic-header probe instead of a full decode so startup
+    // stays bounded on large libraries. Garbage with a supported extension is
+    // rejected, but a truncated file that still carries valid image magic is
+    // listed; decode failures surface later at preload/show time.
+    create_png("good.png");
+    {
+        std::ofstream(root_ / "garbage.png") << "not an image at all";
+        std::ofstream(root_ / "truncated.png", std::ios::binary)
+            << "\x89PNG\r\n\x1a\n" << "cut off before any real chunks";
+    }
+
+    const auto result = library_.discover(root_);
+    ASSERT_EQ(result.paths.size(), 2U);
+    EXPECT_EQ(result.paths[0].filename(), "good.png");
+    EXPECT_EQ(result.paths[1].filename(), "truncated.png");
+    EXPECT_FALSE(result.diagnostics.empty());
+}
+
 TEST_F(WallpaperLibraryTest, HandlesUppercaseSpacesAndUnicodeNames) {
     const auto upper = create_png("BETA.PNG");
     const auto spaced = create_png("Arthur Leywin.png");
