@@ -4,7 +4,10 @@
 #include <glib.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <cstring>
+#include <fstream>
 #include <iterator>
 #include <string_view>
 #include <system_error>
@@ -41,22 +44,41 @@ std::string lowercase_filename(const std::filesystem::path& path) {
     return filename;
 }
 
-bool decodable_image(const std::filesystem::path& path) {
-    GError* error = nullptr;
-    // Decode a tiny scaled frame rather than trusting the extension/header.
-    // This keeps discovery bounded while rejecting truncated/corrupt images
-    // before a Relictombs session owns any GL state.
-    GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file_at_scale(
-        path.c_str(),
-        1,
-        1,
-        TRUE,
-        &error
-    );
-    const bool valid = pixbuf != nullptr;
-    if (pixbuf != nullptr) g_object_unref(pixbuf);
-    g_clear_error(&error);
-    return valid;
+bool plausible_image(const std::filesystem::path& path) {
+    // Bounded discovery: probe the magic header instead of fully decoding the
+    // image. gdk_pixbuf_new_from_file_at_scale() decodes the ENTIRE frame
+    // even for a 1x1 scale, so validating every library member that way made
+    // startup block for seconds on large collections (1.1 GB / 39 files took
+    // ~13.5 s in the field). The header probe rejects the same garbage
+    // (text files, videos, random data) in constant time; images that are
+    // magic-valid but truncated are surfaced with a decode error later at
+    // preload/show time, where the overlay already handles failure cleanly.
+    std::error_code error;
+    const auto size = std::filesystem::file_size(path, error);
+    if (error || size == 0) return false;
+
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return false;
+    std::array<char, 12> header{};
+    stream.read(header.data(), static_cast<std::streamsize>(header.size()));
+    const std::streamsize read = stream.gcount();
+    if (read < 8) return false;
+
+    const auto starts_with = [&](const char* magic, std::size_t length) {
+        return read >= static_cast<std::streamsize>(length) &&
+               std::memcmp(header.data(), magic, length) == 0;
+    };
+
+    // PNG: \x89PNG\r\n\x1a\n
+    if (starts_with("\x89PNG\r\n\x1a\n", 8)) return true;
+    // JPEG: \xFF\xD8\xFF
+    if (starts_with("\xFF\xD8\xFF", 3)) return true;
+    // WebP: RIFF....WEBP
+    if (starts_with("RIFF", 4) && read >= 12 &&
+        std::memcmp(header.data() + 8, "WEBP", 4) == 0) {
+        return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -107,7 +129,7 @@ WallpaperDiscovery WallpaperLibrary::discover(std::filesystem::path root) const 
                 "ignored unreadable entry: " + path.string()
             );
         } else if (regular && supported_extension(path.extension().string())) {
-            if (decodable_image(path)) {
+            if (plausible_image(path)) {
                 result.paths.push_back(path);
             } else {
                 result.diagnostics.emplace_back(
