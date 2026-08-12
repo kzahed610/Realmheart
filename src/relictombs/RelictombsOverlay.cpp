@@ -36,6 +36,9 @@ constexpr const char* kSurfaceNamespace = "realmheart-relictombs";
 // viewport at the monitor's physical resolution, then a little headroom for
 // the apply-state interior motion that later phases add.
 constexpr double kDecodeHeadroom = 1.25;
+// One short understated line for a commit failure that keeps the selector
+// open (guide §25); anything longer gets truncated.
+constexpr std::size_t kErrorLineMaxChars = 96;
 
 // Decodes one wallpaper with a bounded target so browsing never rescales a
 // full 4K original into memory on every Up/Down step.
@@ -260,6 +263,10 @@ struct RelictombsOverlay::Impl {
     bool repaired = false;
     guint64 reconstruct_started_micros = 0;
     double reconstruct_progress = 1.0;  // 1.0 = fully repaired
+
+    // Understated one-line diagnostic shown while a commit failure keeps the
+    // selector open (guide §25). Cleared on the next navigation/apply.
+    std::string error_message;
 
     [[nodiscard]] double fragment_progress(std::size_t index) const {
         if (repaired) return 1.0;
@@ -512,6 +519,39 @@ void draw_wallpaper_cb(
             }
         }
     }
+
+    // Guide §25: one short understated diagnostic, bottom-center, so a
+    // failed commit explains itself without stealing the scene.
+    if (!impl->error_message.empty()) {
+        cairo_save(cr);
+        cairo_select_font_face(
+            cr,
+            "Sans",
+            CAIRO_FONT_SLANT_NORMAL,
+            CAIRO_FONT_WEIGHT_NORMAL
+        );
+        cairo_set_font_size(cr, 16.0);
+        cairo_text_extents_t extents{};
+        cairo_text_extents(cr, impl->error_message.c_str(), &extents);
+        const double text_x =
+            (framebuffer_width - extents.width) * 0.5 - extents.x_bearing;
+        const double text_y = framebuffer_height - 24.0;
+        // Subtle: dim text over a soft dark scrim, gold-tinted to match the
+        // realm's palette.
+        cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.35);
+        cairo_rectangle(
+            cr,
+            text_x - 12.0,
+            text_y - extents.height + 6.0,
+            extents.width + 24.0,
+            extents.height + 12.0
+        );
+        cairo_fill(cr);
+        cairo_set_source_rgba(cr, 0.93, 0.79, 0.45, 0.85);
+        cairo_move_to(cr, text_x, text_y);
+        cairo_show_text(cr, impl->error_message.c_str());
+        cairo_restore(cr);
+    }
 }
 
 void install_transparency_css(RelictombsOverlay::Impl& impl) {
@@ -576,13 +616,17 @@ void RelictombsOverlay::Impl::hide() {
 void RelictombsOverlay::Impl::request_wallpaper_decode() {
     if (selected_path.empty()) return;
 
+    // A cancellable is single-shot: once cancelled it stays cancelled, and
+    // handing a dead cancellable to the next decode would make every
+    // subsequent navigation silently no-op (the worker sees
+    // g_cancellable_is_cancelled() immediately and returns null). Clear the
+    // old handle so each decode starts with a fresh, live cancellable.
     g_cancellable_cancel(decode_cancel);
+    g_clear_object(&decode_cancel);
     g_clear_object(&decode_task);
     ++decode_generation;
 
-    if (decode_cancel == nullptr) {
-        decode_cancel = g_cancellable_new();
-    }
+    decode_cancel = g_cancellable_new();
     auto* job = new WallpaperDecodeJob{
         selected_path,
         decode_generation,
@@ -614,6 +658,7 @@ void RelictombsOverlay::Impl::navigate(int direction) {
     last_navigation_micros = now;
 
     apply_requested = false;
+    error_message.clear();
     if (!selection.navigate(direction)) return;
     selected_path = selection.selected().string();
     std::cerr << "[Relictombs] browsing: "
@@ -632,6 +677,7 @@ void RelictombsOverlay::Impl::begin_apply() {
     // plus a short complete-arch hold (guide §16-§20).
     state = State::Reconstructing;
     apply_requested = false;
+    error_message.clear();
     repaired = false;
     reconstruct_started_micros = g_get_monotonic_time();
     reconstruct_progress = 0.0;
@@ -985,10 +1031,25 @@ void RelictombsOverlay::backend_committed() {
 
 void RelictombsOverlay::backend_failed(std::string_view diagnostic) {
     if (impl_->state != Impl::State::Applying) return;
-    impl_->send(RelictombsResultKind::Error, std::string(diagnostic));
-    impl_->hide();
-    impl_->state = Impl::State::Closed;
-    impl_->reset_fragments();
+
+    // Guide §25: a commit failure must NOT close the selector. Return the
+    // fragments to their broken idle positions, surface one short understated
+    // diagnostic, and drop back to Browsing so the user can navigate or retry.
+    // Never leave the arch permanently half-repaired.
+    impl_->state = Impl::State::Browsing;
+    impl_->repaired = false;
+    impl_->reconstruct_started_micros = 0;
+    impl_->reconstruct_progress = 0.0;
+    impl_->apply_requested = false;
+    impl_->error_message.assign(diagnostic);
+    if (impl_->error_message.size() > kErrorLineMaxChars) {
+        impl_->error_message.resize(kErrorLineMaxChars);
+        impl_->error_message += "...";
+    }
+    impl_->queue_redraw();
+    std::cerr << "[Relictombs] apply failed: " << diagnostic << '\n';
+    // The shell restores the workspace on Cancel/Complete; a failed session
+    // deliberately stays open, so no workspace restore is triggered here.
 }
 
 bool RelictombsOverlay::active() const noexcept {
