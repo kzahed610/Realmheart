@@ -1118,6 +1118,8 @@ private:
                 return;
             }
             if (!result.payload.empty() && result.payload != relictombs_apply_path_) {
+                relictombs_apply_pending_ = false;
+                relictombs_apply_path_.clear();
                 relictombs_process_.apply_failed(
                     "Relictombs commit path changed after wallpaper preparation"
                 );
@@ -1132,6 +1134,8 @@ private:
                     if (!async_state->alive.load() || owner == nullptr) return;
 
                     if (!success) {
+                        owner->relictombs_apply_pending_ = false;
+                        owner->relictombs_apply_path_.clear();
                         owner->relictombs_process_.apply_failed(
                             error_message.empty()
                                 ? "prepared wallpaper commit failed"
@@ -1179,6 +1183,8 @@ private:
                     return;
                 }
 
+                owner->relictombs_apply_pending_ = false;
+                owner->relictombs_apply_path_.clear();
                 owner->relictombs_process_.apply_failed(
                     error_message.empty()
                         ? "wallpaper backend prepare failed"
