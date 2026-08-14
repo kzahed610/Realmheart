@@ -36,6 +36,10 @@ constexpr const char* kSurfaceNamespace = "realmheart-relictombs";
 // viewport at the monitor's physical resolution, then a little headroom for
 // the apply-state interior motion that later phases add.
 constexpr double kDecodeHeadroom = 1.25;
+// Selector zoom: the base arch renders 20% larger than cover-fit so the portal
+// fills more of the screen and the wallpaper inside is immediately recognisable.
+// The base is scaled around the framebuffer center; edges crop naturally.
+constexpr double kZoomFactor = 1.2;
 // One short understated line for a commit failure that keeps the selector
 // open (guide §25); anything longer gets truncated.
 constexpr std::size_t kErrorLineMaxChars = 96;
@@ -419,14 +423,19 @@ void draw_wallpaper_cb(
             static_cast<double>(cairo_image_surface_get_width(impl->base_surface));
         const double image_height =
             static_cast<double>(cairo_image_surface_get_height(impl->base_surface));
-        const double scale = std::min(
+        // Cover-fit gives uniform scale so the base fills the framebuffer with
+        // no letterbox. The selector zoom (kZoomFactor) grows the arch 20%
+        // beyond that, cropping edges so the portal is more recognisable.
+        const double cover_scale = std::min(
             framebuffer_width / image_width,
             framebuffer_height / image_height
         );
+        const double scale = cover_scale * kZoomFactor;
         const double draw_width = image_width * scale;
         const double draw_height = image_height * scale;
+        // Center the zoomed arch in the framebuffer.
         const double offset_x = (framebuffer_width - draw_width) * 0.5;
-        const double offset_y = (framebuffer_height - draw_height) * 0.5;
+        const double offset_y = ((framebuffer_height - draw_height) * 0.5) + 50.0; // Shift down 50px per user request
 
         // Draw order is z-order: the wallpaper renders BEHIND the arch, the
         // base image's own alpha carves the portal hole out of it (opaque
@@ -459,14 +468,16 @@ void draw_wallpaper_cb(
             );
         }
 
-        draw_cover_fit(
-            cr,
-            impl->base_surface,
-            0.0,
-            0.0,
-            framebuffer_width,
-            framebuffer_height
-        );
+        // Draw the base arch with the zoomed transform so it renders 20%
+        // larger than cover-fit, cropping edges. We do NOT use draw_cover_fit
+        // here because it recomputes its own scale; the zoom factor must be
+        // part of the same transform as the portal and fragments.
+        cairo_save(cr);
+        cairo_translate(cr, offset_x, offset_y);
+        cairo_scale(cr, scale, scale);
+        cairo_set_source_surface(cr, impl->base_surface, 0.0, 0.0);
+        cairo_paint(cr);
+        cairo_restore(cr);
 
         // Phases 3-4: the four broken fragments rest at their authored idle
         // rects and fly to their socket rects during reconstruction. They
