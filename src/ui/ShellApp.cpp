@@ -1058,7 +1058,7 @@ private:
         if (generation != relictombs_launch_generation_) return;
         relictombs_launch_pending_ = false;
 
-        if (!switched || original_workspace <= 0) {
+        if (!switched || original_workspace == 0) {
             restore_relictombs_chrome();
             std::cerr << "[Relictombs] unable to enter the empty Relictombs workspace\n";
             return;
