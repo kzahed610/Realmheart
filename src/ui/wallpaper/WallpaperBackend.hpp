@@ -38,6 +38,18 @@ public:
         std::string* error_message = nullptr
     ) = 0;
 
+    // Generic two-phase wallpaper transaction. prepare_wallpaper() performs
+    // expensive decode/upload work without changing visible pixels;
+    // commit_prepared_wallpaper() makes that prepared image authoritative.
+    [[nodiscard]] virtual bool prepare_wallpaper(
+        const std::filesystem::path& path,
+        std::string* error_message = nullptr
+    ) = 0;
+    [[nodiscard]] virtual bool commit_prepared_wallpaper(
+        std::string* error_message = nullptr
+    ) = 0;
+    virtual void discard_prepared_wallpaper() noexcept = 0;
+
 protected:
     WallpaperBackend() = default;
 };

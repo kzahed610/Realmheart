@@ -3,6 +3,7 @@
 #include "core/TaskExecutor.hpp"
 #include "services/HyprlandWorkspaces.hpp"
 #include "ui/LayerSurface.hpp"
+#include "ui/bar/BarGeometry.hpp"
 #include "ui/bar/VerticalBarModel.hpp"
 
 #include <algorithm>
@@ -12,13 +13,6 @@
 
 namespace realmheart::ui::bar {
 namespace {
-
-// The compositor reserves only the straight rail. The extra surface width is
-// transparent through the middle and exists solely for the two outward caps.
-constexpr int kRailWidth = 56;
-constexpr int kCapExtension = 20;
-constexpr int kVisualWidth = kRailWidth + kCapExtension;
-constexpr int kCurveHeight = 35;
 
 int monitor_height_or_fallback(GtkWidget* widget) {
     constexpr int fallback_height = 1080;
@@ -59,14 +53,18 @@ VerticalBar::VerticalBar(
     services::MediaService& media_service,
     std::function<void()> toggle_sidebar,
     std::function<void()> launch_launcher,
-    std::function<void(double, double)> open_power_menu
+    std::function<void()> toggle_workspace_overview,
+    std::function<void(double, double)> open_power_menu,
+    std::function<void(services::WorkspaceSnapshot)> workspace_snapshot_changed
 ) : app_(app),
     notification_history_(notification_history),
     battery_service_(battery_service),
     media_service_(media_service),
     toggle_sidebar_(std::move(toggle_sidebar)),
     launch_launcher_(std::move(launch_launcher)),
-    open_power_menu_(std::move(open_power_menu)) {
+    toggle_workspace_overview_(std::move(toggle_workspace_overview)),
+    open_power_menu_(std::move(open_power_menu)),
+    workspace_snapshot_changed_(std::move(workspace_snapshot_changed)) {
     g_weak_ref_init(&active_popover_ref_, nullptr);
     window_ = gtk_application_window_new(app_);
     gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Aether Spine");
@@ -442,11 +440,94 @@ void VerticalBar::open_exclusive_system() {
     g_weak_ref_set(&active_popover_ref_, nullptr);
 }
 
+void VerticalBar::request_workspace_overview_toggle() {
+    if (media_widget_ != nullptr) media_widget_->close();
+    if (system_monitor_widget_ != nullptr) system_monitor_widget_->close();
+
+    GObject* current = static_cast<GObject*>(g_weak_ref_get(&active_popover_ref_));
+    if (current != nullptr) {
+        gtk_popover_popdown(GTK_POPOVER(current));
+    }
+    g_clear_object(&current);
+    g_weak_ref_set(&active_popover_ref_, nullptr);
+
+    if (toggle_workspace_overview_) toggle_workspace_overview_();
+}
+
+std::vector<workspace::animation::WorkspaceMorphSource>
+VerticalBar::workspace_morph_sources() const {
+    std::vector<workspace::animation::WorkspaceMorphSource> sources;
+    sources.reserve(workspace_runes_.size());
+    if (window_ == nullptr) return sources;
+
+    for (const auto& rune : workspace_runes_) {
+        if (rune == nullptr) continue;
+        graphene_rect_t bounds{};
+        if (!rune->compute_artwork_bounds(window_, &bounds)) continue;
+        sources.push_back({
+            rune->workspace_id(),
+            {
+                static_cast<double>(bounds.origin.x),
+                static_cast<double>(bounds.origin.y),
+                static_cast<double>(bounds.size.width),
+                static_cast<double>(bounds.size.height),
+            },
+            rune->active(),
+            rune->occupied(),
+        });
+    }
+    return sources;
+}
+
+void VerticalBar::set_workspace_morph_active(bool active) {
+    workspace_morph_active_ = active;
+    // Hyprland hides normal Top-layer panels behind true fullscreen clients.
+    // The workspace overview is also Top-layer, so temporarily lift the Aether
+    // Spine to Overlay only while the overview owns the morph/visible state.
+    // Returning to Top restores the bar's original fullscreen behavior.
+    if (window_ != nullptr) {
+        set_layer_surface_level(
+            GTK_WINDOW(window_),
+            active ? LayerSurfaceLevel::Overlay : LayerSurfaceLevel::Top
+        );
+    }
+    if (!active) {
+        set_workspace_morph_progress(0.0);
+    }
+    if (active) {
+        if (media_widget_ != nullptr) media_widget_->close();
+        if (system_monitor_widget_ != nullptr) system_monitor_widget_->close();
+
+        GObject* current = static_cast<GObject*>(
+            g_weak_ref_get(&active_popover_ref_)
+        );
+        if (current != nullptr) {
+            gtk_popover_popdown(GTK_POPOVER(current));
+        }
+        g_clear_object(&current);
+        g_weak_ref_set(&active_popover_ref_, nullptr);
+    }
+
+    for (const auto& rune : workspace_runes_) {
+        if (rune != nullptr) rune->set_morph_suppressed(active);
+    }
+}
+
+
+void VerticalBar::set_workspace_morph_progress(double progress) {
+    workspace_morph_progress_ = std::clamp(progress, 0.0, 1.0);
+    const double opacity =
+        workspace::animation::workspace_morph_rune_opacity(
+            workspace_morph_progress_
+        );
+    for (const auto& rune : workspace_runes_) {
+        if (rune != nullptr) rune->set_morph_visual_opacity(opacity);
+    }
+}
 
 void VerticalBar::activate_workspace(int workspace_id) {
     constexpr int kMinimumWorkspaceId = 1;
-    constexpr int kMaximumWorkspaceId = 5;
-    if (workspace_id < kMinimumWorkspaceId || workspace_id > kMaximumWorkspaceId) return;
+    if (workspace_id < kMinimumWorkspaceId) return;
 
     // Dispatch outside GTK's main loop. hyprctl normally returns quickly, but
     // a compositor IPC hiccup must never stall pointer handling or animation.
@@ -592,6 +673,7 @@ void VerticalBar::request_wifi_refresh() {
 
 void VerticalBar::apply_workspaces(services::WorkspaceSnapshot snapshot) {
     workspace_window_tracker_.apply(snapshot);
+    if (workspace_snapshot_changed_) workspace_snapshot_changed_(snapshot);
     const auto states = build_workspace_pills(snapshot);
     const bool same_topology = states.size() == workspace_runes_.size() &&
         std::equal(states.begin(), states.end(), workspace_runes_.begin(), [](const auto& state, const auto& rune) {
@@ -612,8 +694,14 @@ void VerticalBar::apply_workspaces(services::WorkspaceSnapshot snapshot) {
         auto rune = std::make_unique<widgets::WorkspaceRune>(
             state,
             [this](int workspace_id) { activate_workspace(workspace_id); },
-            toggle_sidebar_,
+            [this] { request_workspace_overview_toggle(); },
             [this](GtkPopover* popover) { open_exclusive_popover(popover); }
+        );
+        rune->set_morph_suppressed(workspace_morph_active_);
+        rune->set_morph_visual_opacity(
+            workspace::animation::workspace_morph_rune_opacity(
+                workspace_morph_progress_
+            )
         );
         gtk_box_append(GTK_BOX(workspace_box_), rune->widget());
         workspace_runes_.push_back(std::move(rune));

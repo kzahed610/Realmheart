@@ -81,6 +81,7 @@ bool WallpaperController::set_wallpaper(
     std::string backend_error;
     if (backend_->set_wallpaper(path, &backend_error)) {
         current_wallpaper_ = path;
+        prepared_wallpaper_.clear();
         return true;
     }
 
@@ -90,6 +91,7 @@ bool WallpaperController::set_wallpaper(
         if (activate_backend(WallpaperBackendType::Gtk, error_message) &&
             backend_->set_wallpaper(path, error_message)) {
             current_wallpaper_ = path;
+            prepared_wallpaper_.clear();
             return true;
         }
         return false;
@@ -151,6 +153,7 @@ void WallpaperController::set_wallpaper_async(
 
                 if (payload->success) {
                     owner->current_wallpaper_ = payload->path;
+                    owner->prepared_wallpaper_.clear();
                     if (payload->callback) payload->callback(true, {});
                     return G_SOURCE_REMOVE;
                 }
@@ -186,6 +189,190 @@ void WallpaperController::set_wallpaper_async(
     });
 
     if (!posted && callback) callback(false, "wallpaper worker queue is unavailable");
+}
+
+void WallpaperController::prepare_wallpaper_async(
+    std::filesystem::path path,
+    SetWallpaperCallback callback
+) {
+    std::string initialize_error;
+    if (!initialize(&initialize_error)) {
+        if (callback) callback(false, std::move(initialize_error));
+        return;
+    }
+    if (path.empty()) {
+        if (callback) callback(false, "wallpaper path is empty");
+        return;
+    }
+
+    const auto state = async_state_;
+    const std::uint64_t generation = state->generation.fetch_add(1) + 1;
+    const auto backend = backend_;
+    if (backend == nullptr) {
+        if (callback) callback(false, "wallpaper backend is unavailable");
+        return;
+    }
+
+    const bool posted = realmheart::core::shared_task_executor().post([
+        state, backend, path = std::move(path), generation, callback
+    ]() mutable {
+        std::string error_message;
+        const bool success = backend->prepare_wallpaper(path, &error_message);
+
+        struct Payload {
+            std::shared_ptr<AsyncState> state;
+            std::shared_ptr<WallpaperBackend> backend;
+            std::filesystem::path path;
+            std::uint64_t generation = 0;
+            bool success = false;
+            std::string error_message;
+            SetWallpaperCallback callback;
+        };
+
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            +[](gpointer raw) -> gboolean {
+                auto* payload = static_cast<Payload*>(raw);
+                auto* owner = payload->state->owner.load();
+                if (!payload->state->alive.load() || owner == nullptr ||
+                    payload->state->generation.load() != payload->generation ||
+                    owner->backend_ != payload->backend) {
+                    return G_SOURCE_REMOVE;
+                }
+
+                if (payload->success) {
+                    owner->prepared_wallpaper_ = payload->path;
+                } else {
+                    owner->prepared_wallpaper_.clear();
+                }
+                if (payload->callback) {
+                    payload->callback(
+                        payload->success,
+                        std::move(payload->error_message)
+                    );
+                }
+                return G_SOURCE_REMOVE;
+            },
+            new Payload{
+                state,
+                backend,
+                std::move(path),
+                generation,
+                success,
+                std::move(error_message),
+                std::move(callback)
+            },
+            +[](gpointer raw) {
+                delete static_cast<Payload*>(raw);
+            }
+        );
+    });
+
+    if (!posted && callback) {
+        callback(false, "wallpaper prepare worker is unavailable");
+    }
+}
+
+void WallpaperController::commit_prepared_wallpaper_async(
+    SetWallpaperCallback callback
+) {
+    if (backend_ == nullptr || prepared_wallpaper_.empty()) {
+        if (callback) callback(false, "no prepared wallpaper is available");
+        return;
+    }
+
+    const auto state = async_state_;
+    const std::uint64_t generation = state->generation.fetch_add(1) + 1;
+    const auto backend = backend_;
+    const auto path = prepared_wallpaper_;
+
+    // GTK wallpaper surfaces belong to the main thread. Preparation performs
+    // the expensive decode on a worker; committing the already-decoded payload
+    // is intentionally done here on GTK's thread.
+    if (backend->type() == WallpaperBackendType::Gtk) {
+        std::string error_message;
+        const bool success = backend->commit_prepared_wallpaper(&error_message);
+        if (success) {
+            current_wallpaper_ = path;
+            prepared_wallpaper_.clear();
+        }
+        if (callback) callback(success, std::move(error_message));
+        return;
+    }
+
+    const bool posted = realmheart::core::shared_task_executor().post([
+        state, backend, path, generation, callback
+    ]() mutable {
+        std::string error_message;
+        const bool success = backend->commit_prepared_wallpaper(&error_message);
+
+        struct Payload {
+            std::shared_ptr<AsyncState> state;
+            std::shared_ptr<WallpaperBackend> backend;
+            std::filesystem::path path;
+            std::uint64_t generation = 0;
+            bool success = false;
+            std::string error_message;
+            SetWallpaperCallback callback;
+        };
+
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            +[](gpointer raw) -> gboolean {
+                auto* payload = static_cast<Payload*>(raw);
+                auto* owner = payload->state->owner.load();
+                if (!payload->state->alive.load() || owner == nullptr ||
+                    payload->state->generation.load() != payload->generation ||
+                    owner->backend_ != payload->backend) {
+                    return G_SOURCE_REMOVE;
+                }
+
+                if (payload->success) {
+                    owner->current_wallpaper_ = payload->path;
+                    owner->prepared_wallpaper_.clear();
+                }
+                if (payload->callback) {
+                    payload->callback(
+                        payload->success,
+                        std::move(payload->error_message)
+                    );
+                }
+                return G_SOURCE_REMOVE;
+            },
+            new Payload{
+                state,
+                backend,
+                path,
+                generation,
+                success,
+                std::move(error_message),
+                std::move(callback)
+            },
+            +[](gpointer raw) {
+                delete static_cast<Payload*>(raw);
+            }
+        );
+    });
+
+    if (!posted && callback) {
+        callback(false, "wallpaper commit worker is unavailable");
+    }
+}
+
+void WallpaperController::discard_prepared_wallpaper() noexcept {
+    ++async_state_->generation;
+    prepared_wallpaper_.clear();
+    const auto backend = backend_;
+    if (backend == nullptr) return;
+
+    if (backend->type() == WallpaperBackendType::Gtk) {
+        backend->discard_prepared_wallpaper();
+        return;
+    }
+
+    static_cast<void>(realmheart::core::shared_task_executor().post(
+        [backend] { backend->discard_prepared_wallpaper(); }
+    ));
 }
 
 void WallpaperController::switch_backend_async(
@@ -252,6 +439,7 @@ void WallpaperController::switch_backend_async(
                         auto previous = std::move(owner->backend_);
                         owner->backend_ = std::move(candidate);
                         owner->requested_backend_ = WallpaperBackendType::Gtk;
+                        owner->prepared_wallpaper_.clear();
                         release_backend(std::move(previous));
                     }
                     if (payload->callback) {
@@ -309,6 +497,7 @@ void WallpaperController::switch_backend_async(
                     auto previous = std::move(owner->backend_);
                     owner->backend_ = std::move(payload->candidate);
                     owner->requested_backend_ = WallpaperBackendType::Native;
+                    owner->prepared_wallpaper_.clear();
                     release_backend(std::move(previous));
                 }
                 if (payload->callback) {
@@ -359,6 +548,7 @@ bool WallpaperController::switch_backend(
     auto previous = std::move(backend_);
     backend_ = std::move(candidate);
     requested_backend_ = backend;
+    prepared_wallpaper_.clear();
     release_backend(std::move(previous));
     return true;
 }
@@ -387,6 +577,7 @@ bool WallpaperController::activate_backend(
     if (!candidate->initialize(error_message)) return false;
     auto previous = std::move(backend_);
     backend_ = std::move(candidate);
+    prepared_wallpaper_.clear();
     release_backend(std::move(previous));
     return true;
 }
@@ -439,7 +630,10 @@ void WallpaperController::start_gtk_request(
                         std::move(*payload->decoded), &payload->error_message
                     );
                 }
-                if (success) owner->current_wallpaper_ = payload->path;
+                if (success) {
+                    owner->current_wallpaper_ = payload->path;
+                    owner->prepared_wallpaper_.clear();
+                }
                 if (payload->callback) {
                     payload->callback(success, std::move(payload->error_message));
                 }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(Realmheart VERSION 0.1.0 LANGUAGES C CXX)
+project(Realmheart VERSION 0.5.0 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 
@@ -175,9 +175,20 @@ add_library(realmheart_ui STATIC
     src/ui/powermenu/PowerMenuLayout.cpp
     src/ui/powermenu/PowerMenuVideoState.cpp
     src/ui/powermenu/PowerMenuProcess.cpp
+    src/ui/relictombs/RelictombsProcess.cpp
+    src/relictombs/RelictombsProtocol.cpp
     src/ui/powermenu/animation/PowerMenuRippleRenderer.cpp
     src/ui/powermenu/PowerMenuScene.cpp
     src/ui/powermenu/PowerMenuOverlay.cpp
+    src/ui/workspace/WorkspaceOverviewModel.cpp
+    src/ui/workspace/WorkspaceOverviewOverlay.cpp
+    src/ui/workspace/animation/WorkspaceMorphDiagnostics.cpp
+    src/ui/workspace/animation/WorkspaceMorphFrontier.cpp
+    src/ui/workspace/animation/WorkspaceMorphModel.cpp
+    src/ui/workspace/animation/WorkspaceMorphPresentation.cpp
+    src/ui/workspace/animation/WorkspaceMorphRendererState.cpp
+    src/ui/workspace/animation/WorkspaceMorphShaderData.cpp
+    src/ui/workspace/animation/WorkspaceOverviewMorphRenderer.cpp
     src/ui/launcher/LauncherOverlay.cpp
     src/ui/launcher/CommandReceiptOverlay.cpp
     src/services/LauncherService.cpp
@@ -237,6 +248,30 @@ target_link_libraries(realmheart_power_menu_renderer PRIVATE
 )
 
 add_dependencies(realmheart realmheart_power_menu_renderer)
+
+add_executable(realmheart_relictombs_renderer
+    src/relictombs-renderer/main.cpp
+    src/relictombs/RelictombsOverlay.cpp
+    src/relictombs/WallpaperLibrary.cpp
+    src/relictombs/RelictombsSelection.cpp
+    src/core/Command.cpp
+    src/services/SessionManager.cpp
+)
+set_target_properties(realmheart_relictombs_renderer PROPERTIES
+    OUTPUT_NAME "realmheart-relictombs-renderer"
+)
+target_include_directories(realmheart_relictombs_renderer PRIVATE src third_party)
+target_compile_options(realmheart_relictombs_renderer PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_link_libraries(realmheart_relictombs_renderer PRIVATE
+    realmheart_ui
+    PkgConfig::GIO
+    PkgConfig::GTK4
+    PkgConfig::GTK4_LAYER_SHELL
+    PkgConfig::GDK_PIXBUF
+    Threads::Threads
+)
+
+add_dependencies(realmheart realmheart_relictombs_renderer)
 
 set(REALMHEART_NATIVE_WALLPAPER_BUILT OFF)
 if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
@@ -327,7 +362,7 @@ if(TARGET realmheart_fx)
     install(TARGETS realmheart_fx LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/realmheart)
 endif()
 
-install(TARGETS realmheart realmheart_power_menu_renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS realmheart realmheart_power_menu_renderer realmheart_relictombs_renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(REALMHEART_NATIVE_WALLPAPER_BUILT)
     install(TARGETS realmheart-wallpaper-renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
@@ -586,6 +621,63 @@ if(BUILD_TESTING)
     add_executable(realmheart_workspace_tests tests/HyprlandWorkspacesTests.cpp src/core/Command.cpp src/services/HyprlandWorkspaces.cpp)
     realmheart_register_test(realmheart_workspace_tests)
 
+    add_executable(
+        realmheart_workspace_overview_model_tests
+        tests/WorkspaceOverviewModelTests.cpp
+        src/ui/workspace/WorkspaceOverviewModel.cpp
+    )
+    realmheart_register_test(realmheart_workspace_overview_model_tests)
+
+    add_executable(
+        realmheart_workspace_morph_model_tests
+        tests/WorkspaceMorphModelTests.cpp
+        src/ui/workspace/animation/WorkspaceMorphModel.cpp
+    )
+    realmheart_register_test(realmheart_workspace_morph_model_tests)
+
+    add_executable(
+        realmheart_workspace_morph_frontier_tests
+        tests/WorkspaceMorphFrontierTests.cpp
+        src/ui/workspace/animation/WorkspaceMorphFrontier.cpp
+    )
+    realmheart_register_test(realmheart_workspace_morph_frontier_tests)
+
+    add_executable(
+        realmheart_workspace_morph_viewport_tests
+        tests/WorkspaceMorphViewportTests.cpp
+        src/ui/bar/VerticalBarModel.cpp
+    )
+    realmheart_register_test(realmheart_workspace_morph_viewport_tests)
+
+    add_executable(
+        realmheart_workspace_morph_shader_data_tests
+        tests/WorkspaceMorphShaderDataTests.cpp
+        src/ui/workspace/animation/WorkspaceMorphModel.cpp
+        src/ui/workspace/animation/WorkspaceMorphShaderData.cpp
+    )
+    realmheart_register_test(realmheart_workspace_morph_shader_data_tests)
+
+    add_executable(
+        realmheart_workspace_morph_renderer_state_tests
+        tests/WorkspaceMorphRendererStateTests.cpp
+        src/ui/workspace/animation/WorkspaceMorphRendererState.cpp
+    )
+    realmheart_register_test(realmheart_workspace_morph_renderer_state_tests)
+
+    add_executable(
+        realmheart_workspace_morph_presentation_tests
+        tests/WorkspaceMorphPresentationTests.cpp
+        src/ui/workspace/animation/WorkspaceMorphPresentation.cpp
+    )
+    realmheart_register_test(realmheart_workspace_morph_presentation_tests)
+
+    add_executable(
+        realmheart_workspace_morph_diagnostics_tests
+        tests/WorkspaceMorphDiagnosticsTests.cpp
+        src/ui/workspace/animation/WorkspaceMorphDiagnostics.cpp
+    )
+    realmheart_register_test(realmheart_workspace_morph_diagnostics_tests)
+
     add_executable(realmheart_hyprland_event_monitor_tests tests/HyprlandEventMonitorTests.cpp src/services/HyprlandEventMonitor.cpp)
     realmheart_register_test(realmheart_hyprland_event_monitor_tests)
 
@@ -750,6 +842,49 @@ if(BUILD_TESTING)
     add_executable(realmheart_wallpaper_service_tests tests/WallpaperServiceTests.cpp src/services/WallpaperService.cpp src/core/Command.cpp)
     target_link_libraries(realmheart_wallpaper_service_tests PRIVATE GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_wallpaper_service_tests)
+
+    add_executable(
+        realmheart_relictombs_layout_tests
+        tests/RelictombsLayoutTests.cpp
+    )
+    target_link_libraries(
+        realmheart_relictombs_layout_tests
+        PRIVATE GTest::gtest GTest::gtest_main PkgConfig::GDK_PIXBUF
+    )
+    realmheart_register_test(realmheart_relictombs_layout_tests)
+
+    add_executable(
+        realmheart_relictombs_wallpaper_library_tests
+        tests/WallpaperLibraryTests.cpp
+        src/relictombs/WallpaperLibrary.cpp
+    )
+    target_link_libraries(
+        realmheart_relictombs_wallpaper_library_tests
+        PRIVATE GTest::gtest GTest::gtest_main PkgConfig::GDK_PIXBUF
+    )
+    realmheart_register_test(realmheart_relictombs_wallpaper_library_tests)
+
+    add_executable(
+        realmheart_relictombs_selection_tests
+        tests/RelictombsSelectionTests.cpp
+        src/relictombs/RelictombsSelection.cpp
+    )
+    target_link_libraries(
+        realmheart_relictombs_selection_tests
+        PRIVATE GTest::gtest GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_relictombs_selection_tests)
+
+    add_executable(
+        realmheart_relictombs_protocol_tests
+        tests/RelictombsProtocolTests.cpp
+        src/relictombs/RelictombsProtocol.cpp
+    )
+    target_link_libraries(
+        realmheart_relictombs_protocol_tests
+        PRIVATE GTest::gtest GTest::gtest_main PkgConfig::GIO
+    )
+    realmheart_register_test(realmheart_relictombs_protocol_tests)
 
     add_executable(realmheart_wifi_tests tests/WifiTests.cpp src/core/Command.cpp src/services/Wifi.cpp)
     realmheart_register_test(realmheart_wifi_tests)

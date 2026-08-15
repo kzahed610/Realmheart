@@ -1,0 +1,67 @@
+{
+  "version": 3,
+  "status": "LOCKED VISUAL PROTOTYPE",
+  "referenceViewport": { "width": 1920, "height": 1080 },
+  "initialActiveRealm": "water",
+  "activeFraction": 0.56,
+  "inactiveFraction": 0.1466666667,
+  "easing": "cubic-bezier(.22,.78,.2,1)",
+  "durationMs": 480,
+  "dragHoverExpandDelayMs": 170,
+  "logicalHitboxes": "rectangular horizontal allocations",
+  "visualMasks": "animated interlocking polygon layers",
+  "boundarySampleXPercent": [0, 8, 16, 24, 32, 40, 50, 60, 70, 80, 88, 94, 100],
+  "boundaryOffsetsPx": [
+    [6, -18, -4, 14, -12, 8, -20, 4, 17, -10, 7, -5, 11],
+    [0, 16, 28, 13, -8, -21, -5, 18, 27, 9, -15, -7, 2],
+    [3, -12, 16, -7, 21, -17, 7, -14, 19, -5, 13, -9, 4]
+  ],
+  "characterTuning": {
+    "fire":  { "activeHeight": 760, "activeRight": -28, "activeBottom": 0, "idleHeight": 430, "idleRight": -5, "idleTop": -35 },
+    "water": { "activeHeight": 780, "activeRight": -58, "activeBottom": 0, "idleHeight": 430, "idleRight": -8, "idleTop": -36 },
+    "wind":  { "activeHeight": 760, "activeRight": 4,   "activeBottom": 0, "idleHeight": 420, "idleRight": 15, "idleTop": -33 },
+    "earth": { "activeHeight": 760, "activeRight": -18, "activeBottom": 0, "idleHeight": 430, "idleRight": -2, "idleTop": -35 }
+  },
+  "realms": [
+    {
+      "key": "fire",
+      "roman": "I",
+      "element": "FIRE",
+      "location": "The Hearth",
+      "character": "Bairon Wykes",
+      "background": "assets/1080p/backgrounds/fire-the-hearth.png",
+      "characterAsset": "assets/1080p/characters/bairon-wykes.png",
+      "accent": "fire orange"
+    },
+    {
+      "key": "water",
+      "roman": "II",
+      "element": "WATER",
+      "location": "Etistin Bay",
+      "character": "Varay Aurae",
+      "background": "assets/1080p/backgrounds/water-etistin-bay.png",
+      "characterAsset": "assets/1080p/characters/varay-aurae.png",
+      "accent": "icy cyan"
+    },
+    {
+      "key": "wind",
+      "roman": "III",
+      "element": "WIND",
+      "location": "Elshire Forest",
+      "character": "Aya Grephin",
+      "background": "assets/1080p/backgrounds/wind-elshire-forest.png",
+      "characterAsset": "assets/1080p/characters/aya-grephin.png",
+      "accent": "muted mint"
+    },
+    {
+      "key": "earth",
+      "roman": "IV",
+      "element": "EARTH",
+      "location": "Vildorial",
+      "character": "Mica Earthborn",
+      "background": "assets/1080p/backgrounds/earth-vildorial.png",
+      "characterAsset": "assets/1080p/characters/mica-earthborn.png",
+      "accent": "warm stone gold"
+    }
+  ]
+}

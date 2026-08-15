@@ -37,6 +37,14 @@ public:
         std::filesystem::path path,
         SetWallpaperCallback callback = {}
     );
+    void prepare_wallpaper_async(
+        std::filesystem::path path,
+        SetWallpaperCallback callback = {}
+    );
+    void commit_prepared_wallpaper_async(
+        SetWallpaperCallback callback = {}
+    );
+    void discard_prepared_wallpaper() noexcept;
     void switch_backend_async(
         WallpaperBackendType backend,
         SetWallpaperCallback callback = {}
@@ -73,6 +81,7 @@ private:
     WallpaperBackendType requested_backend_ = WallpaperBackendType::Gtk;
     std::shared_ptr<WallpaperBackend> backend_;
     std::filesystem::path current_wallpaper_;
+    std::filesystem::path prepared_wallpaper_;
     std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
 };
 

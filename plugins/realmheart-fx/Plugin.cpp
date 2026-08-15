@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Target-only compositor lifecycle adapted from  hyprfx (commit
-// d680dabdd2d9362626ecedcad9bd396508163468) and sandwichfarm/hyprfx,
-// both derived from xhos/hyprfx.
+// Upstream provenance for the target-only compositor lifecycle lives in
+// ATTRIBUTION.md.
 
 #define WLR_USE_UNSTABLE
 
@@ -1391,7 +1390,7 @@ void onWindowOpen(PHLWINDOW window) {
         return;
     }
 
-    // /HyprFX lifecycle: own only this target. Stop Hyprland's already
+    // Target-only lifecycle: own only this target. Stop Hyprland's already
     // armed geometry transition, settle sibling layout reflow, hide the native
     // target, and sample its live surface plus current geometry on every frame.
     window->finishAnimation();
@@ -2159,8 +2158,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     return {
         .name = "Realmheart FX",
         .description = "Realmheart target-only Hyprland window transitions",
-        .author = "Zahed; lifecycle adapted from  hyprfx/sandwichfarm hyprfx/xhos hyprfx",
-        .version = "0.10.14-plasma-fast-open",
+        .author = "Zahed",
+        .version = "0.10.14-realmheart",
     };
 }
 

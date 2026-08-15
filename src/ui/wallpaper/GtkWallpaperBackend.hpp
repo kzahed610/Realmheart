@@ -42,6 +42,14 @@ public:
         const std::filesystem::path& path,
         std::string* error_message = nullptr
     ) override;
+    [[nodiscard]] bool prepare_wallpaper(
+        const std::filesystem::path& path,
+        std::string* error_message = nullptr
+    ) override;
+    [[nodiscard]] bool commit_prepared_wallpaper(
+        std::string* error_message = nullptr
+    ) override;
+    void discard_prepared_wallpaper() noexcept override;
 
     [[nodiscard]] static std::optional<DecodedWallpaper> decode_wallpaper(
         const std::filesystem::path& path,
@@ -70,6 +78,7 @@ private:
     GListModel* monitors_ = nullptr;
     gulong monitor_signal_id_ = 0;
     GdkTexture* texture_ = nullptr;
+    std::optional<DecodedWallpaper> prepared_wallpaper_;
     std::vector<std::unique_ptr<WallpaperSurface>> surfaces_;
     bool initialized_ = false;
 };

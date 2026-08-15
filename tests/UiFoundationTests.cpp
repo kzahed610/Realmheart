@@ -66,7 +66,8 @@ void test_bar_surface_spec_is_reusable_and_reserves_its_width() {
     require(spec.anchor_left && spec.anchor_top && spec.anchor_bottom && !spec.anchor_right,
             "vertical bar must anchor to the complete left edge");
     require(spec.exclusive_zone == 72, "bar must reserve exactly its configured width");
-    require(spec.layer == realmheart::ui::LayerSurfaceLevel::Top, "bar must use the top layer");
+    require(spec.layer == realmheart::ui::LayerSurfaceLevel::Top,
+            "bar must use the normal top panel layer outside transient overlays");
     require(spec.keyboard_mode == realmheart::ui::LayerKeyboardMode::OnDemand,
             "bar keyboard access must remain on-demand");
 }

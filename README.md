@@ -2,7 +2,7 @@
   <img
     src="assets/Realmheart-Icons/realmheart-icon.png"
     alt="Realmheart sigil"
-    width="128"
+    width="256"
   />
 </p>
 
@@ -430,6 +430,7 @@ realmheart --command <name> [argument]
 ```bash
 realmheart --command launch-launcher
 realmheart --command launch-launcher-query ">clip "
+realmheart --command workspace-overview-toggle
 realmheart --command sidebar-right-toggle
 realmheart --command bar-toggle
 realmheart --command toggle-notes
@@ -437,6 +438,45 @@ realmheart --command logout-menu
 realmheart --command osd-volume
 realmheart --command osd-brightness
 ```
+
+### Workspace morph diagnostics
+
+The rune-to-realm transition is transparent outside its geometry-owned reveal
+clips and falls back to the native geometry animation if its optional shader
+host fails. Opt-in timing and memory diagnostics are available without adding
+idle work:
+
+```fish
+systemctl --user set-environment REALMHEART_WORKSPACE_MORPH_DIAGNOSTICS=1
+systemctl --user restart realmheart.service
+./tools/workspace-morph-profile.fish --cycles 30 --rapid 20
+```
+
+Each completed transition reports its endpoint, elapsed time, frame count,
+worst frame interval, reversal count, shader state, peak transition texture
+bytes, retained transition bytes, and process RSS delta. Disable the logs with:
+
+```fish
+systemctl --user unset-environment REALMHEART_WORKSPACE_MORPH_DIAGNOSTICS
+systemctl --user restart realmheart.service
+```
+
+The workspace overview is also toggled by right-clicking any workspace rune in
+the Aether Spine. It docks beside the bar and presents a four-workspace viewport
+that follows Hyprland beyond workspace 4. For example, activating workspace 5
+shifts the visible range to workspaces 2–5. Fire, Water, Wind, and Earth cycle
+across later workspaces, so workspace 5 returns to Bairon and the Fire realm.
+
+The overview uses live client class/title data and cached application icons.
+Client open, close, move, and title changes refresh the cards. Clicking a card
+focuses that exact window; dragging a card into another visible realm moves the
+client there. A held drag survives workspace scrolling, allowing `SUPER` plus
+the configured workspace wheel bind to reveal a later destination before drop.
+
+Use `Up`/`Down` or `K`/`J` to select a realm, `Left`/`Right` or `H`/`L` to
+select a window, and `Enter` to activate it. Number keys `1`–`4` select the four
+currently visible realm slots, while `Escape` or clicking unused background
+closes the overview.
 
 ### Character controls
 
@@ -529,6 +569,7 @@ Useful environment overrides:
 | `REALMHEART_THEME_CACHE` | Override palette cache file. |
 | `REALMHEART_EMOJI_DATA` | Override launcher emoji data source. |
 | `REALMHEART_CHARACTER_DEBUG` | Enable character compositor diagnostics. |
+| `REALMHEART_WORKSPACE_MORPH_DIAGNOSTICS` | Log workspace morph timing, reversal, shader, texture, and RSS diagnostics. |
 
 ---
 
@@ -618,7 +659,7 @@ Realmheart is intentionally **not** trying to become:
 - a complete desktop environment;
 - a compositor replacement;
 - a universal shell for every Wayland compositor;
-- a drop-in clone of Quickshell, AGS, Waybar, or any existing shell;
+- a drop-in clone of another shell or status-bar stack;
 - a generic framework that sacrifices identity for configurability.
 
 It is a focused Hyprland shell built around one desktop, one design language,

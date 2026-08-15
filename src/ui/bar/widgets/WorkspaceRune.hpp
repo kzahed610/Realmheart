@@ -22,7 +22,18 @@ public:
 
     GtkWidget* widget() const { return button_; }
     int workspace_id() const noexcept { return state_.id; }
+    bool active() const noexcept { return state_.active; }
+    bool occupied() const noexcept { return state_.windows > 0; }
     void update(const services::WorkspaceState& state);
+    void set_morph_suppressed(bool suppressed);
+    void set_morph_visual_opacity(double opacity);
+    [[nodiscard]] bool morph_suppressed() const noexcept {
+        return morph_suppressed_;
+    }
+    [[nodiscard]] bool compute_artwork_bounds(
+        GtkWidget* target,
+        graphene_rect_t* bounds
+    ) const;
 
 private:
     static void draw(GtkDrawingArea* area, cairo_t* cr, int width, int height, gpointer data);
@@ -47,6 +58,7 @@ private:
     gint64 hover_last_frame_us_ = 0;
     double hover_progress_ = 0.0;
     double hover_target_ = 0.0;
+    bool morph_suppressed_ = false;
 };
 
 } // namespace realmheart::ui::bar::widgets

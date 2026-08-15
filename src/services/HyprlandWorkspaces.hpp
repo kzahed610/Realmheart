@@ -2,6 +2,7 @@
 
 #include "core/Command.hpp"
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -34,6 +35,13 @@ public:
     static WorkspaceSnapshot read(const realmheart::core::CommandOptions& options = {});
     static bool switch_to(
         int workspace_id,
+        const realmheart::core::CommandOptions& options = {}
+    );
+    static bool switch_to_named(
+        std::string_view workspace_name,
+        const realmheart::core::CommandOptions& options = {}
+    );
+    [[nodiscard]] static std::optional<int> active_workspace_id(
         const realmheart::core::CommandOptions& options = {}
     );
     static WorkspaceSnapshot parse(

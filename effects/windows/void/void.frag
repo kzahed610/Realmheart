@@ -1,9 +1,9 @@
-// Void —  window effect.
+// Void — Realmheart window effect.
 // A void seeds at the window's heart and devours it: violet-blue nebula smoke
 // billows in a ring around the growing hole (TRANSPARENT — the desktop shows
 // through), star specks glitter in the smoke, then everything sinks into nothing.
 // OPEN is the recession: the ring recedes while the see-through iris shrinks away,
-// revealing the window edges-first. After the lunar-arcanum void transition.
+// revealing the window edges-first. After the Realmheart void transition.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #version 300 es
@@ -16,7 +16,7 @@ uniform sampler2D tex;
 uniform float radius;
 uniform float reverse; // 1.0 = OPEN (void recedes), 0.0 = CLOSE (void swallows)
 
-//  palette (overridable at runtime for theme-follow)
+// Realmheart palette (overridable at runtime for theme-follow)
 uniform vec3 uGold;
 uniform vec3 uStarlight;
 uniform vec3 uAstral;

@@ -78,6 +78,7 @@ bool HyprlandEventMonitor::is_workspace_event(std::string_view line) {
         "focusedmon>>",
         "openwindow>>", "closewindow>>",
         "movewindow>>", "movewindowv2>>",
+        "windowtitle>>", "windowtitlev2>>",
     };
     for (const auto prefix : prefixes) {
         if (line.starts_with(prefix)) return true;

@@ -20,6 +20,26 @@ WorkspaceSnapshot unavailable(std::string reason) {
     return snapshot;
 }
 
+std::string lua_string_literal(std::string_view value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 2);
+    escaped.push_back('"');
+    for (const char character : value) {
+        if (character == '\\' || character == '"') {
+            escaped.push_back('\\');
+        }
+        if (character == '\n') {
+            escaped.append("\\n");
+        } else if (character == '\r') {
+            escaped.append("\\r");
+        } else {
+            escaped.push_back(character);
+        }
+    }
+    escaped.push_back('"');
+    return escaped;
+}
+
 } // namespace
 
 bool HyprlandWorkspaces::switch_to(
@@ -34,6 +54,57 @@ bool HyprlandWorkspaces::switch_to(
         options
     );
     return result.succeeded() && result.output.find("error:") == std::string::npos;
+}
+
+bool HyprlandWorkspaces::switch_to_named(
+    std::string_view workspace_name,
+    const realmheart::core::CommandOptions& options
+) {
+    if (workspace_name.empty() ||
+        !realmheart::core::command_exists("hyprctl")) {
+        return false;
+    }
+
+    // Named regular workspaces are intentionally used instead of Hyprland
+    // special workspaces: a special workspace overlays the current workspace,
+    // so normal application windows would remain visible through Relictombs'
+    // transparent pixels. A named regular workspace also preserves the configured
+    // workspace exit animation while exposing only Realmheart's wallpaper.
+    const std::string workspace = "name:" + std::string(workspace_name);
+    const std::string dispatcher =
+        "hl.dsp.focus({ workspace = " + lua_string_literal(workspace) + " })";
+    const auto result = realmheart::core::run_capture(
+        {"hyprctl", "dispatch", dispatcher},
+        options
+    );
+    return result.succeeded() &&
+        result.output.find("error:") == std::string::npos;
+}
+
+std::optional<int> HyprlandWorkspaces::active_workspace_id(
+    const realmheart::core::CommandOptions& options
+) {
+    if (!realmheart::core::command_exists("hyprctl")) return std::nullopt;
+
+    const auto active = realmheart::core::run_capture(
+        {"hyprctl", "activeworkspace", "-j"},
+        options
+    );
+    if (!active.succeeded() || active.output.empty() || active.truncated) {
+        return std::nullopt;
+    }
+
+    try {
+        const auto document = json::parse(active.output);
+        if (!document.is_object() || !document.contains("id") ||
+            !document["id"].is_number_integer()) {
+            return std::nullopt;
+        }
+        const int id = document["id"].get<int>();
+        return id;
+    } catch (const json::exception&) {
+        return std::nullopt;
+    }
 }
 
 WorkspaceSnapshot HyprlandWorkspaces::read(const realmheart::core::CommandOptions& options) {
