@@ -37,6 +37,7 @@
 #include "ui/wallpaper/WallpaperController.hpp"
 #include "ui/workspace/WorkspaceOverviewOverlay.hpp"
 #include "ui/relictombs/RelictombsProcess.hpp"
+#include "relictombs/ManaCoresSelector.hpp"
 
 #include <gtk/gtk.h>
 
@@ -409,17 +410,10 @@ public:
 
     void activate() {
         ensure_core_initialized();
-        static_cast<void>(relictombs_process_.warm());
         state_.show_bar();
         apply_bar_visibility();
         const std::string current_path = utilities_->load_wallpaper_path();
         if (current_path.empty()) return;
-
-        // Prime the Relictombs working set as soon as the shell knows the
-        // current wallpaper instead of waiting for the user's first summon.
-        // The warm helper can decode/cache adjacent previews during ordinary
-        // desktop idle time.
-        relictombs_process_.prepare(current_path);
         request_wallpaper(current_path, "Unable to restore wallpaper");
     }
 
@@ -673,25 +667,23 @@ public:
             relictombs_restore_pending_) {
             return;
         }
-        if (relictombs_process_.session_active()) {
-            relictombs_process_.close();
+
+        // Check if ManaCores selector is already active
+        if (mana_cores_selector_ && mana_cores_selector_->is_visible()) {
+            mana_cores_selector_->dismiss();
+            // dismiss() fires the dismiss_callback which restores the workspace
+            // and bar. We don't reset mana_cores_selector_ here because dismiss()
+            // already hides it and the callback handles restoration.
             return;
         }
 
         const std::string current_path = utilities_->load_wallpaper_path();
         if (current_path.empty()) {
-            std::cerr << "[Relictombs] current wallpaper path is unavailable\n";
+            std::cerr << "[ManaCores] current wallpaper path is unavailable\n";
             return;
         }
 
-        // Start candidate decode before Hyprland begins moving the current
-        // workspace away. The workspace/bar transition now doubles as useful
-        // loading time, so the scene can start from its initial frame.
-        relictombs_process_.prepare(current_path);
-
-        // Relictombs owns the screen while active. Dismiss transient shell
-        // surfaces and hide the bar so the empty workspace exposes only the
-        // actual wallpaper beneath the scene.
+        // Dismiss transient shell surfaces and hide the bar
         power_menu_process_.close();
         if (launcher_overlay_) launcher_overlay_->hide();
         if (workspace_overview_ && workspace_overview_->visible()) {
@@ -719,7 +711,7 @@ public:
         ] {
             const auto active = services::HyprlandWorkspaces::active_workspace_id();
             const int original_workspace = active.value_or(cached_workspace);
-            const bool switched = original_workspace > 0 &&
+            const bool switched = original_workspace != 0 &&
                 services::HyprlandWorkspaces::switch_to_named(
                     kRelictombsWorkspaceName
                 );
@@ -738,7 +730,7 @@ public:
                     auto* payload = static_cast<Payload*>(raw);
                     ShellRuntime* owner = payload->state->owner.load();
                     if (payload->state->alive.load() && owner != nullptr) {
-                        owner->finish_relictombs_launch(
+                        owner->finish_mana_cores_launch(
                             payload->generation,
                             std::move(payload->current_path),
                             payload->original_workspace,
@@ -761,7 +753,7 @@ public:
         if (!posted) {
             relictombs_launch_pending_ = false;
             restore_relictombs_chrome();
-            std::cerr << "[Relictombs] unable to queue workspace handoff\n";
+            std::cerr << "[ManaCores] unable to queue workspace handoff\n";
         }
     }
 
@@ -1078,6 +1070,58 @@ private:
         }
     }
 
+    void finish_mana_cores_launch(
+        std::uint64_t generation,
+        std::string current_path,
+        int original_workspace,
+        bool switched
+    ) {
+        if (generation != relictombs_launch_generation_) return;
+        relictombs_launch_pending_ = false;
+
+        if (!switched) {
+            restore_relictombs_chrome();
+            std::cerr << "[ManaCores] unable to enter the empty ManaCores workspace\n";
+            return;
+        }
+
+        // Create and present the ManaCores selector
+        if (!mana_cores_selector_) {
+            mana_cores_selector_ = std::make_unique<realmheart::relictombs::ManaCoresSelector>();
+        }
+        // Set dismiss callback to restore workspace + bar when selector closes
+        mana_cores_selector_->set_dismiss_callback([this, original_workspace]() {
+            handle_mana_cores_dismiss(original_workspace);
+        });
+        // Set apply callback to commit the selected wallpaper
+        mana_cores_selector_->set_apply_callback([this](const std::string& path) {
+            if (wallpaper_controller_) {
+                wallpaper_controller_->prepare_wallpaper_async(
+                    std::filesystem::path(path),
+                    [this](bool success, std::string error_msg) {
+                        if (!success) {
+                            std::cerr << "[ManaCores] wallpaper prepare failed: " << error_msg << "\n";
+                            return;
+                        }
+                        wallpaper_controller_->commit_prepared_wallpaper_async(
+                            [this](bool success, std::string error_msg) {
+                                if (!success) {
+                                    std::cerr << "[ManaCores] wallpaper commit failed: " << error_msg << "\n";
+                                }
+                            }
+                        );
+                    }
+                );
+            }
+        });
+
+        // Use the stored application reference
+        mana_cores_selector_->present(application_);
+
+        // Load wallpapers from the library for the selector
+        mana_cores_selector_->load_wallpapers_from_library(std::filesystem::path(current_path));
+    }
+
     void handle_relictombs_result(
         realmheart::relictombs::RelictombsResult result
     ) {
@@ -1254,6 +1298,12 @@ private:
             gtk_window_present(GTK_WINDOW(bar_->get_window()));
         }
         relictombs_bar_was_visible_ = false;
+    }
+
+    void handle_mana_cores_dismiss(int original_workspace) {
+        // Restore the original workspace if we were switched
+        relictombs_restore_workspace_id_ = original_workspace;
+        restore_relictombs_workspace();
     }
 
     using WallpaperRequestCompletion =
@@ -1808,6 +1858,7 @@ private:
     services::WorkspaceSnapshot workspace_snapshot_;
     powermenu::PowerMenuProcess power_menu_process_;
     relictombs::RelictombsProcess relictombs_process_;
+    std::unique_ptr<realmheart::relictombs::ManaCoresSelector> mana_cores_selector_;
     bool relictombs_launch_pending_ = false;
     bool relictombs_apply_pending_ = false;
     std::string relictombs_apply_path_;

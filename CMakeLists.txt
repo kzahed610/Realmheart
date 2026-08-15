@@ -177,6 +177,11 @@ add_library(realmheart_ui STATIC
     src/ui/powermenu/PowerMenuProcess.cpp
     src/ui/relictombs/RelictombsProcess.cpp
     src/relictombs/RelictombsProtocol.cpp
+    src/relictombs/RelictombsSelection.cpp
+    src/relictombs/WallpaperLibrary.cpp
+    src/relictombs/ManaCoresSelector.cpp
+    src/relictombs/ManaCoresLayout.cpp
+    src/relictombs/RadialBloomShader.cpp
     src/ui/powermenu/animation/PowerMenuRippleRenderer.cpp
     src/ui/powermenu/PowerMenuScene.cpp
     src/ui/powermenu/PowerMenuOverlay.cpp
@@ -818,6 +823,14 @@ if(BUILD_TESTING)
     add_executable(realmheart_wallpaper_service_tests tests/WallpaperServiceTests.cpp src/services/WallpaperService.cpp src/core/Command.cpp)
     target_link_libraries(realmheart_wallpaper_service_tests PRIVATE GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_wallpaper_service_tests)
+
+    add_executable(realmheart_mana_cores_selector_tests tests/ManaCoresSelectorTests.cpp src/relictombs/ManaCoresSelector.cpp src/relictombs/ManaCoresLayout.cpp src/relictombs/RadialBloomShader.cpp src/ui/LayerSurface.cpp src/relictombs/WallpaperLibrary.cpp)
+    target_link_libraries(realmheart_mana_cores_selector_tests PRIVATE PkgConfig::GTK4 PkgConfig::GTK4_LAYER_SHELL PkgConfig::GDK_PIXBUF PkgConfig::EPOXY GTest::gtest GTest::gtest_main)
+    realmheart_register_test(realmheart_mana_cores_selector_tests)
+
+    add_executable(realmheart_mana_cores_layout_tests tests/ManaCoresLayoutTests.cpp src/relictombs/ManaCoresLayout.cpp)
+    target_link_libraries(realmheart_mana_cores_layout_tests PRIVATE GTest::gtest GTest::gtest_main)
+    realmheart_register_test(realmheart_mana_cores_layout_tests)
 
     add_executable(realmheart_wifi_tests tests/WifiTests.cpp src/core/Command.cpp src/services/Wifi.cpp)
     realmheart_register_test(realmheart_wifi_tests)
