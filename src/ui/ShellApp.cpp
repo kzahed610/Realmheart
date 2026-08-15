@@ -661,6 +661,20 @@ public:
     }
 
     void toggle_relictombs() {
+        if (bar_ == nullptr || !gtk_widget_get_realized(bar_->get_window())) {
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,
+                +[](gpointer raw) -> gboolean {
+                    auto* runtime = static_cast<ShellRuntime*>(raw);
+                    runtime->toggle_relictombs();
+                    return G_SOURCE_REMOVE;
+                },
+                this,
+                nullptr
+            );
+            return;
+        }
+
         ensure_core_initialized();
 
         if (relictombs_apply_pending_ || relictombs_launch_pending_ ||

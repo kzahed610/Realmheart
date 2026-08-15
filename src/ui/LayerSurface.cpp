@@ -50,6 +50,12 @@ GdkMonitor* resolve_layer_surface_monitor(
     int requested_index
 ) {
     if (widget == nullptr) return nullptr;
+    // Some layer surfaces are set up before the GTK widget has a realized native
+    // and display. Accessing the monitor list during that window is unsafe and can
+    // crash in GTK while resolving scale/factor metadata. Let the compositor pick
+    // the monitor naturally until the window is realized.
+    if (!gtk_widget_get_realized(widget)) return nullptr;
+
     GdkDisplay* display = gtk_widget_get_display(widget);
     if (display == nullptr) return nullptr;
 

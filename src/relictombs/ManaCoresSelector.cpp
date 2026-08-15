@@ -13,18 +13,102 @@
 #include "ui/LayerSurface.hpp"
 
 namespace realmheart::relictombs {
+namespace {
+void force_transparent_surface(GtkWidget* widget);
+} // namespace
 
 ManaCoresSelector::ManaCoresSelector() = default;
 
 ManaCoresSelector::~ManaCoresSelector() {
-    if (tick_callback_id_ != 0) {
+    if (tick_callback_id_ != 0 && canvas_ != nullptr) {
         gtk_widget_remove_tick_callback(canvas_, tick_callback_id_);
         tick_callback_id_ = 0;
     }
+    if (transparency_retry_id_ != 0 && window_ != nullptr) {
+        gtk_widget_remove_tick_callback(GTK_WIDGET(window_), transparency_retry_id_);
+        transparency_retry_id_ = 0;
+    }
 }
+
+void ManaCoresSelector::schedule_transparency_retry() {
+    if (window_ == nullptr || transparency_retry_id_ != 0) return;
+    transparency_retry_count_ = 0;
+    transparency_retry_id_ = gtk_widget_add_tick_callback(
+        GTK_WIDGET(window_),
+        transparency_retry_callback,
+        this,
+        nullptr
+    );
+}
+
+gboolean ManaCoresSelector::transparency_retry_callback(GtkWidget* widget, GdkFrameClock* frame_clock, gpointer user_data) {
+    (void)frame_clock;
+    auto* self = static_cast<ManaCoresSelector*>(user_data);
+    if (self == nullptr || self->window_ == nullptr) return G_SOURCE_REMOVE;
+
+    GtkNative* native = gtk_widget_get_native(widget);
+    if (native == nullptr) {
+        if (++self->transparency_retry_count_ >= 30) {
+            self->transparency_retry_id_ = 0;
+            return G_SOURCE_REMOVE;
+        }
+        return G_SOURCE_CONTINUE;
+    }
+
+    GdkSurface* surface = gtk_native_get_surface(native);
+    if (surface == nullptr) {
+        if (++self->transparency_retry_count_ >= 30) {
+            self->transparency_retry_id_ = 0;
+            return G_SOURCE_REMOVE;
+        }
+        return G_SOURCE_CONTINUE;
+    }
+
+    // Keep applying the transparent region until the surface is mapped.
+    force_transparent_surface(widget);
+
+    if (!gdk_surface_get_mapped(surface)) {
+        if (++self->transparency_retry_count_ >= 30) {
+            self->transparency_retry_id_ = 0;
+            return G_SOURCE_REMOVE;
+        }
+        return G_SOURCE_CONTINUE;
+    }
+
+    // Surface is mapped - force buffer commits by queuing renders for several frames.
+    // Wayland buffer commits are asynchronous, and the opaque region must be applied
+    // at the right phase of the surface lifecycle across multiple compositor cycles.
+    gdk_surface_queue_render(surface);
+
+    if (++self->transparency_retry_count_ >= 30) {
+        self->transparency_retry_id_ = 0;
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+namespace {
+
+void force_transparent_surface(GtkWidget* widget) {
+    GtkNative* native = gtk_widget_get_native(widget);
+    if (native == nullptr) return;
+
+    GdkSurface* surface = gtk_native_get_surface(native);
+    if (surface == nullptr) return;
+
+    cairo_region_t* empty_region = cairo_region_create();
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+    gdk_surface_set_opaque_region(surface, empty_region);
+    G_GNUC_END_IGNORE_DEPRECATIONS
+    cairo_region_destroy(empty_region);
+}
+
+} // namespace
 
 void ManaCoresSelector::present(GtkApplication* app) {
     if (visible_) return;
+
+    if (app == nullptr) return;
 
     visible_ = true;
     state_ = State::Assembling;
@@ -65,15 +149,22 @@ void ManaCoresSelector::present(GtkApplication* app) {
     // Create window and layer surface if not exists
     setup_window(app);
 
-    // Add tick callback for animations
+    // Add tick callback for animations before making the window visible.
     if (tick_callback_id_ == 0) {
         tick_callback_id_ = gtk_widget_add_tick_callback(canvas_, tick_callback, this, nullptr);
     }
 
-    // Present the window
-    gtk_window_present(window_);
-
-    queue_redraw();
+    // Use gtk_widget_set_visible() to show the window and ensure the realize/map
+    // handlers fire at the correct time in the Wayland surface lifecycle.
+    // The handlers registered in setup_window() will call force_transparent_surface().
+    gtk_widget_set_visible(GTK_WIDGET(window_), TRUE);
+    
+    // Immediately queue a draw to render the transparent canvas.
+    gtk_widget_queue_draw(canvas_);
+    
+    // Schedule transparency retry to ensure the empty opaque region persists
+    // through multiple compositor buffer cycles.
+    schedule_transparency_retry();
 }
 
 void ManaCoresSelector::dismiss() {
@@ -98,8 +189,33 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
     window_ = GTK_WINDOW(gtk_application_window_new(app));
     gtk_window_set_decorated(window_, FALSE);
     gtk_window_set_resizable(window_, TRUE);
+    gtk_widget_set_can_target(GTK_WIDGET(window_), FALSE);
     gtk_widget_add_css_class(GTK_WIDGET(window_), "realmheart-mana-cores-window");
     gtk_widget_remove_css_class(GTK_WIDGET(window_), "background");
+
+    if (GdkDisplay* display = gdk_display_get_default(); display != nullptr) {
+        GtkCssProvider* provider = gtk_css_provider_new();
+        gtk_css_provider_load_from_string(provider, R"CSS(
+            .realmheart-mana-cores-window,
+            .realmheart-mana-cores-window * {
+                background: transparent;
+                background-color: transparent;
+                border: none;
+                box-shadow: none;
+            }
+
+            .realmheart-mana-cores-canvas {
+                background: transparent;
+                background-color: transparent;
+            }
+        )CSS");
+        gtk_style_context_add_provider_for_display(
+            display,
+            GTK_STYLE_PROVIDER(provider),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
+        );
+        g_object_unref(provider);
+    }
 
     // Apply layer surface with full output coverage
     ui::LayerSurfaceSpec spec;
@@ -115,10 +231,14 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
     spec.margin_left = 0;
     spec.margin_right = 0;
     spec.exclusive_zone = -1;
-    spec.monitor_index = 0;  // Explicitly set monitor index
+    spec.monitor_index = -1;
 
     ui::apply_layer_surface(window_, spec);
     gtk_layer_set_exclusive_zone(window_, -1);
+
+    GtkWidget* root = gtk_overlay_new();
+    gtk_widget_add_css_class(root, "realmheart-mana-cores-window");
+    gtk_widget_remove_css_class(root, "background");
 
     // Establish an empty opaque region as soon as the Wayland surface exists,
     // and repeat it on map because GTK may recompute opaque regions while the
@@ -127,17 +247,8 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
         window_,
         "realize",
         G_CALLBACK(+[](GtkWidget* widget, gpointer) {
-            GtkNative* native = gtk_widget_get_native(widget);
-            if (native) {
-                GdkSurface* surface = gtk_native_get_surface(native);
-                if (surface) {
-                    cairo_region_t* empty_region = cairo_region_create();
-                    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
-                    gdk_surface_set_opaque_region(surface, empty_region);
-                    G_GNUC_END_IGNORE_DEPRECATIONS
-                    cairo_region_destroy(empty_region);
-                }
-            }
+            force_transparent_surface(widget);
+            return;
         }),
         nullptr
     );
@@ -145,29 +256,23 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
         window_,
         "map",
         G_CALLBACK(+[](GtkWidget* widget, gpointer) {
-            GtkNative* native = gtk_widget_get_native(widget);
-            if (native) {
-                GdkSurface* surface = gtk_native_get_surface(native);
-                if (surface) {
-                    cairo_region_t* empty_region = cairo_region_create();
-                    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
-                    gdk_surface_set_opaque_region(surface, empty_region);
-                    G_GNUC_END_IGNORE_DEPRECATIONS
-                    cairo_region_destroy(empty_region);
-                }
-            }
+            force_transparent_surface(widget);
+            return;
         }),
         nullptr
     );
 
-    // Create canvas BEFORE presenting the window
+    // Create canvas BEFORE presenting the window.
     canvas_ = gtk_drawing_area_new();
+    gtk_widget_add_css_class(GTK_WIDGET(canvas_), "realmheart-mana-cores-canvas");
     gtk_widget_remove_css_class(GTK_WIDGET(canvas_), "background");
     gtk_widget_set_visible(canvas_, TRUE);
     gtk_widget_set_hexpand(canvas_, TRUE);
     gtk_widget_set_vexpand(canvas_, TRUE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(canvas_), draw_callback, this, nullptr);
-    gtk_window_set_child(window_, canvas_);
+    gtk_overlay_set_child(GTK_OVERLAY(root), canvas_);
+    gtk_window_set_child(window_, root);
+    gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
 
     // NOW present the window after canvas is set as child
     // (present() will call gtk_window_present after setup_window returns)
@@ -458,6 +563,15 @@ void ManaCoresSelector::draw(GtkDrawingArea* area G_GNUC_UNUSED, cairo_t* cr, in
     cairo_paint(cr);
     cairo_restore(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+    // Keep the selector transparent except for its circular mana-core elements.
+    // The previous implementation left a default GTK dark background visible,
+    // which covered the desktop and made the selector look like a fullscreen
+    // opaque overlay.
+    cairo_save(cr);
+    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.0);
+    cairo_paint(cr);
+    cairo_restore(cr);
 
     // Draw based on state
     switch (state_) {

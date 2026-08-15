@@ -105,6 +105,11 @@ private:
 
     // Frame clock callback for animations
     guint tick_callback_id_ = 0;
+    guint transparency_retry_id_ = 0;
+    int transparency_retry_count_ = 0;
+
+    void schedule_transparency_retry();
+    static gboolean transparency_retry_callback(GtkWidget* widget, GdkFrameClock* frame_clock, gpointer user_data);
 
     // Drawing
     void draw_core(cairo_t* cr, double alpha);
