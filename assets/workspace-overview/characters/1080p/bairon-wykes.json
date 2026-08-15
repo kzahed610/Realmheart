@@ -1,0 +1,31 @@
+{
+  "source_file": "Bairon-Wykes_1080p.png",
+  "source_canvas_size": {
+    "width": 1920,
+    "height": 1080
+  },
+  "crop_box_xyxy": [
+    936,
+    89,
+    1920,
+    1080
+  ],
+  "cropped_size": {
+    "width": 984,
+    "height": 991
+  },
+  "recommended_draw_offset": {
+    "x": 936,
+    "y": 89
+  },
+  "kept_component_count": 104,
+  "parameters": {
+    "alpha_component_thresh": 16,
+    "alpha_soft_thresh": 3,
+    "open_size": 3,
+    "bbox_margin": 60,
+    "soft_dilate": 6,
+    "pad": 20,
+    "min_component_area": 8
+  }
+}

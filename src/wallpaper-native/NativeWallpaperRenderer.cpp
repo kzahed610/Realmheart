@@ -12,6 +12,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <optional>
 #include <poll.h>
 #include <string_view>
 #include <unistd.h>
@@ -303,6 +304,8 @@ bool NativeWallpaperRenderer::set_wallpaper(
         return false;
     }
 
+    discard_prepared_wallpaper();
+
     Texture candidate;
     if (!upload_texture(path, candidate, error_message)) return false;
 
@@ -314,10 +317,74 @@ bool NativeWallpaperRenderer::set_wallpaper(
 
     destroy_texture(next_texture_);
     next_texture_ = candidate;
+    active_transition_duration_ = transition_duration_;
     animation_started_ = std::chrono::steady_clock::now();
     animating_ = true;
     draw_all();
     return true;
+}
+
+bool NativeWallpaperRenderer::prepare_wallpaper(
+    const std::string& path,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!initialized_) {
+        set_error(error_message, "native wallpaper renderer is not initialized");
+        return false;
+    }
+    if (animating_) {
+        set_error(error_message, "native wallpaper renderer is still transitioning");
+        return false;
+    }
+
+    // PREPARE is authoritative for the next transaction. Never retain a stale
+    // full-resolution candidate if this decode fails or the selection changed.
+    discard_prepared_wallpaper();
+    Texture candidate;
+    if (!upload_texture(path, candidate, error_message)) return false;
+    prepared_texture_ = candidate;
+    return true;
+}
+
+bool NativeWallpaperRenderer::commit_prepared_wallpaper(
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!initialized_) {
+        set_error(error_message, "native wallpaper renderer is not initialized");
+        return false;
+    }
+    if (prepared_texture_.id == 0) {
+        set_error(error_message, "native wallpaper renderer has no prepared wallpaper");
+        return false;
+    }
+    if (animating_) {
+        set_error(error_message, "native wallpaper renderer is already transitioning");
+        return false;
+    }
+
+    if (current_texture_.id == 0) {
+        current_texture_ = prepared_texture_;
+        prepared_texture_ = {};
+        draw_all();
+        return true;
+    }
+
+    destroy_texture(next_texture_);
+    next_texture_ = prepared_texture_;
+    prepared_texture_ = {};
+    active_transition_duration_ = transition_duration_;
+    animation_started_ = std::chrono::steady_clock::now();
+    animating_ = true;
+    draw_all();
+    return true;
+}
+
+void NativeWallpaperRenderer::discard_prepared_wallpaper() noexcept {
+    if (!initialized_ || prepared_texture_.id == 0) return;
+    if (!make_pbuffer_current()) return;
+    destroy_texture(prepared_texture_);
 }
 
 int NativeWallpaperRenderer::run_stdio() {
@@ -853,7 +920,7 @@ void NativeWallpaperRenderer::draw_all() {
         const auto elapsed = std::chrono::steady_clock::now() - animation_started_;
         progress = std::clamp(
             std::chrono::duration<float, std::milli>(elapsed).count() /
-                static_cast<float>(transition_duration_.count()),
+                static_cast<float>(active_transition_duration_.count()),
             0.0F,
             1.0F
         );
@@ -953,7 +1020,7 @@ void NativeWallpaperRenderer::draw_output(OutputSurface& output, float progress)
 
 void NativeWallpaperRenderer::advance_animation() {
     const auto elapsed = std::chrono::steady_clock::now() - animation_started_;
-    const bool complete = elapsed >= transition_duration_;
+    const bool complete = elapsed >= active_transition_duration_;
     draw_all();
 
     if (!complete) return;
@@ -963,7 +1030,24 @@ void NativeWallpaperRenderer::advance_animation() {
     current_texture_ = next_texture_;
     next_texture_ = {};
     animating_ = false;
+    active_transition_duration_ = transition_duration_;
     draw_all();
+
+    // SET / COMMIT is acknowledged only after the final wallpaper frame has
+    // been submitted. Callers get a real visual-ready boundary instead of a
+    // guessed sleep.
+    if (set_response_pending_) {
+        set_response_pending_ = false;
+        // Synchronize once after the final buffer commit so the acknowledgement
+        // cannot overtake that commit on the Wayland connection. This is a
+        // protocol readiness boundary, not a timing guess.
+        if (wl_display_roundtrip(display_) < 0) {
+            send_error("Wayland failed while confirming final wallpaper frame");
+            running_ = false;
+            return;
+        }
+        send_ok();
+    }
 }
 
 void NativeWallpaperRenderer::destroy_texture(Texture& texture) noexcept {
@@ -1046,34 +1130,84 @@ void NativeWallpaperRenderer::process_command(const std::string& command) {
         running_ = false;
         return;
     }
-
-    constexpr std::string_view prefix = "SET ";
-    if (!command.starts_with(prefix)) {
-        send_error("unknown native wallpaper command");
+    if (command == "DISCARD") {
+        discard_prepared_wallpaper();
+        send_ok();
+        return;
+    }
+    if (command == "COMMIT") {
+        std::string error;
+        if (!commit_prepared_wallpaper(&error)) {
+            send_error(error);
+            return;
+        }
+        if (animating_) {
+            set_response_pending_ = true;
+            return;
+        }
+        if (wl_display_roundtrip(display_) < 0) {
+            send_error("Wayland failed while confirming prepared wallpaper commit");
+            running_ = false;
+            return;
+        }
+        send_ok();
         return;
     }
 
-    const std::string encoded = command.substr(prefix.size());
-    gsize decoded_size = 0;
-    guchar* decoded = g_base64_decode(encoded.c_str(), &decoded_size);
-    if (decoded == nullptr || decoded_size == 0) {
-        if (decoded != nullptr) g_free(decoded);
-        send_error("invalid encoded wallpaper path");
+    const auto decode_path = [&](std::string_view prefix) -> std::optional<std::string> {
+        if (!command.starts_with(prefix)) return std::nullopt;
+        const std::string encoded = command.substr(prefix.size());
+        gsize decoded_size = 0;
+        guchar* decoded = g_base64_decode(encoded.c_str(), &decoded_size);
+        if (decoded == nullptr || decoded_size == 0) {
+            if (decoded != nullptr) g_free(decoded);
+            return std::nullopt;
+        }
+        std::string path(
+            reinterpret_cast<const char*>(decoded),
+            static_cast<std::size_t>(decoded_size)
+        );
+        g_free(decoded);
+        return path;
+    };
+
+    constexpr std::string_view prepare_prefix = "PREPARE ";
+    if (command.starts_with(prepare_prefix)) {
+        const auto path = decode_path(prepare_prefix);
+        if (!path) {
+            send_error("invalid encoded wallpaper path");
+            return;
+        }
+        std::string error;
+        if (!prepare_wallpaper(*path, &error)) {
+            send_error(error);
+            return;
+        }
+        std::cout << "PREPARED\n" << std::flush;
         return;
     }
 
-    std::string path(
-        reinterpret_cast<const char*>(decoded),
-        static_cast<std::size_t>(decoded_size)
-    );
-    g_free(decoded);
-
-    std::string error;
-    if (!set_wallpaper(path, &error)) {
-        send_error(error);
+    constexpr std::string_view set_prefix = "SET ";
+    if (command.starts_with(set_prefix)) {
+        const auto path = decode_path(set_prefix);
+        if (!path) {
+            send_error("invalid encoded wallpaper path");
+            return;
+        }
+        std::string error;
+        if (!set_wallpaper(*path, &error)) {
+            send_error(error);
+            return;
+        }
+        if (animating_) {
+            set_response_pending_ = true;
+            return;
+        }
+        send_ok();
         return;
     }
-    send_ok();
+
+    send_error("unknown native wallpaper command");
 }
 
 void NativeWallpaperRenderer::send_ok() const {
@@ -1125,6 +1259,7 @@ void NativeWallpaperRenderer::cleanup() noexcept {
             pbuffer_surface_,
             egl_context_
         );
+        destroy_texture(prepared_texture_);
         destroy_texture(next_texture_);
         destroy_texture(current_texture_);
         if (program_ != 0) {
@@ -1170,6 +1305,7 @@ void NativeWallpaperRenderer::cleanup() noexcept {
 
     initialized_ = false;
     running_ = false;
+    set_response_pending_ = false;
 }
 
 } // namespace realmheart::wallpaper_native

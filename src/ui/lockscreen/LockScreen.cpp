@@ -32,7 +32,7 @@ void LockScreen::setup_layout() {
     gtk_widget_set_halign(overlay_container_, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(overlay_container_, GTK_ALIGN_CENTER);
     
-    // Visuals: Mirroring  (Large Centered Clock)
+    // Visuals: centered-clock Realmheart lock screen presentation
     clock_label_ = gtk_label_new("00:00");
     
     // Use Pango markup for that "Aesthetic as fuck" look

@@ -400,12 +400,14 @@ TEST(LauncherServiceClipboardActivationTest, RestoresImagesWithTheirMimeType) {
 
 TEST(LauncherCommandSuggestionTest, ListsAvailableCommandsFromChevronPrefix) {
     const auto results = launcher_command_suggestions(">");
-    ASSERT_EQ(results.size(), 2U);
+    ASSERT_EQ(results.size(), 3U);
     EXPECT_EQ(results[0].kind, LauncherResultKind::LauncherCommand);
     EXPECT_EQ(results[0].id, "clip");
     EXPECT_EQ(results[0].title, ">clip");
     EXPECT_EQ(results[1].id, "clear");
     EXPECT_EQ(results[1].title, ">clear");
+    EXPECT_EQ(results[2].id, "emoji");
+    EXPECT_EQ(results[2].title, ">emoji");
 }
 
 TEST(LauncherCommandSuggestionTest, FiltersSuggestionsByTypedPrefix) {

@@ -13,6 +13,7 @@
 #include "ui/bar/widgets/MediaWidget.hpp"
 #include "ui/bar/widgets/SystemMonitorWidget.hpp"
 #include "ui/bar/widgets/WorkspaceRune.hpp"
+#include "ui/workspace/animation/WorkspaceMorphModel.hpp"
 
 #include <atomic>
 #include <functional>
@@ -33,7 +34,9 @@ public:
         services::MediaService& media_service,
         std::function<void()> toggle_sidebar,
         std::function<void()> launch_launcher,
-        std::function<void(double, double)> open_power_menu = {}
+        std::function<void()> toggle_workspace_overview = {},
+        std::function<void(double, double)> open_power_menu = {},
+        std::function<void(services::WorkspaceSnapshot)> workspace_snapshot_changed = {}
     );
     ~VerticalBar();
 
@@ -42,6 +45,11 @@ public:
 
     GtkWidget* get_window() const { return window_; }
     void refresh();
+    [[nodiscard]] std::vector<
+        workspace::animation::WorkspaceMorphSource
+    > workspace_morph_sources() const;
+    void set_workspace_morph_active(bool active);
+    void set_workspace_morph_progress(double progress);
 
 private:
     struct AsyncState {
@@ -70,6 +78,7 @@ private:
     void open_exclusive_popover(GtkPopover* popover);
     void open_exclusive_media();
     void open_exclusive_system();
+    void request_workspace_overview_toggle();
     void activate_workspace(int workspace_id);
     [[nodiscard]] std::pair<double, double> power_menu_origin() const;
 
@@ -96,7 +105,9 @@ private:
     services::MediaService& media_service_;
     std::function<void()> toggle_sidebar_;
     std::function<void()> launch_launcher_;
+    std::function<void()> toggle_workspace_overview_;
     std::function<void(double, double)> open_power_menu_;
+    std::function<void(services::WorkspaceSnapshot)> workspace_snapshot_changed_;
     std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
     services::NotificationHistory::Subscription notification_subscription_;
     services::MediaService::Subscription media_subscription_;
@@ -105,6 +116,8 @@ private:
     GWeakRef active_popover_ref_{};
     guint refresh_timer_id_ = 0;
     unsigned refresh_tick_ = 0;
+    bool workspace_morph_active_ = false;
+    double workspace_morph_progress_ = 0.0;
 };
 
 } // namespace realmheart::ui::bar

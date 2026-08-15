@@ -28,6 +28,8 @@ struct LayerSurfaceSpec {
     bool anchor_right = false;
     bool anchor_top = false;
     bool anchor_bottom = false;
+    // 0 respects existing exclusive zones; -1 ignores them and uses the full
+    // output (appropriate for fullscreen shell surfaces such as the overview).
     int exclusive_zone = 0;
     int margin_left = 0;
     int margin_right = 0;
@@ -46,6 +48,7 @@ GdkMonitor* resolve_layer_surface_monitor(
     GtkWidget* widget,
     int requested_index = -1
 );
+void set_layer_surface_level(GtkWindow* window, LayerSurfaceLevel layer);
 void apply_layer_surface(GtkWindow* window, const LayerSurfaceSpec& spec);
 
 } // namespace realmheart::ui

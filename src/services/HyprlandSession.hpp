@@ -37,6 +37,11 @@ public:
         std::string_view address,
         const realmheart::core::CommandOptions& options = {}
     );
+    static bool move_window_to_workspace(
+        std::string_view address,
+        int workspace_id,
+        const realmheart::core::CommandOptions& options = {}
+    );
 };
 
 } // namespace realmheart::services
