@@ -44,6 +44,33 @@ constexpr double kZoomFactor = 1.2;
 // open (guide §25); anything longer gets truncated.
 constexpr std::size_t kErrorLineMaxChars = 96;
 
+// Phase 5: Idle floating animation (guide §11)
+constexpr double kIdleFloatPeriodMicros[] = {4'000'000.0, 5'000'000.0, 3'500'000.0, 4'500'000.0};
+constexpr double kIdleFloatAmplitudeX[] = {1.5, 2.0, 1.0, 2.5};
+constexpr double kIdleFloatAmplitudeY[] = {3.0, 2.5, 4.0, 3.5};
+constexpr double kIdleFloatRotationAmp[] = {0.8, 1.2, 0.6, 1.0};
+constexpr double kIdleFloatPhaseOffset[] = {0.0, 1.57, 3.14, 4.71};
+
+// Opening sequence timing (guide §13)
+constexpr double kOpeningDurationMicros = 300'000.0;
+constexpr double kOpeningBaseScaleStart = 0.97;
+constexpr double kOpeningFragmentBias = 0.15;  // start 15% toward socket
+
+// Phase 9: Exit transition (guide §22)
+constexpr double kExitDurationMicros = 250'000.0;
+constexpr double kExitPortalBrightenMicros = 100'000.0;
+
+// Phase 10: FX (guide §32)
+constexpr std::size_t kNumMotes = 8;
+constexpr double kMoteLifetimeMicros = 1'500'000.0;
+constexpr double kMoteSpeedMin = 15.0;
+constexpr double kMoteSpeedMax = 40.0;
+constexpr double kMoteSizeMin = 1.5;
+constexpr double kMoteSizeMax = 3.5;
+
+// Joining flash during reconstruction
+constexpr double kJoinFlashDurationMicros = 50'000.0;
+
 // Decodes one wallpaper with a bounded target so browsing never rescales a
 // full 4K original into memory on every Up/Down step.
 [[nodiscard]] GdkPixbuf* decode_wallpaper_bounded(
@@ -222,6 +249,7 @@ struct RelictombsOverlay::Impl {
         Browsing,
         Reconstructing,
         Applying,
+        Exiting,
     };
 
     GtkApplication* application = nullptr;
@@ -230,13 +258,15 @@ struct RelictombsOverlay::Impl {
     GtkCssProvider* transparency_provider = nullptr;
     ResultCallback callback;
 
-    State state = State::Closed;
+    State state = RelictombsOverlay::Impl::State::Closed;
 
     RelictombsSelection selection;
     std::string selected_path;
 
     cairo_surface_t* base_surface = nullptr;
     cairo_surface_t* wallpaper_surface = nullptr;
+    cairo_surface_t* previous_wallpaper_surface = nullptr;
+    guint64 nav_transition_started_micros = 0;
     std::string wallpaper_path;
 
     // Four broken-arch fragment sprites, decoded once at the active tier and
@@ -272,6 +302,31 @@ struct RelictombsOverlay::Impl {
     // selector open (guide §25). Cleared on the next navigation/apply.
     std::string error_message;
 
+    // Phase 5: Idle floating animation state
+    guint64 idle_animation_start_micros = 0;
+
+    // Opening sequence state (guide §13)
+    bool opening_animation_active = false;
+    guint64 opening_started_micros = 0;
+
+    // Phase 9: Exit transition state (guide §22)
+    bool exit_animation_active = false;
+    guint64 exit_started_micros = 0;
+
+    // Phase 10: FX state
+    struct Mote {
+        double x = 0.0, y = 0.0;
+        double vx = 0.0, vy = 0.0;
+        double size = 2.0;
+        double life_micros = 0.0;
+        double max_life_micros = 1.0;
+    };
+    std::array<Mote, kNumMotes> motes{};
+    bool motes_initialized = false;
+
+    // Joining flash during reconstruction
+    guint64 join_flash_start_micros = 0;
+
     [[nodiscard]] double fragment_progress(std::size_t index) const {
         if (repaired) return 1.0;
         if (reconstruct_started_micros == 0) return 0.0;
@@ -297,6 +352,7 @@ struct RelictombsOverlay::Impl {
         }
         g_clear_object(&decode_task);
         g_clear_object(&decode_cancel);
+        cairo_surface_destroy(previous_wallpaper_surface);
         cairo_surface_destroy(wallpaper_surface);
         cairo_surface_destroy(base_surface);
         for (cairo_surface_t* surface : fragment_surfaces) {
@@ -317,6 +373,11 @@ struct RelictombsOverlay::Impl {
     void begin_apply();
     void on_reconstruct_tick();
     void reset_fragments();
+    void update_idle_animation();
+    void start_opening_animation();
+    void start_exit_animation();
+    void update_motes(double dt);
+    void render_fx(cairo_t* cr, double offset_x, double offset_y, double design_scale, double scale);
     bool handle_key(guint keyval);
     void queue_redraw() const;
 
@@ -383,7 +444,11 @@ void wallpaper_decode_done(GObject* source_object, GAsyncResult* result, gpointe
     g_object_unref(pixbuf);
     if (surface == nullptr) return;
 
-    cairo_surface_destroy(impl->wallpaper_surface);
+    if (impl->wallpaper_surface != nullptr) {
+        cairo_surface_destroy(impl->previous_wallpaper_surface);
+        impl->previous_wallpaper_surface = impl->wallpaper_surface;
+        impl->nav_transition_started_micros = g_get_monotonic_time();
+    }
     impl->wallpaper_surface = surface;
     impl->wallpaper_path = impl->selected_path;
     impl->queue_redraw();
@@ -391,6 +456,11 @@ void wallpaper_decode_done(GObject* source_object, GAsyncResult* result, gpointe
     if (impl->apply_requested && impl->wallpaper_is_current()) {
         impl->apply_requested = false;
         impl->begin_apply();
+    }
+
+    // Start opening animation on first wallpaper load
+    if (impl->state == RelictombsOverlay::Impl::State::Browsing && impl->idle_animation_start_micros == 0) {
+        impl->start_opening_animation();
     }
 }
 
@@ -418,24 +488,29 @@ void draw_wallpaper_cb(
     // render exactly behind that hole at every tier and aspect. Anchor both
     // draws to one transform: fit the base (scale = min, centered), then map
     // the design-space portal rect through the same scale + offset.
+    double image_width = 0.0, image_height = 0.0;
+    double cover_scale = 1.0, scale = 1.0, draw_width = 0.0, draw_height = 0.0;
+    double offset_x = 0.0, offset_y = 0.0, design_scale = 1.0;
+
     if (impl->base_surface != nullptr) {
-        const double image_width =
+        image_width =
             static_cast<double>(cairo_image_surface_get_width(impl->base_surface));
-        const double image_height =
+        image_height =
             static_cast<double>(cairo_image_surface_get_height(impl->base_surface));
         // Cover-fit gives uniform scale so the base fills the framebuffer with
         // no letterbox. The selector zoom (kZoomFactor) grows the arch 20%
         // beyond that, cropping edges so the portal is more recognisable.
-        const double cover_scale = std::min(
+        cover_scale = std::min(
             framebuffer_width / image_width,
             framebuffer_height / image_height
         );
-        const double scale = cover_scale * kZoomFactor;
-        const double draw_width = image_width * scale;
-        const double draw_height = image_height * scale;
+        scale = cover_scale * kZoomFactor;
+        draw_width = image_width * scale;
+        draw_height = image_height * scale;
         // Center the zoomed arch in the framebuffer.
-        const double offset_x = (framebuffer_width - draw_width) * 0.5;
-        const double offset_y = ((framebuffer_height - draw_height) * 0.5) + 50.0; // Shift down 50px per user request
+        offset_x = (framebuffer_width - draw_width) * 0.5;
+        offset_y = ((framebuffer_height - draw_height) * 0.5) + 50.0; // Shift down 50px per user request
+        design_scale = image_width / kDesignWidth;
 
         // Draw order is z-order: the wallpaper renders BEHIND the arch, the
         // base image's own alpha carves the portal hole out of it (opaque
@@ -458,6 +533,43 @@ void draw_wallpaper_cb(
                 kPortalViewport.width * design_scale * scale;
             const double portal_height =
                 kPortalViewport.height * design_scale * scale;
+
+            constexpr double kNavCrossfadeMicros = 200'000.0;
+            double progress = 1.0;
+            if (impl->previous_wallpaper_surface != nullptr && impl->nav_transition_started_micros > 0) {
+                const double elapsed = static_cast<double>(
+                    g_get_monotonic_time() - impl->nav_transition_started_micros
+                );
+                progress = elapsed / kNavCrossfadeMicros;
+                if (progress >= 1.0) {
+                    progress = 1.0;
+                    cairo_surface_destroy(impl->previous_wallpaper_surface);
+                    impl->previous_wallpaper_surface = nullptr;
+                } else {
+                    impl->queue_redraw();
+                }
+            }
+
+            const double ease_p = progress * (2.0 - progress);
+
+            if (impl->previous_wallpaper_surface != nullptr && progress < 1.0) {
+                cairo_save(cr);
+                cairo_push_group(cr);
+                draw_cover_crop(
+                    cr,
+                    impl->previous_wallpaper_surface,
+                    portal_x,
+                    portal_y,
+                    portal_width,
+                    portal_height
+                );
+                cairo_pop_group_to_source(cr);
+                cairo_paint_with_alpha(cr, 1.0 - ease_p);
+                cairo_restore(cr);
+            }
+
+            cairo_save(cr);
+            cairo_push_group(cr);
             draw_cover_crop(
                 cr,
                 impl->wallpaper_surface,
@@ -466,6 +578,13 @@ void draw_wallpaper_cb(
                 portal_width,
                 portal_height
             );
+            cairo_pop_group_to_source(cr);
+            if (progress < 1.0) {
+                cairo_paint_with_alpha(cr, ease_p);
+            } else {
+                cairo_paint(cr);
+            }
+            cairo_restore(cr);
         }
 
         // Draw the base arch with the zoomed transform so it renders 20%
@@ -484,30 +603,68 @@ void draw_wallpaper_cb(
         // ride the exact same design-space -> framebuffer mapping as the
         // portal so they can never drift relative to the arch.
         const double design_scale = image_width / kDesignWidth;
+
+        // Phase 5: Idle floating animation + Opening sequence (guide §11, §13)
+        double idle_time_sec = 0.0;
+        double opening_progress = 0.0;
+        if (impl->idle_animation_start_micros > 0) {
+            idle_time_sec = static_cast<double>(g_get_monotonic_time() - impl->idle_animation_start_micros) / 1'000'000.0;
+        }
+        if (impl->opening_animation_active) {
+            double elapsed = static_cast<double>(g_get_monotonic_time() - impl->opening_started_micros);
+            opening_progress = std::clamp(elapsed / kOpeningDurationMicros, 0.0, 1.0);
+            if (opening_progress >= 1.0) {
+                impl->opening_animation_active = false;
+                impl->opening_started_micros = 0;
+            }
+        }
+
         for (std::size_t index = 0;
              index < impl->fragment_surfaces.size();
              ++index) {
             if (!impl->fragment_loaded[index]) continue;
             const auto& spec = kFragmentSpecs[index];
-            const double progress = impl->fragment_progress(index);
+            const double recon_progress = impl->fragment_progress(index);
+
+            // Opening: fragments start biased toward socket, float to idle
+            double open_bias = 0.0;
+            if (impl->opening_animation_active || (impl->state == RelictombsOverlay::Impl::State::Browsing && opening_progress < 1.0)) {
+                // Ease-out for opening: start at kOpeningFragmentBias toward socket, go to 0 (idle)
+                double open_ease = 1.0 - (1.0 - opening_progress) * (1.0 - opening_progress);
+                open_bias = kOpeningFragmentBias * (1.0 - open_ease);
+            }
+
+            // Interpolate: idle + open_bias*(socket - idle) - recon_progress*(idle + open_bias*(socket-idle) - socket)
+            // = idle*(1-recon_progress) + socket*recon_progress + open_bias*(1-recon_progress)*(socket-idle)
             const float start_x = spec.idle_rect.x;
             const float start_y = spec.idle_rect.y;
             const float end_x = spec.socket_rect.x;
             const float end_y = spec.socket_rect.y;
+
+            double interp_x = start_x + (end_x - start_x) * recon_progress + open_bias * (end_x - start_x) * (1.0 - recon_progress);
+            double interp_y = start_y + (end_y - start_y) * recon_progress + open_bias * (end_y - start_y) * (1.0 - recon_progress);
+
+            // Phase 5: Idle floating motion (guide §11) - only when browsing and not reconstructing
+            double float_offset_x = 0.0, float_offset_y = 0.0, float_rotation = 0.0;
+            if (impl->state == RelictombsOverlay::Impl::State::Browsing && recon_progress == 0.0 && !impl->opening_animation_active) {
+                double period = kIdleFloatPeriodMicros[index] / 1'000'000.0;
+                double phase = kIdleFloatPhaseOffset[index];
+                float_offset_x = std::sin(idle_time_sec * 2.0 * G_PI / period + phase) * kIdleFloatAmplitudeX[index];
+                float_offset_y = std::sin(idle_time_sec * 2.0 * G_PI / period * 0.73 + phase) * kIdleFloatAmplitudeY[index];
+                float_rotation = std::sin(idle_time_sec * 2.0 * G_PI / period * 0.51 + phase) * kIdleFloatRotationAmp[index];
+            }
+
             const double fragment_x =
-                offset_x +
-                (start_x + (end_x - start_x) * progress) * design_scale * scale;
+                offset_x + (interp_x + float_offset_x) * design_scale * scale;
             const double fragment_y =
-                offset_y +
-                (start_y + (end_y - start_y) * progress) * design_scale * scale;
+                offset_y + (interp_y + float_offset_y) * design_scale * scale;
             const double fragment_width =
                 spec.idle_rect.width * design_scale * scale;
             const double fragment_height =
                 spec.idle_rect.height * design_scale * scale;
-            // Rotate the sprite around its own center while it locks into
-            // the socket; idle fragments stay axis-aligned.
-            const double rotation_deg =
-                spec.socket_rotation_deg * progress;
+
+            // Rotation: reconstruction rotation + idle floating rotation
+            const double rotation_deg = spec.socket_rotation_deg * recon_progress + float_rotation;
             if (std::abs(rotation_deg) > 0.1) {
                 draw_cover_fit_rotated(
                     cr,
@@ -563,6 +720,50 @@ void draw_wallpaper_cb(
         cairo_show_text(cr, impl->error_message.c_str());
         cairo_restore(cr);
     }
+
+    // Phase 10: Render FX (guide §32)
+    impl->render_fx(cr, offset_x, offset_y, design_scale, scale);
+
+    // Phase 9: Exit transition - fade out Relictombs to reveal new desktop (guide §22)
+    if (impl->exit_animation_active) {
+        double elapsed = static_cast<double>(g_get_monotonic_time() - impl->exit_started_micros);
+        double exit_progress = std::clamp(elapsed / kExitDurationMicros, 0.0, 1.0);
+        if (exit_progress >= 1.0) {
+            impl->exit_animation_active = false;
+            impl->exit_started_micros = 0;
+            // Close the selector
+            impl->hide();
+            impl->state = RelictombsOverlay::Impl::State::Closed;
+            impl->reset_fragments();
+            if (impl->state == RelictombsOverlay::Impl::State::Exiting) {
+                impl->send(RelictombsResultKind::Cancel, "");
+            }
+            return;
+        }
+
+        // Portal brightens first (guide §22) - subtle warm glow at portal
+        if (elapsed < kExitPortalBrightenMicros) {
+            double portal_brighten = 1.0 - std::clamp(elapsed / kExitPortalBrightenMicros, 0.0, 1.0);
+            double portal_x = offset_x + kPortalViewport.x * design_scale * scale;
+            double portal_y = offset_y + kPortalViewport.y * design_scale * scale;
+            double portal_width = kPortalViewport.width * design_scale * scale;
+            double portal_height = kPortalViewport.height * design_scale * scale;
+            double radius = std::max(portal_width, portal_height) * 0.7;
+
+            cairo_save(cr);
+            cairo_set_source_rgba(cr, 1.0, 0.9, 0.5, portal_brighten * 0.4);
+            cairo_arc(cr, portal_x + portal_width * 0.5, portal_y + portal_height * 0.5, radius, 0, 2.0 * G_PI);
+            cairo_fill(cr);
+            cairo_restore(cr);
+        }
+
+        // Fade out entire Relictombs scene with ease-out
+        double fade_out = exit_progress * (2.0 - exit_progress); // quadratic ease-out
+        cairo_save(cr);
+        cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, fade_out);
+        cairo_paint(cr);
+        cairo_restore(cr);
+    }
 }
 
 void install_transparency_css(RelictombsOverlay::Impl& impl) {
@@ -600,6 +801,7 @@ gboolean canvas_key_pressed(
     (void)controller;
     (void)keycode;
     (void)state;
+    std::cerr << "[Relictombs] canvas_key_pressed: " << keyval << " data=" << data << "\n";
     auto* impl = static_cast<RelictombsOverlay::Impl*>(data);
     if (impl == nullptr) return GDK_EVENT_STOP;
     if (impl->handle_key(keyval)) return GDK_EVENT_STOP;
@@ -614,7 +816,9 @@ void RelictombsOverlay::Impl::queue_redraw() const {
 
 void RelictombsOverlay::Impl::present() {
     if (window == nullptr) return;
+    std::cerr << "[Relictombs] present() called\n";
     gtk_window_present(window);
+    std::cerr << "[Relictombs] window presented, grabbing focus on canvas: " << canvas << "\n";
     gtk_widget_grab_focus(canvas);
 }
 
@@ -661,7 +865,7 @@ bool RelictombsOverlay::Impl::wallpaper_is_current() const {
 }
 
 void RelictombsOverlay::Impl::navigate(int direction) {
-    if (state != State::Browsing) return;
+    if (state != RelictombsOverlay::Impl::State::Browsing) return;
     if (direction == 0) return;
 
     const guint64 now = g_get_monotonic_time();
@@ -678,7 +882,7 @@ void RelictombsOverlay::Impl::navigate(int direction) {
 }
 
 void RelictombsOverlay::Impl::begin_apply() {
-    if (state != State::Browsing && state != State::Applying) return;
+    if (state != RelictombsOverlay::Impl::State::Browsing && state != RelictombsOverlay::Impl::State::Applying) return;
     if (!wallpaper_is_current()) return;
 
     // Enter: the selected wallpaper is ready. Lock navigation, stop the
@@ -686,7 +890,7 @@ void RelictombsOverlay::Impl::begin_apply() {
     // (fragments fly idle -> socket, staggered, smooth deceleration). The
     // wallpaper commit result only fires once the arch is fully repaired
     // plus a short complete-arch hold (guide §16-§20).
-    state = State::Reconstructing;
+    state = RelictombsOverlay::Impl::State::Reconstructing;
     apply_requested = false;
     error_message.clear();
     repaired = false;
@@ -702,7 +906,7 @@ void RelictombsOverlay::Impl::begin_apply() {
 }
 
 void RelictombsOverlay::Impl::on_reconstruct_tick() {
-    if (state != State::Reconstructing) return;
+    if (state != RelictombsOverlay::Impl::State::Reconstructing) return;
 
     const guint64 now = g_get_monotonic_time();
     const double elapsed =
@@ -716,7 +920,7 @@ void RelictombsOverlay::Impl::on_reconstruct_tick() {
     if (elapsed >= total + kRepairedHoldMicros) {
         repaired = true;
         reconstruct_progress = 1.0;
-        state = State::Applying;
+        state = RelictombsOverlay::Impl::State::Applying;
         queue_redraw();
         std::cerr << "[Relictombs] arch repaired, committing\n";
         send(RelictombsResultKind::Apply, selected_path);
@@ -730,8 +934,156 @@ void RelictombsOverlay::Impl::reset_fragments() {
     queue_redraw();
 }
 
+// Phase 5: Update idle floating animation (guide §11)
+void RelictombsOverlay::Impl::update_idle_animation() {
+    if (state != RelictombsOverlay::Impl::State::Browsing) return;
+    if (idle_animation_start_micros == 0) {
+        idle_animation_start_micros = g_get_monotonic_time();
+    }
+    queue_redraw();
+}
+
+// Idle animation frame callback - runs at monitor refresh rate
+gboolean idle_animation_tick(GtkWidget* widget G_GNUC_UNUSED, GdkFrameClock* frame_clock G_GNUC_UNUSED, gpointer user_data) {
+    auto* impl = static_cast<RelictombsOverlay::Impl*>(user_data);
+    if (impl == nullptr) return G_SOURCE_REMOVE;
+    impl->update_idle_animation();
+    return G_SOURCE_CONTINUE;
+}
+
+// Opening sequence: fragments start socket-biased, float to idle (guide §13)
+void RelictombsOverlay::Impl::start_opening_animation() {
+    opening_animation_active = true;
+    opening_started_micros = g_get_monotonic_time();
+    idle_animation_start_micros = g_get_monotonic_time();
+    queue_redraw();
+}
+
+// Phase 9: Exit transition - fade Relictombs away (guide §22)
+void RelictombsOverlay::Impl::start_exit_animation() {
+    exit_animation_active = true;
+    exit_started_micros = g_get_monotonic_time();
+    state = RelictombsOverlay::Impl::State::Exiting;
+    queue_redraw();
+}
+
+// Phase 10: Update motes (guide §32)
+void RelictombsOverlay::Impl::update_motes(double dt) {
+    (void)g_get_monotonic_time();
+    if (!motes_initialized) {
+        // Initialize motes around the portal center
+        for (std::size_t i = 0; i < kNumMotes; ++i) {
+            double angle = (static_cast<double>(i) / kNumMotes) * 2.0 * G_PI;
+            double radius = 50.0 + (i % 3) * 30.0;
+            motes[i].x = std::cos(angle) * radius;
+            motes[i].y = std::sin(angle) * radius;
+            double speed = kMoteSpeedMin + (i % 5) * ((kMoteSpeedMax - kMoteSpeedMin) / 4.0);
+            motes[i].vx = std::cos(angle) * speed;
+            motes[i].vy = std::sin(angle) * speed;
+            motes[i].size = kMoteSizeMin + (i % 4) * ((kMoteSizeMax - kMoteSizeMin) / 3.0);
+            motes[i].life_micros = 0.0;
+            motes[i].max_life_micros = kMoteLifetimeMicros;
+        }
+        motes_initialized = true;
+    }
+
+    // Update motes
+    for (auto& mote : motes) {
+        mote.life_micros += dt * 1'000'000.0;
+        if (mote.life_micros >= mote.max_life_micros) {
+            // Respawn at portal center with new random direction
+            double angle = (static_cast<double>(rand()) / RAND_MAX) * 2.0 * G_PI;
+            double radius = 20.0 + (static_cast<double>(rand()) / RAND_MAX) * 40.0;
+            mote.x = std::cos(angle) * radius;
+            mote.y = std::sin(angle) * radius;
+            double speed = kMoteSpeedMin + (static_cast<double>(rand()) / RAND_MAX) * (kMoteSpeedMax - kMoteSpeedMin);
+            mote.vx = std::cos(angle) * speed;
+            mote.vy = std::sin(angle) * speed;
+            mote.size = kMoteSizeMin + (static_cast<double>(rand()) / RAND_MAX) * (kMoteSizeMax - kMoteSizeMin);
+            mote.life_micros = 0.0;
+            mote.max_life_micros = kMoteLifetimeMicros;
+        } else {
+            mote.x += mote.vx * dt;
+            mote.y += mote.vy * dt;
+        }
+    }
+}
+
+// Phase 10: Render FX - edge glow, motes, joining flash (guide §32)
+void RelictombsOverlay::Impl::render_fx(cairo_t* cr, double offset_x, double offset_y, double design_scale, double scale) {
+    const guint64 now = g_get_monotonic_time();
+
+    // 1. Joining flash during reconstruction
+    if (state == RelictombsOverlay::Impl::State::Reconstructing && !repaired) {
+        if (join_flash_start_micros == 0) {
+            join_flash_start_micros = now;
+        }
+        double elapsed = static_cast<double>(now - join_flash_start_micros);
+        double flash_progress = elapsed / kJoinFlashDurationMicros;
+        if (flash_progress < 1.0) {
+            // Soft gold-white glow at socket positions
+            for (std::size_t i = 0; i < kFragmentSpecs.size(); ++i) {
+                const auto& spec = kFragmentSpecs[i];
+                double socket_x = offset_x + spec.socket_rect.x * design_scale * scale;
+                double socket_y = offset_y + spec.socket_rect.y * design_scale * scale;
+                double socket_w = spec.socket_rect.width * design_scale * scale;
+                double socket_h = spec.socket_rect.height * design_scale * scale;
+                double radius = std::max(socket_w, socket_h) * 0.6;
+
+                cairo_save(cr);
+                cairo_set_source_rgba(cr, 1.0, 0.85, 0.4, (1.0 - flash_progress) * 0.3);
+                cairo_arc(cr, socket_x + socket_w * 0.5, socket_y + socket_h * 0.5, radius, 0, 2.0 * G_PI);
+                cairo_fill(cr);
+                cairo_restore(cr);
+            }
+        }
+    } else {
+        join_flash_start_micros = 0;
+    }
+
+    // 2. Faint warm edge glow at socket positions (during Reconstruction and Exit only, not Browsing)
+    if (state == RelictombsOverlay::Impl::State::Reconstructing || state == RelictombsOverlay::Impl::State::Exiting) {
+        for (std::size_t i = 0; i < kFragmentSpecs.size(); ++i) {
+            const auto& spec = kFragmentSpecs[i];
+            double socket_x = offset_x + spec.socket_rect.x * design_scale * scale;
+            double socket_y = offset_y + spec.socket_rect.y * design_scale * scale;
+            double socket_w = spec.socket_rect.width * design_scale * scale;
+            double socket_h = spec.socket_rect.height * design_scale * scale;
+            double radius = std::max(socket_w, socket_h) * 0.5;
+
+            // Subtle pulsing glow
+            double pulse = (std::sin(static_cast<double>(now) / 1'000'000.0 * 2.0) + 1.0) * 0.5; // 0 to 1
+            double alpha = 0.05 + pulse * 0.08;
+
+            cairo_save(cr);
+            cairo_set_source_rgba(cr, 1.0, 0.9, 0.6, alpha);
+            cairo_arc(cr, socket_x + socket_w * 0.5, socket_y + socket_h * 0.5, radius, 0, 2.0 * G_PI);
+            cairo_fill(cr);
+            cairo_restore(cr);
+        }
+    }
+
+    // 3. Motes during Reconstruction and Exit only (not during Browsing)
+    if (state == RelictombsOverlay::Impl::State::Reconstructing || state == RelictombsOverlay::Impl::State::Exiting) {
+        update_motes(1.0 / 60.0); // approximate 60fps dt
+
+        for (const auto& mote : motes) {
+            double life_progress = mote.life_micros / mote.max_life_micros;
+            double alpha = (1.0 - life_progress) * 0.6;
+            double cx = offset_x + 960.0 * design_scale * scale + mote.x * design_scale * scale;
+            double cy = offset_y + 540.0 * design_scale * scale + mote.y * design_scale * scale;
+
+            cairo_save(cr);
+            cairo_set_source_rgba(cr, 1.0, 0.95, 0.7, alpha);
+            cairo_arc(cr, cx, cy, mote.size * design_scale * scale, 0, 2.0 * G_PI);
+            cairo_fill(cr);
+            cairo_restore(cr);
+        }
+    }
+}
+
 void RelictombsOverlay::Impl::request_apply() {
-    if (state != State::Browsing) return;
+    if (state != RelictombsOverlay::Impl::State::Browsing) return;
     if (wallpaper_is_current()) {
         begin_apply();
         return;
@@ -742,13 +1094,14 @@ void RelictombsOverlay::Impl::request_apply() {
 }
 
 bool RelictombsOverlay::Impl::handle_key(guint keyval) {
+    std::cerr << "[Relictombs] handle_key: " << keyval << " state=" << static_cast<int>(state) << "\n";
     switch (keyval) {
-    case GDK_KEY_Up:
-    case GDK_KEY_k:
+    case GDK_KEY_Left:
+    case GDK_KEY_h:
         navigate(-1);
         return true;
-    case GDK_KEY_Down:
-    case GDK_KEY_j:
+    case GDK_KEY_Right:
+    case GDK_KEY_l:
         navigate(1);
         return true;
     case GDK_KEY_Return:
@@ -757,10 +1110,10 @@ bool RelictombsOverlay::Impl::handle_key(guint keyval) {
         request_apply();
         return true;
     case GDK_KEY_Escape:
-        if (state == State::Browsing) {
+        if (state == RelictombsOverlay::Impl::State::Browsing) {
             send(RelictombsResultKind::Cancel);
             hide();
-            state = State::Closed;
+            state = RelictombsOverlay::Impl::State::Closed;
             reset_fragments();
         }
         return true;
@@ -769,7 +1122,7 @@ bool RelictombsOverlay::Impl::handle_key(guint keyval) {
         // Phase 4 debug toggle: instantly flip between idle fragments and the
         // fully repaired arch. Lets socket geometry be tuned without waiting
         // on the reconstruction animation (guide §36 Phase 4).
-        if (state == State::Browsing) {
+        if (state == RelictombsOverlay::Impl::State::Browsing) {
             repaired = !repaired;
             reconstruct_started_micros = 0;
             reconstruct_progress = repaired ? 1.0 : 0.0;
@@ -867,6 +1220,11 @@ bool RelictombsOverlay::prepare(std::string* error) {
     // Load the tiered base arch image.
     const AssetTier tier = select_asset_tier(physical_height);
     impl_->tier = tier;
+
+    // Attach frame clock callback for Phase 5 idle floating animation (guide §11).
+    // This runs at the monitor's refresh rate while the selector is visible.
+    gtk_widget_add_tick_callback(canvas, &idle_animation_tick, impl_.get(), nullptr);
+
     const auto base_path = ui::resolve_project_asset(
         std::string("Relictombs-Broken_Arch/") +
         std::string(base_asset_relative_path(tier))
@@ -959,7 +1317,7 @@ bool RelictombsOverlay::prepare(std::string* error) {
 
     impl_->window = window;
     impl_->canvas = canvas;
-    impl_->state = Impl::State::Closed;
+    impl_->state = RelictombsOverlay::Impl::State::Closed;
     std::cerr << "[Relictombs] overlay prepared (tier "
               << static_cast<int>(tier) << ", portal decode target "
               << impl_->decode_target_width << "x"
@@ -979,7 +1337,7 @@ bool RelictombsOverlay::preload(
         if (error != nullptr) *error = "Relictombs selection is empty";
         return false;
     }
-    if (impl_->state != Impl::State::Closed) {
+    if (impl_->state != RelictombsOverlay::Impl::State::Closed) {
         if (error != nullptr) *error = "Relictombs session is already active";
         return false;
     }
@@ -1008,7 +1366,7 @@ bool RelictombsOverlay::show(
     impl_->selection = std::move(selection);
     impl_->selected_path = impl_->selection.selected().string();
     impl_->apply_requested = false;
-    impl_->state = Impl::State::Browsing;
+    impl_->state = RelictombsOverlay::Impl::State::Browsing;
     impl_->last_navigation_micros = g_get_monotonic_time();
     impl_->reset_fragments();
     impl_->request_wallpaper_decode();
@@ -1018,36 +1376,36 @@ bool RelictombsOverlay::show(
 }
 
 void RelictombsOverlay::cancel() {
-    if (impl_->state == Impl::State::Browsing) {
+    if (impl_->state == RelictombsOverlay::Impl::State::Browsing) {
         impl_->send(RelictombsResultKind::Cancel);
-        impl_->hide();
-        impl_->state = Impl::State::Closed;
+        // Phase 9: Start exit animation on Esc (guide §24)
+        impl_->start_exit_animation();
         impl_->reset_fragments();
     }
-    // Applying owns its lifecycle; Closed is a no-op.
+    // Applying/Reconstructing own their lifecycle; Closed is a no-op.
 }
 
 void RelictombsOverlay::backend_prepared() {
-    if (impl_->state != Impl::State::Applying) return;
+    if (impl_->state != RelictombsOverlay::Impl::State::Applying) return;
     impl_->send(RelictombsResultKind::Commit, impl_->selected_path);
 }
 
 void RelictombsOverlay::backend_committed() {
-    if (impl_->state != Impl::State::Applying) return;
+    if (impl_->state != RelictombsOverlay::Impl::State::Applying) return;
     impl_->send(RelictombsResultKind::Complete);
-    impl_->hide();
-    impl_->state = Impl::State::Closed;
-    impl_->reset_fragments();
+    // Phase 9: Start exit transition instead of immediately hiding (guide §22)
+    impl_->start_exit_animation();
+    // State will transition to Closed when exit animation completes
 }
 
 void RelictombsOverlay::backend_failed(std::string_view diagnostic) {
-    if (impl_->state != Impl::State::Applying) return;
+    if (impl_->state != RelictombsOverlay::Impl::State::Applying) return;
 
     // Guide §25: a commit failure must NOT close the selector. Return the
     // fragments to their broken idle positions, surface one short understated
     // diagnostic, and drop back to Browsing so the user can navigate or retry.
     // Never leave the arch permanently half-repaired.
-    impl_->state = Impl::State::Browsing;
+    impl_->state = RelictombsOverlay::Impl::State::Browsing;
     impl_->repaired = false;
     impl_->reconstruct_started_micros = 0;
     impl_->reconstruct_progress = 0.0;
@@ -1064,9 +1422,9 @@ void RelictombsOverlay::backend_failed(std::string_view diagnostic) {
 }
 
 bool RelictombsOverlay::active() const noexcept {
-    return impl_->state == Impl::State::Browsing ||
-           impl_->state == Impl::State::Reconstructing ||
-           impl_->state == Impl::State::Applying;
+    return impl_->state == RelictombsOverlay::Impl::State::Browsing ||
+           impl_->state == RelictombsOverlay::Impl::State::Reconstructing ||
+           impl_->state == RelictombsOverlay::Impl::State::Applying;
 }
 
 } // namespace realmheart::relictombs

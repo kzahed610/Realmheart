@@ -101,7 +101,7 @@ std::optional<int> HyprlandWorkspaces::active_workspace_id(
             return std::nullopt;
         }
         const int id = document["id"].get<int>();
-        return id > 0 ? std::optional<int>{id} : std::nullopt;
+        return id;
     } catch (const json::exception&) {
         return std::nullopt;
     }
