@@ -5,7 +5,7 @@
 
 namespace realmheart::relictombs {
 
-ManaCoresLayout ManaCoresLayout::for_height(int physical_height) {
+ManaCoresLayout ManaCoresLayout::for_height(int physical_height, int physical_width) {
     ManaCoresLayout l;
 
     // Reference dimensions at 1080p
@@ -13,37 +13,53 @@ ManaCoresLayout ManaCoresLayout::for_height(int physical_height) {
     constexpr int kRefWidth = 1920;
 
     const double scale = static_cast<double>(physical_height) / kRefHeight;
-    const double canvas_width = kRefWidth * scale;
     const double canvas_height = physical_height;
+    const double canvas_width = (physical_width > 0) ? static_cast<double>(physical_width) : (kRefWidth * scale);
 
     l.canvas_width = canvas_width;
     l.canvas_height = canvas_height;
 
-    // Core positioned on LEFT side (~50px from left edge, near taskbar), vertically centred
-    l.core_centre_x = 50.0 * scale;  // ~50px from left edge at 1080p
+    // Core is centered horizontally with slight left offset (~40px) to balance
+    // the radial slices attached to its right side, vertically centered.
+    l.core_centre_x = (canvas_width / 2.0) - (40.0 * scale);
     l.core_centre_y = canvas_height / 2.0;
 
-    // Core radius: ~140px at 1080p (scaled)
-    l.core_radius = 140.0 * scale;
-    // Shrunk radius during apply: ~50px at 1080p
-    l.core_radius_shrunk = 50.0 * scale;
+    // Core radii
+    l.core_radius_expanded = 220.0 * scale;  // Large enough to comfortably preview wallpaper
+    l.core_radius_small = 45.0 * scale;      // Compact core during emerge & assembly
+    l.core_radius_shrunk = 35.0 * scale;     // Shrunk core during apply & exit
 
-    // Radials parked to the right of core
-    // Park position: core right edge + 15px gap + radial radius
-    l.radial_radius = 28.0 * scale;
-    l.radial_spacing = 10.0 * scale;
-    l.radials_park_x = l.core_centre_x + l.core_radius + 15.0 * scale + l.radial_radius;
-    l.radials_park_y = l.core_centre_y;
+    // Slices (annular sectors)
+    l.slice_gap = 18.0 * scale;              // Gap between core border and slice inner arc (~15-20px)
+    l.slice_depth_expanded = 95.0 * scale;   // Radial depth of slices when expanded
+    l.slice_depth_attached = 35.0 * scale;   // Radial depth of slices when attached to small core
 
-    // Fan-in arc radius: ~180px at 1080p
-    l.fan_arc_radius = 180.0 * scale;
-    // Fan from -45° to +45° (left side of core)
-    l.fan_start_angle = -std::numbers::pi / 4.0;  // -45 degrees
-    l.fan_end_angle = std::numbers::pi / 4.0;      // +45 degrees
+    // Angular slice setup: 3 slices on the right side of the core
+    // Top (Silver): -52° to -18°
+    // Middle (Yellow): -14° to +14°
+    // Bottom (Orange): +18° to +52°
+    // (with 4° angular gaps between slices)
+    constexpr double deg2rad = std::numbers::pi / 180.0;
+
+    // Slice 0: Silver (Top)
+    l.slices[0].start_angle = -52.0 * deg2rad;
+    l.slices[0].end_angle = -18.0 * deg2rad;
+    l.slices[0].mid_angle = (-52.0 + -18.0) * 0.5 * deg2rad;
+
+    // Slice 1: Yellow (Middle)
+    l.slices[1].start_angle = -14.0 * deg2rad;
+    l.slices[1].end_angle = 14.0 * deg2rad;
+    l.slices[1].mid_angle = 0.0;
+
+    // Slice 2: Orange (Bottom)
+    l.slices[2].start_angle = 18.0 * deg2rad;
+    l.slices[2].end_angle = 52.0 * deg2rad;
+    l.slices[2].mid_angle = (18.0 + 52.0) * 0.5 * deg2rad;
 
     // Visual styling
     l.border_thickness = 2.5 * scale;
-    l.glow_extent = 18.0 * scale;
+    l.glow_extent = 16.0 * scale;
+    l.star_spike_length = 16.0 * scale;
 
     return l;
 }
