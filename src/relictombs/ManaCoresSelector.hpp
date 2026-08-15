@@ -7,12 +7,12 @@
 #include <functional>
 #include <optional>
 #include <array>
+#include <vector>
 #include <filesystem>
 #include <string>
 
 #include "relictombs/ManaCoresLayout.hpp"
 #include "relictombs/WallpaperLibrary.hpp"
-#include "relictombs/RadialBloomShader.hpp"
 
 namespace realmheart::relictombs {
 
@@ -50,7 +50,11 @@ private:
     enum class State { Hidden, Assembling, Idle, Applying, Dismissing };
     State state_ = State::Hidden;
 
-    // Layout (computed at present time based on monitor)
+    // Assembly sub-phases
+    enum class AssemblePhase { Emerge, Formation, Expansion };
+    AssemblePhase assemble_phase_ = AssemblePhase::Emerge;
+
+    // Layout
     ManaCoresLayout layout_;
 
     // Window and layer surface
@@ -58,52 +62,34 @@ private:
     GtkWidget* canvas_ = nullptr;
     bool visible_ = false;
 
-    // Wallpaper pixbufs (non-owning, owned by WallpaperLibrary)
-    GdkPixbuf* current_wallpaper_ = nullptr;
-    std::array<GdkPixbuf*, 3> next_wallpapers_ = {nullptr, nullptr, nullptr};
+    // Wallpaper library & pixbufs
+    std::vector<std::filesystem::path> all_wallpaper_paths_;
+    int current_wallpaper_index_ = 0;
+    GdkPixbuf* current_core_pixbuf_ = nullptr;
+    std::array<GdkPixbuf*, 3> slice_pixbufs_ = {nullptr, nullptr, nullptr};
+    GdkPixbuf* apply_fullscreen_pixbuf_ = nullptr;
 
     // Animation timing
     guint64 animation_start_micros_ = 0;
     guint64 idle_start_micros_ = 0;
-    
-    // Current wallpaper index in the cycle
-    int current_wallpaper_index_ = 0;
-
-    // Assembly sub-phase
-    enum class AssemblePhase { CoreIn, FanIn, Detach };
-    AssemblePhase assemble_phase_ = AssemblePhase::CoreIn;
-
-    // Radial animation progress (0..1 each)
-    std::array<double, 3> radial_progress_ = {0.0, 0.0, 0.0};
-    std::array<double, 3> radial_target_x_ = {0.0, 0.0, 0.0};
-    std::array<double, 3> radial_target_y_ = {0.0, 0.0, 0.0};
-
-    // Core radius during animation
-    double core_current_radius_ = 0.0;
-
-    // Idle floating parameters (seeded per radial)
-    struct IdleFloatParams {
-        double period_x = 0.0;
-        double period_y = 0.0;
-        double phase_x = 0.0;
-        double phase_y = 0.0;
-        double amplitude_x = 0.0;
-        double amplitude_y = 0.0;
-    };
-    std::array<IdleFloatParams, 3> idle_float_params_;
-
-    // Hovered radial index (-1 = none, 0/1/2 = silver/yellow/orange)
-    int hovered_radial_ = -1;
-    
-    // Wallpaper file paths for cycling
-    std::array<std::string, 3> next_wallpaper_paths_ = {};
-
-    // Apply animation
     guint64 apply_start_micros_ = 0;
-    double apply_progress_ = 0.0;  // 0..1
-    std::unique_ptr<RadialBloomShader> bloom_shader_;
+    guint64 dismiss_start_micros_ = 0;
 
-    // Frame clock callback for animations
+    // Current animated coordinates & radii
+    double current_cx_ = 0.0;
+    double current_cy_ = 0.0;
+    double current_core_radius_ = 0.0;
+    double current_slice_r_in_ = 0.0;
+    double current_slice_r_out_ = 0.0;
+    double current_alpha_ = 1.0;
+    double current_wallpaper_alpha_ = 0.0;
+    double apply_mask_radius_ = 0.0;
+
+    // Hovered radial slice index (-1 = none, 0 = silver, 1 = yellow, 2 = orange)
+    int hovered_radial_ = -1;
+    bool apply_callback_fired_ = false;
+
+    // Frame clock and transparency handling
     guint tick_callback_id_ = 0;
     guint transparency_retry_id_ = 0;
     int transparency_retry_count_ = 0;
@@ -112,23 +98,26 @@ private:
     static gboolean transparency_retry_callback(GtkWidget* widget, GdkFrameClock* frame_clock, gpointer user_data);
 
     // Drawing
-    void draw_core(cairo_t* cr, double alpha);
-    void draw_radials(cairo_t* cr, double alpha);
-    void draw_core_animated(cairo_t* cr, double alpha, double radius, double cx, double cy);
-    void draw_radials_animated(cairo_t* cr, double alpha);
-    void draw_joining_flash(cairo_t* cr, double cx, double cy, double progress);
-    void draw_phase10_edge_glow(cairo_t* cr);
-    void draw_phase10_motes(cairo_t* cr);
     void draw(GtkDrawingArea* area, cairo_t* cr, int width, int height);
     static void draw_callback(GtkDrawingArea* area, cairo_t* cr, int width, int height, gpointer user_data);
     static gboolean tick_callback(GtkWidget* widget, GdkFrameClock* frame_clock, gpointer user_data);
+
+    void draw_core(cairo_t* cr, double cx, double cy, double radius, double alpha, double wallpaper_alpha);
+    void draw_radial_slices(cairo_t* cr, double cx, double cy, double r_in, double r_out, double alpha, double wallpaper_alpha);
+    void draw_cardinal_stars(cairo_t* cr, double cx, double cy, double radius, double alpha);
+    void draw_reverse_bloom(cairo_t* cr, double cx, double cy, double mask_radius);
+    static void draw_pixbuf_cover(cairo_t* cr, GdkPixbuf* pixbuf, double x, double y, double width, double height, double alpha);
+
     void update_animations(guint64 now_micros);
     void queue_redraw();
     void start_idle_animation();
     void begin_apply();
     void begin_dismiss();
     void setup_window(GtkApplication* app);
-    
+
+    void reload_pixbufs();
+    void clear_pixbufs();
+
     // Callbacks
     DismissCallback dismiss_callback_;
     std::function<void(const std::string& /*path*/)> apply_callback_;

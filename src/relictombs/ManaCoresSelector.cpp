@@ -4,6 +4,7 @@
 #include <numbers>
 #include <memory>
 #include <iostream>
+#include <algorithm>
 #include <filesystem>
 #include <string>
 #include <gtk/gtk.h>
@@ -14,7 +15,35 @@
 
 namespace realmheart::relictombs {
 namespace {
-void force_transparent_surface(GtkWidget* widget);
+
+void force_transparent_surface(GtkWidget* widget) {
+    GtkNative* native = gtk_widget_get_native(widget);
+    if (native == nullptr) return;
+
+    GdkSurface* surface = gtk_native_get_surface(native);
+    if (surface == nullptr) return;
+
+    cairo_region_t* empty_region = cairo_region_create();
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+    gdk_surface_set_opaque_region(surface, empty_region);
+    G_GNUC_END_IGNORE_DEPRECATIONS
+    cairo_region_destroy(empty_region);
+}
+
+void append_annular_sector_path(
+    cairo_t* cr,
+    double cx, double cy,
+    double r_in, double r_out,
+    double start_angle, double end_angle
+) {
+    cairo_arc(cr, cx, cy, r_in, start_angle, end_angle);
+    double x_out_end = cx + r_out * std::cos(end_angle);
+    double y_out_end = cy + r_out * std::sin(end_angle);
+    cairo_line_to(cr, x_out_end, y_out_end);
+    cairo_arc_negative(cr, cx, cy, r_out, end_angle, start_angle);
+    cairo_close_path(cr);
+}
+
 } // namespace
 
 ManaCoresSelector::ManaCoresSelector() = default;
@@ -27,6 +56,24 @@ ManaCoresSelector::~ManaCoresSelector() {
     if (transparency_retry_id_ != 0 && window_ != nullptr) {
         gtk_widget_remove_tick_callback(GTK_WIDGET(window_), transparency_retry_id_);
         transparency_retry_id_ = 0;
+    }
+    clear_pixbufs();
+}
+
+void ManaCoresSelector::clear_pixbufs() {
+    if (current_core_pixbuf_ != nullptr) {
+        g_object_unref(current_core_pixbuf_);
+        current_core_pixbuf_ = nullptr;
+    }
+    for (auto& pb : slice_pixbufs_) {
+        if (pb != nullptr) {
+            g_object_unref(pb);
+            pb = nullptr;
+        }
+    }
+    if (apply_fullscreen_pixbuf_ != nullptr) {
+        g_object_unref(apply_fullscreen_pixbuf_);
+        apply_fullscreen_pixbuf_ = nullptr;
     }
 }
 
@@ -64,7 +111,6 @@ gboolean ManaCoresSelector::transparency_retry_callback(GtkWidget* widget, GdkFr
         return G_SOURCE_CONTINUE;
     }
 
-    // Keep applying the transparent region until the surface is mapped.
     force_transparent_surface(widget);
 
     if (!gdk_surface_get_mapped(surface)) {
@@ -75,9 +121,6 @@ gboolean ManaCoresSelector::transparency_retry_callback(GtkWidget* widget, GdkFr
         return G_SOURCE_CONTINUE;
     }
 
-    // Surface is mapped - force buffer commits by queuing renders for several frames.
-    // Wayland buffer commits are asynchronous, and the opaque region must be applied
-    // at the right phase of the surface lifecycle across multiple compositor cycles.
     gdk_surface_queue_render(surface);
 
     if (++self->transparency_retry_count_ >= 30) {
@@ -87,83 +130,49 @@ gboolean ManaCoresSelector::transparency_retry_callback(GtkWidget* widget, GdkFr
     return G_SOURCE_CONTINUE;
 }
 
-namespace {
-
-void force_transparent_surface(GtkWidget* widget) {
-    GtkNative* native = gtk_widget_get_native(widget);
-    if (native == nullptr) return;
-
-    GdkSurface* surface = gtk_native_get_surface(native);
-    if (surface == nullptr) return;
-
-    cairo_region_t* empty_region = cairo_region_create();
-    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
-    gdk_surface_set_opaque_region(surface, empty_region);
-    G_GNUC_END_IGNORE_DEPRECATIONS
-    cairo_region_destroy(empty_region);
-}
-
-} // namespace
-
 void ManaCoresSelector::present(GtkApplication* app) {
     if (visible_) return;
-
     if (app == nullptr) return;
 
     visible_ = true;
     state_ = State::Assembling;
-    assemble_phase_ = AssemblePhase::CoreIn;
+    assemble_phase_ = AssemblePhase::Emerge;
     animation_start_micros_ = g_get_monotonic_time();
-    core_current_radius_ = 0.0;
+    apply_callback_fired_ = false;
 
-    // Initialize layout from the primary monitor's dimensions
-    if (layout_.canvas_width == 0.0 || layout_.canvas_height == 0.0) {
-        GdkDisplay* display = gdk_display_get_default();
-        GListModel* monitors = gdk_display_get_monitors(display);
-        if (monitors && g_list_model_get_n_items(monitors) > 0) {
-            GdkMonitor* monitor = GDK_MONITOR(g_list_model_get_item(monitors, 0));
-            if (monitor) {
-                GdkRectangle geom;
-                gdk_monitor_get_geometry(monitor, &geom);
-                layout_ = ManaCoresLayout::for_height(geom.height);
-                g_object_unref(monitor);
-            }
-            g_object_unref(monitors);
+    // Initialize layout from monitor dimensions
+    GdkDisplay* display = gdk_display_get_default();
+    GListModel* monitors = gdk_display_get_monitors(display);
+    if (monitors && g_list_model_get_n_items(monitors) > 0) {
+        GdkMonitor* monitor = GDK_MONITOR(g_list_model_get_item(monitors, 0));
+        if (monitor) {
+            GdkRectangle geom;
+            gdk_monitor_get_geometry(monitor, &geom);
+            layout_ = ManaCoresLayout::for_height(geom.height, geom.width);
+            g_object_unref(monitor);
         }
+        g_object_unref(monitors);
+    } else {
+        layout_ = ManaCoresLayout::for_height(1080, 1920);
     }
 
-    // Initialize radial targets to their fan-in start positions (off-screen left)
-    const double cx = layout_.core_centre_x;
-    const double cy = layout_.core_centre_y;
-    const double fan_r = layout_.fan_arc_radius;
-    const double start_angle = layout_.fan_start_angle;
-    const double angle_step = (layout_.fan_end_angle - layout_.fan_start_angle) / 3.0;
+    // Set initial animation state (emerges from off-screen left)
+    current_cx_ = -150.0;
+    current_cy_ = layout_.core_centre_y;
+    current_core_radius_ = layout_.core_radius_small;
+    current_slice_r_in_ = layout_.core_radius_small + 2.0;
+    current_slice_r_out_ = layout_.core_radius_small + 2.0 + layout_.slice_depth_attached;
+    current_alpha_ = 0.0;
+    current_wallpaper_alpha_ = 0.0;
 
-    for (int i = 0; i < 3; ++i) {
-        double angle = start_angle + i * angle_step;
-        radial_target_x_[i] = cx + fan_r * std::cos(angle);
-        radial_target_y_[i] = cy + fan_r * std::sin(angle);
-        radial_progress_[i] = 0.0;
-    }
-
-    // Create window and layer surface if not exists
     setup_window(app);
 
-    // Add tick callback for animations before making the window visible.
     if (tick_callback_id_ == 0) {
         tick_callback_id_ = gtk_widget_add_tick_callback(canvas_, tick_callback, this, nullptr);
     }
 
-    // Use gtk_widget_set_visible() to show the window and ensure the realize/map
-    // handlers fire at the correct time in the Wayland surface lifecycle.
-    // The handlers registered in setup_window() will call force_transparent_surface().
     gtk_widget_set_visible(GTK_WIDGET(window_), TRUE);
-    
-    // Immediately queue a draw to render the transparent canvas.
     gtk_widget_queue_draw(canvas_);
-    
-    // Schedule transparency retry to ensure the empty opaque region persists
-    // through multiple compositor buffer cycles.
     schedule_transparency_retry();
 }
 
@@ -177,7 +186,6 @@ void ManaCoresSelector::dismiss() {
     if (window_) {
         gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
     }
-    // Fire dismiss callback to let shell restore workspace + bar
     if (dismiss_callback_) {
         dismiss_callback_();
     }
@@ -203,7 +211,6 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
                 border: none;
                 box-shadow: none;
             }
-
             .realmheart-mana-cores-canvas {
                 background: transparent;
                 background-color: transparent;
@@ -217,7 +224,6 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
         g_object_unref(provider);
     }
 
-    // Apply layer surface with full output coverage
     ui::LayerSurfaceSpec spec;
     spec.surface_namespace = "realmheart-mana-cores";
     spec.layer = ui::LayerSurfaceLevel::Overlay;
@@ -240,15 +246,11 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
     gtk_widget_add_css_class(root, "realmheart-mana-cores-window");
     gtk_widget_remove_css_class(root, "background");
 
-    // Establish an empty opaque region as soon as the Wayland surface exists,
-    // and repeat it on map because GTK may recompute opaque regions while the
-    // widget tree changes between hidden and visible states.
     g_signal_connect(
         window_,
         "realize",
         G_CALLBACK(+[](GtkWidget* widget, gpointer) {
             force_transparent_surface(widget);
-            return;
         }),
         nullptr
     );
@@ -257,12 +259,10 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
         "map",
         G_CALLBACK(+[](GtkWidget* widget, gpointer) {
             force_transparent_surface(widget);
-            return;
         }),
         nullptr
     );
 
-    // Create canvas BEFORE presenting the window.
     canvas_ = gtk_drawing_area_new();
     gtk_widget_add_css_class(GTK_WIDGET(canvas_), "realmheart-mana-cores-canvas");
     gtk_widget_remove_css_class(GTK_WIDGET(canvas_), "background");
@@ -274,9 +274,6 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
     gtk_window_set_child(window_, root);
     gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
 
-    // NOW present the window after canvas is set as child
-    // (present() will call gtk_window_present after setup_window returns)
-    // Connect keyboard events
     GtkEventController* key_controller = gtk_event_controller_key_new();
     g_signal_connect(key_controller, "key-pressed", G_CALLBACK(+[](GtkEventControllerKey*, guint keyval, guint, GdkModifierType, gpointer data) -> gboolean {
         auto* self = static_cast<ManaCoresSelector*>(data);
@@ -284,331 +281,438 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
     }), this);
     gtk_widget_add_controller(GTK_WIDGET(window_), key_controller);
 
-    // Connect close signal
     g_signal_connect(window_, "close-request", G_CALLBACK(+[](GtkWindow*, gpointer data) -> gboolean {
         auto* self = static_cast<ManaCoresSelector*>(data);
         self->dismiss();
-        return TRUE;  // Prevent default close
+        return TRUE;
     }), this);
 }
 
 void ManaCoresSelector::set_current_wallpaper(GdkPixbuf* pixbuf) {
-    current_wallpaper_ = pixbuf;
+    if (current_core_pixbuf_ != nullptr) {
+        g_object_unref(current_core_pixbuf_);
+    }
+    current_core_pixbuf_ = pixbuf ? GDK_PIXBUF(g_object_ref(pixbuf)) : nullptr;
 }
 
 void ManaCoresSelector::set_next_wallpapers(std::array<GdkPixbuf*, 3> pixbufs) {
-    next_wallpapers_ = pixbufs;
+    for (size_t i = 0; i < 3; ++i) {
+        if (slice_pixbufs_[i] != nullptr) {
+            g_object_unref(slice_pixbufs_[i]);
+        }
+        slice_pixbufs_[i] = pixbufs[i] ? GDK_PIXBUF(g_object_ref(pixbufs[i])) : nullptr;
+    }
 }
 
 void ManaCoresSelector::load_wallpapers_from_library(const std::filesystem::path& current_path) {
     WallpaperLibrary library;
     auto discovery = library.discover();
-    
-    // Find the current wallpaper index in the discovered paths
-    int current_idx = 0;
-    for (size_t i = 0; i < discovery.paths.size(); ++i) {
-        if (discovery.paths[i] == current_path) {
-            current_idx = static_cast<int>(i);
+    all_wallpaper_paths_ = discovery.paths;
+
+    current_wallpaper_index_ = 0;
+    for (size_t i = 0; i < all_wallpaper_paths_.size(); ++i) {
+        if (all_wallpaper_paths_[i] == current_path) {
+            current_wallpaper_index_ = static_cast<int>(i);
             break;
         }
     }
-    
-    current_wallpaper_index_ = current_idx;
-    
-    // Load the CURRENT wallpaper for the core
+
+    reload_pixbufs();
+}
+
+void ManaCoresSelector::reload_pixbufs() {
+    if (all_wallpaper_paths_.empty()) return;
+
+    clear_pixbufs();
+
+    const int total = static_cast<int>(all_wallpaper_paths_.size());
+    const int core_target_dim = static_cast<int>(layout_.core_radius_expanded * 2.2);
+    const int slice_target_dim = static_cast<int>((layout_.core_radius_expanded + layout_.slice_depth_expanded) * 2.0);
+
+    // 1. Current Core Wallpaper
     {
+        const auto& path = all_wallpaper_paths_[current_wallpaper_index_];
         GError* error = nullptr;
-        double scale = layout_.canvas_height / 1080.0;
-        int target_size = static_cast<int>(layout_.core_radius * 2 * scale);
-        GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file_at_scale(
-            current_path.string().c_str(),
-            target_size, target_size, TRUE, &error
+        current_core_pixbuf_ = gdk_pixbuf_new_from_file_at_scale(
+            path.string().c_str(),
+            core_target_dim, core_target_dim, FALSE, &error
         );
-        if (pixbuf != nullptr) {
-            current_wallpaper_ = pixbuf;
-        } else if (error) {
-            g_error_free(error);
-        }
+        if (error) g_error_free(error);
+
+        // Also load high-res for fullscreen apply reverse bloom
+        error = nullptr;
+        apply_fullscreen_pixbuf_ = gdk_pixbuf_new_from_file_at_scale(
+            path.string().c_str(),
+            static_cast<int>(layout_.canvas_width),
+            static_cast<int>(layout_.canvas_height),
+            FALSE, &error
+        );
+        if (error) g_error_free(error);
     }
-    
-    // Load the next 3 wallpapers as pixbufs
-    for (int i = 0; i < 3; ++i) {
-        int idx = (current_idx + 1 + i) % static_cast<int>(discovery.paths.size());
-        if (idx < 0 || idx >= static_cast<int>(discovery.paths.size())) {
-            next_wallpaper_paths_[i].clear();
-            next_wallpapers_[i] = nullptr;
-            continue;
-        }
-        
-        next_wallpaper_paths_[i] = discovery.paths[idx].string();
-        // Load pixbuf - cover-crop at radial display size
-        GError* error = nullptr;
-        double scale = layout_.canvas_height / 1080.0;
-        int target_size = static_cast<int>(layout_.radial_radius * 2 * scale);
-        GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file_at_scale(
-            discovery.paths[idx].string().c_str(),
-            target_size, target_size, TRUE, &error
-        );
-        if (pixbuf != nullptr) {
-            next_wallpapers_[i] = pixbuf;
-        } else {
-            g_error_free(error);
-            next_wallpapers_[i] = nullptr;
+
+    // 2. Three Slices:
+    // Slice 0 (Silver, Top): Previous Wallpaper (idx - 1)
+    // Slice 1 (Yellow, Middle): Next Wallpaper (idx + 1)
+    // Slice 2 (Orange, Bottom): Third Wallpaper (idx + 2)
+    const std::array<int, 3> slice_indices = {
+        (current_wallpaper_index_ - 1 + total) % total,
+        (current_wallpaper_index_ + 1) % total,
+        (current_wallpaper_index_ + 2) % total
+    };
+
+    for (size_t i = 0; i < 3; ++i) {
+        int idx = slice_indices[i];
+        if (idx >= 0 && idx < total) {
+            const auto& path = all_wallpaper_paths_[idx];
+            GError* error = nullptr;
+            slice_pixbufs_[i] = gdk_pixbuf_new_from_file_at_scale(
+                path.string().c_str(),
+                slice_target_dim, slice_target_dim, FALSE, &error
+            );
+            if (error) g_error_free(error);
         }
     }
 }
 
 void ManaCoresSelector::cycle_wallpaper(int direction) {
-    // Cycle the wallpaper selection: shift the 3 previews by `direction`
-    // direction: -1 = left (previous), +1 = right (next)
-    if (next_wallpaper_paths_[0].empty()) return;
-    
-    // Reload wallpapers shifted by direction
-    WallpaperLibrary library;
-    auto discovery = library.discover();
-    
-    // Adjust current index
-    current_wallpaper_index_ = (current_wallpaper_index_ + direction + 
-        static_cast<int>(discovery.paths.size())) % static_cast<int>(discovery.paths.size());
-    
-    // Reload CURRENT wallpaper for core
-    const std::filesystem::path& new_current_path = discovery.paths[current_wallpaper_index_];
-    {
-        GError* error = nullptr;
-        double scale = layout_.canvas_height / 1080.0;
-        int target_size = static_cast<int>(layout_.core_radius * 2 * scale);
-        GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file_at_scale(
-            new_current_path.string().c_str(),
-            target_size, target_size, TRUE, &error
-        );
-        if (pixbuf != nullptr) {
-            if (current_wallpaper_ != nullptr) {
-                g_object_unref(current_wallpaper_);
-            }
-            current_wallpaper_ = pixbuf;
-        } else if (error) {
-            g_error_free(error);
-        }
-    }
-    
-    // Reload next 3
-    for (int i = 0; i < 3; ++i) {
-        int idx = (current_wallpaper_index_ + 1 + i) % static_cast<int>(discovery.paths.size());
-        next_wallpaper_paths_[i] = discovery.paths[idx].string();
-        
-        GError* error = nullptr;
-        double scale = layout_.canvas_height / 1080.0;
-        int target_size = static_cast<int>(layout_.radial_radius * 2 * scale);
-        GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file_at_scale(
-            discovery.paths[idx].string().c_str(),
-            target_size, target_size, TRUE, &error
-        );
-        if (pixbuf != nullptr) {
-            // Free old pixbuf
-            if (next_wallpapers_[i] != nullptr) {
-                g_object_unref(next_wallpapers_[i]);
-            }
-            next_wallpapers_[i] = pixbuf;
-        } else {
-            g_error_free(error);
-        }
-    }
-    
+    if (all_wallpaper_paths_.empty()) return;
+
+    const int total = static_cast<int>(all_wallpaper_paths_.size());
+    current_wallpaper_index_ = (current_wallpaper_index_ + direction + total) % total;
+
+    reload_pixbufs();
     queue_redraw();
 }
 
-void ManaCoresSelector::force_apply(const std::string& /*wallpaper_path*/) {
-    // Apply a specific wallpaper immediately (bypass selection)
-    begin_apply();
-    // The apply callback will fire when the animation completes
-}
+void ManaCoresSelector::draw_pixbuf_cover(
+    cairo_t* cr,
+    GdkPixbuf* pixbuf,
+    double x, double y,
+    double width, double height,
+    double alpha
+) {
+    if (pixbuf == nullptr || width <= 0.0 || height <= 0.0 || alpha <= 0.0) return;
 
-void ManaCoresSelector::draw_core(cairo_t* cr, double alpha) {
-    if (alpha <= 0.0) return;
+    int pw = gdk_pixbuf_get_width(pixbuf);
+    int ph = gdk_pixbuf_get_height(pixbuf);
+    if (pw <= 0 || ph <= 0) return;
 
-    const double cx = layout_.core_centre_x;
-    const double cy = layout_.core_centre_y;
-    const double r = layout_.core_radius;
-    const double border = layout_.border_thickness;
-    const double glow = layout_.glow_extent;
+    double scale = std::max(width / static_cast<double>(pw), height / static_cast<double>(ph));
+    double rw = pw * scale;
+    double rh = ph * scale;
+    double rx = x + (width - rw) * 0.5;
+    double ry = y + (height - rh) * 0.5;
 
-    // Outer glow - white with soft falloff
     cairo_save(cr);
-    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.35 * alpha);
-    cairo_set_line_width(cr, border + glow);
-    cairo_arc(cr, cx, cy, r, 0, 2 * std::numbers::pi);
-    cairo_stroke(cr);
-    cairo_restore(cr);
-
-    // Hard border - crisp white
-    cairo_save(cr);
-    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.95 * alpha);
-    cairo_set_line_width(cr, border);
-    cairo_arc(cr, cx, cy, r, 0, 2 * std::numbers::pi);
-    cairo_stroke(cr);
-    cairo_restore(cr);
-}
-
-void ManaCoresSelector::draw_core_animated(cairo_t* cr, double alpha, double radius, double cx, double cy) {
-    if (alpha <= 0.0 || radius <= 0.0) return;
-
-    const double border = layout_.border_thickness;
-    const double glow = layout_.glow_extent;
-
-    // Outer glow - white with soft falloff
-    cairo_save(cr);
-    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.35 * alpha);
-    cairo_set_line_width(cr, border + glow);
-    cairo_arc(cr, cx, cy, radius, 0, 2 * std::numbers::pi);
-    cairo_stroke(cr);
-    cairo_restore(cr);
-
-    // Hard border - crisp white
-    cairo_save(cr);
-    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.95 * alpha);
-    cairo_set_line_width(cr, border);
-    cairo_arc(cr, cx, cy, radius, 0, 2 * std::numbers::pi);
-    cairo_stroke(cr);
+    cairo_translate(cr, rx, ry);
+    cairo_scale(cr, scale, scale);
+    G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+    gdk_cairo_set_source_pixbuf(cr, pixbuf, 0.0, 0.0);
+    G_GNUC_END_IGNORE_DEPRECATIONS
+    if (alpha >= 0.999) {
+        cairo_paint(cr);
+    } else {
+        cairo_paint_with_alpha(cr, alpha);
+    }
     cairo_restore(cr);
 }
 
-void ManaCoresSelector::draw_radials(cairo_t* cr, double alpha) {
-    if (alpha <= 0.0) return;
+void ManaCoresSelector::draw_cardinal_stars(
+    cairo_t* cr,
+    double cx, double cy,
+    double radius,
+    double alpha
+) {
+    if (alpha <= 0.0 || radius <= 10.0) return;
 
-    const double border = layout_.border_thickness;
-    const double glow = layout_.glow_extent;
-    const double r = layout_.radial_radius;
-    const double base_x = layout_.radials_park_x;
-    const double base_y = layout_.radials_park_y;
-    const double spacing = layout_.radial_spacing;
+    const double spike_len = layout_.star_spike_length;
+    // 4 Cardinal positions: North (-pi/2), East (0), South (pi/2), West (pi)
+    const std::array<double, 4> angles = {
+        -std::numbers::pi * 0.5,
+        0.0,
+        std::numbers::pi * 0.5,
+        std::numbers::pi
+    };
 
-    for (int i = 0; i < 3; ++i) {
-        // Apply idle floating offsets
-        double offset_x = 0.0, offset_y = 0.0;
-        if (state_ == State::Idle && idle_start_micros_ > 0) {
-            double t = static_cast<double>(g_get_monotonic_time() - idle_start_micros_) / 1'000'000.0;
-            const auto& params = idle_float_params_[i];
-            offset_x = params.amplitude_x * std::sin(2.0 * std::numbers::pi * t / params.period_x + params.phase_x);
-            offset_y = params.amplitude_y * std::sin(2.0 * std::numbers::pi * t / params.period_y + params.phase_y);
-        }
+    for (double theta : angles) {
+        double px = cx + radius * std::cos(theta);
+        double py = cy + radius * std::sin(theta);
 
-        // Apply hover animation
-        double hover_scale = 1.0;
-        double hover_glow_boost = 1.0;
-        if (i == hovered_radial_ && state_ == State::Idle) {
-            double t = static_cast<double>(g_get_monotonic_time() - idle_start_micros_) / 1'000'000.0;
-            hover_scale = 1.1;  // 10% scale up
-            hover_glow_boost = 1.0 + 0.2 * std::sin(t * 8.0);  // Pulse at 8 Hz
-        }
+        double cos_t = std::cos(theta);
+        double sin_t = std::sin(theta);
+        double perp_x = -sin_t;
+        double perp_y = cos_t;
 
-        const double cx = base_x + offset_x;
-        const double cy = base_y + (i - 1) * spacing + offset_y;
-        const double draw_r = r * hover_scale;
-        const auto& colour = layout_.kRadialPalette[i];
+        // Diamond vertices
+        double tip_out_x = px + cos_t * spike_len;
+        double tip_out_y = py + sin_t * spike_len;
+        double tip_in_x = px - cos_t * (spike_len * 0.55);
+        double tip_in_y = py - sin_t * (spike_len * 0.55);
+        double tip_left_x = px + perp_x * (spike_len * 0.45);
+        double tip_left_y = py + perp_y * (spike_len * 0.45);
+        double tip_right_x = px - perp_x * (spike_len * 0.45);
+        double tip_right_y = py - perp_y * (spike_len * 0.45);
 
-        // Outer glow - radial's mana colour with hover boost
         cairo_save(cr);
-        cairo_set_source_rgba(cr, colour[0], colour[1], colour[2], 0.35 * alpha * hover_glow_boost);
-        cairo_set_line_width(cr, border + glow * hover_glow_boost);
-        cairo_arc(cr, cx, cy, draw_r, 0, 2 * std::numbers::pi);
-        cairo_stroke(cr);
-        cairo_restore(cr);
+        cairo_move_to(cr, tip_out_x, tip_out_y);
+        cairo_line_to(cr, tip_left_x, tip_left_y);
+        cairo_line_to(cr, tip_in_x, tip_in_y);
+        cairo_line_to(cr, tip_right_x, tip_right_y);
+        cairo_close_path(cr);
 
-        // Hard border
-        cairo_save(cr);
-        cairo_set_source_rgba(cr, colour[0], colour[1], colour[2], 0.95 * alpha);
-        cairo_set_line_width(cr, border);
-        cairo_arc(cr, cx, cy, draw_r, 0, 2 * std::numbers::pi);
+        // Bright fill with cyan-white core
+        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.95 * alpha);
+        cairo_fill_preserve(cr);
+
+        // Glow stroke
+        cairo_set_source_rgba(cr, 0.85, 0.92, 1.0, 0.8 * alpha);
+        cairo_set_line_width(cr, 1.5);
         cairo_stroke(cr);
+
+        // Center sparkle
+        cairo_arc(cr, px, py, 2.5, 0, 2.0 * std::numbers::pi);
+        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0 * alpha);
+        cairo_fill(cr);
+
         cairo_restore(cr);
     }
 }
 
-void ManaCoresSelector::draw_radials_animated(cairo_t* cr, double alpha) {
-    if (alpha <= 0.0) return;
+void ManaCoresSelector::draw_core(
+    cairo_t* cr,
+    double cx, double cy,
+    double radius,
+    double alpha,
+    double wallpaper_alpha
+) {
+    if (radius <= 0.0 || alpha <= 0.0) return;
+
+    // 1. Wallpaper inside core
+    if (current_core_pixbuf_ != nullptr && wallpaper_alpha > 0.0) {
+        cairo_save(cr);
+        cairo_arc(cr, cx, cy, radius, 0, 2.0 * std::numbers::pi);
+        cairo_clip(cr);
+
+        draw_pixbuf_cover(
+            cr,
+            current_core_pixbuf_,
+            cx - radius, cy - radius,
+            radius * 2.0, radius * 2.0,
+            wallpaper_alpha * alpha
+        );
+
+        // Subtle dark rim vignette
+        cairo_pattern_t* vignette = cairo_pattern_create_radial(
+            cx, cy, radius * 0.75,
+            cx, cy, radius
+        );
+        cairo_pattern_add_color_stop_rgba(vignette, 0.0, 0.0, 0.0, 0.0, 0.0);
+        cairo_pattern_add_color_stop_rgba(vignette, 1.0, 0.0, 0.0, 0.0, 0.35 * alpha);
+        cairo_set_source(cr, vignette);
+        cairo_paint(cr);
+        cairo_pattern_destroy(vignette);
+
+        cairo_restore(cr);
+    }
 
     const double border = layout_.border_thickness;
     const double glow = layout_.glow_extent;
-    const double r = layout_.radial_radius;
 
-    for (int i = 0; i < 3; ++i) {
-        const double cx = radial_target_x_[i];
-        const double cy = radial_target_y_[i];
-        const auto& colour = layout_.kRadialPalette[i];
+    // 2. White Mana Core Outer Glow
+    cairo_save(cr);
+    cairo_set_source_rgba(cr, 0.88, 0.94, 1.0, 0.35 * alpha);
+    cairo_set_line_width(cr, border + glow);
+    cairo_arc(cr, cx, cy, radius, 0, 2.0 * std::numbers::pi);
+    cairo_stroke(cr);
+    cairo_restore(cr);
 
-        // Outer glow - radial's mana colour
+    // Inner Glow
+    cairo_save(cr);
+    cairo_set_source_rgba(cr, 0.95, 0.98, 1.0, 0.25 * alpha);
+    cairo_set_line_width(cr, border + (glow * 0.5));
+    cairo_arc(cr, cx, cy, radius, 0, 2.0 * std::numbers::pi);
+    cairo_stroke(cr);
+    cairo_restore(cr);
+
+    // Crisp Hard Border
+    cairo_save(cr);
+    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.95 * alpha);
+    cairo_set_line_width(cr, border);
+    cairo_arc(cr, cx, cy, radius, 0, 2.0 * std::numbers::pi);
+    cairo_stroke(cr);
+    cairo_restore(cr);
+
+    // 3. Four Cardinal Diamond Star Ornaments
+    if (wallpaper_alpha > 0.1) {
+        draw_cardinal_stars(cr, cx, cy, radius, alpha * wallpaper_alpha);
+    }
+}
+
+void ManaCoresSelector::draw_radial_slices(
+    cairo_t* cr,
+    double cx, double cy,
+    double r_in, double r_out,
+    double alpha,
+    double wallpaper_alpha
+) {
+    if (r_in <= 0.0 || r_out <= r_in || alpha <= 0.0) return;
+
+    const double border = layout_.border_thickness;
+    const double glow = layout_.glow_extent;
+
+    for (size_t i = 0; i < 3; ++i) {
+        const auto& geom = layout_.slices[i];
+        const auto& color = layout_.kRadialPalette[i];
+        GdkPixbuf* pixbuf = slice_pixbufs_[i];
+
+        double slice_cx = cx;
+        double slice_cy = cy;
+        double slice_r_in = r_in;
+        double slice_r_out = r_out;
+        double glow_boost = 1.0;
+
+        // Hover animation for selected radial
+        if (state_ == State::Idle && hovered_radial_ == static_cast<int>(i)) {
+            double t = static_cast<double>(g_get_monotonic_time() - idle_start_micros_) / 1'000'000.0;
+            glow_boost = 1.0 + 0.3 * std::sin(t * 8.0);
+            double pop = 6.0 * (layout_.canvas_height / 1080.0);
+            slice_cx += pop * std::cos(geom.mid_angle);
+            slice_cy += pop * std::sin(geom.mid_angle);
+        }
+
+        // 1. Wallpaper preview inside slice
+        if (pixbuf != nullptr && wallpaper_alpha > 0.0) {
+            cairo_save(cr);
+            append_annular_sector_path(
+                cr, slice_cx, slice_cy,
+                slice_r_in, slice_r_out,
+                geom.start_angle, geom.end_angle
+            );
+            cairo_clip(cr);
+
+            // Midpoint of slice
+            double mid_r = (slice_r_in + slice_r_out) * 0.5;
+            double mid_x = slice_cx + mid_r * std::cos(geom.mid_angle);
+            double mid_y = slice_cy + mid_r * std::sin(geom.mid_angle);
+            double bb_size = (slice_r_out - slice_r_in) * 1.6;
+
+            draw_pixbuf_cover(
+                cr,
+                pixbuf,
+                mid_x - bb_size * 0.5, mid_y - bb_size * 0.5,
+                bb_size, bb_size,
+                wallpaper_alpha * alpha
+            );
+
+            // Subtle dark tint to contrast border glow
+            cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.22 * alpha);
+            cairo_paint(cr);
+
+            cairo_restore(cr);
+        }
+
+        // 2. Coloured border & glow
         cairo_save(cr);
-        cairo_set_source_rgba(cr, colour[0], colour[1], colour[2], 0.35 * alpha);
-        cairo_set_line_width(cr, border + glow);
-        cairo_arc(cr, cx, cy, r, 0, 2 * std::numbers::pi);
+
+        // Outer glow
+        append_annular_sector_path(
+            cr, slice_cx, slice_cy,
+            slice_r_in, slice_r_out,
+            geom.start_angle, geom.end_angle
+        );
+        cairo_set_source_rgba(cr, color[0], color[1], color[2], 0.38 * alpha * glow_boost);
+        cairo_set_line_width(cr, border + glow * glow_boost);
+        cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
         cairo_stroke(cr);
-        cairo_restore(cr);
 
-        // Hard border
-        cairo_save(cr);
-        cairo_set_source_rgba(cr, colour[0], colour[1], colour[2], 0.95 * alpha);
+        // Crisp border
+        append_annular_sector_path(
+            cr, slice_cx, slice_cy,
+            slice_r_in, slice_r_out,
+            geom.start_angle, geom.end_angle
+        );
+        cairo_set_source_rgba(cr, color[0], color[1], color[2], 0.95 * alpha);
         cairo_set_line_width(cr, border);
-        cairo_arc(cr, cx, cy, r, 0, 2 * std::numbers::pi);
+        cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
         cairo_stroke(cr);
+
         cairo_restore(cr);
     }
 }
 
-void ManaCoresSelector::draw(GtkDrawingArea* area G_GNUC_UNUSED, cairo_t* cr, int width G_GNUC_UNUSED, int height G_GNUC_UNUSED) {
+void ManaCoresSelector::draw_reverse_bloom(
+    cairo_t* cr,
+    double cx, double cy,
+    double mask_radius
+) {
+    if (apply_fullscreen_pixbuf_ == nullptr) return;
+
+    cairo_save(cr);
+
+    // Clip to region OUTSIDE the shrinking circle hole
+    cairo_rectangle(cr, 0, 0, layout_.canvas_width, layout_.canvas_height);
+    if (mask_radius > 1.0) {
+        cairo_arc_negative(cr, cx, cy, mask_radius, 2.0 * std::numbers::pi, 0.0);
+    }
+    cairo_clip(cr);
+
+    // Render fullscreen new wallpaper
+    draw_pixbuf_cover(
+        cr,
+        apply_fullscreen_pixbuf_,
+        0, 0,
+        layout_.canvas_width, layout_.canvas_height,
+        1.0
+    );
+
+    // Glowing border along the inner reveal edge
+    if (mask_radius > 6.0) {
+        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.85);
+        cairo_set_line_width(cr, 3.0);
+        cairo_arc(cr, cx, cy, mask_radius, 0, 2.0 * std::numbers::pi);
+        cairo_stroke(cr);
+
+        cairo_set_source_rgba(cr, 0.82, 0.92, 1.0, 0.35);
+        cairo_set_line_width(cr, 18.0);
+        cairo_arc(cr, cx, cy, mask_radius, 0, 2.0 * std::numbers::pi);
+        cairo_stroke(cr);
+    }
+
+    cairo_restore(cr);
+}
+
+void ManaCoresSelector::draw(GtkDrawingArea*, cairo_t* cr, int, int) {
     if (!visible_) return;
 
-    // Set transparent background - ensure nothing opaque is left from previous frames
+    // Clear buffer to fully transparent
     cairo_save(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
     cairo_paint(cr);
     cairo_restore(cr);
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 
-    // Keep the selector transparent except for its circular mana-core elements.
-    // The previous implementation left a default GTK dark background visible,
-    // which covered the desktop and made the selector look like a fullscreen
-    // opaque overlay.
-    cairo_save(cr);
-    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.0);
-    cairo_paint(cr);
-    cairo_restore(cr);
+    // In Applying phase: draw reverse radial bloom first
+    if (state_ == State::Applying && apply_mask_radius_ >= 0.0) {
+        draw_reverse_bloom(cr, layout_.core_centre_x, layout_.core_centre_y, apply_mask_radius_);
+    }
 
-    // Draw based on state
-    switch (state_) {
-    case State::Assembling:
-        draw_core_animated(cr, radial_progress_[0], core_current_radius_, layout_.core_centre_x, layout_.core_centre_y);
-        draw_radials_animated(cr, radial_progress_[0]);
-        break;
-    case State::Idle:
-        draw_core(cr, 1.0);
-        draw_radials(cr, 1.0);
-        break;
-    case State::Applying: {
-        // Draw the apply animation with radial bloom effect
-        double alpha = 1.0 - apply_progress_ * 0.5;  // Fade out slightly
-        draw_core_animated(cr, alpha, core_current_radius_, layout_.core_centre_x, layout_.core_centre_y);
-        draw_radials_animated(cr, alpha);
-        
-        // Draw Phase 10 FX during apply: edge glow, motes, and joining flash
-        draw_phase10_edge_glow(cr);
-        draw_phase10_motes(cr);
-        
-        // Joining flash at core center (mid-apply)
-        if (apply_progress_ > 0.3 && apply_progress_ < 0.7) {
-            draw_joining_flash(cr, layout_.core_centre_x, layout_.core_centre_y, apply_progress_);
-        }
-        break;
-    }
-    case State::Dismissing: {
-        double alpha = radial_progress_[0];  // Fade out
-        if (alpha > 0.0) {
-            draw_core_animated(cr, alpha, core_current_radius_, layout_.core_centre_x, layout_.core_centre_y);
-            draw_radials_animated(cr, alpha);
-        }
-        break;
-    }
-    default:
-        break;
+    // Draw central core and radial slices
+    if (current_alpha_ > 0.0) {
+        draw_core(
+            cr,
+            current_cx_, current_cy_,
+            current_core_radius_,
+            current_alpha_,
+            current_wallpaper_alpha_
+        );
+
+        draw_radial_slices(
+            cr,
+            current_cx_, current_cy_,
+            current_slice_r_in_, current_slice_r_out_,
+            current_alpha_,
+            current_wallpaper_alpha_
+        );
     }
 }
 
@@ -617,9 +721,7 @@ void ManaCoresSelector::draw_callback(GtkDrawingArea* area, cairo_t* cr, int wid
     self->draw(area, cr, width, height);
 }
 
-gboolean ManaCoresSelector::tick_callback(GtkWidget* widget, GdkFrameClock* frame_clock, gpointer user_data) {
-    (void)widget;
-    (void)frame_clock;
+gboolean ManaCoresSelector::tick_callback(GtkWidget*, GdkFrameClock*, gpointer user_data) {
     auto* self = static_cast<ManaCoresSelector*>(user_data);
     if (!self->visible_) return G_SOURCE_REMOVE;
 
@@ -630,91 +732,77 @@ gboolean ManaCoresSelector::tick_callback(GtkWidget* widget, GdkFrameClock* fram
 
 void ManaCoresSelector::update_animations(guint64 now_micros) {
     if (state_ == State::Assembling) {
-        const double elapsed = static_cast<double>(now_micros - animation_start_micros_) / 1'000'000.0;  // seconds
+        const double elapsed = static_cast<double>(now_micros - animation_start_micros_) / 1'000'000.0;
 
         switch (assemble_phase_) {
-        case AssemblePhase::CoreIn: {
-            // Core fades and scales in over 250ms
-            constexpr double kCoreInDuration = 0.25;
-            double progress = std::min(elapsed / kCoreInDuration, 1.0);
-            // Quadratic ease-out: t * (2 - t)
-            progress = progress * (2.0 - progress);
+        case AssemblePhase::Emerge: {
+            // Emerge: small core with attached slices slides from off-screen left to center (350ms)
+            constexpr double kEmergeDuration = 0.35;
+            double progress = std::min(elapsed / kEmergeDuration, 1.0);
+            double ease = progress * (2.0 - progress);
 
-            core_current_radius_ = layout_.core_radius * progress;
-            radial_progress_[0] = progress;  // Use first radial's progress as alpha for core
+            current_cx_ = -150.0 + (layout_.core_centre_x + 150.0) * ease;
+            current_cy_ = layout_.core_centre_y;
+            current_core_radius_ = layout_.core_radius_small;
+            current_slice_r_in_ = layout_.core_radius_small + 2.0;
+            current_slice_r_out_ = layout_.core_radius_small + 2.0 + layout_.slice_depth_attached;
+            current_alpha_ = ease;
+            current_wallpaper_alpha_ = 0.0;
 
             if (progress >= 1.0) {
-                assemble_phase_ = AssemblePhase::FanIn;
+                assemble_phase_ = AssemblePhase::Formation;
                 animation_start_micros_ = now_micros;
-                // Reset radial progress for fan-in
-                radial_progress_[0] = radial_progress_[1] = radial_progress_[2] = 0.0;
             }
             break;
         }
+        case AssemblePhase::Formation: {
+            // Brief settle / pulse at center (150ms)
+            constexpr double kFormationDuration = 0.15;
+            double progress = std::min(elapsed / kFormationDuration, 1.0);
 
-        case AssemblePhase::FanIn: {
-            // Radials fan in sequentially: each takes 200ms, starts 80ms after previous
-            constexpr double kFanInDuration = 0.20;
-            constexpr double kFanInStagger = 0.08;
+            current_cx_ = layout_.core_centre_x;
+            current_cy_ = layout_.core_centre_y;
+            current_core_radius_ = layout_.core_radius_small;
+            current_slice_r_in_ = layout_.core_radius_small + 2.0;
+            current_slice_r_out_ = layout_.core_radius_small + 2.0 + layout_.slice_depth_attached;
+            current_alpha_ = 1.0;
+            current_wallpaper_alpha_ = 0.0;
 
-            for (int i = 0; i < 3; ++i) {
-                double start_delay = i * kFanInStagger;
-                double radial_elapsed = elapsed - start_delay;
-                if (radial_elapsed <= 0) {
-                    radial_progress_[i] = 0.0;
-                } else {
-                    double progress = std::min(radial_elapsed / kFanInDuration, 1.0);
-                    // Quadratic ease-out
-                    progress = progress * (2.0 - progress);
-                    radial_progress_[i] = progress;
-                }
-            }
-
-            // Check if all radials are done (last one + its duration + stagger)
-            double total_fan_time = kFanInDuration + 2 * kFanInStagger;
-            if (elapsed >= total_fan_time) {
-                assemble_phase_ = AssemblePhase::Detach;
+            if (progress >= 1.0) {
+                assemble_phase_ = AssemblePhase::Expansion;
                 animation_start_micros_ = now_micros;
-                // Set up detach targets
-                for (int i = 0; i < 3; ++i) {
-                    radial_target_x_[i] = layout_.radials_park_x;
-                    radial_target_y_[i] = layout_.radials_park_y + (i - 1) * layout_.radial_spacing;
-                }
             }
             break;
         }
+        case AssemblePhase::Expansion: {
+            // Expansion: Core expands to full radius; slices detach and move to right parked radius (450ms)
+            constexpr double kExpansionDuration = 0.45;
+            double progress = std::min(elapsed / kExpansionDuration, 1.0);
+            // Cubic ease-out
+            double ease = 1.0 - std::pow(1.0 - progress, 3);
 
-        case AssemblePhase::Detach: {
-            // Radials slide from fan positions to parked stack, core expands to full radius
-            constexpr double kDetachDuration = 0.25;
-            double progress = std::min(elapsed / kDetachDuration, 1.0);
-            progress = progress * (2.0 - progress);
+            current_cx_ = layout_.core_centre_x;
+            current_cy_ = layout_.core_centre_y;
 
-            // Interpolate radial positions
-            const double cx = layout_.core_centre_x;
-            const double cy = layout_.core_centre_y;
-            const double fan_r = layout_.fan_arc_radius;
-            const double start_angle = layout_.fan_start_angle;
-            const double angle_step = (layout_.fan_end_angle - layout_.fan_start_angle) / 3.0;
+            // Expand core
+            current_core_radius_ = layout_.core_radius_small +
+                (layout_.core_radius_expanded - layout_.core_radius_small) * ease;
 
-            for (int i = 0; i < 3; ++i) {
-                double fan_angle = start_angle + i * angle_step;
-                double fan_x = cx + fan_r * std::cos(fan_angle);
-                double fan_y = cy + fan_r * std::sin(fan_angle);
-                double park_x = layout_.radials_park_x;
-                double park_y = layout_.radials_park_y + (i - 1) * layout_.radial_spacing;
+            // Detach slices
+            double target_r_in = layout_.core_radius_expanded + layout_.slice_gap;
+            double target_r_out = target_r_in + layout_.slice_depth_expanded;
+            double start_r_in = layout_.core_radius_small + 2.0;
+            double start_r_out = start_r_in + layout_.slice_depth_attached;
 
-                radial_target_x_[i] = fan_x + (park_x - fan_x) * progress;
-                radial_target_y_[i] = fan_y + (park_y - fan_y) * progress;
-            }
+            current_slice_r_in_ = start_r_in + (target_r_in - start_r_in) * ease;
+            current_slice_r_out_ = start_r_out + (target_r_out - start_r_out) * ease;
 
-            // Core expands to full radius
-            core_current_radius_ = layout_.core_radius;
+            current_alpha_ = 1.0;
+            current_wallpaper_alpha_ = ease;
 
             if (progress >= 1.0) {
                 state_ = State::Idle;
                 idle_start_micros_ = now_micros;
-                // Initialize idle floating
                 start_idle_animation();
             }
             break;
@@ -722,106 +810,80 @@ void ManaCoresSelector::update_animations(guint64 now_micros) {
         }
 
         queue_redraw();
+    } else if (state_ == State::Idle) {
+        current_cx_ = layout_.core_centre_x;
+        current_cy_ = layout_.core_centre_y;
+        current_core_radius_ = layout_.core_radius_expanded;
+        current_slice_r_in_ = layout_.core_radius_expanded + layout_.slice_gap;
+        current_slice_r_out_ = current_slice_r_in_ + layout_.slice_depth_expanded;
+        current_alpha_ = 1.0;
+        current_wallpaper_alpha_ = 1.0;
+
+        queue_redraw();
     } else if (state_ == State::Applying) {
         const double elapsed = static_cast<double>(now_micros - apply_start_micros_) / 1'000'000.0;
-        constexpr double kApplyDuration = 0.4;  // 400ms apply animation
+        constexpr double kApplyDuration = 0.65;  // 650ms total apply animation
 
-        apply_progress_ = std::min(elapsed / kApplyDuration, 1.0);
-        // Quadratic ease-out for the bloom
-        // double bloom_progress = apply_progress_ * (2.0 - apply_progress_);  // Available if needed for shader
+        double progress = std::min(elapsed / kApplyDuration, 1.0);
 
-        // Core shrinks
-        core_current_radius_ = layout_.core_radius * (1.0 - apply_progress_ * 0.65);  // Shrink to ~35%
+        // 1. Reverse radial bloom mask radius (shrinks from screen diagonal down to 0)
+        double diag = std::hypot(layout_.canvas_width, layout_.canvas_height);
+        double bloom_ease = progress * (2.0 - progress);
+        apply_mask_radius_ = diag * (1.0 - bloom_ease);
 
-        // Radials expand and surround the core
-        const double cx = layout_.core_centre_x;
-        const double cy = layout_.core_centre_y;
-        const double surround_dist = layout_.core_radius_shrunk + 30.0;  // Distance from core centre
+        // 2. Core contraction & slices re-attaching (0.0 to 0.45s)
+        double contract_p = std::min(progress / 0.70, 1.0);
+        double contract_ease = contract_p * (2.0 - contract_p);
 
-        for (int i = 0; i < 3; ++i) {
-            double angle = (i * 2.0 * std::numbers::pi / 3.0) - std::numbers::pi / 2.0;  // Start at top, 120° apart
-            double target_x = cx + surround_dist * std::cos(angle);
-            double target_y = cy + surround_dist * std::sin(angle);
+        current_core_radius_ = layout_.core_radius_expanded -
+            (layout_.core_radius_expanded - layout_.core_radius_shrunk) * contract_ease;
 
-            // Interpolate from parked position to surround position
-            double park_x = layout_.radials_park_x;
-            double park_y = layout_.radials_park_y + (i - 1) * layout_.radial_spacing;
-            radial_target_x_[i] = park_x + (target_x - park_x) * apply_progress_;
-            radial_target_y_[i] = park_y + (target_y - park_y) * apply_progress_;
+        double target_r_in = layout_.core_radius_shrunk + 2.0;
+        double target_r_out = target_r_in + layout_.slice_depth_attached;
+        double start_r_in = layout_.core_radius_expanded + layout_.slice_gap;
+        double start_r_out = start_r_in + layout_.slice_depth_expanded;
+
+        current_slice_r_in_ = start_r_in - (start_r_in - target_r_in) * contract_ease;
+        current_slice_r_out_ = start_r_out - (start_r_out - target_r_out) * contract_ease;
+
+        // 3. Slide back to offscreen left (0.45s to 0.65s)
+        if (progress > 0.60) {
+            double slide_p = (progress - 0.60) / 0.40;
+            double slide_ease = slide_p * slide_p;
+            current_cx_ = layout_.core_centre_x - (layout_.core_centre_x + 200.0) * slide_ease;
+            current_alpha_ = 1.0 - slide_p;
+        } else {
+            current_cx_ = layout_.core_centre_x;
+            current_alpha_ = 1.0;
         }
 
-        if (apply_progress_ >= 1.0) {
-            // Apply complete - fire apply callback and start dismiss
-            std::string selected_path;
-            if (current_wallpaper_index_ >= 0 && current_wallpaper_index_ < static_cast<int>(next_wallpaper_paths_.size())) {
-                selected_path = next_wallpaper_paths_[(current_wallpaper_index_ + 1) % 3];
+        // 4. Trigger wallpaper commit at 85% progress
+        if (progress >= 0.85 && !apply_callback_fired_) {
+            apply_callback_fired_ = true;
+            if (!all_wallpaper_paths_.empty() && current_wallpaper_index_ >= 0 &&
+                current_wallpaper_index_ < static_cast<int>(all_wallpaper_paths_.size())) {
+                std::string path = all_wallpaper_paths_[current_wallpaper_index_].string();
+                if (apply_callback_) {
+                    apply_callback_(path);
+                }
             }
-            if (apply_callback_) {
-                apply_callback_(selected_path);
-            }
-            state_ = State::Dismissing;
-            apply_start_micros_ = now_micros;
-            apply_progress_ = 1.0;
+        }
+
+        if (progress >= 1.0) {
+            state_ = State::Hidden;
+            dismiss();
         }
 
         queue_redraw();
     } else if (state_ == State::Dismissing) {
-        const double elapsed = static_cast<double>(now_micros - apply_start_micros_) / 1'000'000.0;
-        constexpr double kDismissDuration = 0.4;  // 400ms dismiss (Phase 9: exit transition)
+        const double elapsed = static_cast<double>(now_micros - dismiss_start_micros_) / 1'000'000.0;
+        constexpr double kDismissDuration = 0.25;
 
         double progress = std::min(elapsed / kDismissDuration, 1.0);
-        // Quadratic ease-in-out for smooth transition
-        progress = progress < 0.5 ? 2.0 * progress * progress : 1.0 - 2.0 * (1.0 - progress) * (1.0 - progress);
+        double ease = progress * progress;
 
-        // Phase 9: Exit transition
-        // 0-0.5: Radials fly outward, core shrinks
-        // 0.5-1.0: Everything fades out
-        
-        if (progress < 0.5) {
-            // First half: radials expand outward, core shrinks
-            double phase_progress = progress * 2.0;
-            
-            // Core shrinks to near zero
-            core_current_radius_ = layout_.core_radius * (1.0 - phase_progress * 0.95);
-            
-            // Radials fly outward to surround the core
-            const double cx = layout_.core_centre_x;
-            const double cy = layout_.core_centre_y;
-            const double fly_distance = 200.0;  // Distance to fly out
-            
-            for (int i = 0; i < 3; ++i) {
-                double angle = (i * 2.0 * std::numbers::pi / 3.0) - std::numbers::pi / 2.0;
-                double start_x = layout_.radials_park_x;
-                double start_y = layout_.radials_park_y + (i - 1) * layout_.radial_spacing;
-                double end_x = cx + fly_distance * std::cos(angle);
-                double end_y = cy + fly_distance * std::sin(angle);
-                
-                radial_target_x_[i] = start_x + (end_x - start_x) * phase_progress;
-                radial_target_y_[i] = start_y + (end_y - start_y) * phase_progress;
-            }
-        } else {
-            // Second half: everything fades out
-            double fade_progress = (progress - 0.5) * 2.0;
-            double alpha = 1.0 - fade_progress;
-            radial_progress_[0] = alpha;  // Use as alpha for fade
-            
-            // Continue flying out slightly
-            if (fade_progress < 1.0) {
-                const double cx = layout_.core_centre_x;
-                const double cy = layout_.core_centre_y;
-                
-                for (int i = 0; i < 3; ++i) {
-                    double angle = (i * 2.0 * std::numbers::pi / 3.0) - std::numbers::pi / 2.0;
-                    double current_x = radial_target_x_[i];
-                    double current_y = radial_target_y_[i];
-                    double end_x = cx + 250.0 * std::cos(angle);
-                    double end_y = cy + 250.0 * std::sin(angle);
-                    
-                    radial_target_x_[i] = current_x + (end_x - current_x) * fade_progress;
-                    radial_target_y_[i] = current_y + (end_y - current_y) * fade_progress;
-                }
-            }
-        }
+        current_cx_ = layout_.core_centre_x - (layout_.core_centre_x + 200.0) * ease;
+        current_alpha_ = 1.0 - progress;
 
         if (progress >= 1.0) {
             state_ = State::Hidden;
@@ -833,181 +895,96 @@ void ManaCoresSelector::update_animations(guint64 now_micros) {
 }
 
 void ManaCoresSelector::start_idle_animation() {
-    // Initialize seeded floating parameters for each radial
-    // Using fixed seeds for deterministic but varied motion
-    static constexpr uint32_t seeds[3] = {0x9E3779B9, 0x243F6A88, 0x13198A2E};
-
-    for (int i = 0; i < 3; ++i) {
-        uint32_t seed = seeds[i];
-
-        // X period: 3.0 - 5.0 seconds
-        seed = seed * 1664525 + 1013904223;
-        idle_float_params_[i].period_x = 3.0 + (seed % 1000) / 1000.0 * 2.0;
-
-        // Y period: 2.5 - 4.5 seconds
-        seed = seed * 1664525 + 1013904223;
-        idle_float_params_[i].period_y = 2.5 + (seed % 1000) / 1000.0 * 2.0;
-
-        // Phase offsets: 0 - 2π
-        seed = seed * 1664525 + 1013904223;
-        idle_float_params_[i].phase_x = (seed % 1000) / 1000.0 * 2.0 * std::numbers::pi;
-
-        seed = seed * 1664525 + 1013904223;
-        idle_float_params_[i].phase_y = (seed % 1000) / 1000.0 * 2.0 * std::numbers::pi;
-
-        // Amplitude: 2-4px scaled
-        seed = seed * 1664525 + 1013904223;
-        double scale = layout_.canvas_height / 1080.0;
-        idle_float_params_[i].amplitude_x = (2.0 + (seed % 1000) / 1000.0 * 2.0) * scale;
-
-        seed = seed * 1664525 + 1013904223;
-        idle_float_params_[i].amplitude_y = (2.0 + (seed % 1000) / 1000.0 * 2.0) * scale;
-    }
+    idle_start_micros_ = g_get_monotonic_time();
 }
 
 void ManaCoresSelector::request_apply() {
     if (state_ != State::Idle) return;
+    begin_apply();
+}
 
+void ManaCoresSelector::force_apply(const std::string& wallpaper_path) {
+    // If a specific wallpaper path is requested, switch to it and apply
+    for (size_t i = 0; i < all_wallpaper_paths_.size(); ++i) {
+        if (all_wallpaper_paths_[i] == wallpaper_path) {
+            current_wallpaper_index_ = static_cast<int>(i);
+            reload_pixbufs();
+            break;
+        }
+    }
     begin_apply();
 }
 
 void ManaCoresSelector::begin_apply() {
     state_ = State::Applying;
     apply_start_micros_ = g_get_monotonic_time();
-    apply_progress_ = 0.0;
-
-    // Initialize bloom shader if not already done
-    if (!bloom_shader_) {
-        bloom_shader_ = std::make_unique<RadialBloomShader>();
-        if (!bloom_shader_->compile()) {
-            std::cerr << "[ManaCoresSelector] Failed to compile bloom shader, falling back to Cairo\n";
-            bloom_shader_.reset();
-        }
-    }
-
-    // Core starts at full radius and will shrink
-    core_current_radius_ = layout_.core_radius;
-
-    // Radials start at parked positions
-    for (int i = 0; i < 3; ++i) {
-        radial_target_x_[i] = layout_.radials_park_x;
-        radial_target_y_[i] = layout_.radials_park_y + (i - 1) * layout_.radial_spacing;
-    }
-
+    apply_callback_fired_ = false;
+    apply_mask_radius_ = std::hypot(layout_.canvas_width, layout_.canvas_height);
     queue_redraw();
 }
 
-void ManaCoresSelector::draw_joining_flash(cairo_t* cr, double cx, double cy, double progress) {
-    // Joining flash at core center - bright white flash expanding outward
-    double flash_progress = (progress - 0.3) / 0.4;  // Normalize to 0..1 between 0.3 and 0.7
-    if (flash_progress <= 0.0 || flash_progress >= 1.0) return;
-    
-    // Quadratic ease-out for flash intensity
-    double intensity = 1.0 - flash_progress * (2.0 - flash_progress);
-    double max_radius = layout_.core_radius * 2.0;
-    double flash_radius = max_radius * flash_progress;
-    
-    cairo_save(cr);
-    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, intensity * 0.8);
-    cairo_set_line_width(cr, 3.0);
-    cairo_arc(cr, cx, cy, flash_radius, 0, 2 * std::numbers::pi);
-    cairo_stroke(cr);
-    cairo_restore(cr);
-    
-    // Inner glow
-    cairo_save(cr);
-    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, intensity * 0.4);
-    cairo_arc(cr, cx, cy, flash_radius * 0.5, 0, 2 * std::numbers::pi);
-    cairo_fill(cr);
-    cairo_restore(cr);
+void ManaCoresSelector::begin_dismiss() {
+    state_ = State::Dismissing;
+    dismiss_start_micros_ = g_get_monotonic_time();
+    queue_redraw();
 }
 
-void ManaCoresSelector::draw_phase10_edge_glow(cairo_t* cr) {
-    // Edge glow around the core portal - only during Applying phase
-    const double cx = layout_.core_centre_x;
-    const double cy = layout_.core_centre_y;
-    const double r = layout_.core_radius;
-    const double glow = layout_.glow_extent;
-    
-    if (state_ != State::Applying) return;
-    
-    // Glow pulses during apply animation
-    double pulse = 0.5 + 0.5 * std::sin(apply_progress_ * 4.0 * 3.14159);
-    
-    cairo_save(cr);
-    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.3 * pulse);
-    cairo_set_line_width(cr, glow * pulse);
-    cairo_arc(cr, cx, cy, r, 0, 2 * std::numbers::pi);
-    cairo_stroke(cr);
-    cairo_restore(cr);
-}
-
-void ManaCoresSelector::draw_phase10_motes(cairo_t* cr) {
-    // Floating motes/particles around the core - only during Applying phase
-    if (state_ != State::Applying) return;
-    
-    const double cx = layout_.core_centre_x;
-    const double cy = layout_.core_centre_y;
-    const double r = layout_.core_radius;
-    
-    double t = apply_progress_;
-    
-    // Draw 8 motes orbiting around the core
-    for (int i = 0; i < 8; ++i) {
-        double angle = (i * 2.0 * std::numbers::pi / 8.0) + t * 3.0;  // Rotation during apply
-        double orbit_r = r + 30.0 + 10.0 * std::sin(t * 1.2 + i * 0.5);
-        double mx = cx + orbit_r * std::cos(angle);
-        double my = cy + orbit_r * std::sin(angle);
-        double mote_size = 2.0 + 1.0 * std::sin(t * 3.0 + i);
-        double alpha = (0.3 + 0.4 * std::sin(t * 2.0 + i * 0.8)) * (1.0 - t);  // Fade out as apply completes
-        
-        cairo_save(cr);
-        cairo_set_source_rgba(cr, 1.0, 0.9, 0.7, alpha);
-        cairo_arc(cr, mx, my, mote_size, 0, 2 * std::numbers::pi);
-        cairo_fill(cr);
-        cairo_restore(cr);
-    }
-}
-
-[[nodiscard]] bool ManaCoresSelector::handle_key(guint keyval) {
-    if (state_ == State::Idle || state_ == State::Assembling) {
+bool ManaCoresSelector::handle_key(guint keyval) {
+    if (state_ == State::Idle) {
         switch (keyval) {
         case GDK_KEY_Escape:
+        case GDK_KEY_q:
         case GDK_KEY_Q:
-            dismiss();
+            begin_dismiss();
             return true;
-        case GDK_KEY_Up:
-        case GDK_KEY_k:
-            if (hovered_radial_ > 0) {
-                hovered_radial_--;
-                queue_redraw();
-                return true;
-            }
-            break;
-        case GDK_KEY_Down:
-        case GDK_KEY_j:
-            if (hovered_radial_ < 2) {
-                hovered_radial_++;
-                queue_redraw();
-                return true;
-            }
-            break;
+
         case GDK_KEY_Left:
         case GDK_KEY_h:
-            // Cycle wallpaper selection left (previous)
+        case GDK_KEY_H:
             cycle_wallpaper(-1);
             return true;
+
         case GDK_KEY_Right:
         case GDK_KEY_l:
-            // Cycle wallpaper selection right (next)
+        case GDK_KEY_L:
             cycle_wallpaper(1);
             return true;
+
+        case GDK_KEY_Up:
+        case GDK_KEY_k:
+        case GDK_KEY_K:
+            if (hovered_radial_ > 0) {
+                hovered_radial_--;
+            } else if (hovered_radial_ == -1) {
+                hovered_radial_ = 0;
+            }
+            queue_redraw();
+            return true;
+
+        case GDK_KEY_Down:
+        case GDK_KEY_j:
+        case GDK_KEY_J:
+            if (hovered_radial_ < 2 && hovered_radial_ >= 0) {
+                hovered_radial_++;
+            } else if (hovered_radial_ == -1) {
+                hovered_radial_ = 2;
+            }
+            queue_redraw();
+            return true;
+
         case GDK_KEY_Return:
         case GDK_KEY_KP_Enter:
+        case GDK_KEY_space:
             request_apply();
             return true;
+
         default:
             break;
+        }
+    } else if (state_ == State::Assembling) {
+        if (keyval == GDK_KEY_Escape || keyval == GDK_KEY_q || keyval == GDK_KEY_Q) {
+            begin_dismiss();
+            return true;
         }
     }
     return false;
