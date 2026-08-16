@@ -71,6 +71,23 @@ ThemeStyles::ThemeStyles(std::shared_ptr<services::ThemeService> theme_service)
     };
     component_css_ = styles::load_css_modules(component_modules);
 
+    // Hardcode ManaCores selector transparency rules globally to avoid adding
+    // providers dynamically at runtime, which triggers a global style update that
+    // can crash GTK if executed while other widgets are handling input or transitions.
+    component_css_ += R"CSS(
+        .realmheart-mana-cores-window,
+        .realmheart-mana-cores-window * {
+            background: transparent;
+            background-color: transparent;
+            border: none;
+            box-shadow: none;
+        }
+        .realmheart-mana-cores-canvas {
+            background: transparent;
+            background-color: transparent;
+        }
+    )CSS";
+
     subscription_ = theme_service_->subscribe([this](const services::Palette& palette) {
         apply(palette);
     });
