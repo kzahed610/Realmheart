@@ -226,28 +226,11 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
     gtk_widget_add_css_class(GTK_WIDGET(window_), "realmheart-mana-cores-window");
     gtk_widget_remove_css_class(GTK_WIDGET(window_), "background");
 
-    if (GdkDisplay* display = gdk_display_get_default(); display != nullptr) {
-        GtkCssProvider* provider = gtk_css_provider_new();
-        gtk_css_provider_load_from_string(provider, R"CSS(
-            .realmheart-mana-cores-window,
-            .realmheart-mana-cores-window * {
-                background: transparent;
-                background-color: transparent;
-                border: none;
-                box-shadow: none;
-            }
-            .realmheart-mana-cores-canvas {
-                background: transparent;
-                background-color: transparent;
-            }
-        )CSS");
-        gtk_style_context_add_provider_for_display(
-            display,
-            GTK_STYLE_PROVIDER(provider),
-            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
-        );
-        g_object_unref(provider);
-    }
+    // CSS rules for .realmheart-mana-cores-window and .realmheart-mana-cores-canvas
+    // are now loaded globally by ThemeStyles at shell startup. Adding a CSS provider
+    // dynamically here triggers a global GTK style invalidation which can cause a
+    // crash (g_signal_emit -> style-updated) if executed when other shell widgets
+    // are in the middle of being realized (like during an early keybind launch).
 
     ui::LayerSurfaceSpec spec;
     spec.surface_namespace = "realmheart-mana-cores";
