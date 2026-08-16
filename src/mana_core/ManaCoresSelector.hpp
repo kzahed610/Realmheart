@@ -125,6 +125,24 @@ private:
     std::array<ManaParticle, kMaxParticles> particles_{};
     guint64 last_tick_micros_ = 0;
 
+    // White Core Ethereal Smoke & Aether Tendril System
+    struct SmokeTendril {
+        double angle_offset = 0.0;
+        double arc_length = 0.0;
+        double radial_extent = 0.0;
+        double phase = 0.0;
+        double speed = 0.0;
+        double opacity = 0.0;
+        double thickness = 0.0;
+        double curl = 0.0;
+        bool is_aether = false;
+        bool clockwise = true;
+    };
+    static constexpr size_t kNumSmokeTendrils = 10;
+    std::array<SmokeTendril, kNumSmokeTendrils> smoke_tendrils_{};
+    bool smoke_tendrils_seeded_ = false;
+    void seed_smoke_tendrils();
+
     // Frame clock and transparency handling
     guint tick_callback_id_ = 0;
     guint transparency_retry_id_ = 0;
@@ -140,6 +158,7 @@ private:
 
     void draw_drop_shadows(cairo_t* cr, double cx, double cy, double core_radius, double r_in, double r_out, double alpha);
     void draw_realmheart_runes(cairo_t* cr, double cx, double cy, double radius, double alpha);
+    void draw_core_smoke(cairo_t* cr, double cx, double cy, double radius, double alpha);
     void draw_core(cairo_t* cr, double cx, double cy, double radius, double alpha, double wallpaper_alpha);
     void draw_radial_slices(cairo_t* cr, double cx, double cy, double r_in, double r_out, double alpha, double wallpaper_alpha);
     void draw_mana_particles(cairo_t* cr, double alpha);

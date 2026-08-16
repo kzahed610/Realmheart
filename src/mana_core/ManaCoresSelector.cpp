@@ -1,5 +1,6 @@
 #include "mana_core/ManaCoresSelector.hpp"
 
+#include <cstdlib>
 #include <cmath>
 #include <numbers>
 #include <memory>
@@ -47,7 +48,9 @@ void append_annular_sector_path(
 
 } // namespace
 
-ManaCoresSelector::ManaCoresSelector() = default;
+ManaCoresSelector::ManaCoresSelector() {
+    seed_smoke_tendrils();
+}
 
 ManaCoresSelector::~ManaCoresSelector() {
     if (tick_callback_id_ != 0 && canvas_ != nullptr) {
@@ -580,6 +583,241 @@ void ManaCoresSelector::draw_drop_shadows(
     cairo_restore(cr);
 }
 
+void ManaCoresSelector::seed_smoke_tendrils() {
+    for (size_t i = 0; i < kNumSmokeTendrils; ++i) {
+        auto& t = smoke_tendrils_[i];
+        auto rand01 = []() { return static_cast<double>(std::rand()) / static_cast<double>(RAND_MAX); };
+
+        t.angle_offset = (2.0 * std::numbers::pi / static_cast<double>(kNumSmokeTendrils)) * static_cast<double>(i)
+                         + (rand01() - 0.5) * 0.40;
+        t.arc_length = (38.0 + rand01() * 72.0) * (std::numbers::pi / 180.0);
+        t.radial_extent = 20.0 + rand01() * 38.0;
+        t.phase = rand01() * 2.0 * std::numbers::pi;
+        t.speed = 0.22 + rand01() * 0.55;
+        t.opacity = 0.16 + rand01() * 0.16;
+        t.thickness = 0.85 + rand01() * 0.90;
+        t.curl = 0.35 + rand01() * 0.65;
+        t.is_aether = (i % 3 == 1);
+        t.clockwise = (i % 2 == 0);
+    }
+    smoke_tendrils_seeded_ = true;
+}
+
+void ManaCoresSelector::draw_core_smoke(
+    cairo_t* cr,
+    double cx, double cy,
+    double radius,
+    double alpha
+) {
+    if (radius <= 15.0 || alpha <= 0.01) return;
+    if (!smoke_tendrils_seeded_) {
+        seed_smoke_tendrils();
+    }
+
+    cairo_save(cr);
+
+    double t = static_cast<double>(g_get_monotonic_time()) / 1'000'000.0;
+    double scale = layout_.canvas_height / 1080.0;
+
+    // Organic double-beat heartbeat pulse (systole + diastole)
+    double beat_time = std::fmod(t, 1.35);
+    double heartbeat = 0.0;
+    if (beat_time < 0.16) {
+        heartbeat = std::sin((beat_time / 0.16) * std::numbers::pi);
+    } else if (beat_time >= 0.22 && beat_time < 0.38) {
+        heartbeat = 0.50 * std::sin(((beat_time - 0.22) / 0.16) * std::numbers::pi);
+    }
+
+    // Clip smoke to only render OUTSIDE the inner core circle (preserving 100% wallpaper clarity)
+    cairo_save(cr);
+    cairo_rectangle(cr, 0, 0, layout_.canvas_width, layout_.canvas_height);
+    cairo_arc_negative(cr, cx, cy, radius - 1.0 * scale, 2.0 * std::numbers::pi, 0.0);
+    cairo_clip(cr);
+
+    // -------------------------------------------------------------------------
+    // 1. Multi-Harmonic Nebular Smoke Haze (Billowing organic perimeter cloud)
+    // -------------------------------------------------------------------------
+    constexpr int kHazeSteps = 64;
+    cairo_new_path(cr);
+    for (int k = 0; k <= kHazeSteps; ++k) {
+        double theta = (static_cast<double>(k) / static_cast<double>(kHazeSteps)) * (2.0 * std::numbers::pi);
+        // Multi-frequency harmonic perturbation with breathing pulse
+        double wave = 16.0 * scale
+            + (9.0 * std::sin(3.0 * theta + t * 0.75)
+             + 6.0 * std::cos(5.0 * theta - t * 0.95 + 1.2)
+             + 3.5 * std::sin(8.0 * theta + t * 1.40)
+             + heartbeat * 8.0) * scale;
+        double r_haze = radius + std::max(wave, 4.0 * scale);
+        double px = cx + r_haze * std::cos(theta);
+        double py = cy + r_haze * std::sin(theta);
+        if (k == 0) {
+            cairo_move_to(cr, px, py);
+        } else {
+            cairo_line_to(cr, px, py);
+        }
+    }
+    cairo_close_path(cr);
+
+    // Radial gradient for nebular haze
+    double haze_max_r = radius + (48.0 + heartbeat * 14.0) * scale;
+    cairo_pattern_t* haze_grad = cairo_pattern_create_radial(
+        cx, cy, radius * 0.95,
+        cx, cy, haze_max_r
+    );
+    cairo_pattern_add_color_stop_rgba(haze_grad, 0.0,  1.0, 1.0, 1.0, 0.0);
+    cairo_pattern_add_color_stop_rgba(haze_grad, 0.12, 0.95, 0.98, 1.0, (0.24 + heartbeat * 0.12) * alpha);
+    cairo_pattern_add_color_stop_rgba(haze_grad, 0.40, 0.85, 0.92, 1.0, 0.14 * alpha);
+    cairo_pattern_add_color_stop_rgba(haze_grad, 0.70, 0.78, 0.58, 0.95, 0.07 * alpha); // Aether violet hint
+    cairo_pattern_add_color_stop_rgba(haze_grad, 1.0,  0.0, 0.0, 0.0, 0.0);
+    cairo_set_source(cr, haze_grad);
+    cairo_fill(cr);
+    cairo_pattern_destroy(haze_grad);
+
+    // -------------------------------------------------------------------------
+    // 2. Swirling Mana & Aether Smoke Tendrils (Curved Tapered Energy Ribbons)
+    // -------------------------------------------------------------------------
+    for (const auto& tendril : smoke_tendrils_) {
+        double dir = tendril.clockwise ? 1.0 : -1.0;
+        double base_theta = tendril.angle_offset
+            + dir * t * tendril.speed * 0.28
+            + 0.06 * std::sin(t * 1.25 + tendril.phase);
+        double arc_span = tendril.arc_length * (0.92 + 0.16 * std::sin(t * 0.85 + tendril.phase * 1.4));
+
+        double r_base = radius;
+        double r_peak = radius + (tendril.radial_extent + heartbeat * 12.0) * scale
+                                * (0.90 + 0.20 * std::cos(t * 1.05 + tendril.phase));
+        double r_tip  = radius + (tendril.radial_extent * 0.30 + 5.0) * scale;
+
+        double mid_theta = base_theta + dir * (arc_span * 0.52);
+        double tip_theta = base_theta + dir * arc_span;
+
+        double p0_x = cx + r_base * std::cos(base_theta);
+        double p0_y = cy + r_base * std::sin(base_theta);
+
+        double pmid_x = cx + r_peak * std::cos(mid_theta);
+        double pmid_y = cy + r_peak * std::sin(mid_theta);
+
+        double ptip_x = cx + r_tip * std::cos(tip_theta);
+        double ptip_y = cy + r_tip * std::sin(tip_theta);
+
+        // Control points for outer curve (sweeps outwards into space)
+        double c1a_theta = base_theta + dir * (arc_span * 0.20);
+        double c1a_r = radius + (r_peak - radius) * 0.55;
+        double c1a_x = cx + c1a_r * std::cos(c1a_theta);
+        double c1a_y = cy + c1a_r * std::sin(c1a_theta);
+
+        double c1b_theta = mid_theta - dir * (arc_span * 0.14);
+        double c1b_r = r_peak * 1.02;
+        double c1b_x = cx + c1b_r * std::cos(c1b_theta);
+        double c1b_y = cy + c1b_r * std::sin(c1b_theta);
+
+        double c2a_theta = mid_theta + dir * (arc_span * 0.16);
+        double c2a_r = r_peak * 0.94;
+        double c2a_x = cx + c2a_r * std::cos(c2a_theta);
+        double c2a_y = cy + c2a_r * std::sin(c2a_theta);
+
+        double c2b_theta = tip_theta - dir * (arc_span * 0.12);
+        double c2b_r = r_tip + 8.0 * scale;
+        double c2b_x = cx + c2b_r * std::cos(c2b_theta);
+        double c2b_y = cy + c2b_r * std::sin(c2b_theta);
+
+        // Inner curve points (tapered return to core ring)
+        double ribbon_w = (9.0 + 10.0 * tendril.thickness) * scale * (0.85 + 0.30 * heartbeat);
+        double r_peak_in = std::max(radius + 1.0, r_peak - ribbon_w);
+        double pmid_in_x = cx + r_peak_in * std::cos(mid_theta);
+        double pmid_in_y = cy + r_peak_in * std::sin(mid_theta);
+
+        double base_in_theta = base_theta + dir * 0.06;
+        double p0_in_x = cx + radius * std::cos(base_in_theta);
+        double p0_in_y = cy + radius * std::sin(base_in_theta);
+
+        double c_in1_theta = mid_theta + dir * (arc_span * 0.14);
+        double c_in1_r = r_peak_in * 0.96;
+        double c_in1_x = cx + c_in1_r * std::cos(c_in1_theta);
+        double c_in1_y = cy + c_in1_r * std::sin(c_in1_theta);
+
+        double c_in2_theta = mid_theta - dir * (arc_span * 0.14);
+        double c_in2_r = radius + (r_peak_in - radius) * 0.50;
+        double c_in2_x = cx + c_in2_r * std::cos(c_in2_theta);
+        double c_in2_y = cy + c_in2_r * std::sin(c_in2_theta);
+
+        // Build closed ribbon path
+        cairo_new_path(cr);
+        cairo_move_to(cr, p0_x, p0_y);
+        cairo_curve_to(cr, c1a_x, c1a_y, c1b_x, c1b_y, pmid_x, pmid_y);
+        cairo_curve_to(cr, c2a_x, c2a_y, c2b_x, c2b_y, ptip_x, ptip_y);
+        cairo_curve_to(cr, c_in1_x, c_in1_y, pmid_in_x, pmid_in_y, pmid_in_x, pmid_in_y);
+        cairo_curve_to(cr, c_in2_x, c_in2_y, p0_in_x, p0_in_y, p0_x, p0_y);
+        cairo_close_path(cr);
+
+        // Ribbon linear gradient fill
+        cairo_pattern_t* ribbon_grad = cairo_pattern_create_linear(p0_x, p0_y, ptip_x, ptip_y);
+        double tendril_op = tendril.opacity * (0.85 + 0.25 * heartbeat) * alpha;
+
+        if (tendril.is_aether) {
+            cairo_pattern_add_color_stop_rgba(ribbon_grad, 0.0,  0.92, 0.82, 1.0,  tendril_op * 0.95);
+            cairo_pattern_add_color_stop_rgba(ribbon_grad, 0.35, 0.80, 0.58, 0.98, tendril_op * 0.75);
+            cairo_pattern_add_color_stop_rgba(ribbon_grad, 0.75, 0.65, 0.40, 0.92, tendril_op * 0.35);
+            cairo_pattern_add_color_stop_rgba(ribbon_grad, 1.0,  0.50, 0.25, 0.80, 0.0);
+        } else {
+            cairo_pattern_add_color_stop_rgba(ribbon_grad, 0.0,  1.0,  1.0,  1.0,  tendril_op * 0.98);
+            cairo_pattern_add_color_stop_rgba(ribbon_grad, 0.30, 0.92, 0.96, 1.0,  tendril_op * 0.80);
+            cairo_pattern_add_color_stop_rgba(ribbon_grad, 0.70, 0.78, 0.88, 0.98, tendril_op * 0.40);
+            cairo_pattern_add_color_stop_rgba(ribbon_grad, 1.0,  0.68, 0.82, 1.0,  0.0);
+        }
+
+        cairo_set_source(cr, ribbon_grad);
+        cairo_fill(cr);
+        cairo_pattern_destroy(ribbon_grad);
+
+        // Crisp leading edge stroke (luminous energy streak)
+        cairo_new_path(cr);
+        cairo_move_to(cr, p0_x, p0_y);
+        cairo_curve_to(cr, c1a_x, c1a_y, c1b_x, c1b_y, pmid_x, pmid_y);
+        cairo_curve_to(cr, c2a_x, c2a_y, c2b_x, c2b_y, ptip_x, ptip_y);
+
+        cairo_set_line_width(cr, (1.1 * tendril.thickness) * scale);
+        if (tendril.is_aether) {
+            cairo_set_source_rgba(cr, 0.92, 0.84, 1.0, (0.50 + 0.30 * heartbeat) * alpha);
+        } else {
+            cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, (0.60 + 0.35 * heartbeat) * alpha);
+        }
+        cairo_stroke(cr);
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. Crackling Mana Filaments (Delicate electrical wisps)
+    // -------------------------------------------------------------------------
+    for (int k = 0; k < 4; ++k) {
+        double f_angle = t * 0.45 * (k % 2 == 0 ? 1.0 : -1.0) + (k * std::numbers::pi * 0.50);
+        double f_span = 0.35 + 0.10 * std::sin(t * 1.8 + k * 1.7);
+        double f_r = radius + (2.0 + 4.0 * std::sin(t * 3.5 + k * 2.1)) * scale;
+
+        double fx0 = cx + f_r * std::cos(f_angle);
+        double fy0 = cy + f_r * std::sin(f_angle);
+        double fx_mid = cx + (f_r + 6.0 * scale) * std::cos(f_angle + f_span * 0.5);
+        double fy_mid = cy + (f_r + 6.0 * scale) * std::sin(f_angle + f_span * 0.5);
+        double fx1 = cx + (f_r + 1.0 * scale) * std::cos(f_angle + f_span);
+        double fy1 = cy + (f_r + 1.0 * scale) * std::sin(f_angle + f_span);
+
+        cairo_new_path(cr);
+        cairo_move_to(cr, fx0, fy0);
+        cairo_curve_to(
+            cr,
+            fx0 + 3.0 * scale * std::cos(f_angle + 0.8),
+            fy0 + 3.0 * scale * std::sin(f_angle + 0.8),
+            fx_mid, fy_mid,
+            fx1, fy1
+        );
+        cairo_set_line_width(cr, 0.9 * scale);
+        cairo_set_source_rgba(cr, 0.95, 0.98, 1.0, (0.35 + 0.25 * heartbeat) * alpha);
+        cairo_stroke(cr);
+    }
+
+    cairo_restore(cr); // Restore from clip
+    cairo_restore(cr); // Restore from outer save
+}
+
 void ManaCoresSelector::draw_core(
     cairo_t* cr,
     double cx, double cy,
@@ -1103,7 +1341,10 @@ void ManaCoresSelector::draw(GtkDrawingArea*, cairo_t* cr, int, int) {
         // 3. Drop shadows (creates elevation)
         draw_drop_shadows(cr, current_cx_, current_cy_, current_core_radius_, current_slice_r_in_, current_slice_r_out_, current_alpha_ * current_wallpaper_alpha_);
 
-        // 4. Core & Slices
+        // 4. White Core Ethereal Smoke & Aether Wisps
+        draw_core_smoke(cr, current_cx_, current_cy_, current_core_radius_, current_alpha_ * current_wallpaper_alpha_);
+
+        // 5. Core & Slices
         draw_core(
             cr,
             current_cx_, current_cy_,
