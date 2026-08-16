@@ -68,7 +68,6 @@ ManaCoresLayout ManaCoresLayout::for_height(int physical_height, int physical_wi
     // Visual styling
     l.border_thickness = 2.5 * scale;
     l.glow_extent = 16.0 * scale;
-    l.star_spike_length = 16.0 * scale;
 
     return l;
 }

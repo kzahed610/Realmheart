@@ -37,7 +37,6 @@ struct ManaCoresLayout {
     // Visual styling
     double border_thickness = 2.5;      // 2.5px
     double glow_extent = 16.0;          // 16px glow radius beyond border
-    double star_spike_length = 16.0;    // 16px cardinal star ornaments
 
     // Radial colour palette: {r, g, b} for silver, yellow, orange
     inline static const std::array<std::array<double, 3>, 3> kRadialPalette = {{

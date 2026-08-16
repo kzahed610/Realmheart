@@ -140,9 +140,7 @@ private:
     void draw_core(cairo_t* cr, double cx, double cy, double radius, double alpha, double wallpaper_alpha);
     void draw_radial_slices(cairo_t* cr, double cx, double cy, double r_in, double r_out, double alpha, double wallpaper_alpha);
     void draw_mana_particles(cairo_t* cr, double alpha);
-    void draw_cardinal_stars(cairo_t* cr, double cx, double cy, double radius, double alpha);
     void draw_reverse_bloom(cairo_t* cr, double cx, double cy, double mask_radius);
-    void draw_ambient_glow(cairo_t* cr, double cx, double cy, double radius, double alpha);
     void draw_backdrop_dim(cairo_t* cr, double alpha);
     static void draw_pixbuf_cover(cairo_t* cr, GdkPixbuf* pixbuf, double x, double y, double width, double height, double alpha);
 
