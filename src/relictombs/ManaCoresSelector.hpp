@@ -104,6 +104,24 @@ private:
     int hovered_radial_ = -1;
     bool apply_callback_fired_ = false;
 
+    // Atmospheric Mana & Aether Particle System (zero-allocation fixed pool)
+    struct ManaParticle {
+        double x = 0.0;
+        double y = 0.0;
+        double vx = 0.0;
+        double vy = 0.0;
+        double life = 0.0;    // 1.0 -> 0.0
+        double decay = 0.02;
+        double size = 2.0;
+        double r = 1.0;
+        double g = 1.0;
+        double b = 1.0;
+        bool active = false;
+    };
+    static constexpr size_t kMaxParticles = 36;
+    std::array<ManaParticle, kMaxParticles> particles_{};
+    guint64 last_tick_micros_ = 0;
+
     // Frame clock and transparency handling
     guint tick_callback_id_ = 0;
     guint transparency_retry_id_ = 0;
@@ -117,8 +135,11 @@ private:
     static void draw_callback(GtkDrawingArea* area, cairo_t* cr, int width, int height, gpointer user_data);
     static gboolean tick_callback(GtkWidget* widget, GdkFrameClock* frame_clock, gpointer user_data);
 
+    void draw_drop_shadows(cairo_t* cr, double cx, double cy, double core_radius, double r_in, double r_out, double alpha);
+    void draw_realmheart_runes(cairo_t* cr, double cx, double cy, double radius, double alpha);
     void draw_core(cairo_t* cr, double cx, double cy, double radius, double alpha, double wallpaper_alpha);
     void draw_radial_slices(cairo_t* cr, double cx, double cy, double r_in, double r_out, double alpha, double wallpaper_alpha);
+    void draw_mana_particles(cairo_t* cr, double alpha);
     void draw_cardinal_stars(cairo_t* cr, double cx, double cy, double radius, double alpha);
     void draw_reverse_bloom(cairo_t* cr, double cx, double cy, double mask_radius);
     void draw_ambient_glow(cairo_t* cr, double cx, double cy, double radius, double alpha);
@@ -126,6 +147,8 @@ private:
     static void draw_pixbuf_cover(cairo_t* cr, GdkPixbuf* pixbuf, double x, double y, double width, double height, double alpha);
 
     void update_animations(guint64 now_micros);
+    void update_particles(guint64 now_micros, double dt);
+    void spawn_particle(double x, double y, double vx, double vy, double r, double g, double b, double size, double decay);
     void queue_redraw();
     void start_idle_animation();
     void begin_apply();
