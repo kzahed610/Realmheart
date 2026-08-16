@@ -71,6 +71,8 @@ private:
     int current_wallpaper_index_ = 0;
     GdkPixbuf* current_core_pixbuf_ = nullptr;
     std::array<GdkPixbuf*, 3> slice_pixbufs_ = {nullptr, nullptr, nullptr};
+    GdkPixbuf* old_core_pixbuf_ = nullptr;
+    std::array<GdkPixbuf*, 3> old_slice_pixbufs_ = {nullptr, nullptr, nullptr};
     GdkPixbuf* apply_fullscreen_pixbuf_ = nullptr;
 
     // Animation timing
@@ -95,6 +97,7 @@ private:
     // Navigation crossfade
     guint64 nav_transition_start_micros_ = 0;
     bool nav_transitioning_ = false;
+    double nav_progress_ = 1.0;
 
     // Hovered radial slice index (-1 = none, 0 = silver, 1 = yellow, 2 = orange)
     int hovered_radial_ = -1;

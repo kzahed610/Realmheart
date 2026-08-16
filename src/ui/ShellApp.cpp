@@ -1112,15 +1112,20 @@ private:
             if (wallpaper_controller_) {
                 wallpaper_controller_->prepare_wallpaper_async(
                     std::filesystem::path(path),
-                    [this](bool success, std::string error_msg) {
+                    [this, path](bool success, std::string error_msg) {
                         if (!success) {
                             std::cerr << "[ManaCores] wallpaper prepare failed: " << error_msg << "\n";
                             return;
                         }
                         wallpaper_controller_->commit_prepared_wallpaper_async(
-                            [this](bool success, std::string error_msg) {
+                            [this, path](bool success, std::string error_msg) {
                                 if (!success) {
                                     std::cerr << "[ManaCores] wallpaper commit failed: " << error_msg << "\n";
+                                } else {
+                                    if (services::WallpaperService* service = utilities_->get_wallpaper_service()) {
+                                        service->update_state(path);
+                                    }
+                                    generate_theme_for(path);
                                 }
                             }
                         );

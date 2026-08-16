@@ -76,6 +76,16 @@ void ManaCoresSelector::clear_pixbufs() {
         g_object_unref(apply_fullscreen_pixbuf_);
         apply_fullscreen_pixbuf_ = nullptr;
     }
+    if (old_core_pixbuf_ != nullptr) {
+        g_object_unref(old_core_pixbuf_);
+        old_core_pixbuf_ = nullptr;
+    }
+    for (auto& pb : old_slice_pixbufs_) {
+        if (pb != nullptr) {
+            g_object_unref(pb);
+            pb = nullptr;
+        }
+    }
 }
 
 void ManaCoresSelector::schedule_transparency_retry() {
@@ -339,9 +349,10 @@ void ManaCoresSelector::reload_pixbufs() {
             path, core_target_dim, &error
         );
 
-        // Also load high-res for fullscreen apply reverse bloom
-        apply_fullscreen_pixbuf_ = ThumbnailCache::load_or_create(
-            path, static_cast<int>(layout_.canvas_width), nullptr
+        // Also load high-res for fullscreen apply reverse bloom.
+        // We use gdk_pixbuf_new_from_file_at_scale directly so we don't accidentally load a thumbnail.
+        apply_fullscreen_pixbuf_ = gdk_pixbuf_new_from_file_at_scale(
+            path.c_str(), static_cast<int>(layout_.canvas_width), -1, TRUE, nullptr
         );
     }
 
@@ -369,6 +380,14 @@ void ManaCoresSelector::reload_pixbufs() {
 void ManaCoresSelector::cycle_wallpaper(int direction) {
     if (all_wallpaper_paths_.empty()) return;
 
+    if (old_core_pixbuf_ != nullptr) g_object_unref(old_core_pixbuf_);
+    old_core_pixbuf_ = current_core_pixbuf_ ? GDK_PIXBUF(g_object_ref(current_core_pixbuf_)) : nullptr;
+
+    for (size_t i = 0; i < 3; ++i) {
+        if (old_slice_pixbufs_[i] != nullptr) g_object_unref(old_slice_pixbufs_[i]);
+        old_slice_pixbufs_[i] = slice_pixbufs_[i] ? GDK_PIXBUF(g_object_ref(slice_pixbufs_[i])) : nullptr;
+    }
+
     const int total = static_cast<int>(all_wallpaper_paths_.size());
     current_wallpaper_index_ = (current_wallpaper_index_ + direction + total) % total;
 
@@ -376,6 +395,7 @@ void ManaCoresSelector::cycle_wallpaper(int direction) {
 
     // Trigger navigation crossfade
     nav_transitioning_ = true;
+    nav_progress_ = 0.0;
     nav_transition_start_micros_ = g_get_monotonic_time();
 
     queue_redraw();
@@ -485,18 +505,30 @@ void ManaCoresSelector::draw_core(
     if (radius <= 0.0 || alpha <= 0.0) return;
 
     // 1. Wallpaper inside core
-    if (current_core_pixbuf_ != nullptr && wallpaper_alpha > 0.0) {
+    if (wallpaper_alpha > 0.0) {
         cairo_save(cr);
         cairo_arc(cr, cx, cy, radius, 0, 2.0 * std::numbers::pi);
         cairo_clip(cr);
 
-        draw_pixbuf_cover(
-            cr,
-            current_core_pixbuf_,
-            cx - radius, cy - radius,
-            radius * 2.0, radius * 2.0,
-            wallpaper_alpha * alpha
-        );
+        if (nav_progress_ < 1.0 && old_core_pixbuf_ != nullptr) {
+            draw_pixbuf_cover(
+                cr,
+                old_core_pixbuf_,
+                cx - radius, cy - radius,
+                radius * 2.0, radius * 2.0,
+                wallpaper_alpha * alpha * (1.0 - nav_progress_)
+            );
+        }
+
+        if (current_core_pixbuf_ != nullptr && nav_progress_ > 0.0) {
+            draw_pixbuf_cover(
+                cr,
+                current_core_pixbuf_,
+                cx - radius, cy - radius,
+                radius * 2.0, radius * 2.0,
+                wallpaper_alpha * alpha * nav_progress_
+            );
+        }
 
         // Subtle dark rim vignette
         cairo_pattern_t* vignette = cairo_pattern_create_radial(
@@ -615,7 +647,7 @@ void ManaCoresSelector::draw_radial_slices(
         }
 
         // 1b. Wallpaper preview inside slice
-        if (pixbuf != nullptr && wallpaper_alpha > 0.0) {
+        if (wallpaper_alpha > 0.0) {
             cairo_save(cr);
             append_annular_sector_path(
                 cr, slice_cx, slice_cy,
@@ -630,13 +662,25 @@ void ManaCoresSelector::draw_radial_slices(
             double mid_y = slice_cy + mid_r * std::sin(geom.mid_angle);
             double bb_size = (slice_r_out - slice_r_in) * 1.6;
 
-            draw_pixbuf_cover(
-                cr,
-                pixbuf,
-                mid_x - bb_size * 0.5, mid_y - bb_size * 0.5,
-                bb_size, bb_size,
-                wallpaper_alpha * alpha
-            );
+            if (nav_progress_ < 1.0 && old_slice_pixbufs_[i] != nullptr) {
+                draw_pixbuf_cover(
+                    cr,
+                    old_slice_pixbufs_[i],
+                    mid_x - bb_size * 0.5, mid_y - bb_size * 0.5,
+                    bb_size, bb_size,
+                    wallpaper_alpha * alpha * (1.0 - nav_progress_)
+                );
+            }
+
+            if (pixbuf != nullptr && nav_progress_ > 0.0) {
+                draw_pixbuf_cover(
+                    cr,
+                    pixbuf,
+                    mid_x - bb_size * 0.5, mid_y - bb_size * 0.5,
+                    bb_size, bb_size,
+                    wallpaper_alpha * alpha * nav_progress_
+                );
+            }
 
             // Subtle dark tint to contrast border glow
             cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.22 * alpha);
@@ -869,10 +913,10 @@ void ManaCoresSelector::update_animations(guint64 now_micros) {
         if (nav_transitioning_) {
             constexpr double kNavDuration = 0.25;
             double nav_elapsed = static_cast<double>(now_micros - nav_transition_start_micros_) / 1'000'000.0;
-            if (nav_elapsed >= kNavDuration) {
+            nav_progress_ = std::min(nav_elapsed / kNavDuration, 1.0);
+            if (nav_progress_ >= 1.0) {
                 nav_transitioning_ = false;
             }
-            // The actual crossfade is handled by opacity in draw — just keep redrawing
         }
 
         queue_redraw();
