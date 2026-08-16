@@ -146,7 +146,13 @@ gboolean ManaCoresSelector::transparency_retry_callback(GtkWidget* widget, GdkFr
 }
 
 void ManaCoresSelector::present(GtkApplication* app) {
-    if (visible_) return;
+    // Toggle: if already visible, dismiss instead of re-presenting
+    if (visible_) {
+        if (state_ == State::Assembling || state_ == State::Idle) {
+            begin_dismiss();
+        }
+        return;
+    }
     if (app == nullptr) return;
 
     visible_ = true;
@@ -1439,6 +1445,12 @@ void ManaCoresSelector::begin_apply() {
     }
 
     queue_redraw();
+}
+
+void ManaCoresSelector::request_dismiss() {
+    if (state_ == State::Assembling || state_ == State::Idle) {
+        begin_dismiss();
+    }
 }
 
 void ManaCoresSelector::begin_dismiss() {

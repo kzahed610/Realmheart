@@ -45,6 +45,9 @@ public:
     void request_apply();
     void force_apply(const std::string& wallpaper_path);
 
+    // Public API for shell to trigger animated dismiss (keybind toggle)
+    void request_dismiss();
+
 private:
     // State machine
     enum class State { Hidden, Assembling, Idle, Applying, Dismissing };

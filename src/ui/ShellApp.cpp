@@ -688,10 +688,9 @@ public:
 
         // Check if ManaCores selector is already active
         if (mana_cores_selector_ && mana_cores_selector_->is_visible()) {
-            mana_cores_selector_->dismiss();
-            // dismiss() fires the dismiss_callback which restores the workspace
-            // and bar. We don't reset mana_cores_selector_ here because dismiss()
-            // already hides it and the callback handles restoration.
+            mana_cores_selector_->request_dismiss();
+            // request_dismiss() triggers the animated dismiss sequence
+            // (Contraction -> Slide -> dismiss_callback restores workspace/bar).
             return;
         }
 
