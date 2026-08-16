@@ -182,6 +182,8 @@ void ManaCoresSelector::present(GtkApplication* app) {
     current_slices_ = layout_.attached_slices;
     current_alpha_ = 0.0;
     current_wallpaper_alpha_ = 0.0;
+    particles_.fill(ManaParticle{});
+    last_tick_micros_ = 0;
 
     setup_window(app);
 
@@ -199,6 +201,8 @@ void ManaCoresSelector::dismiss() {
     state_ = State::Hidden;
     nav_transitioning_ = false;
     nav_progress_ = 1.0;
+    particles_.fill(ManaParticle{});
+    last_tick_micros_ = 0;
     if (tick_callback_id_ != 0 && canvas_ != nullptr) {
         gtk_widget_remove_tick_callback(canvas_, tick_callback_id_);
         tick_callback_id_ = 0;
@@ -436,7 +440,16 @@ void ManaCoresSelector::draw_cardinal_stars(
 ) {
     if (alpha <= 0.0 || radius <= 10.0) return;
 
-    const double spike_len = layout_.star_spike_length;
+    double t = static_cast<double>(g_get_monotonic_time()) / 1'000'000.0;
+    double beat_time = std::fmod(t, 1.35);
+    double heartbeat = 0.0;
+    if (beat_time < 0.16) {
+        heartbeat = std::sin((beat_time / 0.16) * std::numbers::pi);
+    } else if (beat_time >= 0.22 && beat_time < 0.38) {
+        heartbeat = 0.50 * std::sin(((beat_time - 0.22) / 0.16) * std::numbers::pi);
+    }
+
+    const double spike_len = layout_.star_spike_length + heartbeat * 2.5;
     // 4 Cardinal positions: North (-pi/2), East (0), South (pi/2), West (pi)
     const std::array<double, 4> angles = {
         -std::numbers::pi * 0.5,
@@ -472,21 +485,163 @@ void ManaCoresSelector::draw_cardinal_stars(
         cairo_close_path(cr);
 
         // Bright fill with cyan-white core
-        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.95 * alpha);
+        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, (0.92 + heartbeat * 0.08) * alpha);
         cairo_fill_preserve(cr);
 
         // Glow stroke
-        cairo_set_source_rgba(cr, 0.85, 0.92, 1.0, 0.8 * alpha);
-        cairo_set_line_width(cr, 1.5);
+        cairo_set_source_rgba(cr, 0.85, 0.92, 1.0, (0.80 + heartbeat * 0.20) * alpha);
+        cairo_set_line_width(cr, 1.5 + heartbeat * 0.8);
         cairo_stroke(cr);
 
         // Center sparkle
-        cairo_arc(cr, px, py, 2.5, 0, 2.0 * std::numbers::pi);
+        cairo_arc(cr, px, py, 2.5 + heartbeat * 0.8, 0, 2.0 * std::numbers::pi);
         cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0 * alpha);
         cairo_fill(cr);
 
         cairo_restore(cr);
     }
+}
+
+void ManaCoresSelector::draw_realmheart_runes(
+    cairo_t* cr,
+    double cx, double cy,
+    double radius,
+    double alpha
+) {
+    if (alpha <= 0.02 || radius <= 20.0) return;
+
+    cairo_save(cr);
+
+    double t = static_cast<double>(g_get_monotonic_time()) / 1'000'000.0;
+    double scale = layout_.canvas_height / 1080.0;
+
+    // 1. Concentric orbital rune rings in the orbit gap
+    double ring1_r = radius + 8.0 * scale;
+    double ring2_r = radius + 15.0 * scale;
+
+    // Inner dashed Aether ring (slow clockwise rotation)
+    cairo_save(cr);
+    cairo_arc(cr, cx, cy, ring1_r, 0, 2.0 * std::numbers::pi);
+    const double dashes1[] = {5.0 * scale, 9.0 * scale};
+    cairo_set_dash(cr, dashes1, 2, t * 14.0);
+    cairo_set_line_width(cr, 1.2 * scale);
+    // Subtle Aether violet / lavender tone
+    cairo_set_source_rgba(cr, 0.78, 0.62, 0.98, 0.28 * alpha);
+    cairo_stroke(cr);
+    cairo_restore(cr);
+
+    // Outer dotted Mana ring (counter-clockwise rotation)
+    cairo_save(cr);
+    cairo_arc(cr, cx, cy, ring2_r, 0, 2.0 * std::numbers::pi);
+    const double dashes2[] = {2.0 * scale, 6.0 * scale};
+    cairo_set_dash(cr, dashes2, 2, -t * 10.0);
+    cairo_set_line_width(cr, 0.9 * scale);
+    // Crisp mana cyan-white tone
+    cairo_set_source_rgba(cr, 0.85, 0.92, 1.0, 0.22 * alpha);
+    cairo_stroke(cr);
+    cairo_restore(cr);
+
+    // 2. 8 Geometric God Step / Realmheart tick marks at 45° intervals
+    for (int k = 0; k < 8; ++k) {
+        double theta = k * (std::numbers::pi * 0.25) + t * 0.04;
+        double cos_t = std::cos(theta);
+        double sin_t = std::sin(theta);
+
+        double tick_r_in = radius + 5.0 * scale;
+        double tick_r_out = radius + 18.0 * scale;
+
+        cairo_move_to(cr, cx + tick_r_in * cos_t, cy + tick_r_in * sin_t);
+        cairo_line_to(cr, cx + tick_r_out * cos_t, cy + tick_r_out * sin_t);
+        cairo_set_source_rgba(cr, 0.88, 0.82, 1.0, 0.32 * alpha);
+        cairo_set_line_width(cr, (k % 2 == 0) ? (1.5 * scale) : (0.8 * scale));
+        cairo_stroke(cr);
+
+        if (k % 2 == 0) {
+            double dx = cx + (tick_r_out + 3.0 * scale) * cos_t;
+            double dy = cy + (tick_r_out + 3.0 * scale) * sin_t;
+            cairo_arc(cr, dx, dy, 1.6 * scale, 0, 2.0 * std::numbers::pi);
+            cairo_set_source_rgba(cr, 0.95, 0.90, 1.0, 0.50 * alpha);
+            cairo_fill(cr);
+        }
+    }
+
+    cairo_restore(cr);
+}
+
+void ManaCoresSelector::draw_drop_shadows(
+    cairo_t* cr,
+    double cx, double cy,
+    double core_radius,
+    double r_in, double r_out,
+    double alpha
+) {
+    if (alpha <= 0.01) return;
+
+    cairo_save(cr);
+    double scale = layout_.canvas_height / 1080.0;
+
+    // 1. Core Drop Shadow (elevates the main disk)
+    if (core_radius > 10.0) {
+        const double shadow_dx = 8.0 * scale;
+        const double shadow_dy = 12.0 * scale;
+
+        // Soft outer ambient shadow
+        cairo_arc(cr, cx + shadow_dx, cy + shadow_dy, core_radius + 4.0, 0, 2.0 * std::numbers::pi);
+        cairo_set_source_rgba(cr, 0.0, 0.0, 0.04, 0.40 * alpha);
+        cairo_set_line_width(cr, 28.0 * scale);
+        cairo_stroke(cr);
+
+        // Tighter contact shadow
+        cairo_arc(cr, cx + shadow_dx * 0.6, cy + shadow_dy * 0.6, core_radius, 0, 2.0 * std::numbers::pi);
+        cairo_set_source_rgba(cr, 0.0, 0.0, 0.02, 0.60 * alpha);
+        cairo_set_line_width(cr, 10.0 * scale);
+        cairo_stroke(cr);
+    }
+
+    // 2. Radial Slices Drop Shadows
+    if (r_in > 0.0 && r_out > r_in) {
+        for (size_t i = 0; i < 3; ++i) {
+            const auto& geom = current_slices_[i];
+            double slice_cx = cx;
+            double slice_cy = cy;
+            double slice_r_in = r_in;
+            double slice_r_out = r_out;
+
+            if (state_ == State::Idle && hovered_radial_ == static_cast<int>(i)) {
+                double pop = 14.0 * scale;
+                slice_cx += pop * std::cos(geom.mid_angle);
+                slice_cy += pop * std::sin(geom.mid_angle);
+                slice_r_out += 8.0 * scale;
+            }
+
+            const double shadow_dx = 6.0 * scale;
+            const double shadow_dy = 10.0 * scale;
+
+            // Ambient slice shadow
+            append_annular_sector_path(
+                cr, slice_cx + shadow_dx, slice_cy + shadow_dy,
+                slice_r_in, slice_r_out,
+                geom.start_angle, geom.end_angle
+            );
+            cairo_set_source_rgba(cr, 0.0, 0.0, 0.03, 0.35 * alpha);
+            cairo_set_line_width(cr, (layout_.border_thickness + 16.0) * scale);
+            cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+            cairo_stroke(cr);
+
+            // Contact slice shadow
+            append_annular_sector_path(
+                cr, slice_cx + shadow_dx * 0.6, slice_cy + shadow_dy * 0.6,
+                slice_r_in, slice_r_out,
+                geom.start_angle, geom.end_angle
+            );
+            cairo_set_source_rgba(cr, 0.0, 0.0, 0.02, 0.55 * alpha);
+            cairo_set_line_width(cr, (layout_.border_thickness + 6.0) * scale);
+            cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+            cairo_stroke(cr);
+        }
+    }
+
+    cairo_restore(cr);
 }
 
 void ManaCoresSelector::draw_core(
@@ -498,21 +653,31 @@ void ManaCoresSelector::draw_core(
 ) {
     if (radius <= 0.0 || alpha <= 0.0) return;
 
-    // 1. Wallpaper inside core
+    double t = static_cast<double>(g_get_monotonic_time()) / 1'000'000.0;
+    double scale = layout_.canvas_height / 1080.0;
+
+    // Organic double-beat heartbeat pulse (systole + diastole)
+    double beat_time = std::fmod(t, 1.35);
+    double heartbeat = 0.0;
+    if (beat_time < 0.16) {
+        heartbeat = std::sin((beat_time / 0.16) * std::numbers::pi);
+    } else if (beat_time >= 0.22 && beat_time < 0.38) {
+        heartbeat = 0.50 * std::sin(((beat_time - 0.22) / 0.16) * std::numbers::pi);
+    }
+
+    // 1. Wallpaper inside core with 2.5D Lissajous floating parallax
     if (wallpaper_alpha > 0.0) {
         cairo_save(cr);
         cairo_arc(cr, cx, cy, radius, 0, 2.0 * std::numbers::pi);
         cairo_clip(cr);
 
-        // Curving & rotating slide for navigation
-        // Next (dir=+1): new swings in from top slice direction (~ -42° angle),
-        //               rotating from tilted to level. Old swings out towards bottom-left with tilt.
-        // Prev (dir=-1): inverted directions.
+        double parallax_x = (7.0 * std::sin(t * 0.65) + 3.0 * std::cos(t * 1.3)) * scale;
+        double parallax_y = (5.0 * std::cos(t * 0.85) + 2.0 * std::sin(t * 1.7)) * scale;
+
         double dir = static_cast<double>(nav_direction_);
         double box = radius * 2.4;
 
         if (nav_progress_ < 1.0 && old_core_pixbuf_ != nullptr) {
-            // Old image swings out towards bottom-left with slight rotation and fading
             double travel = radius * 0.6;
             double old_progress = nav_progress_;
             double old_dx = -travel * std::cos(42.0 * std::numbers::pi / 180.0) * old_progress * dir;
@@ -520,7 +685,7 @@ void ManaCoresSelector::draw_core(
             double old_rot = -0.35 * old_progress * dir;
 
             cairo_save(cr);
-            cairo_translate(cr, cx + old_dx, cy + old_dy);
+            cairo_translate(cr, cx + old_dx + parallax_x, cy + old_dy + parallax_y);
             cairo_rotate(cr, old_rot);
             draw_pixbuf_cover(
                 cr,
@@ -533,16 +698,14 @@ void ManaCoresSelector::draw_core(
         }
 
         if (current_core_pixbuf_ != nullptr && nav_progress_ > 0.0) {
-            // New image swings in from the top slice direction, rotating from angled to level
             double ease = (nav_progress_ < 1.0) ? (1.0 - std::pow(1.0 - nav_progress_, 3.0)) : 1.0;
             double travel = radius * 0.75;
             double in_dx = travel * std::cos(-42.0 * std::numbers::pi / 180.0) * (1.0 - ease) * dir;
             double in_dy = travel * std::sin(-42.0 * std::numbers::pi / 180.0) * (1.0 - ease) * dir;
-            // Starts tilted by ~0.4 radians (~23 deg), rotating to 0.0 as it settles
             double in_rot = 0.45 * (1.0 - ease) * dir;
 
             cairo_save(cr);
-            cairo_translate(cr, cx + in_dx, cy + in_dy);
+            cairo_translate(cr, cx + in_dx + parallax_x, cy + in_dy + parallax_y);
             cairo_rotate(cr, in_rot);
             draw_pixbuf_cover(
                 cr,
@@ -554,13 +717,14 @@ void ManaCoresSelector::draw_core(
             cairo_restore(cr);
         }
 
-        // Subtle dark rim vignette
+        // Subtle dark rim vignette with Aether violet depth
         cairo_pattern_t* vignette = cairo_pattern_create_radial(
-            cx, cy, radius * 0.75,
+            cx, cy, radius * 0.65,
             cx, cy, radius
         );
         cairo_pattern_add_color_stop_rgba(vignette, 0.0, 0.0, 0.0, 0.0, 0.0);
-        cairo_pattern_add_color_stop_rgba(vignette, 1.0, 0.0, 0.0, 0.0, 0.35 * alpha);
+        cairo_pattern_add_color_stop_rgba(vignette, 0.72, 0.35, 0.12, 0.55, 0.22 * alpha); // Aether violet hint
+        cairo_pattern_add_color_stop_rgba(vignette, 1.0, 0.0, 0.0, 0.02, 0.45 * alpha);
         cairo_set_source(cr, vignette);
         cairo_paint(cr);
         cairo_pattern_destroy(vignette);
@@ -571,31 +735,50 @@ void ManaCoresSelector::draw_core(
     const double border = layout_.border_thickness;
     const double glow = layout_.glow_extent;
 
-    // 2. White Mana Core Outer Glow
+    // 2. White & Aether Mana Core Flowing Animated Gradients
+    double grad_angle = t * 1.4;
+    double gx1 = cx + radius * std::cos(grad_angle);
+    double gy1 = cy + radius * std::sin(grad_angle);
+    double gx2 = cx - radius * std::cos(grad_angle);
+    double gy2 = cy - radius * std::sin(grad_angle);
+
+    cairo_pattern_t* core_glow_pattern = cairo_pattern_create_linear(gx1, gy1, gx2, gy2);
+    cairo_pattern_add_color_stop_rgba(core_glow_pattern, 0.0, 1.0, 1.0, 1.0, 0.45 * alpha);
+    cairo_pattern_add_color_stop_rgba(core_glow_pattern, 0.35, 0.82, 0.94, 1.0, 0.40 * alpha);
+    cairo_pattern_add_color_stop_rgba(core_glow_pattern, 0.70, 0.88, 0.72, 1.0, 0.42 * alpha); // Aether
+    cairo_pattern_add_color_stop_rgba(core_glow_pattern, 1.0, 1.0, 1.0, 1.0, 0.45 * alpha);
+
+    // Outer Glow with heartbeat pulsation
     cairo_save(cr);
-    cairo_set_source_rgba(cr, 0.88, 0.94, 1.0, 0.35 * alpha);
-    cairo_set_line_width(cr, border + glow);
+    cairo_set_source(cr, core_glow_pattern);
+    cairo_set_line_width(cr, border + glow + heartbeat * 7.0 * scale);
     cairo_arc(cr, cx, cy, radius, 0, 2.0 * std::numbers::pi);
     cairo_stroke(cr);
     cairo_restore(cr);
 
     // Inner Glow
     cairo_save(cr);
-    cairo_set_source_rgba(cr, 0.95, 0.98, 1.0, 0.25 * alpha);
+    cairo_set_source_rgba(cr, 0.95, 0.98, 1.0, (0.28 + heartbeat * 0.15) * alpha);
     cairo_set_line_width(cr, border + (glow * 0.5));
     cairo_arc(cr, cx, cy, radius, 0, 2.0 * std::numbers::pi);
     cairo_stroke(cr);
     cairo_restore(cr);
 
-    // Crisp Hard Border
+    // Crisp Hard Border with animated gradient flow
     cairo_save(cr);
-    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.95 * alpha);
+    cairo_pattern_t* core_border_pattern = cairo_pattern_create_linear(gx1, gy1, gx2, gy2);
+    cairo_pattern_add_color_stop_rgba(core_border_pattern, 0.0, 1.0, 1.0, 1.0, 0.98 * alpha);
+    cairo_pattern_add_color_stop_rgba(core_border_pattern, 0.5, 0.90, 0.95, 1.0, 0.95 * alpha);
+    cairo_pattern_add_color_stop_rgba(core_border_pattern, 1.0, 1.0, 1.0, 1.0, 0.98 * alpha);
+    cairo_set_source(cr, core_border_pattern);
     cairo_set_line_width(cr, border);
     cairo_arc(cr, cx, cy, radius, 0, 2.0 * std::numbers::pi);
     cairo_stroke(cr);
+    cairo_pattern_destroy(core_border_pattern);
+    cairo_pattern_destroy(core_glow_pattern);
     cairo_restore(cr);
 
-    // 3. Four Cardinal Diamond Star Ornaments
+    // 3. Four Cardinal Diamond Star Ornaments with Heartbeat Sparkle
     if (wallpaper_alpha > 0.1) {
         draw_cardinal_stars(cr, cx, cy, radius, alpha * wallpaper_alpha);
     }
@@ -612,6 +795,8 @@ void ManaCoresSelector::draw_radial_slices(
 
     const double border = layout_.border_thickness;
     const double glow = layout_.glow_extent;
+    double t = static_cast<double>(g_get_monotonic_time()) / 1'000'000.0;
+    double scale = layout_.canvas_height / 1080.0;
 
     for (size_t i = 0; i < 3; ++i) {
         const auto& geom = current_slices_[i];
@@ -624,15 +809,21 @@ void ManaCoresSelector::draw_radial_slices(
         double slice_r_out = r_out;
         double glow_boost = 1.0;
 
-        // Hover animation for selected radial
+        // Hover animation with organic double-beat pulse for selected radial
         if (state_ == State::Idle && hovered_radial_ == static_cast<int>(i)) {
-            double t = static_cast<double>(g_get_monotonic_time() - idle_start_micros_) / 1'000'000.0;
-            glow_boost = 1.0 + 0.5 * std::sin(t * 6.0);
-            double pop = 14.0 * (layout_.canvas_height / 1080.0);
+            double h_t = static_cast<double>(g_get_monotonic_time() - idle_start_micros_) / 1'000'000.0;
+            double beat = std::fmod(h_t, 1.35);
+            double hover_pulse = 0.0;
+            if (beat < 0.16) {
+                hover_pulse = std::sin((beat / 0.16) * std::numbers::pi);
+            } else if (beat >= 0.22 && beat < 0.38) {
+                hover_pulse = 0.50 * std::sin(((beat - 0.22) / 0.16) * std::numbers::pi);
+            }
+            glow_boost = 1.2 + 0.6 * hover_pulse;
+            double pop = (14.0 + 3.0 * hover_pulse) * scale;
             slice_cx += pop * std::cos(geom.mid_angle);
             slice_cy += pop * std::sin(geom.mid_angle);
-            // Scale slice outward slightly
-            slice_r_out += 8.0 * (layout_.canvas_height / 1080.0);
+            slice_r_out += (8.0 + 2.0 * hover_pulse) * scale;
         }
 
         // 1a. Mana gradient fill (visible when wallpaper is not fully shown)
@@ -653,7 +844,6 @@ void ManaCoresSelector::draw_radial_slices(
             double grad_r = (slice_r_out - slice_r_in) * 0.85;
 
             cairo_pattern_t* grad = cairo_pattern_create_radial(gx, gy, 0.0, gx, gy, grad_r);
-            // Bright centre fading to deeper tint at edges
             cairo_pattern_add_color_stop_rgba(grad, 0.0,
                 std::min(1.0, color[0] + 0.3),
                 std::min(1.0, color[1] + 0.3),
@@ -672,7 +862,7 @@ void ManaCoresSelector::draw_radial_slices(
             cairo_restore(cr);
         }
 
-        // 1b. Wallpaper preview inside slice — rotated to fill the sector
+        // 1b. Wallpaper preview inside slice with 2.5D micro-parallax
         if (wallpaper_alpha > 0.0) {
             cairo_save(cr);
             append_annular_sector_path(
@@ -682,36 +872,25 @@ void ManaCoresSelector::draw_radial_slices(
             );
             cairo_clip(cr);
 
-            // Midpoint of slice for positioning
             double mid_r = (slice_r_in + slice_r_out) * 0.5;
-
-            // Bounding box tailored to the rotated sector geometry.
-            // Since we rotate by mid_angle + 90, the unrotated X axis aligns with
-            // the arc (tangent), and the unrotated Y axis aligns with the radius.
             double arc_span = std::abs(geom.end_angle - geom.start_angle);
             double arc_width = slice_r_out * arc_span;
             double radial_depth = slice_r_out - slice_r_in;
             
-            // Add slight padding to ensure the curved edges are fully covered
             double bb_w = arc_width * 1.15;
             double bb_h = radial_depth * 1.25;
 
-            // Immersion tweak: slight angular offset per slice slot
             double immersion_tweak = 0.0;
-            if (i == 0) immersion_tweak = -0.12;       // ~-7° less
-            else if (i == 2) immersion_tweak = 0.12;   // ~+7° more
+            if (i == 0) immersion_tweak = -0.12;
+            else if (i == 2) immersion_tweak = 0.12;
 
-            // Rotational carousel slide along the curved track:
-            // Slices are spaced by delta angle ~42° (0.733 rad).
-            // Next (dir=+1): carousel rotates upward along the arc (bot -> mid -> top).
-            //   New image arrives from the lower slot (current_angle + delta_angle).
-            //   Old image departs towards the upper slot (current_angle - delta_angle).
-            // Prev (dir=-1): carousel rotates downward (top -> mid -> bot).
+            double slice_plx = (4.0 * std::sin(t * 0.85 + i * 1.4)) * scale;
+            double slice_ply = (3.0 * std::cos(t * 0.95 + i * 1.4)) * scale;
+
             double s_dir = static_cast<double>(nav_direction_);
             constexpr double delta_angle = 42.0 * std::numbers::pi / 180.0;
 
             if (nav_progress_ < 1.0 && old_slice_pixbufs_[i] != nullptr) {
-                // Old image departs along the curved arc
                 double old_angle_offset = -delta_angle * nav_progress_ * s_dir;
                 double old_angle = geom.mid_angle + old_angle_offset;
                 double old_x = slice_cx + mid_r * std::cos(old_angle);
@@ -719,7 +898,7 @@ void ManaCoresSelector::draw_radial_slices(
                 double old_rot = old_angle + (std::numbers::pi / 2.0) + immersion_tweak;
 
                 cairo_save(cr);
-                cairo_translate(cr, old_x, old_y);
+                cairo_translate(cr, old_x + slice_plx, old_y + slice_ply);
                 cairo_rotate(cr, old_rot);
                 draw_pixbuf_cover(
                     cr,
@@ -732,7 +911,6 @@ void ManaCoresSelector::draw_radial_slices(
             }
 
             if (pixbuf != nullptr && nav_progress_ > 0.0) {
-                // New image arrives along the curved arc from the adjacent slot
                 double new_angle_offset = 0.0;
                 if (nav_progress_ < 1.0) {
                     double ease = 1.0 - std::pow(1.0 - nav_progress_, 3.0);
@@ -744,7 +922,7 @@ void ManaCoresSelector::draw_radial_slices(
                 double cur_rot = cur_angle + (std::numbers::pi / 2.0) + immersion_tweak;
 
                 cairo_save(cr);
-                cairo_translate(cr, cur_x, cur_y);
+                cairo_translate(cr, cur_x + slice_plx, cur_y + slice_ply);
                 cairo_rotate(cr, cur_rot);
                 draw_pixbuf_cover(
                     cr,
@@ -763,8 +941,26 @@ void ManaCoresSelector::draw_radial_slices(
             cairo_restore(cr);
         }
 
-        // 2. Coloured border & glow
+        // 2. Coloured border & glow with Dynamic "Mana Flow" Gradients
         cairo_save(cr);
+
+        double flow_t = t * 2.2 + i * 1.6;
+        double gx1 = slice_cx + slice_r_out * std::cos(geom.start_angle + 0.12 * std::sin(flow_t));
+        double gy1 = slice_cy + slice_r_out * std::sin(geom.start_angle + 0.12 * std::sin(flow_t));
+        double gx2 = slice_cx + slice_r_out * std::cos(geom.end_angle + 0.12 * std::cos(flow_t));
+        double gy2 = slice_cy + slice_r_out * std::sin(geom.end_angle + 0.12 * std::cos(flow_t));
+
+        cairo_pattern_t* slice_grad = cairo_pattern_create_linear(gx1, gy1, gx2, gy2);
+        double shift = 0.5 + 0.35 * std::sin(flow_t);
+        cairo_pattern_add_color_stop_rgba(slice_grad, 0.0,
+            std::min(1.0, color[0] + 0.15), std::min(1.0, color[1] + 0.15), std::min(1.0, color[2] + 0.15),
+            0.85 * alpha);
+        cairo_pattern_add_color_stop_rgba(slice_grad, shift,
+            1.0, std::min(1.0, color[1] + 0.35), std::min(1.0, color[2] + 0.35),
+            1.0 * alpha);
+        cairo_pattern_add_color_stop_rgba(slice_grad, 1.0,
+            color[0] * 0.85, color[1] * 0.85, color[2] * 0.85,
+            0.80 * alpha);
 
         // Outer glow
         append_annular_sector_path(
@@ -777,18 +973,124 @@ void ManaCoresSelector::draw_radial_slices(
         cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
         cairo_stroke(cr);
 
-        // Crisp border
+        // Crisp border with gradient
         append_annular_sector_path(
             cr, slice_cx, slice_cy,
             slice_r_in, slice_r_out,
             geom.start_angle, geom.end_angle
         );
-        cairo_set_source_rgba(cr, color[0], color[1], color[2], 0.95 * alpha);
+        cairo_set_source(cr, slice_grad);
         cairo_set_line_width(cr, border);
         cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
         cairo_stroke(cr);
 
+        cairo_pattern_destroy(slice_grad);
         cairo_restore(cr);
+    }
+}
+
+void ManaCoresSelector::draw_mana_particles(cairo_t* cr, double alpha) {
+    if (alpha <= 0.01) return;
+
+    cairo_save(cr);
+    for (const auto& p : particles_) {
+        if (!p.active || p.life <= 0.0) continue;
+
+        double p_alpha = p.life * alpha;
+        if (p_alpha <= 0.01) continue;
+
+        // Soft outer glowing halo
+        cairo_arc(cr, p.x, p.y, p.size * 2.2, 0, 2.0 * std::numbers::pi);
+        cairo_set_source_rgba(cr, p.r, p.g, p.b, 0.30 * p_alpha);
+        cairo_fill(cr);
+
+        // Bright sparkling core
+        cairo_arc(cr, p.x, p.y, p.size * 0.75, 0, 2.0 * std::numbers::pi);
+        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.88 * p_alpha);
+        cairo_fill(cr);
+    }
+    cairo_restore(cr);
+}
+
+void ManaCoresSelector::spawn_particle(
+    double x, double y,
+    double vx, double vy,
+    double r, double g, double b,
+    double size, double decay
+) {
+    for (auto& p : particles_) {
+        if (!p.active) {
+            p.x = x;
+            p.y = y;
+            p.vx = vx;
+            p.vy = vy;
+            p.r = r;
+            p.g = g;
+            p.b = b;
+            p.size = size;
+            p.decay = decay;
+            p.life = 1.0;
+            p.active = true;
+            return;
+        }
+    }
+}
+
+void ManaCoresSelector::update_particles(guint64 now_micros, double dt) {
+    (void)now_micros;
+    // 1. Advance existing particles
+    for (auto& p : particles_) {
+        if (!p.active) continue;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.life -= p.decay * dt * 60.0;
+        if (p.life <= 0.0) {
+            p.active = false;
+        }
+    }
+
+    // 2. Spawn new particles during Idle or Assembling
+    if ((state_ == State::Idle || state_ == State::Assembling) && current_alpha_ > 0.3) {
+        static double spawn_accum = 0.0;
+        spawn_accum += dt;
+        while (spawn_accum >= 0.045) { // ~22 particles/sec spawn rate
+            spawn_accum -= 0.045;
+
+            double rand_val = static_cast<double>(std::rand()) / RAND_MAX;
+            if (rand_val < 0.65 || hovered_radial_ < 0) {
+                // Spawn around core perimeter
+                double theta = (static_cast<double>(std::rand()) / RAND_MAX) * 2.0 * std::numbers::pi;
+                double px = current_cx_ + current_core_radius_ * std::cos(theta);
+                double py = current_cy_ + current_core_radius_ * std::sin(theta);
+                double speed = 10.0 + 16.0 * (static_cast<double>(std::rand()) / RAND_MAX);
+                double vx = std::cos(theta) * speed + (static_cast<double>(std::rand()) / RAND_MAX * 6.0 - 3.0);
+                double vy = std::sin(theta) * speed - 12.0; // gentle upward draft
+
+                // 80% cyan-white mana, 20% Aether purple
+                double pr = 0.90, pg = 0.95, pb = 1.0;
+                if ((std::rand() % 5) == 0) {
+                    pr = 0.82; pg = 0.55; pb = 1.0; // Aether
+                }
+                double size = 1.4 + 1.8 * (static_cast<double>(std::rand()) / RAND_MAX);
+                double decay = 0.015 + 0.012 * (static_cast<double>(std::rand()) / RAND_MAX);
+                spawn_particle(px, py, vx, vy, pr, pg, pb, size, decay);
+            } else {
+                // Spawn along hovered slice arc
+                const auto& geom = current_slices_[hovered_radial_];
+                const auto& col = layout_.kRadialPalette[hovered_radial_];
+                double t_interp = static_cast<double>(std::rand()) / RAND_MAX;
+                double theta = geom.start_angle + (geom.end_angle - geom.start_angle) * t_interp;
+                double r_spawn = current_slice_r_out_;
+                double px = current_cx_ + r_spawn * std::cos(theta);
+                double py = current_cy_ + r_spawn * std::sin(theta);
+                double speed = 12.0 + 15.0 * (static_cast<double>(std::rand()) / RAND_MAX);
+                double vx = std::cos(theta) * speed;
+                double vy = std::sin(theta) * speed - 8.0;
+                double size = 1.4 + 2.0 * (static_cast<double>(std::rand()) / RAND_MAX);
+                double decay = 0.018 + 0.012 * (static_cast<double>(std::rand()) / RAND_MAX);
+                spawn_particle(px, py, vx, vy, col[0], col[1], col[2], size, decay);
+            }
+        }
     }
 }
 
@@ -817,23 +1119,21 @@ void ManaCoresSelector::draw_reverse_bloom(
         1.0
     );
 
-    // Glowing border along the inner reveal edge
+    // Glowing border along the inner reveal edge with Aether violet energy flash
     if (mask_radius > 6.0) {
         cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.85);
         cairo_set_line_width(cr, 3.0);
         cairo_arc(cr, cx, cy, mask_radius, 0, 2.0 * std::numbers::pi);
         cairo_stroke(cr);
 
-        cairo_set_source_rgba(cr, 0.82, 0.92, 1.0, 0.35);
-        cairo_set_line_width(cr, 18.0);
+        cairo_set_source_rgba(cr, 0.82, 0.65, 1.0, 0.45); // Aether violet-cyan aura
+        cairo_set_line_width(cr, 20.0);
         cairo_arc(cr, cx, cy, mask_radius, 0, 2.0 * std::numbers::pi);
         cairo_stroke(cr);
     }
 
     cairo_restore(cr);
 }
-
-
 
 void ManaCoresSelector::draw_backdrop_dim(
     cairo_t* cr,
@@ -863,11 +1163,16 @@ void ManaCoresSelector::draw(GtkDrawingArea*, cairo_t* cr, int, int) {
 
     // Draw central core and radial slices
     if (current_alpha_ > 0.0) {
-        // Backdrop dim — subtle dark overlay so the selector pops
+        // 1. Backdrop dim
         draw_backdrop_dim(cr, current_alpha_ * current_wallpaper_alpha_);
 
+        // 2. Realmheart orbital runes
+        draw_realmheart_runes(cr, current_cx_, current_cy_, current_core_radius_, current_alpha_ * current_wallpaper_alpha_);
 
+        // 3. Drop shadows (creates elevation)
+        draw_drop_shadows(cr, current_cx_, current_cy_, current_core_radius_, current_slice_r_in_, current_slice_r_out_, current_alpha_ * current_wallpaper_alpha_);
 
+        // 4. Core & Slices
         draw_core(
             cr,
             current_cx_, current_cy_,
@@ -883,6 +1188,9 @@ void ManaCoresSelector::draw(GtkDrawingArea*, cairo_t* cr, int, int) {
             current_alpha_,
             current_wallpaper_alpha_
         );
+
+        // 5. Atmospheric Mana & Aether Particles
+        draw_mana_particles(cr, current_alpha_ * current_wallpaper_alpha_);
     }
 }
 
@@ -899,7 +1207,14 @@ gboolean ManaCoresSelector::tick_callback(GtkWidget*, GdkFrameClock*, gpointer u
     if (self->animation_start_micros_ == 0) {
         self->animation_start_micros_ = now;
     }
+    double dt = (self->last_tick_micros_ > 0)
+        ? static_cast<double>(now - self->last_tick_micros_) / 1'000'000.0
+        : 0.016;
+    self->last_tick_micros_ = now;
+    dt = std::clamp(dt, 0.001, 0.05);
+
     self->update_animations(now);
+    self->update_particles(now, dt);
     return G_SOURCE_CONTINUE;
 }
 
