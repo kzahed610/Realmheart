@@ -154,6 +154,8 @@ void ManaCoresSelector::present(GtkApplication* app) {
     assemble_phase_ = AssemblePhase::Emerge;
     animation_start_micros_ = 0;  // Will be armed on first frame tick
     apply_callback_fired_ = false;
+    nav_transitioning_ = false;
+    nav_progress_ = 1.0;
 
     // Initialize layout from monitor dimensions
     GdkDisplay* display = gdk_display_get_default();
@@ -195,11 +197,17 @@ void ManaCoresSelector::present(GtkApplication* app) {
 void ManaCoresSelector::dismiss() {
     visible_ = false;
     state_ = State::Hidden;
+    nav_transitioning_ = false;
+    nav_progress_ = 1.0;
     if (tick_callback_id_ != 0 && canvas_ != nullptr) {
         gtk_widget_remove_tick_callback(canvas_, tick_callback_id_);
         tick_callback_id_ = 0;
     }
     clear_old_pixbufs();
+    if (apply_fullscreen_pixbuf_ != nullptr) {
+        g_object_unref(apply_fullscreen_pixbuf_);
+        apply_fullscreen_pixbuf_ = nullptr;
+    }
     if (window_) {
         gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
     }
@@ -375,6 +383,12 @@ void ManaCoresSelector::reload_pixbufs() {
 
 void ManaCoresSelector::cycle_wallpaper(int direction) {
     if (all_wallpaper_paths_.empty()) return;
+
+    if (nav_transitioning_) {
+        nav_transitioning_ = false;
+        nav_progress_ = 1.0;
+        clear_old_pixbufs();
+    }
 
     if (old_core_pixbuf_ != nullptr) g_object_unref(old_core_pixbuf_);
     old_core_pixbuf_ = current_core_pixbuf_ ? GDK_PIXBUF(g_object_ref(current_core_pixbuf_)) : nullptr;
@@ -1179,6 +1193,11 @@ void ManaCoresSelector::force_apply(const std::string& wallpaper_path) {
 
 void ManaCoresSelector::begin_apply() {
     state_ = State::Applying;
+    if (nav_transitioning_) {
+        nav_transitioning_ = false;
+        nav_progress_ = 1.0;
+        clear_old_pixbufs();
+    }
     apply_start_micros_ = g_get_monotonic_time();
     apply_callback_fired_ = false;
     apply_mask_radius_ = std::hypot(layout_.canvas_width, layout_.canvas_height);
