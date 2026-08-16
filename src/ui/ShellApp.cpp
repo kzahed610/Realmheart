@@ -662,6 +662,11 @@ public:
 
     void toggle_relictombs() {
         if (bar_ == nullptr || !gtk_widget_get_realized(bar_->get_window())) {
+            if (relictombs_deferred_toggle_count_++ >= 10) {
+                relictombs_deferred_toggle_count_ = 0;
+                std::cerr << "[ManaCores] bar not realized after retries, aborting toggle\n";
+                return;
+            }
             g_idle_add_full(
                 G_PRIORITY_DEFAULT_IDLE,
                 +[](gpointer raw) -> gboolean {
@@ -675,6 +680,7 @@ public:
             return;
         }
 
+        relictombs_deferred_toggle_count_ = 0;
         ensure_core_initialized();
 
         if (relictombs_apply_pending_ || relictombs_launch_pending_ ||
@@ -1883,6 +1889,7 @@ private:
     std::string relictombs_apply_path_;
     bool relictombs_restore_pending_ = false;
     bool relictombs_bar_was_visible_ = false;
+    int relictombs_deferred_toggle_count_ = 0;
     int relictombs_restore_workspace_id_ = 0;
     std::uint64_t relictombs_launch_generation_ = 0;
     std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;
