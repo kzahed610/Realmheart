@@ -507,31 +507,28 @@ void ManaCoresSelector::draw_core(
         cairo_arc(cr, cx, cy, radius, 0, 2.0 * std::numbers::pi);
         cairo_clip(cr);
 
-        // Diagonal slide for navigation: direction-aware
-        // Next (dir=+1): new enters from top-right, old exits bottom-left
-        // Prev (dir=-1): new enters from bottom-left, old exits top-right
+        // Curving & rotating slide for navigation
+        // Next (dir=+1): new swings in from top slice direction (~ -42° angle),
+        //               rotating from tilted to level. Old swings out towards bottom-left with tilt.
+        // Prev (dir=-1): inverted directions.
         double dir = static_cast<double>(nav_direction_);
-        double slide_dx = 0.0;
-        double slide_dy = 0.0;
-        if (nav_progress_ < 1.0) {
-            double ease = 1.0 - std::pow(1.0 - nav_progress_, 3.0);
-            double travel = radius * 0.5;
-            slide_dx = travel * (1.0 - ease) * dir;    // direction-aware X
-            slide_dy = -travel * (1.0 - ease) * dir;   // direction-aware Y
-        }
-
-        // Use a generous bounding box that fully covers the circular clip
-        double box = radius * 2.2;
+        double box = radius * 2.4;
 
         if (nav_progress_ < 1.0 && old_core_pixbuf_ != nullptr) {
-            // Old image slides out in opposite diagonal
-            double old_travel = radius * 0.5 * nav_progress_;
+            // Old image swings out towards bottom-left with slight rotation and fading
+            double travel = radius * 0.6;
+            double old_progress = nav_progress_;
+            double old_dx = -travel * std::cos(42.0 * std::numbers::pi / 180.0) * old_progress * dir;
+            double old_dy = travel * std::sin(42.0 * std::numbers::pi / 180.0) * old_progress * dir;
+            double old_rot = -0.35 * old_progress * dir;
+
             cairo_save(cr);
-            cairo_translate(cr, -old_travel * dir, old_travel * dir);
+            cairo_translate(cr, cx + old_dx, cy + old_dy);
+            cairo_rotate(cr, old_rot);
             draw_pixbuf_cover(
                 cr,
                 old_core_pixbuf_,
-                cx - box * 0.5, cy - box * 0.5,
+                -box * 0.5, -box * 0.5,
                 box, box,
                 wallpaper_alpha * alpha * (1.0 - nav_progress_)
             );
@@ -539,13 +536,21 @@ void ManaCoresSelector::draw_core(
         }
 
         if (current_core_pixbuf_ != nullptr && nav_progress_ > 0.0) {
-            // New image slides in from the leading diagonal
+            // New image swings in from the top slice direction, rotating from angled to level
+            double ease = (nav_progress_ < 1.0) ? (1.0 - std::pow(1.0 - nav_progress_, 3.0)) : 1.0;
+            double travel = radius * 0.75;
+            double in_dx = travel * std::cos(-42.0 * std::numbers::pi / 180.0) * (1.0 - ease) * dir;
+            double in_dy = travel * std::sin(-42.0 * std::numbers::pi / 180.0) * (1.0 - ease) * dir;
+            // Starts tilted by ~0.4 radians (~23 deg), rotating to 0.0 as it settles
+            double in_rot = 0.45 * (1.0 - ease) * dir;
+
             cairo_save(cr);
-            cairo_translate(cr, slide_dx, slide_dy);
+            cairo_translate(cr, cx + in_dx, cy + in_dy);
+            cairo_rotate(cr, in_rot);
             draw_pixbuf_cover(
                 cr,
                 current_core_pixbuf_,
-                cx - box * 0.5, cy - box * 0.5,
+                -box * 0.5, -box * 0.5,
                 box, box,
                 wallpaper_alpha * alpha * (nav_progress_ < 1.0 ? nav_progress_ : 1.0)
             );
@@ -682,8 +687,6 @@ void ManaCoresSelector::draw_radial_slices(
 
             // Midpoint of slice for positioning
             double mid_r = (slice_r_in + slice_r_out) * 0.5;
-            double mid_x = slice_cx + mid_r * std::cos(geom.mid_angle);
-            double mid_y = slice_cy + mid_r * std::sin(geom.mid_angle);
 
             // Bounding box tailored to the rotated sector geometry.
             // Since we rotate by mid_angle + 90, the unrotated X axis aligns with
@@ -696,30 +699,31 @@ void ManaCoresSelector::draw_radial_slices(
             double bb_w = arc_width * 1.15;
             double bb_h = radial_depth * 1.25;
 
-            // Rotate wallpaper to align with the slice's radial direction.
-            // mid_angle points outward from centre; rotating by it aligns
-            // the landscape width along the radial axis.
-            // Vary slightly per slice for immersion:
-            //   top slice (i=0, neg angle): a bit less rotation
-            //   mid slice (i=1, ~0):        straight radial
-            //   bot slice (i=2, pos angle): a bit more rotation
+            // Immersion tweak: slight angular offset per slice slot
             double immersion_tweak = 0.0;
             if (i == 0) immersion_tweak = -0.12;       // ~-7° less
             else if (i == 2) immersion_tweak = 0.12;   // ~+7° more
-            // Add 90 degrees (pi/2) so the bottom of the image faces the central core
-            double rotation = geom.mid_angle + (std::numbers::pi / 2.0) + immersion_tweak;
 
-            // Direction-aware vertical slide: next=bottom→top, prev=top→bottom
+            // Rotational carousel slide along the curved track:
+            // Slices are spaced by delta angle ~42° (0.733 rad).
+            // Next (dir=+1): carousel rotates upward along the arc (bot -> mid -> top).
+            //   New image arrives from the lower slot (current_angle + delta_angle).
+            //   Old image departs towards the upper slot (current_angle - delta_angle).
+            // Prev (dir=-1): carousel rotates downward (top -> mid -> bot).
             double s_dir = static_cast<double>(nav_direction_);
-            double travel = bb_h * 0.4;
+            constexpr double delta_angle = 42.0 * std::numbers::pi / 180.0;
 
             if (nav_progress_ < 1.0 && old_slice_pixbufs_[i] != nullptr) {
-                // Old image slides out (upward for next, downward for prev)
-                double old_t = travel * nav_progress_;
+                // Old image departs along the curved arc
+                double old_angle_offset = -delta_angle * nav_progress_ * s_dir;
+                double old_angle = geom.mid_angle + old_angle_offset;
+                double old_x = slice_cx + mid_r * std::cos(old_angle);
+                double old_y = slice_cy + mid_r * std::sin(old_angle);
+                double old_rot = old_angle + (std::numbers::pi / 2.0) + immersion_tweak;
+
                 cairo_save(cr);
-                cairo_translate(cr, 0, -old_t * s_dir);
-                cairo_translate(cr, mid_x, mid_y);
-                cairo_rotate(cr, rotation);
+                cairo_translate(cr, old_x, old_y);
+                cairo_rotate(cr, old_rot);
                 draw_pixbuf_cover(
                     cr,
                     old_slice_pixbufs_[i],
@@ -731,37 +735,26 @@ void ManaCoresSelector::draw_radial_slices(
             }
 
             if (pixbuf != nullptr && nav_progress_ > 0.0) {
-                // New image slides in (from below for next, from above for prev)
-                double new_offset = 0.0;
+                // New image arrives along the curved arc from the adjacent slot
+                double new_angle_offset = 0.0;
                 if (nav_progress_ < 1.0) {
                     double ease = 1.0 - std::pow(1.0 - nav_progress_, 3.0);
-                    new_offset = travel * (1.0 - ease) * s_dir;  // enters from below/above
+                    new_angle_offset = delta_angle * (1.0 - ease) * s_dir;
                 }
+                double cur_angle = geom.mid_angle + new_angle_offset;
+                double cur_x = slice_cx + mid_r * std::cos(cur_angle);
+                double cur_y = slice_cy + mid_r * std::sin(cur_angle);
+                double cur_rot = cur_angle + (std::numbers::pi / 2.0) + immersion_tweak;
+
                 cairo_save(cr);
-                cairo_translate(cr, 0, new_offset);
-                cairo_translate(cr, mid_x, mid_y);
-                cairo_rotate(cr, rotation);
+                cairo_translate(cr, cur_x, cur_y);
+                cairo_rotate(cr, cur_rot);
                 draw_pixbuf_cover(
                     cr,
                     pixbuf,
                     -bb_w * 0.5, -bb_h * 0.5,
                     bb_w, bb_h,
                     wallpaper_alpha * alpha * (nav_progress_ < 1.0 ? nav_progress_ : 1.0)
-                );
-                cairo_restore(cr);
-            }
-
-            // Draw the static wallpaper (no transition) with rotation
-            if (nav_progress_ >= 1.0 && pixbuf != nullptr) {
-                cairo_save(cr);
-                cairo_translate(cr, mid_x, mid_y);
-                cairo_rotate(cr, rotation);
-                draw_pixbuf_cover(
-                    cr,
-                    pixbuf,
-                    -bb_w * 0.5, -bb_h * 0.5,
-                    bb_w, bb_h,
-                    wallpaper_alpha * alpha
                 );
                 cairo_restore(cr);
             }
