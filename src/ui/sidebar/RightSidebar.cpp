@@ -19,6 +19,7 @@
 #include "ui/bar/widgets/ThemedSvgIcon.hpp"
 #include "ui/components/NotificationWidget.hpp"
 #include "ui/components/SliderWidget.hpp"
+#include <gtk4-layer-shell/gtk4-layer-shell.h>
 
 #include <algorithm>
 #include <array>
@@ -422,11 +423,11 @@ RightSidebar::RightSidebar(
     gtk_window_set_resizable(GTK_WINDOW(window_), FALSE);
     gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
 
-    const auto placement = sidebar_placement_for(window_);
+    // Initial default size (will be updated on realize)
     gtk_window_set_default_size(
         GTK_WINDOW(window_),
         kDefaultSidebarFrameLayout.surface_width(),
-        placement.height
+        760
     );
 
     auto layer_spec = make_layer_surface_spec(
@@ -435,9 +436,17 @@ RightSidebar::RightSidebar(
         LayerKeyboardMode::OnDemand
     );
     layer_spec.anchor_bottom = false;
-    layer_spec.margin_top = placement.top_margin;
+    layer_spec.margin_top = 76; // default, updated on realize
     layer_spec.margin_right = kSidebarRightMargin;
     apply_layer_surface(GTK_WINDOW(window_), layer_spec);
+
+    // Defer geometry computation until the window is realized and we can
+    // query the monitor. resolve_layer_surface_monitor() returns nullptr
+    // before realization.
+    g_signal_connect(window_, "realize", G_CALLBACK(+[](GtkWidget* widget, gpointer data) {
+        auto* self = static_cast<RightSidebar*>(data);
+        self->update_geometry_on_realize(widget);
+    }), this);
 
     setup_layout();
     populate_modules();
@@ -466,6 +475,18 @@ RightSidebar::~RightSidebar() {
         gtk_window_destroy(GTK_WINDOW(window_));
         window_ = nullptr;
     }
+}
+
+void RightSidebar::update_geometry_on_realize(GtkWidget* widget) {
+    const auto placement = sidebar_placement_for(widget);
+    gtk_window_set_default_size(
+        GTK_WINDOW(widget),
+        kDefaultSidebarFrameLayout.surface_width(),
+        placement.height
+    );
+
+    // Update the layer surface margin for proper vertical centering
+    gtk_layer_set_margin(GTK_WINDOW(widget), GTK_LAYER_SHELL_EDGE_TOP, placement.top_margin);
 }
 
 void RightSidebar::setup_layout() {

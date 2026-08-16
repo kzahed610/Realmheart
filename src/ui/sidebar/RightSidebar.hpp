@@ -72,6 +72,7 @@ public:
     GtkWidget* get_window() const { return window_; }
 
 private:
+    void update_geometry_on_realize(GtkWidget* widget);
     struct AsyncUiState {
         std::atomic<bool> alive{true};
         std::atomic<std::uint64_t> generation{0};
