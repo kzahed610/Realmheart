@@ -28,8 +28,11 @@ struct ManaCoresLayout {
     double slice_depth_expanded = 0.0;  // ~95px radial width when expanded
     double slice_depth_attached = 0.0;  // ~35px radial width when attached
 
-    // Angular geometry of the 3 slices on the right perimeter
-    std::array<RadialSliceGeometry, 3> slices;
+    // Angular geometry of the 3 slices fully encompassing the core (Attached state)
+    std::array<RadialSliceGeometry, 3> attached_slices;
+
+    // Angular geometry of the 3 slices parked on the right perimeter (Detached state)
+    std::array<RadialSliceGeometry, 3> detached_slices;
 
     // Visual styling
     double border_thickness = 2.5;      // 2.5px

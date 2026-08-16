@@ -11,6 +11,7 @@
 #include <gtk4-layer-shell.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <cairo.h>
+#include "relictombs/ThumbnailCache.hpp"
 #include "ui/LayerSurface.hpp"
 
 namespace realmheart::relictombs {
@@ -162,6 +163,7 @@ void ManaCoresSelector::present(GtkApplication* app) {
     current_core_radius_ = layout_.core_radius_small;
     current_slice_r_in_ = layout_.core_radius_small + 2.0;
     current_slice_r_out_ = layout_.core_radius_small + 2.0 + layout_.slice_depth_attached;
+    current_slices_ = layout_.attached_slices;
     current_alpha_ = 0.0;
     current_wallpaper_alpha_ = 0.0;
 
@@ -332,44 +334,34 @@ void ManaCoresSelector::reload_pixbufs() {
     // 1. Current Core Wallpaper
     {
         const auto& path = all_wallpaper_paths_[current_wallpaper_index_];
-        GError* error = nullptr;
-        current_core_pixbuf_ = gdk_pixbuf_new_from_file_at_scale(
-            path.string().c_str(),
-            core_target_dim, core_target_dim, FALSE, &error
+        std::string error;
+        current_core_pixbuf_ = ThumbnailCache::load_or_create(
+            path, core_target_dim, &error
         );
-        if (error) g_error_free(error);
 
         // Also load high-res for fullscreen apply reverse bloom
-        error = nullptr;
-        apply_fullscreen_pixbuf_ = gdk_pixbuf_new_from_file_at_scale(
-            path.string().c_str(),
-            static_cast<int>(layout_.canvas_width),
-            static_cast<int>(layout_.canvas_height),
-            FALSE, &error
+        apply_fullscreen_pixbuf_ = ThumbnailCache::load_or_create(
+            path, static_cast<int>(layout_.canvas_width), nullptr
         );
-        if (error) g_error_free(error);
     }
 
     // 2. Three Slices:
-    // Slice 0 (Silver, Top): Previous Wallpaper (idx - 1)
-    // Slice 1 (Yellow, Middle): Next Wallpaper (idx + 1)
-    // Slice 2 (Orange, Bottom): Third Wallpaper (idx + 2)
+    // Slice 0 (Silver, Top): Next Wallpaper (idx + 1)
+    // Slice 1 (Yellow, Middle): Next Next Wallpaper (idx + 2)
+    // Slice 2 (Orange, Bottom): Next Next Next Wallpaper (idx + 3)
     const std::array<int, 3> slice_indices = {
-        (current_wallpaper_index_ - 1 + total) % total,
         (current_wallpaper_index_ + 1) % total,
-        (current_wallpaper_index_ + 2) % total
+        (current_wallpaper_index_ + 2) % total,
+        (current_wallpaper_index_ + 3) % total
     };
 
     for (size_t i = 0; i < 3; ++i) {
         int idx = slice_indices[i];
         if (idx >= 0 && idx < total) {
             const auto& path = all_wallpaper_paths_[idx];
-            GError* error = nullptr;
-            slice_pixbufs_[i] = gdk_pixbuf_new_from_file_at_scale(
-                path.string().c_str(),
-                slice_target_dim, slice_target_dim, FALSE, &error
+            slice_pixbufs_[i] = ThumbnailCache::load_or_create(
+                path, slice_target_dim, nullptr
             );
-            if (error) g_error_free(error);
         }
     }
 }
@@ -381,6 +373,11 @@ void ManaCoresSelector::cycle_wallpaper(int direction) {
     current_wallpaper_index_ = (current_wallpaper_index_ + direction + total) % total;
 
     reload_pixbufs();
+
+    // Trigger navigation crossfade
+    nav_transitioning_ = true;
+    nav_transition_start_micros_ = g_get_monotonic_time();
+
     queue_redraw();
 }
 
@@ -561,7 +558,7 @@ void ManaCoresSelector::draw_radial_slices(
     const double glow = layout_.glow_extent;
 
     for (size_t i = 0; i < 3; ++i) {
-        const auto& geom = layout_.slices[i];
+        const auto& geom = current_slices_[i];
         const auto& color = layout_.kRadialPalette[i];
         GdkPixbuf* pixbuf = slice_pixbufs_[i];
 
@@ -580,7 +577,44 @@ void ManaCoresSelector::draw_radial_slices(
             slice_cy += pop * std::sin(geom.mid_angle);
         }
 
-        // 1. Wallpaper preview inside slice
+        // 1a. Mana gradient fill (visible when wallpaper is not fully shown)
+        double fill_opacity = mana_fill_alpha_ * (1.0 - wallpaper_alpha) * alpha;
+        if (fill_opacity > 0.01) {
+            cairo_save(cr);
+            append_annular_sector_path(
+                cr, slice_cx, slice_cy,
+                slice_r_in, slice_r_out,
+                geom.start_angle, geom.end_angle
+            );
+            cairo_clip(cr);
+
+            // Radial gradient from slice midpoint outward, coloured by mana palette
+            double mid_r = (slice_r_in + slice_r_out) * 0.5;
+            double gx = slice_cx + mid_r * std::cos(geom.mid_angle);
+            double gy = slice_cy + mid_r * std::sin(geom.mid_angle);
+            double grad_r = (slice_r_out - slice_r_in) * 0.85;
+
+            cairo_pattern_t* grad = cairo_pattern_create_radial(gx, gy, 0.0, gx, gy, grad_r);
+            // Bright centre fading to deeper tint at edges
+            cairo_pattern_add_color_stop_rgba(grad, 0.0,
+                std::min(1.0, color[0] + 0.3),
+                std::min(1.0, color[1] + 0.3),
+                std::min(1.0, color[2] + 0.3),
+                0.55 * fill_opacity);
+            cairo_pattern_add_color_stop_rgba(grad, 0.6,
+                color[0] * 0.7, color[1] * 0.7, color[2] * 0.7,
+                0.35 * fill_opacity);
+            cairo_pattern_add_color_stop_rgba(grad, 1.0,
+                color[0] * 0.4, color[1] * 0.4, color[2] * 0.4,
+                0.15 * fill_opacity);
+            cairo_set_source(cr, grad);
+            cairo_paint(cr);
+            cairo_pattern_destroy(grad);
+
+            cairo_restore(cr);
+        }
+
+        // 1b. Wallpaper preview inside slice
         if (pixbuf != nullptr && wallpaper_alpha > 0.0) {
             cairo_save(cr);
             append_annular_sector_path(
@@ -746,6 +780,7 @@ void ManaCoresSelector::update_animations(guint64 now_micros) {
             current_core_radius_ = layout_.core_radius_small;
             current_slice_r_in_ = layout_.core_radius_small + 2.0;
             current_slice_r_out_ = layout_.core_radius_small + 2.0 + layout_.slice_depth_attached;
+            current_slices_ = layout_.attached_slices;
             current_alpha_ = ease;
             current_wallpaper_alpha_ = 0.0;
 
@@ -765,6 +800,7 @@ void ManaCoresSelector::update_animations(guint64 now_micros) {
             current_core_radius_ = layout_.core_radius_small;
             current_slice_r_in_ = layout_.core_radius_small + 2.0;
             current_slice_r_out_ = layout_.core_radius_small + 2.0 + layout_.slice_depth_attached;
+            current_slices_ = layout_.attached_slices;
             current_alpha_ = 1.0;
             current_wallpaper_alpha_ = 0.0;
 
@@ -797,10 +833,18 @@ void ManaCoresSelector::update_animations(guint64 now_micros) {
             current_slice_r_in_ = start_r_in + (target_r_in - start_r_in) * ease;
             current_slice_r_out_ = start_r_out + (target_r_out - start_r_out) * ease;
 
+            for (size_t i = 0; i < 3; ++i) {
+                current_slices_[i].start_angle = layout_.attached_slices[i].start_angle + (layout_.detached_slices[i].start_angle - layout_.attached_slices[i].start_angle) * ease;
+                current_slices_[i].end_angle = layout_.attached_slices[i].end_angle + (layout_.detached_slices[i].end_angle - layout_.attached_slices[i].end_angle) * ease;
+                current_slices_[i].mid_angle = layout_.attached_slices[i].mid_angle + (layout_.detached_slices[i].mid_angle - layout_.attached_slices[i].mid_angle) * ease;
+            }
+
             current_alpha_ = 1.0;
             current_wallpaper_alpha_ = ease;
+            mana_fill_alpha_ = 1.0 - ease;  // Fade out mana fill as wallpaper fades in
 
             if (progress >= 1.0) {
+                mana_fill_alpha_ = 0.0;
                 state_ = State::Idle;
                 idle_start_micros_ = now_micros;
                 start_idle_animation();
@@ -816,8 +860,20 @@ void ManaCoresSelector::update_animations(guint64 now_micros) {
         current_core_radius_ = layout_.core_radius_expanded;
         current_slice_r_in_ = layout_.core_radius_expanded + layout_.slice_gap;
         current_slice_r_out_ = current_slice_r_in_ + layout_.slice_depth_expanded;
+        current_slices_ = layout_.detached_slices;
         current_alpha_ = 1.0;
         current_wallpaper_alpha_ = 1.0;
+        mana_fill_alpha_ = 0.0;
+
+        // Navigation crossfade
+        if (nav_transitioning_) {
+            constexpr double kNavDuration = 0.25;
+            double nav_elapsed = static_cast<double>(now_micros - nav_transition_start_micros_) / 1'000'000.0;
+            if (nav_elapsed >= kNavDuration) {
+                nav_transitioning_ = false;
+            }
+            // The actual crossfade is handled by opacity in draw — just keep redrawing
+        }
 
         queue_redraw();
     } else if (state_ == State::Applying) {
@@ -845,6 +901,12 @@ void ManaCoresSelector::update_animations(guint64 now_micros) {
 
         current_slice_r_in_ = start_r_in - (start_r_in - target_r_in) * contract_ease;
         current_slice_r_out_ = start_r_out - (start_r_out - target_r_out) * contract_ease;
+
+        for (size_t i = 0; i < 3; ++i) {
+            current_slices_[i].start_angle = layout_.detached_slices[i].start_angle + (layout_.attached_slices[i].start_angle - layout_.detached_slices[i].start_angle) * contract_ease;
+            current_slices_[i].end_angle = layout_.detached_slices[i].end_angle + (layout_.attached_slices[i].end_angle - layout_.detached_slices[i].end_angle) * contract_ease;
+            current_slices_[i].mid_angle = layout_.detached_slices[i].mid_angle + (layout_.attached_slices[i].mid_angle - layout_.detached_slices[i].mid_angle) * contract_ease;
+        }
 
         // 3. Slide back to offscreen left (0.45s to 0.65s)
         if (progress > 0.60) {
@@ -877,17 +939,63 @@ void ManaCoresSelector::update_animations(guint64 now_micros) {
         queue_redraw();
     } else if (state_ == State::Dismissing) {
         const double elapsed = static_cast<double>(now_micros - dismiss_start_micros_) / 1'000'000.0;
-        constexpr double kDismissDuration = 0.25;
 
-        double progress = std::min(elapsed / kDismissDuration, 1.0);
-        double ease = progress * progress;
+        switch (dismiss_phase_) {
+        case DismissPhase::Contraction: {
+            // Slices re-attach + core shrinks (350ms)
+            constexpr double kContractDuration = 0.35;
+            double progress = std::min(elapsed / kContractDuration, 1.0);
+            double ease = 1.0 - std::pow(1.0 - progress, 3);  // cubic ease-out
 
-        current_cx_ = layout_.core_centre_x - (layout_.core_centre_x + 200.0) * ease;
-        current_alpha_ = 1.0 - progress;
+            current_cx_ = layout_.core_centre_x;
+            current_cy_ = layout_.core_centre_y;
 
-        if (progress >= 1.0) {
-            state_ = State::Hidden;
-            dismiss();
+            // Shrink core
+            current_core_radius_ = layout_.core_radius_expanded -
+                (layout_.core_radius_expanded - layout_.core_radius_small) * ease;
+
+            // Re-attach slices
+            double start_r_in = layout_.core_radius_expanded + layout_.slice_gap;
+            double start_r_out = start_r_in + layout_.slice_depth_expanded;
+            double target_r_in = layout_.core_radius_small + 2.0;
+            double target_r_out = target_r_in + layout_.slice_depth_attached;
+
+            current_slice_r_in_ = start_r_in + (target_r_in - start_r_in) * ease;
+            current_slice_r_out_ = start_r_out + (target_r_out - start_r_out) * ease;
+
+            for (size_t i = 0; i < 3; ++i) {
+                current_slices_[i].start_angle = layout_.detached_slices[i].start_angle + (layout_.attached_slices[i].start_angle - layout_.detached_slices[i].start_angle) * ease;
+                current_slices_[i].end_angle = layout_.detached_slices[i].end_angle + (layout_.attached_slices[i].end_angle - layout_.detached_slices[i].end_angle) * ease;
+                current_slices_[i].mid_angle = layout_.detached_slices[i].mid_angle + (layout_.attached_slices[i].mid_angle - layout_.detached_slices[i].mid_angle) * ease;
+            }
+
+            current_alpha_ = 1.0;
+            current_wallpaper_alpha_ = 1.0 - ease;  // Fade out wallpaper
+            mana_fill_alpha_ = ease;                 // Fade in mana fill
+
+            if (progress >= 1.0) {
+                dismiss_phase_ = DismissPhase::Slide;
+                dismiss_start_micros_ = now_micros;
+            }
+            break;
+        }
+        case DismissPhase::Slide: {
+            // Slide off screen left (250ms)
+            constexpr double kSlideDuration = 0.25;
+            double progress = std::min(elapsed / kSlideDuration, 1.0);
+            double ease = progress * progress;  // ease-in (accelerating)
+
+            current_cx_ = layout_.core_centre_x - (layout_.core_centre_x + 200.0) * ease;
+            current_alpha_ = 1.0 - progress;
+            current_wallpaper_alpha_ = 0.0;
+            mana_fill_alpha_ = 1.0;
+
+            if (progress >= 1.0) {
+                state_ = State::Hidden;
+                dismiss();
+            }
+            break;
+        }
         }
 
         queue_redraw();
@@ -925,6 +1033,7 @@ void ManaCoresSelector::begin_apply() {
 
 void ManaCoresSelector::begin_dismiss() {
     state_ = State::Dismissing;
+    dismiss_phase_ = DismissPhase::Contraction;
     dismiss_start_micros_ = g_get_monotonic_time();
     queue_redraw();
 }
