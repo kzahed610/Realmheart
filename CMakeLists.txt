@@ -179,6 +179,7 @@ add_library(realmheart_ui STATIC
     src/relictombs/RelictombsProtocol.cpp
     src/relictombs/RelictombsSelection.cpp
     src/relictombs/WallpaperLibrary.cpp
+    src/relictombs/ThumbnailCache.cpp
     src/relictombs/ManaCoresSelector.cpp
     src/relictombs/ManaCoresLayout.cpp
     src/relictombs/RadialBloomShader.cpp
@@ -824,7 +825,7 @@ if(BUILD_TESTING)
     target_link_libraries(realmheart_wallpaper_service_tests PRIVATE GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_wallpaper_service_tests)
 
-    add_executable(realmheart_mana_cores_selector_tests tests/ManaCoresSelectorTests.cpp src/relictombs/ManaCoresSelector.cpp src/relictombs/ManaCoresLayout.cpp src/relictombs/RadialBloomShader.cpp src/ui/LayerSurface.cpp src/relictombs/WallpaperLibrary.cpp)
+    add_executable(realmheart_mana_cores_selector_tests tests/ManaCoresSelectorTests.cpp src/relictombs/ThumbnailCache.cpp src/relictombs/ManaCoresSelector.cpp src/relictombs/ManaCoresLayout.cpp src/relictombs/RadialBloomShader.cpp src/ui/LayerSurface.cpp src/relictombs/WallpaperLibrary.cpp)
     target_link_libraries(realmheart_mana_cores_selector_tests PRIVATE PkgConfig::GTK4 PkgConfig::GTK4_LAYER_SHELL PkgConfig::GDK_PIXBUF PkgConfig::EPOXY GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_mana_cores_selector_tests)
 

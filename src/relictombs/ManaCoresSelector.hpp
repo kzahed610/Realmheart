@@ -54,6 +54,10 @@ private:
     enum class AssemblePhase { Emerge, Formation, Expansion };
     AssemblePhase assemble_phase_ = AssemblePhase::Emerge;
 
+    // Dismiss sub-phases (reverse of assembly)
+    enum class DismissPhase { Contraction, Slide };
+    DismissPhase dismiss_phase_ = DismissPhase::Contraction;
+
     // Layout
     ManaCoresLayout layout_;
 
@@ -81,9 +85,16 @@ private:
     double current_core_radius_ = 0.0;
     double current_slice_r_in_ = 0.0;
     double current_slice_r_out_ = 0.0;
+    std::array<RadialSliceGeometry, 3> current_slices_;
+
     double current_alpha_ = 1.0;
     double current_wallpaper_alpha_ = 0.0;
+    double mana_fill_alpha_ = 1.0;      // Opacity of the mana gradient fill inside slices
     double apply_mask_radius_ = 0.0;
+
+    // Navigation crossfade
+    guint64 nav_transition_start_micros_ = 0;
+    bool nav_transitioning_ = false;
 
     // Hovered radial slice index (-1 = none, 0 = silver, 1 = yellow, 2 = orange)
     int hovered_radial_ = -1;
