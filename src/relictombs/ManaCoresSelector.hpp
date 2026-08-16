@@ -98,6 +98,7 @@ private:
     guint64 nav_transition_start_micros_ = 0;
     bool nav_transitioning_ = false;
     double nav_progress_ = 1.0;
+    int nav_direction_ = 1;  // +1 = right/next, -1 = left/prev
 
     // Hovered radial slice index (-1 = none, 0 = silver, 1 = yellow, 2 = orange)
     int hovered_radial_ = -1;
@@ -120,6 +121,8 @@ private:
     void draw_radial_slices(cairo_t* cr, double cx, double cy, double r_in, double r_out, double alpha, double wallpaper_alpha);
     void draw_cardinal_stars(cairo_t* cr, double cx, double cy, double radius, double alpha);
     void draw_reverse_bloom(cairo_t* cr, double cx, double cy, double mask_radius);
+    void draw_ambient_glow(cairo_t* cr, double cx, double cy, double radius, double alpha);
+    void draw_backdrop_dim(cairo_t* cr, double alpha);
     static void draw_pixbuf_cover(cairo_t* cr, GdkPixbuf* pixbuf, double x, double y, double width, double height, double alpha);
 
     void update_animations(guint64 now_micros);
@@ -131,6 +134,7 @@ private:
 
     void reload_pixbufs();
     void clear_pixbufs();
+    void clear_old_pixbufs();
 
     // Callbacks
     DismissCallback dismiss_callback_;

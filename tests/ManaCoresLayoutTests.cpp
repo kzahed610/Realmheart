@@ -41,12 +41,10 @@ TEST(ManaCoresLayout, DetachedSlicesSeparatedByGaps) {
 
 TEST(ManaCoresLayout, AttachedSlicesEncompassCore) {
     auto l = realmheart::relictombs::ManaCoresLayout::for_height(1080);
-    // Slice 0, 1, 2 should together cover 360 degrees without gaps
-    EXPECT_NEAR(l.attached_slices[0].end_angle, l.attached_slices[1].start_angle, 0.01);
-    EXPECT_NEAR(l.attached_slices[1].end_angle, l.attached_slices[2].start_angle, 0.01);
-    // Full span should be 2pi (360 degrees)
-    double total_span = (l.attached_slices[2].end_angle - l.attached_slices[0].start_angle);
-    EXPECT_NEAR(total_span, 2.0 * std::numbers::pi, 0.01);
+    // Slices should encompass the whole core, taking 120 degrees each.
+    EXPECT_NEAR(l.attached_slices[0].end_angle - l.attached_slices[0].start_angle, 120.0 * (std::numbers::pi / 180.0), 0.01);
+    EXPECT_NEAR(l.attached_slices[1].end_angle - l.attached_slices[1].start_angle, 120.0 * (std::numbers::pi / 180.0), 0.01);
+    EXPECT_NEAR(l.attached_slices[2].end_angle - l.attached_slices[2].start_angle, 120.0 * (std::numbers::pi / 180.0), 0.01);
 }
 
 TEST(ManaCoresLayout, RadialPaletteHasThreeColours) {

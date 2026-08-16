@@ -52,7 +52,7 @@ ManaCoresLayout ManaCoresLayout::for_height(int physical_height, int physical_wi
     l.detached_slices[2].mid_angle = 42.0 * deg2rad;
 
     // Attached state: 3 slices fully encompassing the core forming a giant circle.
-    // Each takes up exactly 120 degrees (-90 to +30, +30 to +150, +150 to +270/-90)
+    // Each takes up exactly 120 degrees
     l.attached_slices[0].start_angle = -180.0 * deg2rad;
     l.attached_slices[0].end_angle = -60.0 * deg2rad;
     l.attached_slices[0].mid_angle = -120.0 * deg2rad;
