@@ -36,8 +36,7 @@
 #include "ui/wallpaper/WallpaperBackend.hpp"
 #include "ui/wallpaper/WallpaperController.hpp"
 #include "ui/workspace/WorkspaceOverviewOverlay.hpp"
-#include "ui/relictombs/RelictombsProcess.hpp"
-#include "relictombs/ManaCoresSelector.hpp"
+#include "mana_core/ManaCoresSelector.hpp"
 
 #include <gtk/gtk.h>
 
@@ -84,7 +83,7 @@ std::filesystem::path user_media_directory(GUserDirectory directory, const char*
 }
 
 constexpr int kHotspotHitWidth = 16;
-constexpr std::string_view kRelictombsWorkspaceName = "realmheart-relictombs";
+constexpr std::string_view kManaCoresWorkspaceName = "realmheart-mana-core";
 
 template <typename... Args>
 void sidebar_input_debug(Args&&... args) {
@@ -361,8 +360,7 @@ public:
     }
 
     ~ShellRuntime() {
-        relictombs_process_.shutdown();
-        power_menu_process_.close();
+                power_menu_process_.close();
 
         // Stop callbacks that capture this before tearing down UI/controllers.
         runtime_async_state_->alive.store(false);
@@ -660,10 +658,10 @@ public:
         workspace_overview_->toggle();
     }
 
-    void toggle_relictombs() {
+    void toggle_mana_cores() {
         if (bar_ == nullptr || !gtk_widget_get_realized(bar_->get_window())) {
-            if (relictombs_deferred_toggle_count_++ >= 10) {
-                relictombs_deferred_toggle_count_ = 0;
+            if (mana_cores_deferred_toggle_count_++ >= 10) {
+                mana_cores_deferred_toggle_count_ = 0;
                 std::cerr << "[ManaCores] bar not realized after retries, aborting toggle\n";
                 return;
             }
@@ -671,7 +669,7 @@ public:
                 G_PRIORITY_DEFAULT_IDLE,
                 +[](gpointer raw) -> gboolean {
                     auto* runtime = static_cast<ShellRuntime*>(raw);
-                    runtime->toggle_relictombs();
+                    runtime->toggle_mana_cores();
                     return G_SOURCE_REMOVE;
                 },
                 this,
@@ -680,11 +678,11 @@ public:
             return;
         }
 
-        relictombs_deferred_toggle_count_ = 0;
+        mana_cores_deferred_toggle_count_ = 0;
         ensure_core_initialized();
 
-        if (relictombs_apply_pending_ || relictombs_launch_pending_ ||
-            relictombs_restore_pending_) {
+        if (mana_cores_launch_pending_ ||
+            mana_cores_restore_pending_) {
             return;
         }
 
@@ -711,13 +709,13 @@ public:
         }
         if (state_.right_sidebar_visible()) toggle_right_sidebar();
 
-        relictombs_bar_was_visible_ = bar_ != nullptr && state_.bar_visible();
-        if (relictombs_bar_was_visible_) {
+        mana_cores_bar_was_visible_ = bar_ != nullptr && state_.bar_visible();
+        if (mana_cores_bar_was_visible_) {
             gtk_widget_set_visible(bar_->get_window(), FALSE);
         }
 
-        relictombs_launch_pending_ = true;
-        const std::uint64_t generation = ++relictombs_launch_generation_;
+        mana_cores_launch_pending_ = true;
+        const std::uint64_t generation = ++mana_cores_launch_generation_;
         const int cached_workspace = workspace_snapshot_.available
             ? workspace_snapshot_.active_id
             : 0;
@@ -733,7 +731,7 @@ public:
             const int original_workspace = active.value_or(cached_workspace);
             const bool switched = original_workspace != 0 &&
                 services::HyprlandWorkspaces::switch_to_named(
-                    kRelictombsWorkspaceName
+                    kManaCoresWorkspaceName
                 );
 
             struct Payload {
@@ -771,18 +769,17 @@ public:
         });
 
         if (!posted) {
-            relictombs_launch_pending_ = false;
-            restore_relictombs_chrome();
+            mana_cores_launch_pending_ = false;
+            restore_mana_cores_chrome();
             std::cerr << "[ManaCores] unable to queue workspace handoff\n";
         }
     }
 
     void set_wallpaper(const std::string& path = {}) {
         ensure_core_initialized();
-        if (relictombs_process_.session_active() || relictombs_apply_pending_ ||
-            relictombs_launch_pending_ || relictombs_restore_pending_) {
+        if (mana_cores_launch_pending_ || mana_cores_restore_pending_) {
             std::cerr
-                << "[Relictombs] wallpaper changes are locked during an active transaction\n";
+                << "[ManaCores] wallpaper changes are locked during an active transaction\n";
             return;
         }
         if (path.empty()) {
@@ -795,10 +792,9 @@ public:
 
     void switch_wallpaper_backend(const std::string& backend_name) {
         ensure_core_initialized();
-        if (relictombs_process_.session_active() || relictombs_apply_pending_ ||
-            relictombs_launch_pending_ || relictombs_restore_pending_) {
+        if (mana_cores_launch_pending_ || mana_cores_restore_pending_) {
             std::cerr
-                << "[Relictombs] wallpaper backend changes are locked during an active transaction\n";
+                << "[ManaCores] wallpaper backend changes are locked during an active transaction\n";
             return;
         }
         const auto backend = wallpaper::parse_wallpaper_backend_type(backend_name);
@@ -1061,53 +1057,24 @@ private:
         now_playing_->show(title, artist);
     }
 
-    void finish_relictombs_launch(
-        std::uint64_t generation,
-        std::string current_path,
-        int original_workspace,
-        bool switched
-    ) {
-        if (generation != relictombs_launch_generation_) return;
-        relictombs_launch_pending_ = false;
-
-        if (!switched || original_workspace == 0) {
-            restore_relictombs_chrome();
-            std::cerr << "[Relictombs] unable to enter the empty Relictombs workspace\n";
-            return;
-        }
-
-        relictombs_restore_workspace_id_ = original_workspace;
-        const auto async_state = runtime_async_state_;
-        if (!relictombs_process_.open(
-                std::move(current_path),
-                [async_state](realmheart::relictombs::RelictombsResult result) {
-                    ShellRuntime* owner = async_state->owner.load();
-                    if (!async_state->alive.load() || owner == nullptr) return;
-                    owner->handle_relictombs_result(std::move(result));
-                })) {
-            std::cerr << "[Relictombs] warm helper rejected the open request\n";
-            restore_relictombs_workspace();
-        }
-    }
-
     void finish_mana_cores_launch(
         std::uint64_t generation,
         std::string current_path,
         int original_workspace,
         bool switched
     ) {
-        if (generation != relictombs_launch_generation_) return;
-        relictombs_launch_pending_ = false;
+        if (generation != mana_cores_launch_generation_) return;
+        mana_cores_launch_pending_ = false;
 
         if (!switched) {
-            restore_relictombs_chrome();
+            restore_mana_cores_chrome();
             std::cerr << "[ManaCores] unable to enter the empty ManaCores workspace\n";
             return;
         }
 
         // Create and present the ManaCores selector
         if (!mana_cores_selector_) {
-            mana_cores_selector_ = std::make_unique<realmheart::relictombs::ManaCoresSelector>();
+            mana_cores_selector_ = std::make_unique<realmheart::mana_core::ManaCoresSelector>();
         }
         // Set dismiss callback to restore workspace + bar when selector closes
         mana_cores_selector_->set_dismiss_callback([this, original_workspace]() {
@@ -1147,135 +1114,19 @@ private:
         mana_cores_selector_->load_wallpapers_from_library(std::filesystem::path(current_path));
     }
 
-    void handle_relictombs_result(
-        realmheart::relictombs::RelictombsResult result
-    ) {
-        using realmheart::relictombs::RelictombsResultKind;
-
-        switch (result.kind) {
-        case RelictombsResultKind::Cancel:
-            if (wallpaper_controller_ != nullptr) {
-                wallpaper_controller_->discard_prepared_wallpaper();
-            }
-            relictombs_apply_pending_ = false;
-            relictombs_apply_path_.clear();
-            restore_relictombs_workspace();
-            return;
-
-        case RelictombsResultKind::Complete:
-            relictombs_apply_pending_ = false;
-            relictombs_apply_path_.clear();
-            restore_relictombs_workspace();
-            return;
-
-        case RelictombsResultKind::Error:
-            if (wallpaper_controller_ != nullptr) {
-                wallpaper_controller_->discard_prepared_wallpaper();
-            }
-            relictombs_apply_pending_ = false;
-            relictombs_apply_path_.clear();
-            std::cerr << "[Relictombs] " << result.payload << '\n';
-            restore_relictombs_workspace();
-            return;
-
-        case RelictombsResultKind::Apply:
-            break;
-
-        case RelictombsResultKind::Commit: {
-            if (!relictombs_apply_pending_ || relictombs_apply_path_.empty() ||
-                wallpaper_controller_ == nullptr) {
-                return;
-            }
-            if (!result.payload.empty() && result.payload != relictombs_apply_path_) {
-                relictombs_apply_pending_ = false;
-                relictombs_apply_path_.clear();
-                relictombs_process_.apply_failed(
-                    "Relictombs commit path changed after wallpaper preparation"
-                );
-                return;
-            }
-
-            const auto async_state = runtime_async_state_;
-            const std::string path = relictombs_apply_path_;
-            wallpaper_controller_->commit_prepared_wallpaper_async(
-                [async_state, path](bool success, std::string error_message) {
-                    ShellRuntime* owner = async_state->owner.load();
-                    if (!async_state->alive.load() || owner == nullptr) return;
-
-                    if (!success) {
-                        owner->relictombs_apply_pending_ = false;
-                        owner->relictombs_apply_path_.clear();
-                        owner->relictombs_process_.apply_failed(
-                            error_message.empty()
-                                ? "prepared wallpaper commit failed"
-                                : std::move(error_message)
-                        );
-                        return;
-                    }
-
-                    // The native renderer has now submitted the prepared
-                    // full-resolution frame. Persist/theme only after that
-                    // authoritative visual-ready boundary.
-                    if (services::WallpaperService* service =
-                            owner->utilities_->get_wallpaper_service()) {
-                        if (!service->update_state(path)) {
-                            std::cerr
-                                << "Wallpaper changed, but its path could not be persisted\n";
-                        }
-                    }
-                    owner->generate_theme_for(path);
-                    owner->relictombs_process_.apply_committed();
-                    // Do not restore yet: the helper owns the final visual phase
-                    // and explicitly emits COMPLETE when the handoff is safe.
-                }
-            );
-            return;
-        }
-        }
-
-        if (relictombs_apply_pending_ || result.payload.empty() ||
-            wallpaper_controller_ == nullptr) {
-            return;
-        }
-
-        relictombs_apply_pending_ = true;
-        relictombs_apply_path_ = result.payload;
-        const auto async_state = runtime_async_state_;
-        wallpaper_controller_->prepare_wallpaper_async(
-            result.payload,
-            [async_state](bool success, std::string error_message) {
-                ShellRuntime* owner = async_state->owner.load();
-                if (!async_state->alive.load() || owner == nullptr) return;
-
-                if (success) {
-                    owner->relictombs_process_.apply_prepared();
-                    return;
-                }
-
-                owner->relictombs_apply_pending_ = false;
-                owner->relictombs_apply_path_.clear();
-                owner->relictombs_process_.apply_failed(
-                    error_message.empty()
-                        ? "wallpaper backend prepare failed"
-                        : std::move(error_message)
-                );
-            }
-        );
-    }
-
-    void restore_relictombs_workspace() {
-        const int workspace_id = relictombs_restore_workspace_id_;
-        relictombs_restore_workspace_id_ = 0;
-        ++relictombs_launch_generation_;
-        relictombs_launch_pending_ = false;
+    void restore_mana_cores_workspace() {
+        const int workspace_id = mana_cores_restore_workspace_id_;
+        mana_cores_restore_workspace_id_ = 0;
+        ++mana_cores_launch_generation_;
+        mana_cores_launch_pending_ = false;
 
         if (workspace_id <= 0) {
-            relictombs_restore_pending_ = false;
-            restore_relictombs_chrome();
+            mana_cores_restore_pending_ = false;
+            restore_mana_cores_chrome();
             return;
         }
 
-        relictombs_restore_pending_ = true;
+        mana_cores_restore_pending_ = true;
         const auto async_state = runtime_async_state_;
         const bool posted = core::shared_task_executor().post([
             async_state,
@@ -1295,13 +1146,13 @@ private:
                     auto* payload = static_cast<Payload*>(raw);
                     ShellRuntime* owner = payload->state->owner.load();
                     if (payload->state->alive.load() && owner != nullptr) {
-                        owner->relictombs_restore_pending_ = false;
+                        owner->mana_cores_restore_pending_ = false;
                         if (!payload->restored) {
                             std::cerr
-                                << "[Relictombs] unable to restore workspace "
+                                << "[ManaCores] unable to restore workspace "
                                 << payload->workspace_id << '\n';
                         }
-                        owner->restore_relictombs_chrome();
+                        owner->restore_mana_cores_chrome();
                     }
                     return G_SOURCE_REMOVE;
                 },
@@ -1311,24 +1162,24 @@ private:
         });
 
         if (!posted) {
-            relictombs_restore_pending_ = false;
-            restore_relictombs_chrome();
+            mana_cores_restore_pending_ = false;
+            restore_mana_cores_chrome();
         }
     }
 
-    void restore_relictombs_chrome() {
-        if (relictombs_bar_was_visible_ && bar_ != nullptr &&
+    void restore_mana_cores_chrome() {
+        if (mana_cores_bar_was_visible_ && bar_ != nullptr &&
             state_.bar_visible()) {
             bar_->refresh();
             gtk_window_present(GTK_WINDOW(bar_->get_window()));
         }
-        relictombs_bar_was_visible_ = false;
+        mana_cores_bar_was_visible_ = false;
     }
 
     void handle_mana_cores_dismiss(int original_workspace) {
         // Restore the original workspace if we were switched
-        relictombs_restore_workspace_id_ = original_workspace;
-        restore_relictombs_workspace();
+        mana_cores_restore_workspace_id_ = original_workspace;
+        restore_mana_cores_workspace();
     }
 
     using WallpaperRequestCompletion =
@@ -1882,16 +1733,13 @@ private:
     std::unique_ptr<workspace::WorkspaceOverviewOverlay> workspace_overview_;
     services::WorkspaceSnapshot workspace_snapshot_;
     powermenu::PowerMenuProcess power_menu_process_;
-    relictombs::RelictombsProcess relictombs_process_;
-    std::unique_ptr<realmheart::relictombs::ManaCoresSelector> mana_cores_selector_;
-    bool relictombs_launch_pending_ = false;
-    bool relictombs_apply_pending_ = false;
-    std::string relictombs_apply_path_;
-    bool relictombs_restore_pending_ = false;
-    bool relictombs_bar_was_visible_ = false;
-    int relictombs_deferred_toggle_count_ = 0;
-    int relictombs_restore_workspace_id_ = 0;
-    std::uint64_t relictombs_launch_generation_ = 0;
+    std::unique_ptr<realmheart::mana_core::ManaCoresSelector> mana_cores_selector_;
+    bool mana_cores_launch_pending_ = false;
+    bool mana_cores_restore_pending_ = false;
+    bool mana_cores_bar_was_visible_ = false;
+    int mana_cores_deferred_toggle_count_ = 0;
+    int mana_cores_restore_workspace_id_ = 0;
+    std::uint64_t mana_cores_launch_generation_ = 0;
     std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;
 
     ShellState state_;
@@ -1969,12 +1817,12 @@ void toggle_workspace_overview_action(
     static_cast<ShellRuntime*>(user_data)->toggle_workspace_overview();
 }
 
-void toggle_relictombs_action(
+void toggle_mana_cores_action(
     GSimpleAction*,
     GVariant*,
     gpointer user_data
 ) {
-    static_cast<ShellRuntime*>(user_data)->toggle_relictombs();
+    static_cast<ShellRuntime*>(user_data)->toggle_mana_cores();
 }
 
 void set_wallpaper_action(GSimpleAction*, GVariant*, gpointer user_data) {
@@ -2050,7 +1898,7 @@ constexpr GActionEntry kShellActions[] = {
     {"launch-launcher", launch_launcher_action, nullptr, nullptr, nullptr, {}},
     {"launch-launcher-query", launch_launcher_query_action, "s", nullptr, nullptr, {}},
     {"workspace-overview-toggle", toggle_workspace_overview_action, nullptr, nullptr, nullptr, {}},
-    {"relictombs-toggle", toggle_relictombs_action, nullptr, nullptr, nullptr, {}},
+    {"mana-cores-toggle", toggle_mana_cores_action, nullptr, nullptr, nullptr, {}},
     {"quit", quit_action, nullptr, nullptr, nullptr, {}},
 };
 

@@ -1,4 +1,4 @@
-#include "relictombs/ManaCoresSelector.hpp"
+#include "mana_core/ManaCoresSelector.hpp"
 
 #include <cmath>
 #include <numbers>
@@ -11,10 +11,10 @@
 #include <gtk4-layer-shell.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <cairo.h>
-#include "relictombs/ThumbnailCache.hpp"
+#include "mana_core/ThumbnailCache.hpp"
 #include "ui/LayerSurface.hpp"
 
-namespace realmheart::relictombs {
+namespace realmheart::mana_core {
 namespace {
 
 void force_transparent_surface(GtkWidget* widget) {
@@ -1590,4 +1590,4 @@ void ManaCoresSelector::queue_redraw() {
     }
 }
 
-} // namespace realmheart::relictombs
+} // namespace realmheart::mana_core

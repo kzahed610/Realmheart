@@ -27,7 +27,7 @@ enum class ShellCommand {
     LaunchLauncher,
     LaunchLauncherQuery,
     ToggleWorkspaceOverview,
-    ToggleRelictombs,
+    ToggleManaCores,
     Restart,
     Quit,
 };

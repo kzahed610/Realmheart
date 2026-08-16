@@ -1,9 +1,9 @@
-#include "relictombs/ManaCoresLayout.hpp"
+#include "mana_core/ManaCoresLayout.hpp"
 
 #include <cmath>
 #include <numbers>
 
-namespace realmheart::relictombs {
+namespace realmheart::mana_core {
 
 ManaCoresLayout ManaCoresLayout::for_height(int physical_height, int physical_width) {
     ManaCoresLayout l;
@@ -73,4 +73,4 @@ ManaCoresLayout ManaCoresLayout::for_height(int physical_height, int physical_wi
     return l;
 }
 
-} // namespace realmheart::relictombs
+} // namespace realmheart::mana_core

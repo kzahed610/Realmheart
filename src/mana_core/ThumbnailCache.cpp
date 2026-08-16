@@ -1,4 +1,4 @@
-#include "relictombs/ThumbnailCache.hpp"
+#include "mana_core/ThumbnailCache.hpp"
 
 #include <glib.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
@@ -17,7 +17,7 @@
 #include <optional>
 #include <cmath>
 
-namespace realmheart::relictombs {
+namespace realmheart::mana_core {
 namespace {
 
 constexpr std::array<char, 8> kPreviewCacheMagic{
@@ -70,7 +70,7 @@ std::filesystem::path preview_cache_path(const std::filesystem::path& source) {
         root = std::filesystem::temp_directory_path(temporary_error);
         if (temporary_error || root.empty()) root = "/tmp";
     }
-    return root / "realmheart" / "worldscar-thumbnails" / name;
+    return root / "realmheart" / "mana-core-thumbnails" / name;
 }
 
 template <typename Value>
@@ -276,4 +276,4 @@ GdkPixbuf* ThumbnailCache::load_or_create(
     return pixbuf;
 }
 
-} // namespace realmheart::relictombs
+} // namespace realmheart::mana_core

@@ -11,10 +11,10 @@
 #include <filesystem>
 #include <string>
 
-#include "relictombs/ManaCoresLayout.hpp"
-#include "relictombs/WallpaperLibrary.hpp"
+#include "mana_core/ManaCoresLayout.hpp"
+#include "mana_core/WallpaperLibrary.hpp"
 
-namespace realmheart::relictombs {
+namespace realmheart::mana_core {
 
 using DismissCallback = std::function<void()>;
 
@@ -164,4 +164,4 @@ private:
     std::function<void(const std::string& /*path*/)> apply_callback_;
 };
 
-} // namespace realmheart::relictombs
+} // namespace realmheart::mana_core

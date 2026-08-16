@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-namespace realmheart::relictombs {
+namespace realmheart::mana_core {
 
 struct WallpaperDiscovery {
     std::vector<std::filesystem::path> paths;
@@ -19,4 +19,4 @@ public:
     ) const;
 };
 
-} // namespace realmheart::relictombs
+} // namespace realmheart::mana_core
