@@ -432,76 +432,6 @@ void ManaCoresSelector::draw_pixbuf_cover(
     cairo_restore(cr);
 }
 
-void ManaCoresSelector::draw_cardinal_stars(
-    cairo_t* cr,
-    double cx, double cy,
-    double radius,
-    double alpha
-) {
-    if (alpha <= 0.0 || radius <= 10.0) return;
-
-    double t = static_cast<double>(g_get_monotonic_time()) / 1'000'000.0;
-    double beat_time = std::fmod(t, 1.35);
-    double heartbeat = 0.0;
-    if (beat_time < 0.16) {
-        heartbeat = std::sin((beat_time / 0.16) * std::numbers::pi);
-    } else if (beat_time >= 0.22 && beat_time < 0.38) {
-        heartbeat = 0.50 * std::sin(((beat_time - 0.22) / 0.16) * std::numbers::pi);
-    }
-
-    const double spike_len = layout_.star_spike_length + heartbeat * 2.5;
-    // 4 Cardinal positions: North (-pi/2), East (0), South (pi/2), West (pi)
-    const std::array<double, 4> angles = {
-        -std::numbers::pi * 0.5,
-        0.0,
-        std::numbers::pi * 0.5,
-        std::numbers::pi
-    };
-
-    for (double theta : angles) {
-        double px = cx + radius * std::cos(theta);
-        double py = cy + radius * std::sin(theta);
-
-        double cos_t = std::cos(theta);
-        double sin_t = std::sin(theta);
-        double perp_x = -sin_t;
-        double perp_y = cos_t;
-
-        // Diamond vertices
-        double tip_out_x = px + cos_t * spike_len;
-        double tip_out_y = py + sin_t * spike_len;
-        double tip_in_x = px - cos_t * (spike_len * 0.55);
-        double tip_in_y = py - sin_t * (spike_len * 0.55);
-        double tip_left_x = px + perp_x * (spike_len * 0.45);
-        double tip_left_y = py + perp_y * (spike_len * 0.45);
-        double tip_right_x = px - perp_x * (spike_len * 0.45);
-        double tip_right_y = py - perp_y * (spike_len * 0.45);
-
-        cairo_save(cr);
-        cairo_move_to(cr, tip_out_x, tip_out_y);
-        cairo_line_to(cr, tip_left_x, tip_left_y);
-        cairo_line_to(cr, tip_in_x, tip_in_y);
-        cairo_line_to(cr, tip_right_x, tip_right_y);
-        cairo_close_path(cr);
-
-        // Bright fill with cyan-white core
-        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, (0.92 + heartbeat * 0.08) * alpha);
-        cairo_fill_preserve(cr);
-
-        // Glow stroke
-        cairo_set_source_rgba(cr, 0.85, 0.92, 1.0, (0.80 + heartbeat * 0.20) * alpha);
-        cairo_set_line_width(cr, 1.5 + heartbeat * 0.8);
-        cairo_stroke(cr);
-
-        // Center sparkle
-        cairo_arc(cr, px, py, 2.5 + heartbeat * 0.8, 0, 2.0 * std::numbers::pi);
-        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0 * alpha);
-        cairo_fill(cr);
-
-        cairo_restore(cr);
-    }
-}
-
 void ManaCoresSelector::draw_realmheart_runes(
     cairo_t* cr,
     double cx, double cy,
@@ -777,11 +707,6 @@ void ManaCoresSelector::draw_core(
     cairo_pattern_destroy(core_border_pattern);
     cairo_pattern_destroy(core_glow_pattern);
     cairo_restore(cr);
-
-    // 3. Four Cardinal Diamond Star Ornaments with Heartbeat Sparkle
-    if (wallpaper_alpha > 0.1) {
-        draw_cardinal_stars(cr, cx, cy, radius, alpha * wallpaper_alpha);
-    }
 }
 
 void ManaCoresSelector::draw_radial_slices(
