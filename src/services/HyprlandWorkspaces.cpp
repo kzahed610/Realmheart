@@ -70,6 +70,7 @@ bool HyprlandWorkspaces::switch_to_named(
     // so normal application windows would remain visible through Relictombs'
     // transparent pixels. A named regular workspace also preserves the configured
     // workspace exit animation while exposing only Realmheart's wallpaper.
+    // The "realmheart-mana-cores" named workspace is used for the mana core selector.
     const std::string workspace = "name:" + std::string(workspace_name);
     const std::string dispatcher =
         "hl.dsp.focus({ workspace = " + lua_string_literal(workspace) + " })";

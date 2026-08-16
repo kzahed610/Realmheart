@@ -24,7 +24,7 @@ std::optional<ShellCommand> parse_shell_command(std::string_view name) {
     if (name == "launch-launcher") return ShellCommand::LaunchLauncher;
     if (name == "launch-launcher-query") return ShellCommand::LaunchLauncherQuery;
     if (name == "workspace-overview-toggle") return ShellCommand::ToggleWorkspaceOverview;
-    if (name == "relictombs-toggle") return ShellCommand::ToggleRelictombs;
+    if (name == "mana-cores-toggle") return ShellCommand::ToggleManaCores;
     if (name == "restart") return ShellCommand::Restart;
     if (name == "quit") return ShellCommand::Quit;
     return std::nullopt;
@@ -53,7 +53,7 @@ std::string_view shell_action_name(ShellCommand command) {
     case ShellCommand::LaunchLauncher: return "launch-launcher";
     case ShellCommand::LaunchLauncherQuery: return "launch-launcher-query";
     case ShellCommand::ToggleWorkspaceOverview: return "workspace-overview-toggle";
-    case ShellCommand::ToggleRelictombs: return "relictombs-toggle";
+    case ShellCommand::ToggleManaCores: return "mana-cores-toggle";
     case ShellCommand::Restart: return "restart";
     case ShellCommand::Quit: return "quit";
     }

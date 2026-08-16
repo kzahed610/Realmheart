@@ -1,15 +1,15 @@
 // tests/ManaCoresSelectorTests.cpp
 #include <gtest/gtest.h>
-#include "relictombs/ManaCoresSelector.hpp"
+#include "mana_core/ManaCoresSelector.hpp"
 #include <gdk/gdk.h>
 
 TEST(ManaCoresSelector, Constructs) {
-    realmheart::relictombs::ManaCoresSelector sel;
+    realmheart::mana_core::ManaCoresSelector sel;
     EXPECT_FALSE(sel.is_visible());
 }
 
 TEST(ManaCoresSelector, DismissCallbackInvokedOnDismiss) {
-    realmheart::relictombs::ManaCoresSelector sel;
+    realmheart::mana_core::ManaCoresSelector sel;
     bool dismissed = false;
     sel.set_dismiss_callback([&dismissed]() {
         dismissed = true;
@@ -20,7 +20,7 @@ TEST(ManaCoresSelector, DismissCallbackInvokedOnDismiss) {
 }
 
 TEST(ManaCoresSelector, ApplyCallbackWiring) {
-    realmheart::relictombs::ManaCoresSelector sel;
+    realmheart::mana_core::ManaCoresSelector sel;
     std::string applied_path;
     sel.set_apply_callback([&applied_path](const std::string& path) {
         applied_path = path;
@@ -30,7 +30,7 @@ TEST(ManaCoresSelector, ApplyCallbackWiring) {
 }
 
 TEST(ManaCoresSelector, HandleKeyWhenHiddenReturnsFalse) {
-    realmheart::relictombs::ManaCoresSelector sel;
+    realmheart::mana_core::ManaCoresSelector sel;
     EXPECT_FALSE(sel.handle_key(GDK_KEY_Escape));
     EXPECT_FALSE(sel.handle_key(GDK_KEY_Return));
     EXPECT_FALSE(sel.handle_key(GDK_KEY_Left));

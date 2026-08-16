@@ -4,7 +4,7 @@
 #include <filesystem>
 #include <string>
 
-namespace realmheart::relictombs {
+namespace realmheart::mana_core {
 
 class ThumbnailCache {
 public:
@@ -18,4 +18,4 @@ public:
     );
 };
 
-} // namespace realmheart::relictombs
+} // namespace realmheart::mana_core

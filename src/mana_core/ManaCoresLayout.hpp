@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <array>
 
-namespace realmheart::relictombs {
+namespace realmheart::mana_core {
 
 struct RadialSliceGeometry {
     double start_angle = 0.0;
@@ -50,4 +50,4 @@ struct ManaCoresLayout {
     [[nodiscard]] static ManaCoresLayout for_height(int physical_height, int physical_width = 0);
 };
 
-} // namespace realmheart::relictombs
+} // namespace realmheart::mana_core

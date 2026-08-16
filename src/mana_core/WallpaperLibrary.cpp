@@ -1,4 +1,4 @@
-#include "relictombs/WallpaperLibrary.hpp"
+#include "mana_core/WallpaperLibrary.hpp"
 
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <glib.h>
@@ -12,7 +12,7 @@
 #include <string_view>
 #include <system_error>
 
-namespace realmheart::relictombs {
+namespace realmheart::mana_core {
 namespace {
 
 bool supported_extension(std::string extension) {
@@ -161,4 +161,4 @@ WallpaperDiscovery WallpaperLibrary::discover(std::filesystem::path root) const 
     return result;
 }
 
-} // namespace realmheart::relictombs
+} // namespace realmheart::mana_core
