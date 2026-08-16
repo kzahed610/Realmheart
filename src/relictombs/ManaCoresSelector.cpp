@@ -507,38 +507,46 @@ void ManaCoresSelector::draw_core(
         cairo_arc(cr, cx, cy, radius, 0, 2.0 * std::numbers::pi);
         cairo_clip(cr);
 
-        // Slide offset for navigation: old image slides out, new slides in
-        double slide_offset = 0.0;
+        // Diagonal slide for navigation: direction-aware
+        // Next (dir=+1): new enters from top-right, old exits bottom-left
+        // Prev (dir=-1): new enters from bottom-left, old exits top-right
+        double dir = static_cast<double>(nav_direction_);
+        double slide_dx = 0.0;
+        double slide_dy = 0.0;
         if (nav_progress_ < 1.0) {
-            // Cubic ease-out for smooth deceleration
             double ease = 1.0 - std::pow(1.0 - nav_progress_, 3.0);
-            slide_offset = radius * 0.6 * (1.0 - ease) * static_cast<double>(nav_direction_);
+            double travel = radius * 0.5;
+            slide_dx = travel * (1.0 - ease) * dir;    // direction-aware X
+            slide_dy = -travel * (1.0 - ease) * dir;   // direction-aware Y
         }
 
+        // Use a generous bounding box that fully covers the circular clip
+        double box = radius * 2.2;
+
         if (nav_progress_ < 1.0 && old_core_pixbuf_ != nullptr) {
-            // Old image slides out in nav direction
-            double old_offset = radius * 0.6 * nav_progress_ * static_cast<double>(nav_direction_);
+            // Old image slides out in opposite diagonal
+            double old_travel = radius * 0.5 * nav_progress_;
             cairo_save(cr);
-            cairo_translate(cr, -old_offset, 0);
+            cairo_translate(cr, -old_travel * dir, old_travel * dir);
             draw_pixbuf_cover(
                 cr,
                 old_core_pixbuf_,
-                cx - radius, cy - radius,
-                radius * 2.0, radius * 2.0,
+                cx - box * 0.5, cy - box * 0.5,
+                box, box,
                 wallpaper_alpha * alpha * (1.0 - nav_progress_)
             );
             cairo_restore(cr);
         }
 
         if (current_core_pixbuf_ != nullptr && nav_progress_ > 0.0) {
-            // New image slides in from opposite side
+            // New image slides in from the leading diagonal
             cairo_save(cr);
-            cairo_translate(cr, slide_offset, 0);
+            cairo_translate(cr, slide_dx, slide_dy);
             draw_pixbuf_cover(
                 cr,
                 current_core_pixbuf_,
-                cx - radius, cy - radius,
-                radius * 2.0, radius * 2.0,
+                cx - box * 0.5, cy - box * 0.5,
+                box, box,
                 wallpaper_alpha * alpha * (nav_progress_ < 1.0 ? nav_progress_ : 1.0)
             );
             cairo_restore(cr);
@@ -662,7 +670,7 @@ void ManaCoresSelector::draw_radial_slices(
             cairo_restore(cr);
         }
 
-        // 1b. Wallpaper preview inside slice
+        // 1b. Wallpaper preview inside slice — rotated to fill the sector
         if (wallpaper_alpha > 0.0) {
             cairo_save(cr);
             append_annular_sector_path(
@@ -672,48 +680,94 @@ void ManaCoresSelector::draw_radial_slices(
             );
             cairo_clip(cr);
 
-            // Midpoint of slice
+            // Midpoint of slice for positioning
             double mid_r = (slice_r_in + slice_r_out) * 0.5;
             double mid_x = slice_cx + mid_r * std::cos(geom.mid_angle);
             double mid_y = slice_cy + mid_r * std::sin(geom.mid_angle);
-            double bb_size = (slice_r_out - slice_r_in) * 1.6;
 
-            // Slide offset for slices too
-            double s_slide = 0.0;
-            if (nav_progress_ < 1.0) {
-                double ease = 1.0 - std::pow(1.0 - nav_progress_, 3.0);
-                s_slide = bb_size * 0.3 * (1.0 - ease) * static_cast<double>(nav_direction_);
-            }
+            // Bounding box tailored to the rotated sector geometry.
+            // Since we rotate by mid_angle + 90, the unrotated X axis aligns with
+            // the arc (tangent), and the unrotated Y axis aligns with the radius.
+            double arc_span = std::abs(geom.end_angle - geom.start_angle);
+            double arc_width = slice_r_out * arc_span;
+            double radial_depth = slice_r_out - slice_r_in;
+            
+            // Add slight padding to ensure the curved edges are fully covered
+            double bb_w = arc_width * 1.15;
+            double bb_h = radial_depth * 1.25;
+
+            // Rotate wallpaper to align with the slice's radial direction.
+            // mid_angle points outward from centre; rotating by it aligns
+            // the landscape width along the radial axis.
+            // Vary slightly per slice for immersion:
+            //   top slice (i=0, neg angle): a bit less rotation
+            //   mid slice (i=1, ~0):        straight radial
+            //   bot slice (i=2, pos angle): a bit more rotation
+            double immersion_tweak = 0.0;
+            if (i == 0) immersion_tweak = -0.12;       // ~-7° less
+            else if (i == 2) immersion_tweak = 0.12;   // ~+7° more
+            // Add 90 degrees (pi/2) so the bottom of the image faces the central core
+            double rotation = geom.mid_angle + (std::numbers::pi / 2.0) + immersion_tweak;
+
+            // Direction-aware vertical slide: next=bottom→top, prev=top→bottom
+            double s_dir = static_cast<double>(nav_direction_);
+            double travel = bb_h * 0.4;
 
             if (nav_progress_ < 1.0 && old_slice_pixbufs_[i] != nullptr) {
-                double old_s = bb_size * 0.3 * nav_progress_ * static_cast<double>(nav_direction_);
+                // Old image slides out (upward for next, downward for prev)
+                double old_t = travel * nav_progress_;
                 cairo_save(cr);
-                cairo_translate(cr, -old_s, 0);
+                cairo_translate(cr, 0, -old_t * s_dir);
+                cairo_translate(cr, mid_x, mid_y);
+                cairo_rotate(cr, rotation);
                 draw_pixbuf_cover(
                     cr,
                     old_slice_pixbufs_[i],
-                    mid_x - bb_size * 0.5, mid_y - bb_size * 0.5,
-                    bb_size, bb_size,
+                    -bb_w * 0.5, -bb_h * 0.5,
+                    bb_w, bb_h,
                     wallpaper_alpha * alpha * (1.0 - nav_progress_)
                 );
                 cairo_restore(cr);
             }
 
             if (pixbuf != nullptr && nav_progress_ > 0.0) {
+                // New image slides in (from below for next, from above for prev)
+                double new_offset = 0.0;
+                if (nav_progress_ < 1.0) {
+                    double ease = 1.0 - std::pow(1.0 - nav_progress_, 3.0);
+                    new_offset = travel * (1.0 - ease) * s_dir;  // enters from below/above
+                }
                 cairo_save(cr);
-                cairo_translate(cr, s_slide, 0);
+                cairo_translate(cr, 0, new_offset);
+                cairo_translate(cr, mid_x, mid_y);
+                cairo_rotate(cr, rotation);
                 draw_pixbuf_cover(
                     cr,
                     pixbuf,
-                    mid_x - bb_size * 0.5, mid_y - bb_size * 0.5,
-                    bb_size, bb_size,
+                    -bb_w * 0.5, -bb_h * 0.5,
+                    bb_w, bb_h,
                     wallpaper_alpha * alpha * (nav_progress_ < 1.0 ? nav_progress_ : 1.0)
                 );
                 cairo_restore(cr);
             }
 
+            // Draw the static wallpaper (no transition) with rotation
+            if (nav_progress_ >= 1.0 && pixbuf != nullptr) {
+                cairo_save(cr);
+                cairo_translate(cr, mid_x, mid_y);
+                cairo_rotate(cr, rotation);
+                draw_pixbuf_cover(
+                    cr,
+                    pixbuf,
+                    -bb_w * 0.5, -bb_h * 0.5,
+                    bb_w, bb_h,
+                    wallpaper_alpha * alpha
+                );
+                cairo_restore(cr);
+            }
+
             // Subtle dark tint to contrast border glow
-            cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.22 * alpha);
+            cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.18 * alpha);
             cairo_paint(cr);
 
             cairo_restore(cr);
