@@ -36,7 +36,13 @@ void main() {
 }
 )GLSL";
 
-constexpr std::string_view kDefaultManaCoreSmokeFragment = R"GLSL(#version 300 es
+constexpr std::string_view kDefaultManaCoreSmokeFragment = R"GLSL(// White Core Smoke — TBATE Lore-Accurate Mana Core Ethereal Mist
+// Billowing pure white and silver smoke orbiting the White Mana Core.
+// Smoothly wraps the core boundary with organic FBM turbulence and micro-motes,
+// strictly masking the inner circle to preserve full wallpaper clarity.
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#version 300 es
 precision highp float;
 
 in vec2 v_texcoord;
@@ -88,7 +94,7 @@ void main() {
     vec2 d = pixelPos - u_core_center;
     float r = length(d);
 
-    // Completely transparent inside the inner core circle to preserve 100% wallpaper clarity
+    // Completely transparent inside the inner core circle to ensure zero wallpaper distortion
     if (r < u_core_radius - 2.0) {
         fragColor = vec4(0.0);
         return;
@@ -105,9 +111,9 @@ void main() {
     float boundary_turb = (fbm(polar_uv) - 0.5) * (14.0 * scale);
     float distorted_edge = u_core_radius + boundary_turb;
 
-    // Radial smoke envelope hugging the core
+    // Radial smoke envelope hugging the core (static width — no heartbeat flicker)
     float dEdge = r - distorted_edge;
-    float band_width = (48.0 + u_heartbeat * 18.0) * scale;
+    float band_width = 48.0 * scale;
     float env = exp(-pow(max(0.0, dEdge - band_width * 0.15) / (band_width * 0.45), 2.0));
 
     // Orbital swirling smoke (volumetric billows rolling along the rim)
@@ -120,8 +126,8 @@ void main() {
     vec2 wisp_coord = vec2(angle * 4.5 - u_time * 0.45, (r - u_core_radius) * 0.022);
     float wisps = pow(fbm(wisp_coord * 2.8), 2.0) * exp(-max(0.0, r - u_core_radius) / (band_width * 1.5));
 
-    // Radiant inner white rim glow
-    float rim_glow = exp(-max(0.0, r - u_core_radius) / (12.0 * scale)) * (0.85 + 0.40 * u_heartbeat);
+    // Radiant inner white rim glow (static — no heartbeat flicker)
+    float rim_glow = exp(-max(0.0, r - u_core_radius) / (12.0 * scale)) * 0.85;
 
     // Luminous micro-motes of pure mana glittering in the smoke
     vec2 mote_uv = pixelPos / (26.0 * scale);
@@ -130,7 +136,7 @@ void main() {
     vec2 mote_subpos = mote_id + 0.2 + 0.6 * vec2(hash12(mote_id + 1.7), hash12(mote_id + 9.3));
     float mote_d2 = dot(mote_uv - mote_subpos, mote_uv - mote_subpos);
     float twinkle = 0.5 + 0.5 * sin(u_time * 5.0 + mote_hash * 30.0);
-    float mote = step(0.76, mote_hash) * exp(-mote_d2 * 55.0) * smoke * twinkle * (0.8 + 0.4 * u_heartbeat);
+    float mote = step(0.76, mote_hash) * exp(-mote_d2 * 55.0) * smoke * twinkle * 0.8;
 
     // Pure White / Silver / Grey palette (TBATE Lore-Accurate White Core)
     vec3 col_pure_white = vec3(1.0, 1.0, 1.0);
@@ -915,15 +921,6 @@ void ManaCoresSelector::draw_core(
     double t = static_cast<double>(g_get_monotonic_time()) / 1'000'000.0;
     double scale = layout_.canvas_height / 1080.0;
 
-    // Organic double-beat heartbeat pulse (systole + diastole)
-    double beat_time = std::fmod(t, 1.35);
-    double heartbeat = 0.0;
-    if (beat_time < 0.16) {
-        heartbeat = std::sin((beat_time / 0.16) * std::numbers::pi);
-    } else if (beat_time >= 0.22 && beat_time < 0.38) {
-        heartbeat = 0.50 * std::sin(((beat_time - 0.22) / 0.16) * std::numbers::pi);
-    }
-
     // 1. Wallpaper inside core with 2.5D Lissajous floating parallax
     if (wallpaper_alpha > 0.0) {
         cairo_save(cr);
@@ -1007,17 +1004,17 @@ void ManaCoresSelector::draw_core(
     cairo_pattern_add_color_stop_rgba(core_glow_pattern, 0.70, 0.88, 0.72, 1.0, 0.42 * alpha); // Aether
     cairo_pattern_add_color_stop_rgba(core_glow_pattern, 1.0, 1.0, 1.0, 1.0, 0.45 * alpha);
 
-    // Outer Glow with heartbeat pulsation
+    // Outer Glow (static — no heartbeat flicker)
     cairo_save(cr);
     cairo_set_source(cr, core_glow_pattern);
-    cairo_set_line_width(cr, border + glow + heartbeat * 7.0 * scale);
+    cairo_set_line_width(cr, border + glow);
     cairo_arc(cr, cx, cy, radius, 0, 2.0 * std::numbers::pi);
     cairo_stroke(cr);
     cairo_restore(cr);
 
-    // Inner Glow
+    // Inner Glow (static — no heartbeat flicker)
     cairo_save(cr);
-    cairo_set_source_rgba(cr, 0.95, 0.98, 1.0, (0.28 + heartbeat * 0.15) * alpha);
+    cairo_set_source_rgba(cr, 0.95, 0.98, 1.0, 0.28 * alpha);
     cairo_set_line_width(cr, border + (glow * 0.5));
     cairo_arc(cr, cx, cy, radius, 0, 2.0 * std::numbers::pi);
     cairo_stroke(cr);
