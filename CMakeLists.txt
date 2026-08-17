@@ -821,7 +821,7 @@ if(BUILD_TESTING)
     target_link_libraries(realmheart_wallpaper_service_tests PRIVATE GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_wallpaper_service_tests)
 
-    add_executable(realmheart_mana_cores_selector_tests tests/ManaCoresSelectorTests.cpp src/mana_core/ThumbnailCache.cpp src/mana_core/ManaCoresSelector.cpp src/mana_core/ManaCoresLayout.cpp src/mana_core/WallpaperLibrary.cpp src/ui/LayerSurface.cpp)
+    add_executable(realmheart_mana_cores_selector_tests tests/ManaCoresSelectorTests.cpp src/mana_core/ThumbnailCache.cpp src/mana_core/ManaCoresSelector.cpp src/mana_core/ManaCoresLayout.cpp src/mana_core/WallpaperLibrary.cpp src/ui/LayerSurface.cpp src/effects/core/ShaderSource.cpp)
     target_link_libraries(realmheart_mana_cores_selector_tests PRIVATE PkgConfig::GTK4 PkgConfig::GTK4_LAYER_SHELL PkgConfig::GDK_PIXBUF PkgConfig::EPOXY GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_mana_cores_selector_tests)
 
