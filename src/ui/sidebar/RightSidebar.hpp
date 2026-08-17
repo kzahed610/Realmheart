@@ -58,6 +58,7 @@ public:
     RightSidebar& operator=(const RightSidebar&) = delete;
 
     void refresh();
+    void apply_geometry();
     void toggle_character();
     bool set_character_hair_mode(std::string_view mode_name);
     // Future settings-panel hook. Deliberately not wired to the sidebar's

@@ -456,6 +456,12 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
     ui::apply_layer_surface(window_, spec);
     gtk_layer_set_exclusive_zone(window_, -1);
 
+    // Realize the window first so GTK has a valid GdkSurface and scale factor
+    // before we build the widget tree. gtk_overlay_set_child() internally calls
+    // gtk_widget_get_scale_factor() which dereferences the monitor list. If the
+    // window is not yet realized, that path can crash on some GTK4/Wayland setups.
+    gtk_widget_realize(GTK_WIDGET(window_));
+
     GtkWidget* root = gtk_overlay_new();
     gtk_widget_add_css_class(root, "realmheart-mana-cores-window");
     gtk_widget_remove_css_class(root, "background");
