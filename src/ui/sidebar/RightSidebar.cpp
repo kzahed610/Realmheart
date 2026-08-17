@@ -385,22 +385,71 @@ private:
 
 SidebarPlacement sidebar_placement_for(GtkWidget* widget) {
     SidebarPlacement placement;
-    GdkMonitor* monitor = resolve_layer_surface_monitor(widget);
-    if (monitor == nullptr) return placement;
 
-    GdkRectangle geometry{};
-    gdk_monitor_get_geometry(monitor, &geometry);
-    g_object_unref(monitor);
+    // Try GDK's monitor list first (the fast path).
+    int monitor_width = 0;
+    int monitor_height = 0;
 
-    if (geometry.height <= 0) return placement;
+    if (GdkMonitor* monitor = resolve_layer_surface_monitor(widget)) {
+        GdkRectangle geometry{};
+        gdk_monitor_get_geometry(monitor, &geometry);
+        g_object_unref(monitor);
+        monitor_width = geometry.width;
+        monitor_height = geometry.height;
+    }
+
+    // Fallback: query Hyprland directly via hyprctl. GDK's monitor list can
+    // become permanently invalid (G_IS_LIST_MODEL assertion failures) after
+    // certain gtk4-layer-shell operations, so we can't rely on it alone.
+    if (monitor_height <= 0) {
+        GError* error = nullptr;
+        gchar* stdout_buf = nullptr;
+        gchar* stderr_buf = nullptr;
+        gint exit_status = 0;
+        if (g_spawn_command_line_sync(
+                "hyprctl monitors -j",
+                &stdout_buf,
+                &stderr_buf,
+                &exit_status,
+                &error
+            ) && error == nullptr && exit_status == 0 && stdout_buf != nullptr) {
+            // Minimal JSON extraction: find the first {"width":W,"height":H pair.
+            // We avoid a full JSON parser to keep this lightweight; hyprctl's
+            // output is stable and always well-formed.
+            const std::string json(stdout_buf);
+            const auto w_pos = json.find("\"width\"");
+            const auto h_pos = json.find("\"height\"");
+            if (w_pos != std::string::npos && h_pos != std::string::npos) {
+                // Parse width: skip to the colon, then the number
+                auto parse_after = [](const std::string& s, std::size_t pos) -> int {
+                    auto colon = s.find(':', pos);
+                    if (colon == std::string::npos) return 0;
+                    // Find the first digit
+                    auto digit_start = s.find_first_of("0123456789", colon);
+                    if (digit_start == std::string::npos) return 0;
+                    char* end = nullptr;
+                    long val = std::strtol(s.c_str() + digit_start, &end, 10);
+                    return static_cast<int>(val);
+                };
+                monitor_width = parse_after(json, w_pos);
+                monitor_height = parse_after(json, h_pos);
+            }
+        }
+        if (error) g_error_free(error);
+        if (stdout_buf) g_free(stdout_buf);
+        if (stderr_buf) g_free(stderr_buf);
+    }
+
+    if (monitor_height <= 0) return placement;
 
     placement.height = std::max(
         static_cast<int>(std::lround(
-            static_cast<double>(geometry.height) * kSidebarHeightFraction
+            static_cast<double>(monitor_height) * kSidebarHeightFraction
         )),
         1
     );
-    placement.top_margin = std::max((geometry.height - placement.height) / 2, 0);
+    placement.top_margin = std::max((monitor_height - placement.height) / 2, 0);
+    (void)monitor_width; // reserved for future horizontal centering
     return placement;
 }
 
