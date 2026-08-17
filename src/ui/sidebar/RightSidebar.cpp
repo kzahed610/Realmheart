@@ -489,6 +489,21 @@ void RightSidebar::update_geometry_on_realize(GtkWidget* widget) {
     gtk_layer_set_margin(GTK_WINDOW(widget), GTK_LAYER_SHELL_EDGE_TOP, placement.top_margin);
 }
 
+void RightSidebar::apply_geometry() {
+    if (window_ == nullptr) return;
+    const auto placement = sidebar_placement_for(window_);
+    gtk_window_set_default_size(
+        GTK_WINDOW(window_),
+        kDefaultSidebarFrameLayout.surface_width(),
+        placement.height
+    );
+    gtk_layer_set_margin(
+        GTK_WINDOW(window_),
+        GTK_LAYER_SHELL_EDGE_TOP,
+        placement.top_margin
+    );
+}
+
 void RightSidebar::setup_layout() {
     frame_ = std::make_unique<SidebarFrame>(
         GTK_WINDOW(window_), kDefaultSidebarFrameLayout

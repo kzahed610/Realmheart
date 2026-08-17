@@ -1653,6 +1653,7 @@ private:
             );
 
             sidebar_->refresh();
+            sidebar_->apply_geometry();
             gtk_window_present(GTK_WINDOW(window));
             sidebar_->animate_character_in();
             schedule_right_sidebar_frame();
