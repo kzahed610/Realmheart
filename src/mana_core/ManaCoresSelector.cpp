@@ -724,7 +724,7 @@ void ManaCoresSelector::draw_realmheart_runes(
 void ManaCoresSelector::draw_drop_shadows(
     cairo_t* cr,
     double cx, double cy,
-    double core_radius,
+    [[maybe_unused]] double core_radius,
     double r_in, double r_out,
     double alpha
 ) {
@@ -733,23 +733,8 @@ void ManaCoresSelector::draw_drop_shadows(
     cairo_save(cr);
     double scale = layout_.canvas_height / 1080.0;
 
-    // 1. Core Drop Shadow (elevates the main disk)
-    if (core_radius > 10.0) {
-        const double shadow_dx = 8.0 * scale;
-        const double shadow_dy = 12.0 * scale;
-
-        // Soft outer ambient shadow
-        cairo_arc(cr, cx + shadow_dx, cy + shadow_dy, core_radius + 4.0, 0, 2.0 * std::numbers::pi);
-        cairo_set_source_rgba(cr, 0.0, 0.0, 0.04, 0.40 * alpha);
-        cairo_set_line_width(cr, 28.0 * scale);
-        cairo_stroke(cr);
-
-        // Tighter contact shadow
-        cairo_arc(cr, cx + shadow_dx * 0.6, cy + shadow_dy * 0.6, core_radius, 0, 2.0 * std::numbers::pi);
-        cairo_set_source_rgba(cr, 0.0, 0.0, 0.02, 0.60 * alpha);
-        cairo_set_line_width(cr, 10.0 * scale);
-        cairo_stroke(cr);
-    }
+    // 1. Core Drop Shadow — REMOVED (was occluding the GL smoke on right/bottom)
+    //     The offset (8,12) shadow pushed into the smoke band and hid it.
 
     // 2. Radial Slices Drop Shadows
     if (r_in > 0.0 && r_out > r_in) {
