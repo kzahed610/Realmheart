@@ -73,9 +73,9 @@ void main() {
     float boundary_turb = (fbm(polar_uv) - 0.5) * (14.0 * scale);
     float distorted_edge = u_core_radius + boundary_turb;
 
-    // Radial smoke envelope hugging the core (static — no heartbeat flicker)
+    // Radial smoke envelope hugging the core
     float dEdge = r - distorted_edge;
-    float band_width = 48.0 * scale;
+    float band_width = (48.0 + u_heartbeat * 18.0) * scale;
     float env = exp(-pow(max(0.0, dEdge - band_width * 0.15) / (band_width * 0.45), 2.0));
 
     // Orbital swirling smoke (volumetric billows rolling along the rim)
@@ -88,8 +88,8 @@ void main() {
     vec2 wisp_coord = vec2(angle * 4.5 - u_time * 0.45, (r - u_core_radius) * 0.022);
     float wisps = pow(fbm(wisp_coord * 2.8), 2.0) * exp(-max(0.0, r - u_core_radius) / (band_width * 1.5));
 
-    // Radiant inner white rim glow (static — no heartbeat flicker)
-    float rim_glow = exp(-max(0.0, r - u_core_radius) / (12.0 * scale)) * 0.85;
+    // Radiant inner white rim glow
+    float rim_glow = exp(-max(0.0, r - u_core_radius) / (12.0 * scale)) * (0.85 + 0.40 * u_heartbeat);
 
     // Luminous micro-motes of pure mana glittering in the smoke
     vec2 mote_uv = pixelPos / (26.0 * scale);
@@ -98,7 +98,7 @@ void main() {
     vec2 mote_subpos = mote_id + 0.2 + 0.6 * vec2(hash12(mote_id + 1.7), hash12(mote_id + 9.3));
     float mote_d2 = dot(mote_uv - mote_subpos, mote_uv - mote_subpos);
     float twinkle = 0.5 + 0.5 * sin(u_time * 5.0 + mote_hash * 30.0);
-    float mote = step(0.76, mote_hash) * exp(-mote_d2 * 55.0) * smoke * twinkle * 0.8;
+    float mote = step(0.76, mote_hash) * exp(-mote_d2 * 55.0) * smoke * twinkle * (0.8 + 0.4 * u_heartbeat);
 
     // Pure White / Silver / Grey palette (TBATE Lore-Accurate White Core)
     vec3 col_pure_white = vec3(1.0, 1.0, 1.0);
