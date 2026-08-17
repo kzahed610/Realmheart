@@ -111,7 +111,7 @@ void main() {
     float boundary_turb = (fbm(polar_uv) - 0.5) * (14.0 * scale);
     float distorted_edge = u_core_radius + boundary_turb;
 
-    // Radial smoke envelope hugging the core (static width — no heartbeat flicker)
+    // Radial smoke envelope hugging the core (static — no heartbeat flicker)
     float dEdge = r - distorted_edge;
     float band_width = 48.0 * scale;
     float env = exp(-pow(max(0.0, dEdge - band_width * 0.15) / (band_width * 0.45), 2.0));
@@ -477,7 +477,7 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
         nullptr
     );
 
-    // Bottom layer: GtkGLArea for fluid GLSL White Core smoke
+    // GL smoke renders as the base layer of the overlay.
     gl_area_ = gtk_gl_area_new();
     gtk_gl_area_set_allowed_apis(
         GTK_GL_AREA(gl_area_),
@@ -494,7 +494,8 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
     g_signal_connect(gl_area_, "render", G_CALLBACK(gl_render_callback), this);
     g_signal_connect(gl_area_, "unrealize", G_CALLBACK(gl_unrealize_callback), this);
 
-    gtk_overlay_set_child(GTK_OVERLAY(root), gl_area_);
+    // GL smoke renders as the base layer; Cairo canvas overlays UI on top.
+    gtk_overlay_set_child(GTK_OVERLAY(root), GTK_WIDGET(gl_area_));
 
     // Top layer: GtkDrawingArea for crisp UI borders, slices, runes, wallpaper preview, and motes
     canvas_ = gtk_drawing_area_new();
@@ -504,7 +505,7 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
     gtk_widget_set_hexpand(canvas_, TRUE);
     gtk_widget_set_vexpand(canvas_, TRUE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(canvas_), draw_callback, this, nullptr);
-    gtk_overlay_add_overlay(GTK_OVERLAY(root), canvas_);
+    gtk_overlay_add_overlay(GTK_OVERLAY(root), GTK_WIDGET(canvas_));
     gtk_window_set_child(window_, root);
     gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
 
