@@ -417,7 +417,14 @@ bool PowerMenuScene::live_frame_ready() const noexcept {
 }
 
 void PowerMenuScene::refresh_opening_ripple_source() noexcept {
-    if (state_.phase() != PowerMenuVideoPhase::Opening ||
+    // The opening ripple runs from the STATIC POSTER only — it snapshots the
+    // deterministic first frame so the click-to-light response is instant.
+    // Refreshing from the live GStreamer stream during opening causes a
+    // massive CPU→GPU texture upload stall (~5s on i5-11300H iGPU) because
+    // gdk_paintable_get_current_image() downloads 8.3MB RGBA and uploads it
+    // via glTexSubImage2D. The live stream is only used for the Visible→Closing
+    // handoff and for the closing animation, not for the opening reveal.
+    if (state_.phase() != PowerMenuVideoPhase::Visible ||
         ripple_renderer_ == nullptr || !ripple_renderer_->active() ||
         media_stream_ == nullptr ||
         !gtk_media_stream_is_prepared(media_stream_) ||
