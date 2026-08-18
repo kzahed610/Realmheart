@@ -483,6 +483,14 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
         nullptr
     );
 
+    // Attach the overlay to the realized window FIRST, before adding children.
+    // gtk_overlay_set_child() and gtk_overlay_add_overlay() internally call
+    // gtk_widget_get_scale_factor(), which requires the widget to be part of
+    // a realized toplevel to access the GdkDisplay's monitor GListModel.
+    // Adding children to an orphan overlay triggers g_list_model_get_item on an
+    // invalid/uninitialized model, causing a SIGSEGV on first invocation.
+    gtk_window_set_child(window_, root);
+
     // GL smoke renders as the base layer of the overlay.
     gl_area_ = gtk_gl_area_new();
     gtk_gl_area_set_allowed_apis(
@@ -512,7 +520,6 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
     gtk_widget_set_vexpand(canvas_, TRUE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(canvas_), draw_callback, this, nullptr);
     gtk_overlay_add_overlay(GTK_OVERLAY(root), GTK_WIDGET(canvas_));
-    gtk_window_set_child(window_, root);
     gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
 
     GtkEventController* key_controller = gtk_event_controller_key_new();
