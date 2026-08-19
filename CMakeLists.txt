@@ -773,6 +773,13 @@ if(BUILD_TESTING)
     )
     realmheart_register_test(realmheart_prophecy_layout_tests)
 
+    add_executable(
+        realmheart_prophecy_motion_tests
+        tests/ProphecyMotionEngineTests.cpp
+        src/services/ProphecyMotionEngine.cpp
+    )
+    realmheart_register_test(realmheart_prophecy_motion_tests)
+
     add_executable(realmheart_shell_state_tests tests/ShellStateTests.cpp)
     realmheart_register_test(realmheart_shell_state_tests)
 
