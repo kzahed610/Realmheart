@@ -372,6 +372,7 @@ if(REALMHEART_ENABLE_LOCKSCREENER)
     pkg_check_modules(EGL_LOCK QUIET IMPORTED_TARGET egl)
     pkg_check_modules(GLESV2_LOCK QUIET IMPORTED_TARGET glesv2)
     pkg_check_modules(PAM_LOCK QUIET IMPORTED_TARGET pam)
+    pkg_check_modules(XKBCOMMON_LOCK QUIET IMPORTED_TARGET xkbcommon)
     pkg_check_modules(WAYLAND_PROTOCOLS_LOCK QUIET IMPORTED_TARGET wayland-protocols)
     find_program(WAYLAND_SCANNER_LOCK_EXECUTABLE wayland-scanner)
 
@@ -420,6 +421,7 @@ if(REALMHEART_ENABLE_LOCKSCREENER)
             PkgConfig::EGL_LOCK
             PkgConfig::GLESV2_LOCK
             PkgConfig::PAM_LOCK
+            PkgConfig::XKBCOMMON_LOCK
             Threads::Threads
         )
         target_compile_options(realmheart-lockscreen-renderer PRIVATE ${REALMHEART_WARNING_FLAGS})
