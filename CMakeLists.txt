@@ -759,6 +759,13 @@ if(BUILD_TESTING)
     add_executable(realmheart_session_manager_tests tests/SessionManagerTests.cpp src/core/Command.cpp src/services/SessionManager.cpp)
     realmheart_register_test(realmheart_session_manager_tests)
 
+    add_executable(
+        realmheart_prophecy_cache_tests
+        tests/ProphecyCacheTests.cpp
+        src/services/WorkspaceProphecyCache.cpp
+    )
+    realmheart_register_test(realmheart_prophecy_cache_tests)
+
     add_executable(realmheart_shell_state_tests tests/ShellStateTests.cpp)
     realmheart_register_test(realmheart_shell_state_tests)
 
