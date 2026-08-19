@@ -16,10 +16,12 @@ namespace realmheart::services {
 LockRendererProcess::LockRendererProcess(
     LockSessionProvider* session_provider,
     AuthSuccessCallback on_auth_success,
+    VeilCompleteCallback on_veil_complete,
     ErrorCallback on_error
 )
     : session_provider_(session_provider)
     , on_auth_success_(std::move(on_auth_success))
+    , on_veil_complete_(std::move(on_veil_complete))
     , on_error_(std::move(on_error))
 {}
 
@@ -141,7 +143,17 @@ void LockRendererProcess::on_socket_readable() {
     std::string message(buf);
 
     // Parse commands from renderer.
-    // UNLOCK — PAM authentication succeeded.
+    // VEIL_COMPLETE — renderer finished the handoff resolve animation.
+    // The parent must now call unlock_session() (composer unlock).
+    // The session has been unlocked (PAM success) but the visual veil
+    // just completed — this is the security-state-vs-visual-state boundary.
+    if (message.find("VEIL_COMPLETE") == 0) {
+        on_renderer_veil_complete();
+        return;
+    }
+
+    // UNLOCK — (deprecated: renderer now sends VEIL_COMPLETE after handoff)
+    // This is kept for backwards compatibility.
     if (message.find("UNLOCK") == 0) {
         on_renderer_auth_success();
         return;
@@ -173,13 +185,28 @@ void LockRendererProcess::on_renderer_ready() {
 }
 
 void LockRendererProcess::on_renderer_auth_success() {
-    // The renderer has verified the password via PAM.
+    // The renderer verified the password via PAM.
     // The PARENT is the only thing authorized to call unlock_session().
+    // In Phase 6, auth success only means the password was valid —
+    // the session stays locked until the handoff veil completes.
+    // (The on_auth_success_ callback fires but does NOT unlock the session.)
+    if (on_auth_success_) {
+        on_auth_success_();
+    }
+}
+
+void LockRendererProcess::on_renderer_veil_complete() {
+    // The renderer has finished the handoff resolve animation.
+    // The session has been authenticated but visually locked —
+    // now the parent releases the actual lock.
     if (session_provider_) {
         session_provider_->unlock_session();
     }
     if (on_auth_success_) {
         on_auth_success_();
+    }
+    if (on_veil_complete_) {
+        on_veil_complete_();
     }
 }
 

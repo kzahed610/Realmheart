@@ -198,8 +198,18 @@ int main(int argc, char** argv) {
 
     bool render_ready_sent = false;
 
+    // Handoff veil state — the resolve animation that plays after PAM
+    // succeeds but before the parent releases the session lock.
+    // Duration: 80-150ms (per design spec §24).
+    bool handoff_active = false;
+    float handoff_elapsed = 0.0f;
+    static constexpr float kHandoffDuration = 0.12f;  // 120ms
+
     // Main loop: wait for commands from parent, render frames.
-    while (!authenticated) {
+    // The loop exits when authenticated AND the handoff veil animation
+    // has completed (security state != visual state — the session stays
+    // locked until the parent calls unlock_session()).
+    while (!authenticated || handoff_active) {
         // Process pending commands from parent (non-blocking read).
         fd_set read_fds;
         FD_ZERO(&read_fds);
@@ -234,7 +244,10 @@ int main(int argc, char** argv) {
                     if (pam_result == PAM_SUCCESS) {
                         authenticated = true;
                         pam_end(pamh, pam_result);
-                        send_response(socket_fd, "UNLOCK");
+                        // Activate the handoff veil — render the resolve
+                        // animation for 80-150ms before signaling unlock.
+                        handoff_active = true;
+                        handoff_elapsed = 0.0f;
                     } else {
                         auth_failures++;
                         pam_end(pamh, pam_result);
@@ -281,6 +294,18 @@ int main(int argc, char** argv) {
         // Update animation state.
         realmheart::services::ProphecyMotionEngine::MotionState motion_state;
         motion_engine.update(0.016f, motion_state);
+
+        // Check handoff veil completion.
+        // The handoff veil plays for 80-150ms after PAM succeeds.
+        // The session stays locked until the parent receives VEIL_COMPLETE
+        // and calls unlock_session() — security state ≠ visual state.
+        if (handoff_active) {
+            handoff_elapsed += 0.016f;
+            if (handoff_elapsed >= kHandoffDuration) {
+                handoff_active = false;
+                send_response(socket_fd, "VEIL_COMPLETE");
+            }
+        }
     }
 
     egl.destroy();

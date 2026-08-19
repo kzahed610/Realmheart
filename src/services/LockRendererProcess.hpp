@@ -22,6 +22,7 @@ namespace realmheart::services {
 class LockRendererProcess {
 public:
     using AuthSuccessCallback = std::function<void()>;
+    using VeilCompleteCallback = std::function<void()>;
     using ErrorCallback = std::function<void(const std::string&)>;
 
     struct RendererConfig {
@@ -35,6 +36,7 @@ public:
     LockRendererProcess(
         LockSessionProvider* session_provider,
         AuthSuccessCallback on_auth_success,
+        VeilCompleteCallback on_veil_complete,
         ErrorCallback on_error
     );
     ~LockRendererProcess();
@@ -68,11 +70,13 @@ public:
 private:
     void on_renderer_ready();
     void on_renderer_auth_success();
+    void on_renderer_veil_complete();
     void on_renderer_error(const std::string& message);
     void on_renderer_exited();
 
     LockSessionProvider* session_provider_ = nullptr;
     AuthSuccessCallback on_auth_success_;
+    VeilCompleteCallback on_veil_complete_;
     ErrorCallback on_error_;
 
     std::string socket_path_;

@@ -23,6 +23,12 @@ bool SessionManager::lock() {
         // Spawn the renderer process.
         renderer_process_ = std::make_unique<LockRendererProcess>(
             session_provider_.get(),
+            // On auth success: password was valid but session stays locked
+            // until the handoff veil completes (security != visual state).
+            [this]() {
+                lock_state_ = LockState::Authenticating;
+            },
+            // On veil complete: the resolve animation finished, now unlock.
             [this]() {
                 lock_state_ = LockState::Unlocking;
                 session_provider_->unlock_session();
