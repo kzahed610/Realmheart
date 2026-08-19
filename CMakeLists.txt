@@ -52,6 +52,11 @@ set(REALMHEART_RUNTIME_SOURCES
     src/services/UtilityManager.cpp
     src/services/WallpaperService.cpp
     src/services/SessionManager.cpp
+    src/services/WorkspaceProphecyCache.cpp
+    src/services/ProphecyLayoutEngine.cpp
+    src/services/ProphecyMotionEngine.cpp
+    src/services/LockSessionProvider.cpp
+    src/services/LockRendererProcess.cpp
     src/services/BatteryService.cpp
     src/services/MediaService.cpp
     src/services/ThemeService.cpp
@@ -232,6 +237,11 @@ add_executable(realmheart_power_menu_renderer
     src/powermenu-renderer/main.cpp
     src/core/Command.cpp
     src/services/SessionManager.cpp
+    src/services/LockSessionProvider.cpp
+    src/services/LockRendererProcess.cpp
+    src/services/ProphecyLayoutEngine.cpp
+    src/services/ProphecyMotionEngine.cpp
+    src/services/WorkspaceProphecyCache.cpp
 )
 set_target_properties(realmheart_power_menu_renderer PROPERTIES
     OUTPUT_NAME "realmheart-power-menu-renderer"
@@ -246,6 +256,8 @@ target_link_libraries(realmheart_power_menu_renderer PRIVATE
     PkgConfig::GDK_PIXBUF
     PkgConfig::JPEG
     PkgConfig::EPOXY
+    PkgConfig::PAM_LOCK
+    PkgConfig::WAYLAND_CLIENT_LOCK
     Threads::Threads
 )
 
@@ -336,6 +348,104 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
     endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# Prophecy of Futures — lock screen renderer (ext-session-lock-v1 + PAM)
+# ---------------------------------------------------------------------------
+# The lockscreen-renderer is a standalone Wayland/EGL client that renders
+# the Prophecy lock screen into ext_session_lock_surface_v1 surfaces.
+# The parent shell (realmheart) spawns this process via LockRendererProcess.
+#
+# Authentication flow:
+#   1. Parent spawns renderer with Wayland fd + socket fd for control IPC
+#   2. Renderer connects to ext-session-lock-v1, creates lock surfaces
+#   3. Renderer runs PAM authentication on password submission
+#   4. On success, renderer sends "UNLOCK" over control socket
+#   5. Parent calls LockSessionProvider::unlock_session() to release lock
+#
+# The renderer NEVER directly releases the session lock — only the parent
+# can do that.
+
+set(REALMHEART_ENABLE_LOCKSCREENER ON CACHE BOOL "Enable Prophecy lock screen renderer")
+if(REALMHEART_ENABLE_LOCKSCREENER)
+    pkg_check_modules(WAYLAND_CLIENT_LOCK QUIET IMPORTED_TARGET wayland-client)
+    pkg_check_modules(WAYLAND_EGL_LOCK QUIET IMPORTED_TARGET wayland-egl)
+    pkg_check_modules(EGL_LOCK QUIET IMPORTED_TARGET egl)
+    pkg_check_modules(GLESV2_LOCK QUIET IMPORTED_TARGET glesv2)
+    pkg_check_modules(PAM_LOCK QUIET IMPORTED_TARGET pam)
+    pkg_check_modules(WAYLAND_PROTOCOLS_LOCK QUIET IMPORTED_TARGET wayland-protocols)
+    find_program(WAYLAND_SCANNER_LOCK_EXECUTABLE wayland-scanner)
+
+    # Locate ext-session-lock-v1 protocol XML (in wayland-protocols staging).
+    set(REALMHEART_EXT_SESSION_LOCK_XML "" CACHE FILEPATH "Path to ext-session-lock-v1.xml")
+    if(NOT REALMHEART_EXT_SESSION_LOCK_XML AND WAYLAND_PROTOCOLS_LOCK_FOUND)
+        pkg_get_variable(WAYLAND_PROTOCOLS_LOCK_DATADIR wayland-protocols pkgdatadir)
+        set(_realmheart_esl_xml "${WAYLAND_PROTOCOLS_LOCK_DATADIR}/staging/ext-session-lock/ext-session-lock-v1.xml")
+        if(EXISTS "${_realmheart_esl_xml}")
+            set(REALMHEART_EXT_SESSION_LOCK_XML "${_realmheart_esl_xml}")
+        endif()
+    endif()
+
+    if(WAYLAND_CLIENT_LOCK_FOUND AND WAYLAND_SCANNER_LOCK_EXECUTABLE AND
+       REALMHEART_EXT_SESSION_LOCK_XML)
+        set(REALMHEART_LOCKSCEEN_PROTOCOL_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-protocols-lockscreen")
+        file(MAKE_DIRECTORY "${REALMHEART_LOCKSCEEN_PROTOCOL_DIR}")
+
+        set(REALMHEART_EXT_SESSION_LOCK_HEADER "${REALMHEART_LOCKSCEEN_PROTOCOL_DIR}/ext-session-lock-v1-client-protocol.h")
+        set(REALMHEART_EXT_SESSION_LOCK_CODE "${REALMHEART_LOCKSCEEN_PROTOCOL_DIR}/ext-session-lock-v1-protocol.c")
+
+        add_custom_command(
+            OUTPUT "${REALMHEART_EXT_SESSION_LOCK_HEADER}"
+            COMMAND "${WAYLAND_SCANNER_LOCK_EXECUTABLE}" client-header
+                "${REALMHEART_EXT_SESSION_LOCK_XML}" "${REALMHEART_EXT_SESSION_LOCK_HEADER}"
+            DEPENDS "${REALMHEART_EXT_SESSION_LOCK_XML}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${REALMHEART_EXT_SESSION_LOCK_CODE}"
+            COMMAND "${WAYLAND_SCANNER_LOCK_EXECUTABLE}" private-code
+                "${REALMHEART_EXT_SESSION_LOCK_XML}" "${REALMHEART_EXT_SESSION_LOCK_CODE}"
+            DEPENDS "${REALMHEART_EXT_SESSION_LOCK_XML}"
+            VERBATIM
+        )
+
+        add_executable(realmheart-lockscreen-renderer
+            src/lockscreen-renderer/main.cpp
+            src/services/ProphecyLayoutEngine.cpp
+            src/services/ProphecyMotionEngine.cpp
+            src/services/LockSessionProvider.cpp
+            src/services/LockRendererProcess.cpp
+            "${REALMHEART_EXT_SESSION_LOCK_HEADER}"
+            "${REALMHEART_EXT_SESSION_LOCK_CODE}"
+        )
+        target_include_directories(realmheart-lockscreen-renderer PRIVATE src "${REALMHEART_LOCKSCEEN_PROTOCOL_DIR}")
+        target_link_libraries(realmheart-lockscreen-renderer PRIVATE
+            PkgConfig::WAYLAND_CLIENT_LOCK
+            PkgConfig::WAYLAND_EGL_LOCK
+            PkgConfig::EGL_LOCK
+            PkgConfig::GLESV2_LOCK
+            PkgConfig::PAM_LOCK
+            Threads::Threads
+        )
+        target_compile_options(realmheart-lockscreen-renderer PRIVATE ${REALMHEART_WARNING_FLAGS})
+        target_compile_definitions(realmheart-lockscreen-renderer PRIVATE REALMHEART_HAS_EXT_SESSION_LOCK)
+        set(REALMHEART_LOCKSCREENER_BUILT ON)
+    else()
+        message(STATUS "Lock screen renderer disabled: missing Wayland/EGL/PAM/ext-session-lock-v1")
+    endif()
+endif()
+
+# When the lock screen renderer is built, propagate the ext-session-lock
+# compile definition to the main shell and power menu renderer targets
+# so LockSessionProvider.cpp compiles with protocol access.
+if(REALMHEART_LOCKSCREENER_BUILT)
+    target_compile_definitions(realmheart PRIVATE REALMHEART_HAS_EXT_SESSION_LOCK)
+    target_compile_definitions(realmheart_power_menu_renderer PRIVATE REALMHEART_HAS_EXT_SESSION_LOCK)
+    target_include_directories(realmheart PRIVATE "${REALMHEART_LOCKSCEEN_PROTOCOL_DIR}")
+    target_include_directories(realmheart_power_menu_renderer PRIVATE "${REALMHEART_LOCKSCEEN_PROTOCOL_DIR}")
+    target_link_libraries(realmheart PRIVATE PkgConfig::WAYLAND_CLIENT_LOCK PkgConfig::PAM_LOCK)
+    target_link_libraries(realmheart_power_menu_renderer PRIVATE PkgConfig::WAYLAND_CLIENT_LOCK)
+endif()
+
 if(TARGET realmheart_fx)
     install(TARGETS realmheart_fx LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/realmheart)
 endif()
@@ -343,6 +453,9 @@ endif()
 install(TARGETS realmheart realmheart_power_menu_renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(REALMHEART_NATIVE_WALLPAPER_BUILT)
     install(TARGETS realmheart-wallpaper-renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+if(REALMHEART_LOCKSCREENER_BUILT)
+    install(TARGETS realmheart-lockscreen-renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 install(DIRECTORY assets/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/assets)
 install(DIRECTORY styles/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/styles)
@@ -779,6 +892,20 @@ if(BUILD_TESTING)
         src/services/ProphecyMotionEngine.cpp
     )
     realmheart_register_test(realmheart_prophecy_motion_tests)
+
+    # LockSessionProvider tests — can run without Wayland display.
+    add_executable(
+        realmheart_lock_session_provider_tests
+        tests/LockSessionProviderTests.cpp
+        src/services/LockSessionProvider.cpp
+    )
+    target_include_directories(realmheart_lock_session_provider_tests PRIVATE src "${REALMHEART_LOCKSCEEN_PROTOCOL_DIR}")
+    target_link_libraries(realmheart_lock_session_provider_tests PRIVATE
+        PkgConfig::PAM_LOCK
+        PkgConfig::WAYLAND_CLIENT_LOCK
+        Threads::Threads
+    )
+    realmheart_register_test(realmheart_lock_session_provider_tests)
 
     add_executable(realmheart_shell_state_tests tests/ShellStateTests.cpp)
     realmheart_register_test(realmheart_shell_state_tests)

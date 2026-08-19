@@ -1,6 +1,10 @@
 #pragma once
 
 #include "core/Command.hpp"
+#include "services/LockRendererProcess.hpp"
+#include "services/LockSessionProvider.hpp"
+
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -30,16 +34,25 @@ public:
 class SessionManager {
 public:
     explicit SessionManager(std::unique_ptr<ICommandExecutor> executor = std::make_unique<SystemCommandExecutor>());
-    
+
+    // Lock the session using the Prophecy lock screen renderer.
+    // Falls back to hyprlock if the renderer fails to spawn or acquire.
     bool lock();
     bool suspend();
     bool logout();
     bool reboot();
     bool power_off();
-    bool is_locked() const;
+
+    // Lock state is now managed by an explicit enum, not pgrep-based checks.
+    enum class LockState { Unlocked, Locking, Locked, Authenticating, Unlocking };
+    LockState lock_state() const { return lock_state_.load(); }
+    bool is_locked() const { return lock_state_.load() == LockState::Locked || lock_state_.load() == LockState::Authenticating; }
 
 private:
     std::unique_ptr<ICommandExecutor> executor_;
+    std::unique_ptr<LockSessionProvider> session_provider_;
+    std::unique_ptr<LockRendererProcess> renderer_process_;
+    std::atomic<LockState> lock_state_{LockState::Unlocked};
 };
 
 } // namespace realmheart::services
