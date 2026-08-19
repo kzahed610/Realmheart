@@ -906,7 +906,14 @@ if(BUILD_TESTING)
         Threads::Threads
     )
     realmheart_register_test(realmheart_lock_session_provider_tests)
-
+    add_executable(
+        realmheart_prophecy_phase7_tests
+        tests/ProphecyPhase7Tests.cpp
+        src/services/ProphecyLayoutEngine.cpp
+        src/services/ProphecyMotionEngine.cpp
+    )
+    target_include_directories(realmheart_prophecy_phase7_tests PRIVATE src)
+    realmheart_register_test(realmheart_prophecy_phase7_tests)
     add_executable(realmheart_shell_state_tests tests/ShellStateTests.cpp)
     realmheart_register_test(realmheart_shell_state_tests)
 
