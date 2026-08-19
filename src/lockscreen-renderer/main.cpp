@@ -32,6 +32,9 @@
 #include <unistd.h>
 #include <vector>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb/stb_image.h"
+
 extern "C" {
 #include "ext-session-lock-v1-client-protocol.h"
 }
@@ -275,6 +278,99 @@ int render_string(void* data, int32_t stride, int32_t buf_w, int32_t buf_h,
     return cursor_x - x;
 }
 
+// ---- Image loading ----
+
+struct LoadedImage {
+    uint8_t* pixels = nullptr;  // RGBA pixel data
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    bool loaded = false;
+
+    void free() {
+        if (pixels) { stbi_image_free(pixels); pixels = nullptr; }
+        loaded = false;
+    }
+};
+
+// Resolve the asset path: try source dir first, then install dir.
+static std::string resolve_asset(const char* relative_path) {
+    // Try source asset dir (for development builds).
+#ifdef REALMHEART_SOURCE_ASSET_DIR
+    {
+        std::string path = std::string(REALMHEART_SOURCE_ASSET_DIR) + "/" + relative_path;
+        struct stat st;
+        if (stat(path.c_str(), &st) == 0) return path;
+    }
+#endif
+    // Try install dir.
+#ifdef REALMHEART_INSTALL_ASSET_DIR
+    {
+        std::string path = std::string(REALMHEART_INSTALL_ASSET_DIR) + "/" + relative_path;
+        struct stat st;
+        if (stat(path.c_str(), &st) == 0) return path;
+    }
+#endif
+    return relative_path;
+}
+
+static LoadedImage load_image(const char* relative_path, int desired_channels) {
+    LoadedImage img;
+    std::string path = resolve_asset(relative_path);
+    img.pixels = stbi_load(path.c_str(), &img.width, &img.height, &img.channels, desired_channels);
+    img.loaded = (img.pixels != nullptr);
+    if (!img.loaded) {
+        std::cerr << "[lockscreen] failed to load image: " << path << "\n";
+    } else {
+        std::cerr << "[lockscreen] loaded image: " << path
+                  << " (" << img.width << "x" << img.height
+                  << " ch=" << img.channels << ")\n";
+    }
+    return img;
+}
+
+// Blit an RGBA image onto the buffer at (dst_x, dst_y).
+// Performs alpha blending for transparent pixels.
+static void blit_image(void* dst, int32_t dst_stride, int32_t dst_w, int32_t dst_h,
+                        const uint8_t* src, int src_w, int src_h, int src_channels,
+                        int dst_x, int dst_y) {
+    for (int sy = 0; sy < src_h; ++sy) {
+        int dy = dst_y + sy;
+        if (dy < 0 || dy >= dst_h) continue;
+        for (int sx = 0; sx < src_w; ++sx) {
+            int dx = dst_x + sx;
+            if (dx < 0 || dx >= dst_w) continue;
+
+            const uint8_t* sp = src + (sy * src_w + sx) * src_channels;
+            uint32_t* dp = pixel_at(dst, dst_stride, dx, dy);
+
+            if (src_channels == 4) {
+                // RGBA → ARGB8888 (Wayland WL_SHM_FORMAT_ARGB8888).
+                // Memory layout: B, G, R, A. uint32_t on little-endian:
+                // bits 0-7=Blue, 8-15=Green, 16-23=Red, 24-31=Alpha.
+                uint32_t sa = sp[3];
+                if (sa == 0) continue;  // Fully transparent.
+                if (sa == 255) {
+                    // Fully opaque — direct copy.
+                    *dp = (0xFFu << 24) | (sp[0] << 16) | (sp[1] << 8) | sp[2];
+                    continue;
+                }
+                // Semi-transparent — alpha blend.
+                uint8_t da_r = (*dp >> 16) & 0xFF;
+                uint8_t da_g = (*dp >> 8) & 0xFF;
+                uint8_t da_b = *dp & 0xFF;
+                uint8_t out_r = static_cast<uint8_t>((sp[0] * sa + da_r * (255 - sa)) / 255);
+                uint8_t out_g = static_cast<uint8_t>((sp[1] * sa + da_g * (255 - sa)) / 255);
+                uint8_t out_b = static_cast<uint8_t>((sp[2] * sa + da_b * (255 - sa)) / 255);
+                *dp = (0xFFu << 24) | (out_r << 16) | (out_g << 8) | out_b;
+            } else if (src_channels == 3) {
+                // RGB → ARGB8888.
+                *dp = (0xFFu << 24) | (sp[0] << 16) | (sp[1] << 8) | sp[2];
+            }
+        }
+    }
+}
+
 // ---- State tracking ----
 
 struct Output {
@@ -315,6 +411,11 @@ struct AppState {
     bool auth_failed = false;    // last auth attempt failed
     int error_display_ms = 0;    // countdown for error display
 
+    // Loaded images (background + Rinia overlay).
+    LoadedImage background;
+    LoadedImage rinia;
+    bool images_loaded = false;
+
     std::vector<Output> outputs;
 };
 
@@ -330,11 +431,51 @@ void render_lock_surface(Output& out) {
     int32_t w = out.width;
     int32_t h = out.height;
 
-    // Fill background.
-    uint32_t* pixels = static_cast<uint32_t*>(data);
-    uint32_t pixel_count = w * h;
-    for (uint32_t i = 0; i < pixel_count; ++i) {
-        pixels[i] = BG_COLOR;
+    // Load images on first render.
+    if (!g_state.images_loaded) {
+        // Determine which resolution variant to use based on output size.
+        const char* variant = "1080p";
+        if (out.width >= 3840 || out.height >= 2160) variant = "4k";
+        else if (out.width >= 2560 || out.height >= 1440) variant = "1440p";
+
+        std::string bg_path = std::string("lockscreen/background/") + variant + "/background-" + variant + ".png";
+        std::string rinia_path = std::string("lockscreen/rinia/") + variant + "/rinia-cropped-" + variant + ".png";
+
+        g_state.background = load_image(bg_path.c_str(), 4);  // RGBA
+        g_state.rinia = load_image(rinia_path.c_str(), 4);    // RGBA
+        g_state.images_loaded = true;
+    }
+
+    // Fill with background image or solid color.
+    if (g_state.background.loaded) {
+        // Scale background to fit output (simple nearest-neighbor).
+        const uint8_t* src = g_state.background.pixels;
+        int src_w = g_state.background.width;
+        int src_h = g_state.background.height;
+        int src_ch = g_state.background.channels;
+        blit_image(data, stride, w, h, src, src_w, src_h, src_ch, 0, 0);
+    } else {
+        uint32_t* pixels = static_cast<uint32_t*>(data);
+        uint32_t pixel_count = w * h;
+        for (uint32_t i = 0; i < pixel_count; ++i) {
+            pixels[i] = BG_COLOR;
+        }
+    }
+
+    // Composite Rinia overlay (with alpha blending).
+    if (g_state.rinia.loaded) {
+        // Position Rinia at the anchor point from crop-manifest.json.
+        // For 1080p: scaled_offset = (313, 190), scaled_crop_size = (677, 774)
+        // Scale proportionally for other resolutions.
+        float scale_x = static_cast<float>(w) / 1920.0f;
+        float scale_y = static_cast<float>(h) / 1080.0f;
+
+        int rinia_x = static_cast<int>(313 * scale_x);
+        int rinia_y = static_cast<int>(190 * scale_y);
+
+        blit_image(data, stride, w, h,
+                   g_state.rinia.pixels, g_state.rinia.width, g_state.rinia.height, 4,
+                   rinia_x, rinia_y);
     }
 
     // Draw password dots in the center of the screen.

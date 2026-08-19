@@ -414,7 +414,7 @@ if(REALMHEART_ENABLE_LOCKSCREENER)
             "${REALMHEART_EXT_SESSION_LOCK_HEADER}"
             "${REALMHEART_EXT_SESSION_LOCK_CODE}"
         )
-        target_include_directories(realmheart-lockscreen-renderer PRIVATE src "${REALMHEART_LOCKSCEEN_PROTOCOL_DIR}")
+        target_include_directories(realmheart-lockscreen-renderer PRIVATE src "${REALMHEART_LOCKSCEEN_PROTOCOL_DIR}" "${CMAKE_SOURCE_DIR}/third_party")
         target_link_libraries(realmheart-lockscreen-renderer PRIVATE
             PkgConfig::WAYLAND_CLIENT_LOCK
             PkgConfig::WAYLAND_EGL_LOCK
@@ -425,7 +425,11 @@ if(REALMHEART_ENABLE_LOCKSCREENER)
             Threads::Threads
         )
         target_compile_options(realmheart-lockscreen-renderer PRIVATE ${REALMHEART_WARNING_FLAGS})
-        target_compile_definitions(realmheart-lockscreen-renderer PRIVATE REALMHEART_HAS_EXT_SESSION_LOCK)
+        target_compile_definitions(realmheart-lockscreen-renderer PRIVATE
+            REALMHEART_HAS_EXT_SESSION_LOCK
+            REALMHEART_SOURCE_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
+            REALMHEART_INSTALL_ASSET_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/assets"
+        )
         set(REALMHEART_LOCKSCREENER_BUILT ON)
     else()
         message(STATUS "Lock screen renderer disabled: missing Wayland/EGL/PAM/ext-session-lock-v1")
