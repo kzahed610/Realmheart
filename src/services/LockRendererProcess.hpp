@@ -1,7 +1,6 @@
 #pragma once
 
 #include "services/LockSessionProvider.hpp"
-#include "services/WorkspaceProphecyCache.hpp"
 
 #include <functional>
 #include <memory>
@@ -14,11 +13,13 @@ namespace realmheart::services {
 
 // LockRendererProcess spawns and manages the realmheart-lockscreen-renderer
 // subprocess. It follows the PowerMenuProcess pattern: Unix socket for
-// commands, stdio for readiness, g_child_watch_add for reaping.
+// control commands, sibling binary resolution via /proc/self/exe.
 //
-// The renderer does PAM authentication and renders into the lock surfaces
-// provided by LockSessionProvider. When the renderer signals successful
-// auth, the parent calls LockSessionProvider::unlock_session().
+// The renderer owns the ext-session-lock-v1 protocol: it connects to
+// Wayland, acquires the session lock, creates lock surfaces, renders,
+// and runs PAM authentication. When auth succeeds, it sends "UNLOCK"
+// over the control socket. The parent then calls
+// ext_session_lock_v1_destroy() to release the compositor lock.
 class LockRendererProcess {
 public:
     using AuthSuccessCallback = std::function<void()>;
@@ -26,10 +27,6 @@ public:
     using ErrorCallback = std::function<void(const std::string&)>;
 
     struct RendererConfig {
-        std::string renderer_path;
-        std::string socket_path;
-        std::string background_asset;
-        std::string rinia_asset;
         std::uint64_t seed = 0;
     };
 
@@ -51,10 +48,6 @@ public:
     // Send a command to the renderer over the Unix socket.
     void send_command(const std::string& command);
 
-    // Called by the parent's Wayland dispatch loop when data is available
-    // on the control socket. Dispatches commands from the renderer.
-    void on_socket_readable();
-
     // Terminate the renderer subprocess.
     void stop();
 
@@ -64,10 +57,10 @@ public:
     // Get the renderer's PID for monitoring.
     int pid() const { return pid_; }
 
-    // Get the control socket path (for passing to the renderer subprocess).
-    const std::string& socket_path() const { return socket_path_; }
-
 private:
+    // Resolve the renderer binary path (sibling of the running executable).
+    std::string resolve_renderer_path() const;
+
     void on_renderer_ready();
     void on_renderer_auth_success();
     void on_renderer_veil_complete();
@@ -79,16 +72,11 @@ private:
     VeilCompleteCallback on_veil_complete_;
     ErrorCallback on_error_;
 
-    std::string socket_path_;
     RendererConfig config_;
 
     int pid_ = 0;
     int socket_fd_ = -1;
     std::vector<std::string> pending_commands_;
-
-    // The workspace cache snapshot is sent to the renderer at startup.
-    // The renderer needs it to know what futures to display.
-    WorkspaceProphecyCache::Selection prophecy_selection_;
     bool renderer_ready_ = false;
 };
 

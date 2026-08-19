@@ -377,7 +377,7 @@ if(REALMHEART_ENABLE_LOCKSCREENER)
 
     # Locate ext-session-lock-v1 protocol XML (in wayland-protocols staging).
     set(REALMHEART_EXT_SESSION_LOCK_XML "" CACHE FILEPATH "Path to ext-session-lock-v1.xml")
-    if(NOT REALMHEART_EXT_SESSION_LOCK_XML AND WAYLAND_PROTOCOLS_LOCK_FOUND)
+    if(REALMHEART_EXT_SESSION_LOCK_XML STREQUAL "" AND WAYLAND_PROTOCOLS_LOCK_FOUND)
         pkg_get_variable(WAYLAND_PROTOCOLS_LOCK_DATADIR wayland-protocols pkgdatadir)
         set(_realmheart_esl_xml "${WAYLAND_PROTOCOLS_LOCK_DATADIR}/staging/ext-session-lock/ext-session-lock-v1.xml")
         if(EXISTS "${_realmheart_esl_xml}")
@@ -410,10 +410,6 @@ if(REALMHEART_ENABLE_LOCKSCREENER)
 
         add_executable(realmheart-lockscreen-renderer
             src/lockscreen-renderer/main.cpp
-            src/services/ProphecyLayoutEngine.cpp
-            src/services/ProphecyMotionEngine.cpp
-            src/services/LockSessionProvider.cpp
-            src/services/LockRendererProcess.cpp
             "${REALMHEART_EXT_SESSION_LOCK_HEADER}"
             "${REALMHEART_EXT_SESSION_LOCK_CODE}"
         )
