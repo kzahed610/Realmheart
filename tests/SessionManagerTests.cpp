@@ -87,20 +87,20 @@ void test_power_off_triggers_systemd_poweroff() {
     std::cout << "test_power_off_triggers_systemd_poweroff PASSED\n";
 }
 
-void test_is_locked_checks_pgrep() {
+void test_is_locked_checks_state() {
     auto mock = std::make_unique<MockCommandExecutor>();
     auto* mock_ptr = mock.get();
     realmheart::services::SessionManager session(std::move(mock));
 
-    mock_ptr->next_capture_result = true;
-    if (!session.is_locked()) { std::cerr << "Should be locked\n"; exit(1); }
+    // Initially unlocked
+    if (session.is_locked()) { std::cerr << "Should be unlocked initially\\n"; exit(1); }
 
-    mock_ptr->next_capture_result = false;
-    if (session.is_locked()) { std::cerr << "Should be unlocked\n"; exit(1); }
+    // After lock (fallback to hyprlock succeeds), should be locked
+    mock_ptr->next_background_result = true;
+    if (!session.lock()) { std::cerr << "Lock failed\\n"; exit(1); }
+    if (!session.is_locked()) { std::cerr << "Should be locked after lock()\\n"; exit(1); }
 
-    if (mock_ptr->capture_calls.size() != 2) { std::cerr << "Wrong call count\n"; exit(1); }
-    if (mock_ptr->capture_calls[0] != std::vector<std::string>{"pgrep", "hyprlock"}) { std::cerr << "Wrong command\n"; exit(1); }
-    std::cout << "test_is_locked_checks_pgrep PASSED\n";
+    std::cout << "test_is_locked_checks_state PASSED\\n";
 }
 
 int main() {
@@ -109,7 +109,7 @@ int main() {
     test_logout_triggers_hyprland_exit();
     test_reboot_triggers_systemd_reboot();
     test_power_off_triggers_systemd_poweroff();
-    test_is_locked_checks_pgrep();
-    std::cout << "All SessionManager tests PASSED (MOCKED)\n";
+    test_is_locked_checks_state();
+    std::cout << "All SessionManager tests PASSED (MOCKED)\\n";
     return 0;
 }

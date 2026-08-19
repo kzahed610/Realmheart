@@ -826,7 +826,18 @@ if(BUILD_TESTING)
     add_executable(realmheart_matugen_parser_tests tests/MatugenParserTests.cpp src/services/MatugenParser.cpp src/services/ThemeService.cpp)
     realmheart_register_test(realmheart_matugen_parser_tests)
 
-    add_executable(realmheart_night_light_tests tests/NightLightTests.cpp src/core/Command.cpp src/services/NightLight.cpp src/services/SessionManager.cpp)
+    add_executable(
+        realmheart_night_light_tests
+        tests/NightLightTests.cpp
+        src/core/Command.cpp
+        src/services/NightLight.cpp
+        src/services/SessionManager.cpp
+        src/services/LockSessionProvider.cpp
+        src/services/LockRendererProcess.cpp
+        src/services/ProphecyLayoutEngine.cpp
+        src/services/ProphecyMotionEngine.cpp
+        src/services/WorkspaceProphecyCache.cpp
+    )
     realmheart_register_test(realmheart_night_light_tests)
 
     add_executable(realmheart_notes_tests tests/NotesServiceTests.cpp src/services/NotesService.cpp)
@@ -869,7 +880,17 @@ if(BUILD_TESTING)
     )
     realmheart_register_test(realmheart_power_menu_video_state_tests)
 
-    add_executable(realmheart_session_manager_tests tests/SessionManagerTests.cpp src/core/Command.cpp src/services/SessionManager.cpp)
+    add_executable(
+        realmheart_session_manager_tests
+        tests/SessionManagerTests.cpp
+        src/core/Command.cpp
+        src/services/SessionManager.cpp
+        src/services/LockSessionProvider.cpp
+        src/services/LockRendererProcess.cpp
+        src/services/ProphecyLayoutEngine.cpp
+        src/services/ProphecyMotionEngine.cpp
+        src/services/WorkspaceProphecyCache.cpp
+    )
     realmheart_register_test(realmheart_session_manager_tests)
 
     add_executable(
