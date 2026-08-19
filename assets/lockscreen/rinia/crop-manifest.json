@@ -1,0 +1,74 @@
+{
+  "source": "Rinia-Base.png",
+  "source_size": [
+    1672,
+    941
+  ],
+  "cropped": "Rinia-Cropped.png",
+  "cropped_size": [
+    590,
+    675
+  ],
+  "crop_bbox": {
+    "left": 273,
+    "top": 166,
+    "right": 863,
+    "bottom": 841
+  },
+  "offset": {
+    "x": 273,
+    "y": 166
+  },
+  "note": "Use offset (x, y) to position cropped image on background of same size as source",
+  "1080p": {
+    "target_size": [
+      1920,
+      1080
+    ],
+    "scale_factor": 1.1483253588516746,
+    "scaled_offset": [
+      313,
+      190
+    ],
+    "scaled_crop_size": [
+      677,
+      774
+    ],
+    "cropped_file": "rinia-cropped-1080p.png",
+    "positioned_file": "rinia-positioned-1080p.png"
+  },
+  "1440p": {
+    "target_size": [
+      2560,
+      1440
+    ],
+    "scale_factor": 1.5311004784688995,
+    "scaled_offset": [
+      417,
+      254
+    ],
+    "scaled_crop_size": [
+      903,
+      1032
+    ],
+    "cropped_file": "rinia-cropped-1440p.png",
+    "positioned_file": "rinia-positioned-1440p.png"
+  },
+  "4k": {
+    "target_size": [
+      3840,
+      2160
+    ],
+    "scale_factor": 2.2966507177033493,
+    "scaled_offset": [
+      626,
+      381
+    ],
+    "scaled_crop_size": [
+      1355,
+      1549
+    ],
+    "cropped_file": "rinia-cropped-4k.png",
+    "positioned_file": "rinia-positioned-4k.png"
+  }
+}
