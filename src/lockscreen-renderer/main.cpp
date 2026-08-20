@@ -388,6 +388,10 @@ struct FutureShard {
     int dest_y = 0;
     int dest_w = 0;
     int dest_h = 0;
+    // Polygon shape: normalized vertices (0..1) relative to dest bounding box.
+    // Points are connected in order; last point connects back to first.
+    struct Vec2 { float x, y; };
+    std::vector<Vec2> polygon;
     // Pre-blurred version for privacy distortion.
     uint8_t* blurred_pixels = nullptr;
     int blurred_w = 0;
@@ -749,14 +753,117 @@ struct AppState {
 
 AppState g_state;
 
+// ---- Polygon helpers ----
+
+// Point-in-polygon test using ray casting.
+static bool point_in_polygon(float px, float py,
+                              const std::vector<FutureShard::Vec2>& poly) {
+    int n = static_cast<int>(poly.size());
+    if (n < 3) return false;
+    bool inside = false;
+    for (int i = 0, j = n - 1; i < n; j = i++) {
+        float xi = poly[i].x, yi = poly[i].y;
+        float xj = poly[j].x, yj = poly[j].y;
+        if (((yi > py) != (yj > py)) &&
+            (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+// Signed distance from point to the nearest polygon edge.
+// Negative = inside, positive = outside.
+static float polygon_edge_distance(float px, float py,
+                                    const std::vector<FutureShard::Vec2>& poly) {
+    int n = static_cast<int>(poly.size());
+    if (n < 3) return 1.0f;
+    float min_dist = 1e9f;
+    for (int i = 0, j = n - 1; i < n; j = i++) {
+        float x0 = poly[j].x, y0 = poly[j].y;
+        float x1 = poly[i].x, y1 = poly[i].y;
+        float dx = x1 - x0, dy = y1 - y0;
+        float len_sq = dx * dx + dy * dy;
+        float t = (len_sq > 0.0f) ? std::clamp(((px - x0) * dx + (py - y0) * dy) / len_sq, 0.0f, 1.0f) : 0.0f;
+        float cx = x0 + t * dx, cy = y0 + t * dy;
+        float d = std::sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
+        min_dist = std::min(min_dist, d);
+    }
+    return point_in_polygon(px, py, poly) ? -min_dist : min_dist;
+}
+
+// Draw a golden border along polygon edges.
+static void draw_polygon_border(void* dst, int32_t stride, int32_t dst_w, int32_t dst_h,
+                                 const std::vector<FutureShard::Vec2>& poly,
+                                 int off_x, int off_y, uint32_t color, int thickness) {
+    int n = static_cast<int>(poly.size());
+    for (int i = 0; i < n; ++i) {
+        int j = (i + 1) % n;
+        int x0 = static_cast<int>(poly[i].x) + off_x;
+        int y0 = static_cast<int>(poly[i].y) + off_y;
+        int x1 = static_cast<int>(poly[j].x) + off_x;
+        int y1 = static_cast<int>(poly[j].y) + off_y;
+        // Bresenham's line for polygon edge.
+        int dx = std::abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+        int dy = -std::abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+        int err = dx + dy;
+        for (;;) {
+            for (int t = -thickness / 2; t <= thickness / 2; ++t) {
+                int px = x0, py = y0 + t;
+                if (in_bounds(px, py, dst_w, dst_h))
+                    *pixel_at(dst, stride, px, py) = color;
+                px = x0 + t; py = y0;
+                if (in_bounds(px, py, dst_w, dst_h))
+                    *pixel_at(dst, stride, px, py) = color;
+            }
+            if (x0 == x1 && y0 == y1) break;
+            int e2 = 2 * err;
+            if (e2 >= dy) { err += dy; x0 += sx; }
+            if (e2 <= dx) { err += dx; y0 += sy; }
+        }
+    }
+}
+
+// ---- Irregular shard shape definitions ----
+// Each is an array of normalized vertices (0..1) relative to the shard bounding box.
+// Shapes are crystal-like fragments matching the Prophecy of Futures concept art.
+using ShardVertex = FutureShard::Vec2;
+
+static const std::vector<ShardVertex> kShardShapes[] = {
+    // 0: Large irregular pentagon — upper left, wide top
+    {{0.15f, 0.05f}, {0.85f, 0.02f}, {0.95f, 0.45f}, {0.70f, 0.95f}, {0.05f, 0.70f}},
+    // 1: Tall pentagon — right side, narrow top
+    {{0.30f, 0.00f}, {0.90f, 0.10f}, {0.95f, 0.75f}, {0.50f, 0.98f}, {0.05f, 0.55f}},
+    // 2: Small hexagon — left of Rinia
+    {{0.10f, 0.10f}, {0.70f, 0.00f}, {0.98f, 0.35f}, {0.85f, 0.90f}, {0.25f, 0.95f}, {0.02f, 0.50f}},
+    // 3: Compact quad — near center, tilted
+    {{0.20f, 0.05f}, {0.95f, 0.15f}, {0.80f, 0.90f}, {0.05f, 0.80f}},
+    // 4: Wide pentagon — bottom area
+    {{0.10f, 0.00f}, {0.80f, 0.05f}, {0.98f, 0.55f}, {0.60f, 0.98f}, {0.02f, 0.70f}},
+    // 5: Elongated shard — for extra futures
+    {{0.05f, 0.15f}, {0.65f, 0.00f}, {0.98f, 0.40f}, {0.75f, 0.95f}, {0.10f, 0.80f}},
+};
+static constexpr int kNumShardShapes = sizeof(kShardShapes) / sizeof(kShardShapes[0]);
+
 // ---- Rendering ----
 
-// Render a single prophecy shard with privacy blur and prophecy aesthetic.
+// Render a single prophecy shard as an irregular polygon with golden borders.
 // The shard is a "vision" — dimmed, slightly blurred, with glowing edges
 // and a prophecy color cast (violet/gold tint).
 static void render_shard(void* dst, int32_t dst_stride, int32_t dst_w, int32_t dst_h,
                          const FutureShard& shard) {
     if (shard.dest_w <= 0 || shard.dest_h <= 0) return;
+    if (shard.polygon.empty()) return;
+
+    // Build absolute polygon coordinates (normalized → pixel space).
+    std::vector<FutureShard::Vec2> abs_poly;
+    abs_poly.reserve(shard.polygon.size());
+    for (const auto& v : shard.polygon) {
+        abs_poly.push_back({
+            v.x * shard.dest_w + shard.dest_x,
+            v.y * shard.dest_h + shard.dest_y
+        });
+    }
 
     // Determine source pixels — use blurred version if available.
     const uint8_t* src = nullptr;
@@ -771,26 +878,6 @@ static void render_shard(void* dst, int32_t dst_stride, int32_t dst_w, int32_t d
         src_w = shard.image.width;
         src_h = shard.image.height;
         src_ch = shard.image.channels;
-    } else {
-        // No image: render a dark future placeholder with subtle internal gradient.
-        for (int dy = 0; dy < shard.dest_h; ++dy) {
-            int py = shard.dest_y + dy;
-            if (py < 0 || py >= dst_h) continue;
-            for (int dx = 0; dx < shard.dest_w; ++dx) {
-                int px = shard.dest_x + dx;
-                if (px < 0 || px >= dst_w) continue;
-                float fx = static_cast<float>(dx) / shard.dest_w;
-                float fy_local = static_cast<float>(dy) / shard.dest_h;
-                // Dark gradient: center slightly brighter than edges.
-                float center = (1.0f - std::abs(fx - 0.5f) * 2.0f) * (1.0f - std::abs(fy_local - 0.5f) * 2.0f);
-                center = std::max(0.0f, center) * 0.3f;
-                uint8_t r = static_cast<uint8_t>(20 + center * 30);
-                uint8_t g = static_cast<uint8_t>(8 + center * 15);
-                uint8_t b = static_cast<uint8_t>(35 + center * 40);
-                *pixel_at(dst, dst_stride, px, py) = (0xFFu << 24) | (r << 16) | (g << 8) | b;
-            }
-        }
-        return;
     }
 
     // --- Prophecy color overlay per shard ---
@@ -821,65 +908,71 @@ static void render_shard(void* dst, int32_t dst_stride, int32_t dst_w, int32_t d
     // Pick color by shard index (dominant shard is always index 0 in defs).
     int color_idx = shard.is_dominant ? 0 : ((shard.workspace_id - 1) % 5 + 1);
     const ProphecyColor& pc = colors[color_idx];
-
     float opacity = shard.is_dominant ? 0.92f : 0.78f;
 
-    // --- Render each pixel with brightness lift, color overlay, and vignette ---
-    for (int dy = 0; dy < shard.dest_h; ++dy) {
-        int py = shard.dest_y + dy;
-        if (py < 0 || py >= dst_h) continue;
+    // Compute polygon bounding box for iteration.
+    float poly_min_x = 1e9f, poly_max_x = -1e9f;
+    float poly_min_y = 1e9f, poly_max_y = -1e9f;
+    for (const auto& v : abs_poly) {
+        poly_min_x = std::min(poly_min_x, v.x);
+        poly_max_x = std::max(poly_max_x, v.x);
+        poly_min_y = std::min(poly_min_y, v.y);
+        poly_max_y = std::max(poly_max_y, v.y);
+    }
+    int iter_x0 = std::max(0, static_cast<int>(poly_min_x) - 2);
+    int iter_y0 = std::max(0, static_cast<int>(poly_min_y) - 2);
+    int iter_x1 = std::min(dst_w - 1, static_cast<int>(poly_max_x) + 2);
+    int iter_y1 = std::min(dst_h - 1, static_cast<int>(poly_max_y) + 2);
 
-        float fy = static_cast<float>(dy) / shard.dest_h;
-        float vignette_y = 1.0f - (std::abs(fy - 0.5f) * 2.0f);
-        vignette_y = 0.85f + vignette_y * 0.15f;  // range [0.85, 1.0] — gentle
+    // --- Render polygon-clipped pixels ---
+    // Fast: point_in_polygon only, no sqrt-based distance calculation.
+    for (int py = iter_y0; py <= iter_y1; ++py) {
+        for (int px = iter_x0; px <= iter_x1; ++px) {
+            float nx = static_cast<float>(px - shard.dest_x) / shard.dest_w;
+            float ny = static_cast<float>(py - shard.dest_y) / shard.dest_h;
 
-        for (int dx = 0; dx < shard.dest_w; ++dx) {
-            int px = shard.dest_x + dx;
-            if (px < 0 || px >= dst_w) continue;
+            if (!point_in_polygon(nx, ny, shard.polygon)) continue;
 
-            float fx = static_cast<float>(dx) / shard.dest_w;
-            float vignette_x = 1.0f - (std::abs(fx - 0.5f) * 2.0f);
-            vignette_x = 0.85f + vignette_x * 0.15f;
-            float vignette = vignette_y * vignette_x;
+            if (!src) {
+                // No image: dark placeholder.
+                float center = (1.0f - std::abs(nx - 0.5f) * 2.0f) * (1.0f - std::abs(ny - 0.5f) * 2.0f);
+                center = std::max(0.0f, center) * 0.3f;
+                uint8_t r = static_cast<uint8_t>(20 + center * 30);
+                uint8_t g = static_cast<uint8_t>(8 + center * 15);
+                uint8_t b = static_cast<uint8_t>(35 + center * 40);
+                *pixel_at(dst, dst_stride, px, py) = (0xFFu << 24) | (r << 16) | (g << 8) | b;
+                continue;
+            }
 
-            // Sample source image (nearest-neighbor).
-            int sx = dx * src_w / shard.dest_w;
-            int sy = dy * src_h / shard.dest_h;
-            sx = std::min(sx, src_w - 1);
-            sy = std::min(sy, src_h - 1);
-
+            // Crop source to 60% centered portion — zooms into the content
+            // so desktop elements are visible, not tiny.
+            float crop_x = 0.20f + nx * 0.60f;
+            float crop_y = 0.20f + ny * 0.60f;
+            int sx = std::clamp(static_cast<int>(crop_x * src_w), 0, src_w - 1);
+            int sy = std::clamp(static_cast<int>(crop_y * src_h), 0, src_h - 1);
             const uint8_t* sp = src + (sy * src_w + sx) * src_ch;
             uint8_t sa = (src_ch == 4) ? sp[3] : 255;
             if (sa == 0) continue;
 
-            // Brightness lift: scale up the very-dark source so detail becomes visible.
+            // Brightness lift + color overlay.
             float src_r = sp[0] * pc.lift;
             float src_g = sp[1] * pc.lift;
             float src_b = sp[2] * pc.lift;
-
-            // Blend source with the prophecy color overlay.
             float r = src_r * (1.0f - pc.overlay_mix) + pc.overlay_r * 255.0f * pc.overlay_mix;
             float g = src_g * (1.0f - pc.overlay_mix) + pc.overlay_g * 255.0f * pc.overlay_mix;
             float b = src_b * (1.0f - pc.overlay_mix) + pc.overlay_b * 255.0f * pc.overlay_mix;
 
-            // Slight desaturation (15%) for the prophecy "haze" feel.
+            // Desaturate 15%.
             float lum = r * 0.299f + g * 0.587f + b * 0.114f;
             r = r * 0.85f + lum * 0.15f;
             g = g * 0.85f + lum * 0.15f;
             b = b * 0.85f + lum * 0.15f;
 
-            // Apply gentle vignette.
-            r *= vignette;
-            g *= vignette;
-            b *= vignette;
-
-            // Clamp.
             uint8_t fr = static_cast<uint8_t>(std::clamp(r, 0.0f, 255.0f));
             uint8_t fg = static_cast<uint8_t>(std::clamp(g, 0.0f, 255.0f));
             uint8_t fb = static_cast<uint8_t>(std::clamp(b, 0.0f, 255.0f));
             uint8_t fa = static_cast<uint8_t>(std::clamp(sa * opacity, 0.0f, 255.0f));
 
-            // Alpha-blend onto destination.
             if (fa == 0) continue;
             if (fa >= 255) {
                 *pixel_at(dst, dst_stride, px, py) = (0xFFu << 24) | (fr << 16) | (fg << 8) | fb;
@@ -896,56 +989,9 @@ static void render_shard(void* dst, int32_t dst_stride, int32_t dst_w, int32_t d
         }
     }
 
-    // --- Glowing edge effect ---
-    // Bright inner border + softer glow in the shard's prophecy color.
-    auto make_argb = [](float r, float g, float b, uint8_t a) -> uint32_t {
-        return (static_cast<uint32_t>(a) << 24)
-             | (static_cast<uint32_t>(std::clamp(r, 0.0f, 255.0f)) << 16)
-             | (static_cast<uint32_t>(std::clamp(g, 0.0f, 255.0f)) << 8)
-             | static_cast<uint32_t>(std::clamp(b, 0.0f, 255.0f));
-    };
-    uint32_t inner_color = make_argb(pc.edge_r * 255, pc.edge_g * 255, pc.edge_b * 255, 0xAA);
-    uint32_t outer_color = make_argb(pc.edge_r * 255, pc.edge_g * 255, pc.edge_b * 255, 0x44);
-
-    // Inner edge (1px, bright).
-    draw_hline(dst, dst_stride, dst_w, dst_h,
-               shard.dest_x, shard.dest_x + shard.dest_w - 1,
-               shard.dest_y, inner_color, 1);
-    draw_hline(dst, dst_stride, dst_w, dst_h,
-               shard.dest_x, shard.dest_x + shard.dest_w - 1,
-               shard.dest_y + shard.dest_h - 1, inner_color, 1);
-    for (int dy = 0; dy < shard.dest_h; ++dy) {
-        int py = shard.dest_y + dy;
-        if (in_bounds(shard.dest_x, py, dst_w, dst_h))
-            *pixel_at(dst, dst_stride, shard.dest_x, py) = inner_color;
-        if (in_bounds(shard.dest_x + shard.dest_w - 1, py, dst_w, dst_h))
-            *pixel_at(dst, dst_stride, shard.dest_x + shard.dest_w - 1, py) = inner_color;
-    }
-
-    // Outer glow (2px, softer, extends inward from edges).
-    for (int i = 0; i < 2; ++i) {
-        int inset = i + 1;
-        int x0 = shard.dest_x + inset;
-        int x1 = shard.dest_x + shard.dest_w - 1 - inset;
-        int y0 = shard.dest_y + inset;
-        int y1 = shard.dest_y + shard.dest_h - 1 - inset;
-        if (x0 > x1 || y0 > y1) continue;
-
-        // Top glow row.
-        draw_hline(dst, dst_stride, dst_w, dst_h, x0, x1, y0, outer_color, 1);
-        // Bottom glow row.
-        draw_hline(dst, dst_stride, dst_w, dst_h, x0, x1, y1, outer_color, 1);
-        // Left glow column.
-        for (int dy = y0; dy <= y1; ++dy) {
-            if (in_bounds(x0, dy, dst_w, dst_h))
-                *pixel_at(dst, dst_stride, x0, dy) = outer_color;
-        }
-        // Right glow column.
-        for (int dy = y0; dy <= y1; ++dy) {
-            if (in_bounds(x1, dy, dst_w, dst_h))
-                *pixel_at(dst, dst_stride, x1, dy) = outer_color;
-        }
-    }
+    // --- Golden polygon border ---
+    draw_polygon_border(dst, dst_stride, dst_w, dst_h, abs_poly, 0, 0, 0xCCDDAA33, 2);
+    draw_polygon_border(dst, dst_stride, dst_w, dst_h, abs_poly, 0, 0, 0x55CC9933, 4);
 }
 
 // Render the clock text into a cached texture.
@@ -1040,6 +1086,10 @@ void render_lock_surface(Output& out) {
                 shard.dest_y = static_cast<int>(fg.y * h);
                 shard.dest_w = static_cast<int>(fg.width * w);
                 shard.dest_h = static_cast<int>(fg.height * h);
+
+                // Assign an irregular polygon shape.
+                int shape_idx = static_cast<int>(i) % kNumShardShapes;
+                shard.polygon = kShardShapes[shape_idx];
             }
             std::cerr << "[lockscreen] layout computed for " << g_state.shards.size()
                       << " shards, seed=" << g_state.prophecy_seed << "\n";
@@ -1086,12 +1136,7 @@ void render_lock_surface(Output& out) {
         }
     }
 
-    // Layer 3: Prophecy future shards.
-    for (const auto& shard : g_state.shards) {
-        render_shard(data, stride, w, h, shard);
-    }
-
-    // Layer 5: Static Rinia overlay (with alpha blending).
+    // Layer 3: Static Rinia overlay (BEHIND shards).
     if (g_state.rinia.loaded) {
         float scale_x = static_cast<float>(w) / 1920.0f;
         float scale_y = static_cast<float>(h) / 1080.0f;
@@ -1102,6 +1147,11 @@ void render_lock_surface(Output& out) {
         blit_image(data, stride, w, h,
                    g_state.rinia.pixels, g_state.rinia.width, g_state.rinia.height, 4,
                    rinia_x, rinia_y);
+    }
+
+    // Layer 4: Prophecy future shards (ON TOP of Rinia).
+    for (const auto& shard : g_state.shards) {
+        render_shard(data, stride, w, h, shard);
     }
 
     // Layer 7: Clock/date (cached texture, rendered only on minute change).
