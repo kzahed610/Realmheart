@@ -28,6 +28,7 @@ public:
 
     struct RendererConfig {
         std::uint64_t seed = 0;
+        std::vector<std::string> future_paths;  // pre-captured workspace screenshots
     };
 
     LockRendererProcess(

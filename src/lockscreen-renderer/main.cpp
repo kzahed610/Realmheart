@@ -400,7 +400,7 @@ struct FutureShard {
 
 // ---- Blurred image cache for privacy distortion ----
 
-static uint8_t* create_blurred(const uint8_t* src, int src_w, int src_h,
+[[maybe_unused]] static uint8_t* create_blurred(const uint8_t* src, int src_w, int src_h,
                                 int channels, int blur_passes, int& out_w, int& out_h) {
     // Downsample by factor of 4 via box filter.
     out_w = std::max(1, src_w / 4);
@@ -443,51 +443,78 @@ static uint8_t* create_blurred(const uint8_t* src, int src_w, int src_h,
         out = tmp;
     }
     return out;
-}// Build prophecy future shards from the background image.
+}// Build prophecy future shards from the background image + optional screenshot.
 // Each shard is a different crop region with a unique color tint,
 // creating "distorted prophecy visions" of the environment.
-// Takes the already-loaded background to avoid double-loading.
+// If a screenshot_path is provided, it becomes the dominant shard (the
+// "active workspace at lock time"). Other shards are background crops.
 // Uses resize() + direct element access to avoid move/dangling-pointer bugs.
 static void build_prophecy_shards(std::vector<FutureShard>& shards,
                                   const LoadedImage& bg,
-                                  int canvas_w, int canvas_h) {
+                                  const std::vector<std::string>& future_paths) {
     if (!bg.loaded || !bg.pixels) {
         std::cerr << "[lockscreen] build_prophecy_shards: no background loaded\n";
         return;
     }
 
-    // Define crop regions and prophecy color tints.
+    // Background crop tint definitions for unfilled shard slots.
     struct ShardDef {
-        double cx, cy, cw, ch;  // crop region (normalized 0..1)
-        double tr, tg, tb;      // tint multiplier (RGB)
-        bool dominant;
+        double cx, cy, cw, ch;
+        double tr, tg, tb;
         const char* label;
     };
-    static const ShardDef defs[] = {
-        // Dominant: center crop, warm gold tint, slightly brighter.
-        {0.20, 0.15, 0.60, 0.60,  1.08, 1.02, 0.88,  true,  "dominant"},
-        // Non-dominant: various crops with distinct color casts.
-        {0.00, 0.00, 0.45, 0.45,  0.88, 0.82, 1.15,  false, "violet"},
-        {0.55, 0.00, 0.45, 0.45,  1.12, 0.95, 0.85,  false, "amber"},
-        {0.00, 0.55, 0.45, 0.45,  0.85, 1.05, 1.10,  false, "teal"},
-        {0.55, 0.55, 0.45, 0.45,  1.05, 0.88, 1.05,  false, "rose"},
-        {0.10, 0.30, 0.80, 0.40,  0.95, 1.00, 1.08,  false, "mist"},
+    static const ShardDef bg_defs[] = {
+        {0.20, 0.15, 0.60, 0.60,  1.08, 1.02, 0.88,  "gold"},
+        {0.00, 0.00, 0.45, 0.45,  0.88, 0.82, 1.15,  "violet"},
+        {0.55, 0.00, 0.45, 0.45,  1.12, 0.95, 0.85,  "amber"},
+        {0.00, 0.55, 0.45, 0.45,  0.85, 1.05, 1.10,  "teal"},
+        {0.55, 0.55, 0.45, 0.45,  1.05, 0.88, 1.05,  "rose"},
+        {0.10, 0.30, 0.80, 0.40,  0.95, 1.00, 1.08,  "mist"},
     };
-    int num_defs = static_cast<int>(sizeof(defs) / sizeof(defs[0]));
 
-    // Pre-allocate vector. Elements are constructed in-place,
-    // avoiding move/copy of FutureShard (which has no move ctor).
-    shards.resize(num_defs);
+    int total = 6;
+    int num_loaded = 0;
 
-    for (int i = 0; i < num_defs; ++i) {
-        const ShardDef& def = defs[i];
-        FutureShard& shard = shards[i];  // direct reference, no copy
+    // Pre-allocate vector.
+    shards.resize(total);
 
+    // --- Load workspace screenshots as shards ---
+    for (int i = 0; i < total && i < static_cast<int>(future_paths.size()); ++i) {
+        FutureShard& shard = shards[i];
         shard.workspace_id = i + 1;
-        shard.is_dominant = def.dominant;
-        shard.is_active = def.dominant;
+        shard.is_dominant = (i == 0);
+        shard.is_active = (i == 0);
 
-        // Crop the background image to this shard's region.
+        int w = 0, h = 0, ch = 0;
+        uint8_t* pixels = stbi_load(future_paths[i].c_str(), &w, &h, &ch, 4);
+        if (pixels && w > 0 && h > 0) {
+            shard.image.pixels = pixels;
+            shard.image.width = w;
+            shard.image.height = h;
+            shard.image.channels = 4;
+            shard.image.loaded = true;
+            ++num_loaded;
+            std::cerr << "[lockscreen] future shard " << i << " loaded: "
+                      << w << "x" << h << " from " << future_paths[i]
+                      << (i == 0 ? " [DOMINANT]" : "") << "\n";
+        } else {
+            std::cerr << "[lockscreen] failed to load " << future_paths[i]
+                      << " — will fill with background crop\n";
+        }
+    }
+
+    // --- Fill remaining slots with background crops ---
+    int bg_def_idx = 0;
+    for (int i = 0; i < total; ++i) {
+        if (shards[i].image.loaded) continue;
+        if (bg_def_idx >= static_cast<int>(sizeof(bg_defs) / sizeof(bg_defs[0]))) break;
+
+        const ShardDef& def = bg_defs[bg_def_idx++];
+        FutureShard& shard = shards[i];
+        shard.workspace_id = i + 1;
+        shard.is_dominant = (i == 0 && num_loaded == 0);
+        shard.is_active = (i == 0 && num_loaded == 0);
+
         int src_x = static_cast<int>(def.cx * bg.width);
         int src_y = static_cast<int>(def.cy * bg.height);
         int src_w = static_cast<int>(def.cw * bg.width);
@@ -496,16 +523,12 @@ static void build_prophecy_shards(std::vector<FutureShard>& shards,
         src_h = std::max(1, std::min(src_h, bg.height - src_y));
 
         shard.image.pixels = static_cast<uint8_t*>(malloc(src_w * src_h * 4));
-        if (!shard.image.pixels) {
-            std::cerr << "[lockscreen] malloc failed for shard " << i << "\n";
-            continue;
-        }
+        if (!shard.image.pixels) continue;
         shard.image.width = src_w;
         shard.image.height = src_h;
         shard.image.channels = 4;
         shard.image.loaded = true;
 
-        // Copy with prophecy tint applied per-pixel.
         for (int row = 0; row < src_h; ++row) {
             const uint8_t* src_row = bg.pixels
                 + ((src_y + row) * bg.width + src_x) * 4;
@@ -519,14 +542,12 @@ static void build_prophecy_shards(std::vector<FutureShard>& shards,
                 dp[3] = sp[3];
             }
         }
-
-        std::cerr << "[lockscreen] future shard " << i
-                  << " crop=(" << def.cx << "," << def.cy << ","
-                  << def.cw << "," << def.ch << ") tint=" << def.label
-                  << (def.dominant ? " [DOMINANT]" : "") << "\n";
+        std::cerr << "[lockscreen] future shard " << i << " background crop: "
+                  << def.label << "\n";
     }
 
-    std::cerr << "[lockscreen] total futures: " << shards.size() << "\n";
+    std::cerr << "[lockscreen] total futures: " << shards.size()
+              << " (" << num_loaded << " workspace screenshots)\n";
 }
 
 // ---- State tracking ----
@@ -578,6 +599,7 @@ struct AppState {
     std::vector<FutureShard> shards;
     bool shards_loaded = false;
     std::uint64_t prophecy_seed = 0;
+    std::vector<std::string> future_paths;  // pre-captured workspace screenshots from parent
 
     // Clock state.
     int last_clock_minute = -1;
@@ -645,9 +667,10 @@ static void render_shard(void* dst, int32_t dst_stride, int32_t dst_w, int32_t d
         float edge_r, edge_g, edge_b;  // edge glow color
     };
     static const ProphecyColor colors[] = {
-        // Dominant: warm gold — bright, inviting.
-        {1.0f, 0.85f, 0.4f,  5.0f, 0.35f,  0.9f, 0.75f, 0.3f},
-        // Violet: cool, mystical.
+        // Dominant (workspace screenshot): light gold tint, low overlay
+        // so the real desktop content shows through.
+        {1.0f, 0.85f, 0.4f,  1.2f, 0.15f,  0.9f, 0.75f, 0.3f},
+        // Violet: cool, mystical (background crops need heavy lift).
         {0.55f, 0.3f, 0.85f, 4.5f, 0.40f,  0.55f, 0.3f, 0.85f},
         // Amber: warm, mysterious.
         {0.95f, 0.65f, 0.25f, 4.5f, 0.40f,  0.95f, 0.65f, 0.25f},
@@ -865,7 +888,8 @@ void render_lock_surface(Output& out) {
 
     // Build prophecy shards on first render (after background is loaded).
     if (!g_state.shards_loaded && g_state.background.loaded) {
-        build_prophecy_shards(g_state.shards, g_state.background, w, h);
+        build_prophecy_shards(g_state.shards, g_state.background,
+                              g_state.future_paths);
 
         // Compute layout positions using the layout engine.
         if (!g_state.shards.empty()) {
@@ -1682,6 +1706,10 @@ int main(int argc, char** argv) {
         if (arg == "--stdio") continue;
         if (arg == "--socket-fd" && i + 1 < argc) {
             socket_fd = std::stoi(argv[++i]);
+        }
+        if (arg == "--future" && i + 1 < argc) {
+            g_state.future_paths.push_back(argv[++i]);
+            std::cerr << "[lockscreen] future path: " << g_state.future_paths.back() << "\n";
         }
     }
 

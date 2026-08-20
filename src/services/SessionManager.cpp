@@ -2,7 +2,10 @@
 #include "services/LockRendererProcess.hpp"
 #include "services/LockSessionProvider.hpp"
 #include "services/ProphecyLayoutEngine.hpp"
+#include "services/ProphecyCaptureService.hpp"
 
+#include <cstdlib>
+#include <filesystem>
 #include <iostream>
 
 namespace realmheart::services {
@@ -12,6 +15,12 @@ SessionManager::SessionManager(std::unique_ptr<ICommandExecutor> executor)
 
 bool SessionManager::lock() {
     lock_state_ = LockState::Locking;
+
+    // Collect pre-captured workspace screenshots from the prophecy cache.
+    // These were captured by ProphecyCaptureService while workspaces were active.
+    auto screenshots = ProphecyCaptureService::list_screenshots();
+    std::cerr << "SessionManager: found " << screenshots.size()
+              << " cached workspace screenshots\n";
 
     // Try the Prophecy lock screen renderer first.
     session_provider_ = std::make_unique<LockSessionProvider>();
@@ -35,10 +44,13 @@ bool SessionManager::lock() {
     );
 
     LockRendererProcess::RendererConfig config;
-    // Seed-based layout for now. Real workspace cache integration later.
     config.seed = static_cast<std::uint64_t>(
         reinterpret_cast<std::uintptr_t>(session_provider_.get())
     );
+    // Pass stored workspace screenshots as future sources.
+    for (const auto& ss : screenshots) {
+        config.future_paths.push_back(ss.path.string());
+    }
 
     if (renderer_process_->start(config)) {
         // Renderer started and sent READY — session is now locked.

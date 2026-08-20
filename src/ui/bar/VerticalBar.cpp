@@ -131,6 +131,8 @@ VerticalBar::VerticalBar(
                 auto* shared = static_cast<std::shared_ptr<AsyncState>*>(raw);
                 if ((*shared)->alive.load() && (*shared)->owner != nullptr) {
                     (*shared)->owner->request_workspace_refresh();
+                    // Schedule a debounced prophecy capture.
+                    (*shared)->owner->schedule_prophecy_capture();
                 }
                 return G_SOURCE_REMOVE;
             },
@@ -547,6 +549,29 @@ void VerticalBar::activate_workspace(int workspace_id) {
             +[](gpointer raw) { delete static_cast<std::shared_ptr<AsyncState>*>(raw); }
         );
     }));
+}
+
+void VerticalBar::schedule_prophecy_capture() {
+    // Debounce: cancel any pending capture timer and reschedule.
+    if (prophecy_capture_timer_id_ > 0) {
+        g_source_remove(prophecy_capture_timer_id_);
+        prophecy_capture_timer_id_ = 0;
+    }
+
+    // Capture 500ms after the last workspace event (settled).
+    prophecy_capture_timer_id_ = g_timeout_add(500, +[](gpointer data) -> gboolean {
+        auto* self = static_cast<VerticalBar*>(data);
+        self->prophecy_capture_timer_id_ = 0;
+
+        // Capture on a background thread to avoid blocking GTK.
+        auto state = self->async_state_;
+        static_cast<void>(realmheart::core::shared_task_executor().post([state] {
+            if (!state->alive.load()) return;
+            services::ProphecyCaptureService::capture_active_workspace();
+        }));
+
+        return G_SOURCE_REMOVE;
+    }, this);
 }
 
 void VerticalBar::request_workspace_refresh() {

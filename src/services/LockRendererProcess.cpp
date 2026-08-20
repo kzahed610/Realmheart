@@ -80,12 +80,21 @@ bool LockRendererProcess::start(const RendererConfig& config) {
     const int child_fd = sockets[1];
 
     // Format args for the renderer.
-    // The renderer always uses fd 3 (via dup2), so we just pass --stdio.
-    std::vector<const char*> argv = {
-        renderer.c_str(),
-        "--stdio",
-        nullptr
+    std::vector<std::string> arg_strings = {
+        renderer,
+        "--stdio"
     };
+    for (const auto& path : config_.future_paths) {
+        if (!path.empty()) {
+            arg_strings.push_back("--future");
+            arg_strings.push_back(path);
+        }
+    }
+    std::vector<const char*> argv;
+    for (const auto& s : arg_strings) {
+        argv.push_back(s.c_str());
+    }
+    argv.push_back(nullptr);
 
     // Spawn the child process using fork+exec.
     pid_t pid = fork();

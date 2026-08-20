@@ -55,6 +55,7 @@ set(REALMHEART_RUNTIME_SOURCES
     src/services/WorkspaceProphecyCache.cpp
     src/services/ProphecyLayoutEngine.cpp
     src/services/ProphecyMotionEngine.cpp
+    src/services/ProphecyCaptureService.cpp
     src/services/LockSessionProvider.cpp
     src/services/LockRendererProcess.cpp
     src/services/BatteryService.cpp
@@ -241,6 +242,7 @@ add_executable(realmheart_power_menu_renderer
     src/services/LockRendererProcess.cpp
     src/services/ProphecyLayoutEngine.cpp
     src/services/ProphecyMotionEngine.cpp
+    src/services/ProphecyCaptureService.cpp
     src/services/WorkspaceProphecyCache.cpp
 )
 set_target_properties(realmheart_power_menu_renderer PROPERTIES
@@ -839,6 +841,7 @@ if(BUILD_TESTING)
         src/services/LockRendererProcess.cpp
         src/services/ProphecyLayoutEngine.cpp
         src/services/ProphecyMotionEngine.cpp
+        src/services/ProphecyCaptureService.cpp
         src/services/WorkspaceProphecyCache.cpp
     )
     realmheart_register_test(realmheart_night_light_tests)
@@ -892,6 +895,7 @@ if(BUILD_TESTING)
         src/services/LockRendererProcess.cpp
         src/services/ProphecyLayoutEngine.cpp
         src/services/ProphecyMotionEngine.cpp
+        src/services/ProphecyCaptureService.cpp
         src/services/WorkspaceProphecyCache.cpp
     )
     realmheart_register_test(realmheart_session_manager_tests)

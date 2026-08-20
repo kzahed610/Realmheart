@@ -2,6 +2,7 @@
 
 #include "services/BatteryService.hpp"
 #include "services/HyprlandEventMonitor.hpp"
+#include "services/ProphecyCaptureService.hpp"
 #include "services/MediaService.hpp"
 #include "services/Notifications.hpp"
 #include "services/Wifi.hpp"
@@ -80,6 +81,7 @@ private:
     void open_exclusive_system();
     void request_workspace_overview_toggle();
     void activate_workspace(int workspace_id);
+    void schedule_prophecy_capture();
     [[nodiscard]] std::pair<double, double> power_menu_origin() const;
 
     GtkApplication* app_ = nullptr;
@@ -115,6 +117,8 @@ private:
     WorkspaceWindowTracker workspace_window_tracker_;
     GWeakRef active_popover_ref_{};
     guint refresh_timer_id_ = 0;
+    guint prophecy_capture_timer_id_ = 0;
+    int last_captured_workspace_id_ = -1;
     unsigned refresh_tick_ = 0;
     bool workspace_morph_active_ = false;
     double workspace_morph_progress_ = 0.0;
