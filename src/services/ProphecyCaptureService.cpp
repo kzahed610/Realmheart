@@ -100,6 +100,8 @@ std::filesystem::path ProphecyCaptureService::capture_workspace(int workspace_id
 
 std::vector<ProphecyCaptureService::WorkspaceScreenshot>
 ProphecyCaptureService::list_screenshots() {
+    static constexpr int kMaxScreenshots = 5;
+
     std::vector<WorkspaceScreenshot> result;
     auto dir = prophecy_dir();
     if (dir.empty()) return result;
@@ -124,6 +126,14 @@ ProphecyCaptureService::list_screenshots() {
     // Sort by workspace ID for consistent ordering.
     std::sort(result.begin(), result.end(),
         [](const auto& a, const auto& b) { return a.workspace_id < b.workspace_id; });
+
+    // If more than kMaxScreenshots, remove the oldest (lowest ID = oldest).
+    while (static_cast<int>(result.size()) > kMaxScreenshots) {
+        std::filesystem::remove(result.front().path, ec);
+        std::cerr << "[prophecy] removed old screenshot: ws-"
+                  << result.front().workspace_id << ".png\n";
+        result.erase(result.begin());
+    }
 
     return result;
 }

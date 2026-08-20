@@ -26,6 +26,7 @@
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <sys/mman.h>
@@ -449,37 +450,143 @@ struct FutureShard {
 // If a screenshot_path is provided, it becomes the dominant shard (the
 // "active workspace at lock time"). Other shards are background crops.
 // Uses resize() + direct element access to avoid move/dangling-pointer bugs.
+// Resolve the current wallpaper path from the state file.
+static std::string resolve_wallpaper_path() {
+    const char* home = std::getenv("HOME");
+    if (!home) return {};
+
+    std::string state_file = std::string(home)
+        + "/.local/state/realmheart/wallpaper/path.txt";
+
+    std::ifstream input(state_file);
+    std::string path;
+    if (!input || !std::getline(input, path) || path.empty()) return {};
+    // Trim trailing whitespace.
+    while (!path.empty() && (path.back() == '\r' || path.back() == '\n' || path.back() == ' '))
+        path.pop_back();
+
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) return {};
+    return path;
+}
+
+// Create a small downscaled thumbnail from an image.
+// Returns a new RGBA pixel buffer (caller owns via stbi_image_free).
+static uint8_t* create_thumbnail(const uint8_t* src, int src_w, int src_h,
+                                 int thumb_w, int thumb_h, int& out_w, int& out_h) {
+    out_w = thumb_w;
+    out_h = thumb_h;
+    auto* out = new uint8_t[thumb_w * thumb_h * 4];
+    for (int ty = 0; ty < thumb_h; ++ty) {
+        int sy = ty * src_h / thumb_h;
+        sy = std::min(sy, src_h - 1);
+        for (int tx = 0; tx < thumb_w; ++tx) {
+            int sx = tx * src_w / thumb_w;
+            sx = std::min(sx, src_w - 1);
+            const uint8_t* sp = src + (sy * src_w + sx) * 4;
+            uint8_t* dp = out + (ty * thumb_w + tx) * 4;
+            dp[0] = sp[0]; dp[1] = sp[1]; dp[2] = sp[2]; dp[3] = sp[3];
+        }
+    }
+    return out;
+}
+
+// Crop a region from a thumbnail and apply a prophecy tint.
+static void crop_tint_thumbnail(const uint8_t* thumb, int thumb_w, int thumb_h,
+                                double cx, double cy, double cw, double ch,
+                                float tint_r, float tint_g, float tint_b,
+                                uint8_t*& out_pixels, int& out_w, int& out_h) {
+    int sx = static_cast<int>(cx * thumb_w);
+    int sy = static_cast<int>(cy * thumb_h);
+    out_w = std::max(1, static_cast<int>(cw * thumb_w));
+    out_h = std::max(1, static_cast<int>(ch * thumb_h));
+    out_w = std::min(out_w, thumb_w - sx);
+    out_h = std::min(out_h, thumb_h - sy);
+
+    out_pixels = static_cast<uint8_t*>(malloc(out_w * out_h * 4));
+    if (!out_pixels) return;
+
+    for (int row = 0; row < out_h; ++row) {
+        const uint8_t* src_row = thumb + ((sy + row) * thumb_w + sx) * 4;
+        uint8_t* dst_row = out_pixels + row * out_w * 4;
+        for (int col = 0; col < out_w; ++col) {
+            const uint8_t* sp = src_row + col * 4;
+            uint8_t* dp = dst_row + col * 4;
+            dp[0] = static_cast<uint8_t>(std::clamp(sp[0] * tint_r, 0.0f, 255.0f));
+            dp[1] = static_cast<uint8_t>(std::clamp(sp[1] * tint_g, 0.0f, 255.0f));
+            dp[2] = static_cast<uint8_t>(std::clamp(sp[2] * tint_b, 0.0f, 255.0f));
+            dp[3] = sp[3];
+        }
+    }
+}
+
+// Build prophecy shards:
+//  - Up to 5 workspace screenshots (most recent visited workspaces)
+//  - Remaining slots filled with wallpaper thumbnails (small, tinted)
+//  - Minimum 3 futures total
+//  - First shard with a workspace screenshot is always the dominant future
 static void build_prophecy_shards(std::vector<FutureShard>& shards,
                                   const LoadedImage& bg,
                                   const std::vector<std::string>& future_paths) {
+    static constexpr int kMaxFutures = 5;
+    static constexpr int kMinFutures = 3;
+    static constexpr int kThumbW = 200;   // wallpaper thumbnail width
+    static constexpr int kThumbH = 120;   // wallpaper thumbnail height
+
     if (!bg.loaded || !bg.pixels) {
         std::cerr << "[lockscreen] build_prophecy_shards: no background loaded\n";
         return;
     }
 
-    // Background crop tint definitions for unfilled shard slots.
-    struct ShardDef {
-        double cx, cy, cw, ch;
-        double tr, tg, tb;
+    // Determine how many workspace screenshots to use (cap at 5).
+    int num_ws = std::min(static_cast<int>(future_paths.size()), kMaxFutures);
+    int total = std::max(kMinFutures, num_ws);  // at least 3 futures
+    total = std::min(total, kMaxFutures);        // at most 5
+
+    // Wallpaper thumbnail crop definitions for unfilled slots.
+    struct ThumbDef {
+        double cx, cy, cw, ch;  // crop region within the thumbnail
+        float tr, tg, tb;       // tint multiplier
         const char* label;
     };
-    static const ShardDef bg_defs[] = {
-        {0.20, 0.15, 0.60, 0.60,  1.08, 1.02, 0.88,  "gold"},
-        {0.00, 0.00, 0.45, 0.45,  0.88, 0.82, 1.15,  "violet"},
-        {0.55, 0.00, 0.45, 0.45,  1.12, 0.95, 0.85,  "amber"},
-        {0.00, 0.55, 0.45, 0.45,  0.85, 1.05, 1.10,  "teal"},
-        {0.55, 0.55, 0.45, 0.45,  1.05, 0.88, 1.05,  "rose"},
-        {0.10, 0.30, 0.80, 0.40,  0.95, 1.00, 1.08,  "mist"},
+    static const ThumbDef thumb_defs[] = {
+        {0.00, 0.00, 0.50, 0.50,  1.08f, 1.02f, 0.88f, "gold"},
+        {0.50, 0.00, 0.50, 0.50,  0.88f, 0.82f, 1.15f, "violet"},
+        {0.00, 0.50, 0.50, 0.50,  1.12f, 0.95f, 0.85f, "amber"},
+        {0.50, 0.50, 0.50, 0.50,  0.85f, 1.05f, 1.10f, "teal"},
+        {0.10, 0.10, 0.80, 0.80,  1.05f, 0.88f, 1.05f, "rose"},
     };
 
-    int total = 6;
-    int num_loaded = 0;
+    // Load the wallpaper as a small thumbnail.
+    LoadedImage wallpaper_thumb;
+    {
+        std::string wp_path = resolve_wallpaper_path();
+        if (!wp_path.empty()) {
+            int ow = 0, oh = 0, oc = 0;
+            uint8_t* full = stbi_load(wp_path.c_str(), &ow, &oh, &oc, 4);
+            if (full && ow > 0 && oh > 0) {
+                int tw = 0, th = 0;
+                wallpaper_thumb.pixels = create_thumbnail(full, ow, oh, kThumbW, kThumbH, tw, th);
+                wallpaper_thumb.width = tw;
+                wallpaper_thumb.height = th;
+                wallpaper_thumb.channels = 4;
+                wallpaper_thumb.loaded = (wallpaper_thumb.pixels != nullptr);
+                stbi_image_free(full);
+                std::cerr << "[lockscreen] loaded wallpaper thumbnail: "
+                          << tw << "x" << th << " from " << wp_path << "\n";
+            }
+        }
+        if (!wallpaper_thumb.loaded) {
+            std::cerr << "[lockscreen] no wallpaper available for thumbnails\n";
+        }
+    }
 
-    // Pre-allocate vector.
     shards.resize(total);
+    int num_loaded = 0;
+    int thumb_def_idx = 0;
 
     // --- Load workspace screenshots as shards ---
-    for (int i = 0; i < total && i < static_cast<int>(future_paths.size()); ++i) {
+    for (int i = 0; i < num_ws; ++i) {
         FutureShard& shard = shards[i];
         shard.workspace_id = i + 1;
         shard.is_dominant = (i == 0);
@@ -494,60 +601,90 @@ static void build_prophecy_shards(std::vector<FutureShard>& shards,
             shard.image.channels = 4;
             shard.image.loaded = true;
             ++num_loaded;
-            std::cerr << "[lockscreen] future shard " << i << " loaded: "
-                      << w << "x" << h << " from " << future_paths[i]
+            std::cerr << "[lockscreen] future shard " << i << " workspace: "
+                      << w << "x" << h
                       << (i == 0 ? " [DOMINANT]" : "") << "\n";
         } else {
             std::cerr << "[lockscreen] failed to load " << future_paths[i]
-                      << " — will fill with background crop\n";
+                      << " — will fill with wallpaper thumb\n";
         }
     }
 
-    // --- Fill remaining slots with background crops ---
-    int bg_def_idx = 0;
+    // --- Fill remaining slots with wallpaper thumbnails ---
+    for (int i = num_ws; i < total; ++i) {
+        FutureShard& shard = shards[i];
+        shard.workspace_id = i + 1;
+        shard.is_dominant = false;
+        shard.is_active = false;
+
+        if (wallpaper_thumb.loaded &&
+            thumb_def_idx < static_cast<int>(sizeof(thumb_defs) / sizeof(thumb_defs[0]))) {
+            const ThumbDef& td = thumb_defs[thumb_def_idx++];
+            crop_tint_thumbnail(wallpaper_thumb.pixels,
+                                wallpaper_thumb.width, wallpaper_thumb.height,
+                                td.cx, td.cy, td.cw, td.ch,
+                                td.tr, td.tg, td.tb,
+                                shard.image.pixels, shard.image.width, shard.image.height);
+            if (shard.image.pixels) {
+                shard.image.channels = 4;
+                shard.image.loaded = true;
+                std::cerr << "[lockscreen] future shard " << i
+                          << " wallpaper thumb: " << td.label << "\n";
+            }
+        }
+    }
+
+    // If still fewer than kMinFutures, fill with background crops.
+    struct BgCrop { double cx, cy, cw, ch; float tr, tg, tb; };
+    static const BgCrop bg_crops[] = {
+        {0.0, 0.0, 0.5, 0.5,  1.08f, 1.02f, 0.88f},
+        {0.5, 0.0, 0.5, 0.5,  0.88f, 0.82f, 1.15f},
+        {0.0, 0.5, 0.5, 0.5,  1.12f, 0.95f, 0.85f},
+        {0.5, 0.5, 0.5, 0.5,  0.85f, 1.05f, 1.10f},
+        {0.1, 0.1, 0.8, 0.8,  1.05f, 0.88f, 1.05f},
+    };
+    int bg_idx = 0;
     for (int i = 0; i < total; ++i) {
         if (shards[i].image.loaded) continue;
-        if (bg_def_idx >= static_cast<int>(sizeof(bg_defs) / sizeof(bg_defs[0]))) break;
-
-        const ShardDef& def = bg_defs[bg_def_idx++];
+        if (bg_idx >= 5) break;
+        const BgCrop& bc = bg_crops[bg_idx++];
         FutureShard& shard = shards[i];
         shard.workspace_id = i + 1;
         shard.is_dominant = (i == 0 && num_loaded == 0);
         shard.is_active = (i == 0 && num_loaded == 0);
 
-        int src_x = static_cast<int>(def.cx * bg.width);
-        int src_y = static_cast<int>(def.cy * bg.height);
-        int src_w = static_cast<int>(def.cw * bg.width);
-        int src_h = static_cast<int>(def.ch * bg.height);
-        src_w = std::max(1, std::min(src_w, bg.width - src_x));
-        src_h = std::max(1, std::min(src_h, bg.height - src_y));
+        int sx = static_cast<int>(bc.cx * bg.width);
+        int sy = static_cast<int>(bc.cy * bg.height);
+        int sw = std::max(1, static_cast<int>(bc.cw * bg.width));
+        int sh = std::max(1, static_cast<int>(bc.ch * bg.height));
+        sw = std::min(sw, bg.width - sx);
+        sh = std::min(sh, bg.height - sy);
 
-        shard.image.pixels = static_cast<uint8_t*>(malloc(src_w * src_h * 4));
+        shard.image.pixels = static_cast<uint8_t*>(malloc(sw * sh * 4));
         if (!shard.image.pixels) continue;
-        shard.image.width = src_w;
-        shard.image.height = src_h;
+        shard.image.width = sw;
+        shard.image.height = sh;
         shard.image.channels = 4;
         shard.image.loaded = true;
 
-        for (int row = 0; row < src_h; ++row) {
-            const uint8_t* src_row = bg.pixels
-                + ((src_y + row) * bg.width + src_x) * 4;
-            uint8_t* dst_row = shard.image.pixels + row * src_w * 4;
-            for (int col = 0; col < src_w; ++col) {
+        for (int row = 0; row < sh; ++row) {
+            const uint8_t* src_row = bg.pixels + ((sy + row) * bg.width + sx) * 4;
+            uint8_t* dst_row = shard.image.pixels + row * sw * 4;
+            for (int col = 0; col < sw; ++col) {
                 const uint8_t* sp = src_row + col * 4;
                 uint8_t* dp = dst_row + col * 4;
-                dp[0] = static_cast<uint8_t>(std::clamp(sp[0] * def.tr, 0.0, 255.0));
-                dp[1] = static_cast<uint8_t>(std::clamp(sp[1] * def.tg, 0.0, 255.0));
-                dp[2] = static_cast<uint8_t>(std::clamp(sp[2] * def.tb, 0.0, 255.0));
+                dp[0] = static_cast<uint8_t>(std::clamp(sp[0] * bc.tr, 0.0f, 255.0f));
+                dp[1] = static_cast<uint8_t>(std::clamp(sp[1] * bc.tg, 0.0f, 255.0f));
+                dp[2] = static_cast<uint8_t>(std::clamp(sp[2] * bc.tb, 0.0f, 255.0f));
                 dp[3] = sp[3];
             }
         }
-        std::cerr << "[lockscreen] future shard " << i << " background crop: "
-                  << def.label << "\n";
+        std::cerr << "[lockscreen] future shard " << i << " bg crop fallback\n";
     }
 
     std::cerr << "[lockscreen] total futures: " << shards.size()
-              << " (" << num_loaded << " workspace screenshots)\n";
+              << " (" << num_loaded << " workspace, "
+              << (shards.size() - num_loaded) << " wallpaper/bg)\n";
 }
 
 // ---- State tracking ----
