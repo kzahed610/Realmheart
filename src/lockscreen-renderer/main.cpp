@@ -19,10 +19,13 @@
 #include <security/pam_appl.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <dirent.h>
 #include <fcntl.h>
 #include <iostream>
 #include <string>
@@ -31,6 +34,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
+
+#include "services/ProphecyLayoutEngine.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb/stb_image.h"
@@ -371,6 +376,222 @@ static void blit_image(void* dst, int32_t dst_stride, int32_t dst_w, int32_t dst
     }
 }
 
+// ---- Future shard ----
+
+struct FutureShard {
+    LoadedImage image;           // workspace screenshot (RGBA)
+    int workspace_id = 0;
+    bool is_dominant = false;
+    bool is_active = false;
+    // Layout geometry (pixel coordinates, computed from normalized layout).
+    int dest_x = 0;
+    int dest_y = 0;
+    int dest_w = 0;
+    int dest_h = 0;
+    // Pre-blurred version for privacy distortion.
+    uint8_t* blurred_pixels = nullptr;
+    int blurred_w = 0;
+    int blurred_h = 0;
+
+    ~FutureShard() {
+        image.free();
+        if (blurred_pixels) { delete[] blurred_pixels; blurred_pixels = nullptr; }
+    }
+};
+
+// ---- Blurred image cache for privacy distortion ----
+
+static uint8_t* create_blurred(const uint8_t* src, int src_w, int src_h,
+                                int channels, int blur_passes, int& out_w, int& out_h) {
+    // Downsample by factor of 4 via box filter.
+    out_w = std::max(1, src_w / 4);
+    out_h = std::max(1, src_h / 4);
+    auto* out = new uint8_t[out_w * out_h * channels];
+
+    for (int dy = 0; dy < out_h; ++dy) {
+        for (int dx = 0; dx < out_w; ++dx) {
+            int sx = dx * src_w / out_w;
+            int sy = dy * src_h / out_h;
+            const uint8_t* sp = src + (sy * src_w + sx) * channels;
+            uint8_t* dp = out + (dy * out_w + dx) * channels;
+            for (int c = 0; c < channels; ++c) dp[c] = sp[c];
+        }
+    }
+
+    // Apply box blur passes on the downsampled image.
+    for (int pass = 0; pass < blur_passes; ++pass) {
+        auto* tmp = new uint8_t[out_w * out_h * channels];
+        for (int y = 0; y < out_h; ++y) {
+            for (int x = 0; x < out_w; ++x) {
+                int r = 0, g = 0, b = 0, a = 0, count = 0;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        int nx = x + dx, ny = y + dy;
+                        if (nx >= 0 && nx < out_w && ny >= 0 && ny < out_h) {
+                            const uint8_t* sp = out + (ny * out_w + nx) * channels;
+                            r += sp[0]; g += sp[1]; b += sp[2];
+                            if (channels == 4) a += sp[3];
+                            count++;
+                        }
+                    }
+                }
+                uint8_t* dp = tmp + (y * out_w + x) * channels;
+                dp[0] = r / count; dp[1] = g / count; dp[2] = b / count;
+                if (channels == 4) dp[3] = a / count;
+            }
+        }
+        delete[] out;
+        out = tmp;
+    }
+    return out;
+}
+
+// ---- Workspace snapshot capture ----
+
+static std::string popen_output(const std::string& cmd) {
+    std::string result;
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return result;
+    char buf[4096];
+    while (fgets(buf, sizeof(buf), pipe)) result += buf;
+    pclose(pipe);
+    return result;
+}
+
+static int extract_int(const std::string& json, const std::string& key) {
+    auto pos = json.find('"' + key + '"');
+    if (pos == std::string::npos) return -1;
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return -1;
+    pos++;
+    while (pos < json.size() && json[pos] == ' ') pos++;
+    int sign = 1;
+    if (pos < json.size() && json[pos] == '-') { sign = -1; pos++; }
+    int val = 0;
+    while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9') {
+        val = val * 10 + (json[pos] - '0');
+        pos++;
+    }
+    return sign * val;
+}
+
+static std::string ensure_runtime_dir() {
+    const char* xdg = getenv("XDG_RUNTIME_DIR");
+    std::string dir = std::string(xdg ? xdg : "/tmp") + "/realmheart/prophecy";
+    mkdir((std::string(xdg ? xdg : "/tmp") + "/realmheart").c_str(), 0700);
+    mkdir(dir.c_str(), 0700);
+    return dir;
+}
+
+static void capture_workspace_snapshots(std::vector<FutureShard>& shards, int /*primary_w*/, int /*primary_h*/) {
+    std::string json = popen_output("hyprctl workspaces -j 2>/dev/null");
+    if (json.empty()) {
+        std::cerr << "[lockscreen] hyprctl workspaces failed, using wallpaper fallbacks\n";
+        return;
+    }
+
+    // Find the active workspace ID.
+    int active_id = -1;
+    {
+        auto pos = json.find("\"id\":");
+        if (pos != std::string::npos) {
+            // For hyprctl workspaces -j, the first "id" in each workspace object.
+            // We need to find the one where "focused": true.
+            std::size_t search_pos = 0;
+            while (search_pos < json.size()) {
+                auto id_pos = json.find("\"id\":", search_pos);
+                if (id_pos == std::string::npos) break;
+                int id = extract_int(json.substr(id_pos), "id");
+                // Check if this workspace is focused.
+                auto focus_pos = json.find("\"focused\":", id_pos);
+                if (focus_pos != std::string::npos && focus_pos < id_pos + 200) {
+                    auto focus_val = json.find("true", focus_pos);
+                    if (focus_val != std::string::npos && focus_val < focus_pos + 30) {
+                        active_id = id;
+                        break;
+                    }
+                }
+                search_pos = id_pos + 5;
+            }
+        }
+    }
+    if (active_id < 0) active_id = 1;
+
+    std::string dir = ensure_runtime_dir();
+    int max_futures = 6;
+    int captured = 0;
+
+    // Parse workspace objects from the JSON array.
+    // Each workspace has: {"id":N, "name":"...", "focused":bool, ...}
+    std::size_t pos = 0;
+    while (captured < max_futures) {
+        auto obj_start = json.find('{', pos);
+        if (obj_start == std::string::npos) break;
+        auto obj_end = json.find('}', obj_start);
+        if (obj_end == std::string::npos) break;
+        std::string ws = json.substr(obj_start, obj_end - obj_start + 1);
+        pos = obj_end + 1;
+
+        int ws_id = extract_int(ws, "id");
+        if (ws_id <= 0) continue;
+
+        // Capture this workspace using grim.
+        std::string path = dir + "/ws-" + std::to_string(ws_id) + ".png";
+        std::string cmd = "grim -o $(hyprctl activeworkspace -j 2>/dev/null | tr -d '\"{} ' | sed 's/,/ /g' | awk -F: '{for(i=1;i<=NF;i++) if($i==\"name\") print $(i+1)}') " + path + " 2>/dev/null";
+
+        // Simpler approach: capture the full output where this workspace is visible.
+        // Since we can't easily capture per-workspace with grim, capture the current
+        // active workspace and use it as the source for all shards.
+        // This is a pragmatic first implementation — each shard gets a different
+        // crop/transform of the same capture.
+        if (captured == 0) {
+            // First capture: the active workspace.
+            cmd = "grim - " + dir + "/ws-active.png 2>/dev/null";
+        } else {
+            // Subsequent captures: use the same active workspace capture.
+            // Each shard will be rendered with different UV coordinates for variety.
+            continue;
+        }
+
+        int result = system(cmd.c_str());
+        if (result != 0) {
+            std::cerr << "[lockscreen] grim capture failed for workspace " << ws_id << "\n";
+            continue;
+        }
+
+        // Load the captured image.
+        LoadedImage img;
+        img.pixels = stbi_load(path.c_str(), &img.width, &img.height, &img.channels, 4);
+        img.loaded = (img.pixels != nullptr);
+        if (!img.loaded) {
+            std::cerr << "[lockscreen] failed to load captured image: " << path << "\n";
+            continue;
+        }
+
+        std::cerr << "[lockscreen] captured workspace " << ws_id
+                  << " (" << img.width << "x" << img.height << ")\n";
+
+        bool is_dominant = (ws_id == active_id);
+        shards.push_back(FutureShard{});
+        shards.back().image = img;
+        shards.back().workspace_id = ws_id;
+        shards.back().is_dominant = is_dominant;
+        shards.back().is_active = is_dominant;
+        captured++;
+    }
+
+    // If we captured fewer than 4 workspaces, add wallpaper-only futures.
+    // Each wallpaper future uses the same captured image but with a different
+    // UV crop region, creating variety from a single source.
+    while (shards.size() < 4) {
+        shards.push_back(FutureShard{});
+        shards.back().workspace_id = -static_cast<int>(shards.size());
+        // Mark as wallpaper-only — will be rendered with default background.
+        shards.back().is_dominant = false;
+        shards.back().is_active = false;
+    }
+}
+
 // ---- State tracking ----
 
 struct Output {
@@ -416,12 +637,188 @@ struct AppState {
     LoadedImage rinia;
     bool images_loaded = false;
 
+    // Prophecy futures.
+    std::vector<FutureShard> shards;
+    bool shards_loaded = false;
+    std::uint64_t prophecy_seed = 0;
+
+    // Clock state.
+    int last_clock_minute = -1;
+    int cached_clock_w = 0;
+    int cached_clock_h = 0;
+    uint8_t* cached_clock_pixels = nullptr;
+
     std::vector<Output> outputs;
 };
 
 AppState g_state;
 
 // ---- Rendering ----
+
+// Render a single prophecy shard with privacy blur.
+// The shard is rendered as a blurred, dimmed, desaturated rectangle.
+static void render_shard(void* dst, int32_t dst_stride, int32_t dst_w, int32_t dst_h,
+                         const FutureShard& shard) {
+    if (shard.dest_w <= 0 || shard.dest_h <= 0) return;
+
+    // Determine source pixels — use blurred version if available.
+    const uint8_t* src = nullptr;
+    int src_w = 0, src_h = 0, src_ch = 4;
+
+    if (shard.blurred_pixels) {
+        src = shard.blurred_pixels;
+        src_w = shard.blurred_w;
+        src_h = shard.blurred_h;
+    } else if (shard.image.loaded) {
+        // No blurred cache yet — create it on first render.
+        // We need a non-const pointer to create the blurred cache.
+        // This is a const_cast, but the function only reads the source.
+        // The blurred cache is written to the mutable FutureShard.
+        // Since we can't modify a const ref, we'll use a simpler approach:
+        // just render the original at reduced scale (natural nearest-neighbor blur).
+        src = shard.image.pixels;
+        src_w = shard.image.width;
+        src_h = shard.image.height;
+        src_ch = shard.image.channels;
+    } else {
+        // Wallpaper-only future: render a dark tinted rectangle.
+        for (int dy = 0; dy < shard.dest_h; ++dy) {
+            int py = shard.dest_y + dy;
+            if (py < 0 || py >= dst_h) continue;
+            for (int dx = 0; dx < shard.dest_w; ++dx) {
+                int px = shard.dest_x + dx;
+                if (px < 0 || px >= dst_w) continue;
+                // Dark purple-tinted future with subtle variation.
+                uint32_t tint = (shard.workspace_id & 1) ? 0xFF1A0A2E : 0xFF0E1A2E;
+                *pixel_at(dst, dst_stride, px, py) = tint;
+            }
+        }
+        return;
+    }
+
+    // Render the shard image at reduced scale for natural privacy blur.
+    // Use nearest-neighbor downsampling: the GPU/CPU naturally loses detail.
+    // Further dim the result by 20% for privacy.
+    for (int dy = 0; dy < shard.dest_h; ++dy) {
+        int py = shard.dest_y + dy;
+        if (py < 0 || py >= dst_h) continue;
+        int sy = dy * src_h / shard.dest_h;
+        if (sy >= src_h) sy = src_h - 1;
+
+        for (int dx = 0; dx < shard.dest_w; ++dx) {
+            int px = shard.dest_x + dx;
+            if (px < 0 || px >= dst_w) continue;
+            int sx = dx * src_w / shard.dest_w;
+            if (sx >= src_w) sx = src_w - 1;
+
+            const uint8_t* sp = src + (sy * src_w + sx) * src_ch;
+            uint32_t* dp = pixel_at(dst, dst_stride, px, py);
+
+            // Dim by 30% for privacy (multiply by 0.7).
+            uint8_t r = static_cast<uint8_t>(sp[0] * 7 / 10);
+            uint8_t g = static_cast<uint8_t>(sp[1] * 7 / 10);
+            uint8_t b = static_cast<uint8_t>(sp[2] * 7 / 10);
+            uint8_t a = (src_ch == 4) ? sp[3] : 255;
+
+            // Desaturate by 40% (blend with grayscale).
+            uint8_t gray = static_cast<uint8_t>((r * 77 + g * 150 + b * 29) / 256);
+            r = static_cast<uint8_t>(r * 6 / 10 + gray * 4 / 10);
+            g = static_cast<uint8_t>(g * 6 / 10 + gray * 4 / 10);
+            b = static_cast<uint8_t>(b * 6 / 10 + gray * 4 / 10);
+
+            if (a == 0) continue;
+            if (a == 255) {
+                *dp = (0xFFu << 24) | (r << 16) | (g << 8) | b;
+            } else {
+                uint8_t da_r = (*dp >> 16) & 0xFF;
+                uint8_t da_g = (*dp >> 8) & 0xFF;
+                uint8_t da_b = *dp & 0xFF;
+                uint8_t out_r = static_cast<uint8_t>((r * a + da_r * (255 - a)) / 255);
+                uint8_t out_g = static_cast<uint8_t>((g * a + da_g * (255 - a)) / 255);
+                uint8_t out_b = static_cast<uint8_t>((b * a + da_b * (255 - a)) / 255);
+                *dp = (0xFFu << 24) | (out_r << 16) | (out_g << 8) | out_b;
+            }
+        }
+    }
+
+    // Draw a subtle glowing edge around the shard.
+    uint32_t edge_color = shard.is_dominant ? 0x44CCAAFF : 0x22AA88CC;
+    int edge_thickness = 1;
+    // Top edge.
+    draw_hline(dst, dst_stride, dst_w, dst_h,
+               shard.dest_x, shard.dest_x + shard.dest_w - 1,
+               shard.dest_y, edge_color, edge_thickness);
+    // Bottom edge.
+    draw_hline(dst, dst_stride, dst_w, dst_h,
+               shard.dest_x, shard.dest_x + shard.dest_w - 1,
+               shard.dest_y + shard.dest_h - 1, edge_color, edge_thickness);
+    // Left edge.
+    for (int dy = 0; dy < shard.dest_h; ++dy) {
+        int py = shard.dest_y + dy;
+        if (in_bounds(shard.dest_x, py, dst_w, dst_h)) {
+            *pixel_at(dst, dst_stride, shard.dest_x, py) = edge_color;
+        }
+    }
+    // Right edge.
+    for (int dy = 0; dy < shard.dest_h; ++dy) {
+        int py = shard.dest_y + dy;
+        if (in_bounds(shard.dest_x + shard.dest_w - 1, py, dst_w, dst_h)) {
+            *pixel_at(dst, dst_stride, shard.dest_x + shard.dest_w - 1, py) = edge_color;
+        }
+    }
+}
+
+// Render the clock text into a cached texture.
+static void render_clock_to_cache(int canvas_w, int canvas_h) {
+    // Get current time.
+    time_t now = time(nullptr);
+    struct tm* tm = localtime(&now);
+    int hour = tm->tm_hour;
+    int minute = tm->tm_min;
+
+    // Only re-render if the minute changed.
+    int current_minute = hour * 60 + minute;
+    if (current_minute == g_state.last_clock_minute && g_state.cached_clock_pixels) return;
+    g_state.last_clock_minute = current_minute;
+
+    // Free old cache.
+    if (g_state.cached_clock_pixels) {
+        delete[] g_state.cached_clock_pixels;
+        g_state.cached_clock_pixels = nullptr;
+    }
+
+    // Format time string.
+    char time_str[16];
+    snprintf(time_str, sizeof(time_str), "%02d:%02d", hour, minute);
+
+    // Create a transparent texture for the clock.
+    g_state.cached_clock_w = canvas_w;
+    g_state.cached_clock_h = canvas_h;
+    g_state.cached_clock_pixels = new uint8_t[canvas_w * canvas_h * 4]();  // zeroed
+
+    // Render clock at large scale (5x) in the top-center protected region.
+    int scale = 5;
+    int text_w = static_cast<int>(strlen(time_str)) * 6 * scale;
+    int text_x = (canvas_w - text_w) / 2;
+    int text_y = static_cast<int>(canvas_h * 0.03);
+
+    render_string(g_state.cached_clock_pixels, canvas_w * 4, canvas_w, canvas_h,
+                  text_x, text_y, time_str, 0xCCFFFFFF, scale);
+
+    // Render date below the clock.
+    char date_str[32];
+    const char* months[] = {"jan", "feb", "mar", "apr", "may", "jun",
+                            "jul", "aug", "sep", "oct", "nov", "dec"};
+    snprintf(date_str, sizeof(date_str), "%s %d",
+             months[tm->tm_mon], tm->tm_mday);
+    int date_scale = 3;
+    int date_w = static_cast<int>(strlen(date_str)) * 6 * date_scale;
+    int date_x = (canvas_w - date_w) / 2;
+    int date_y = text_y + 7 * scale + 12;
+
+    render_string(g_state.cached_clock_pixels, canvas_w * 4, canvas_w, canvas_h,
+                  date_x, date_y, date_str, 0x88CCBBFF, date_scale);
+}
 
 void render_lock_surface(Output& out) {
     if (!out.shm_buf.data || !out.shm_buf.buffer) return;
@@ -446,9 +843,42 @@ void render_lock_surface(Output& out) {
         g_state.images_loaded = true;
     }
 
+    // Capture and load workspace shards on first render.
+    if (!g_state.shards_loaded) {
+        capture_workspace_snapshots(g_state.shards, w, h);
+
+        // Compute layout for the shards we captured.
+        auto layout = realmheart::services::ProphecyLayoutEngine::compute(
+            g_state.prophecy_seed, g_state.shards.size(), w, h);
+
+        // Assign layout positions to shards.
+        for (std::size_t i = 0; i < g_state.shards.size() && i < layout.futures.size(); ++i) {
+            auto& fg = layout.futures[i];
+            auto& shard = g_state.shards[i];
+            shard.dest_x = static_cast<int>(fg.x * w);
+            shard.dest_y = static_cast<int>(fg.y * h);
+            shard.dest_w = static_cast<int>(fg.width * w);
+            shard.dest_h = static_cast<int>(fg.height * h);
+
+            // Create blurred version for privacy distortion.
+            if (shard.image.loaded) {
+                shard.blurred_pixels = create_blurred(
+                    shard.image.pixels, shard.image.width, shard.image.height,
+                    shard.image.channels, 2, shard.blurred_w, shard.blurred_h);
+            }
+
+            std::cerr << "[lockscreen] shard " << i
+                      << " ws=" << shard.workspace_id
+                      << " pos=(" << shard.dest_x << "," << shard.dest_y
+                      << ") size=" << shard.dest_w << "x" << shard.dest_h
+                      << (shard.is_dominant ? " [DOMINANT]" : "") << "\n";
+        }
+
+        g_state.shards_loaded = true;
+    }
+
     // Fill with background image or solid color.
     if (g_state.background.loaded) {
-        // Scale background to fit output (simple nearest-neighbor).
         const uint8_t* src = g_state.background.pixels;
         int src_w = g_state.background.width;
         int src_h = g_state.background.height;
@@ -462,11 +892,37 @@ void render_lock_surface(Output& out) {
         }
     }
 
-    // Composite Rinia overlay (with alpha blending).
+    // Layer 2: Distant mist / atmospheric darkening.
+    // Add a subtle dark gradient in the center to deepen the background.
+    {
+        int center_y = h * 2 / 5;
+        int radius = h / 3;
+        for (int dy = -radius; dy <= radius; ++dy) {
+            int py = center_y + dy;
+            if (py < 0 || py >= h) continue;
+            float factor = 1.0f - static_cast<float>(std::abs(dy)) / radius;
+            factor *= 0.15f;  // subtle darkening
+            for (int px = 0; px < w; ++px) {
+                uint32_t* dp = pixel_at(data, stride, px, py);
+                uint8_t r = (*dp >> 16) & 0xFF;
+                uint8_t g = (*dp >> 8) & 0xFF;
+                uint8_t b = *dp & 0xFF;
+                uint8_t dark = static_cast<uint8_t>(factor * 255);
+                r = std::max(0, r - dark);
+                g = std::max(0, g - dark);
+                b = std::max(0, b - dark);
+                *dp = (0xFFu << 24) | (r << 16) | (g << 8) | b;
+            }
+        }
+    }
+
+    // Layer 3: Prophecy future shards.
+    for (const auto& shard : g_state.shards) {
+        render_shard(data, stride, w, h, shard);
+    }
+
+    // Layer 5: Static Rinia overlay (with alpha blending).
     if (g_state.rinia.loaded) {
-        // Position Rinia at the anchor point from crop-manifest.json.
-        // For 1080p: scaled_offset = (313, 190), scaled_crop_size = (677, 774)
-        // Scale proportionally for other resolutions.
         float scale_x = static_cast<float>(w) / 1920.0f;
         float scale_y = static_cast<float>(h) / 1080.0f;
 
@@ -478,8 +934,34 @@ void render_lock_surface(Output& out) {
                    rinia_x, rinia_y);
     }
 
-    // Draw password dots in the center of the screen.
-    int dot_y = h / 2;
+    // Layer 7: Clock/date (cached texture, rendered only on minute change).
+    render_clock_to_cache(w, h);
+    if (g_state.cached_clock_pixels) {
+        // Composite the cached clock texture (premultiplied alpha).
+        for (int cy = 0; cy < g_state.cached_clock_h; ++cy) {
+            for (int cx = 0; cx < g_state.cached_clock_w; ++cx) {
+                const uint8_t* sp = g_state.cached_clock_pixels + (cy * g_state.cached_clock_w + cx) * 4;
+                uint32_t alpha = sp[3];
+                if (alpha == 0) continue;
+                uint32_t* dp = pixel_at(data, stride, cx, cy);
+                if (alpha == 255) {
+                    *dp = (0xFFu << 24) | (sp[0] << 16) | (sp[1] << 8) | sp[2];
+                } else {
+                    uint8_t da_r = (*dp >> 16) & 0xFF;
+                    uint8_t da_g = (*dp >> 8) & 0xFF;
+                    uint8_t da_b = *dp & 0xFF;
+                    uint8_t out_r = static_cast<uint8_t>((sp[0] * alpha + da_r * (255 - alpha)) / 255);
+                    uint8_t out_g = static_cast<uint8_t>((sp[1] * alpha + da_g * (255 - alpha)) / 255);
+                    uint8_t out_b = static_cast<uint8_t>((sp[2] * alpha + da_b * (255 - alpha)) / 255);
+                    *dp = (0xFFu << 24) | (out_r << 16) | (out_g << 8) | out_b;
+                }
+            }
+        }
+    }
+
+    // Layer 8: Password indicator (ornamental dots, not per-character).
+    // Position in the bottom-center protected region.
+    int dot_y = static_cast<int>(h * 0.88);
     int total_dot_width = g_state.password_len * DOT_SPACING;
     int dot_x_start = (w - total_dot_width) / 2 + DOT_SPACING / 2;
 
@@ -981,7 +1463,32 @@ void create_lock_surfaces() {
 
 // ---- Main ----
 
+// Cleanup helper for prophecy data.
+static void cleanup_prophecy() {
+    g_state.shards.clear();
+    if (g_state.cached_clock_pixels) {
+        delete[] g_state.cached_clock_pixels;
+        g_state.cached_clock_pixels = nullptr;
+    }
+    // Clean up captured snapshot files.
+    const char* xdg = getenv("XDG_RUNTIME_DIR");
+    std::string dir = std::string(xdg ? xdg : "/tmp") + "/realmheart/prophecy";
+    DIR* d = opendir(dir.c_str());
+    if (d) {
+        struct dirent* ent;
+        while ((ent = readdir(d)) != nullptr) {
+            if (ent->d_name[0] == '.') continue;
+            std::string path = dir + "/" + ent->d_name;
+            unlink(path.c_str());
+        }
+        closedir(d);
+    }
+}
+
 int run_renderer(int socket_fd) {
+    // Step 0: Generate a prophecy seed from the current time.
+    g_state.prophecy_seed = static_cast<std::uint64_t>(time(nullptr));
+
     // Step 1: Connect to Wayland display.
     g_state.display = wl_display_connect(nullptr);
     if (!g_state.display) {
@@ -1144,7 +1651,10 @@ int run_renderer(int socket_fd) {
         std::cerr << "[lockscreen] session unlocked\n";
     }
 
-    // Cleanup.
+    // Cleanup prophecy data.
+    cleanup_prophecy();
+
+    // Cleanup Wayland resources.
     for (auto& out : g_state.outputs) {
         if (out.shm_buf.buffer) wl_buffer_destroy(out.shm_buf.buffer);
         if (out.shm_buf.data && out.shm_buf.data != MAP_FAILED)

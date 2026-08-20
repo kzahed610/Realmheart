@@ -411,6 +411,7 @@ if(REALMHEART_ENABLE_LOCKSCREENER)
 
         add_executable(realmheart-lockscreen-renderer
             src/lockscreen-renderer/main.cpp
+            src/services/ProphecyLayoutEngine.cpp
             "${REALMHEART_EXT_SESSION_LOCK_HEADER}"
             "${REALMHEART_EXT_SESSION_LOCK_CODE}"
         )
