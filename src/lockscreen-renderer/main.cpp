@@ -25,7 +25,6 @@
 #include <cstdint>
 #include <cstring>
 #include <ctime>
-#include <dirent.h>
 #include <fcntl.h>
 #include <iostream>
 #include <string>
@@ -444,152 +443,90 @@ static uint8_t* create_blurred(const uint8_t* src, int src_w, int src_h,
         out = tmp;
     }
     return out;
-}
-
-// ---- Workspace snapshot capture ----
-
-static std::string popen_output(const std::string& cmd) {
-    std::string result;
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) return result;
-    char buf[4096];
-    while (fgets(buf, sizeof(buf), pipe)) result += buf;
-    pclose(pipe);
-    return result;
-}
-
-static int extract_int(const std::string& json, const std::string& key) {
-    auto pos = json.find('"' + key + '"');
-    if (pos == std::string::npos) return -1;
-    pos = json.find(':', pos);
-    if (pos == std::string::npos) return -1;
-    pos++;
-    while (pos < json.size() && json[pos] == ' ') pos++;
-    int sign = 1;
-    if (pos < json.size() && json[pos] == '-') { sign = -1; pos++; }
-    int val = 0;
-    while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9') {
-        val = val * 10 + (json[pos] - '0');
-        pos++;
-    }
-    return sign * val;
-}
-
-static std::string ensure_runtime_dir() {
-    const char* xdg = getenv("XDG_RUNTIME_DIR");
-    std::string dir = std::string(xdg ? xdg : "/tmp") + "/realmheart/prophecy";
-    mkdir((std::string(xdg ? xdg : "/tmp") + "/realmheart").c_str(), 0700);
-    mkdir(dir.c_str(), 0700);
-    return dir;
-}
-
-static void capture_workspace_snapshots(std::vector<FutureShard>& shards, int /*primary_w*/, int /*primary_h*/) {
-    std::string json = popen_output("hyprctl workspaces -j 2>/dev/null");
-    if (json.empty()) {
-        std::cerr << "[lockscreen] hyprctl workspaces failed, using wallpaper fallbacks\n";
+}// Build prophecy future shards from the background image.
+// Each shard is a different crop region with a unique color tint,
+// creating "distorted prophecy visions" of the environment.
+// Takes the already-loaded background to avoid double-loading.
+// Uses resize() + direct element access to avoid move/dangling-pointer bugs.
+static void build_prophecy_shards(std::vector<FutureShard>& shards,
+                                  const LoadedImage& bg,
+                                  int canvas_w, int canvas_h) {
+    if (!bg.loaded || !bg.pixels) {
+        std::cerr << "[lockscreen] build_prophecy_shards: no background loaded\n";
         return;
     }
 
-    // Find the active workspace ID.
-    int active_id = -1;
-    {
-        auto pos = json.find("\"id\":");
-        if (pos != std::string::npos) {
-            // For hyprctl workspaces -j, the first "id" in each workspace object.
-            // We need to find the one where "focused": true.
-            std::size_t search_pos = 0;
-            while (search_pos < json.size()) {
-                auto id_pos = json.find("\"id\":", search_pos);
-                if (id_pos == std::string::npos) break;
-                int id = extract_int(json.substr(id_pos), "id");
-                // Check if this workspace is focused.
-                auto focus_pos = json.find("\"focused\":", id_pos);
-                if (focus_pos != std::string::npos && focus_pos < id_pos + 200) {
-                    auto focus_val = json.find("true", focus_pos);
-                    if (focus_val != std::string::npos && focus_val < focus_pos + 30) {
-                        active_id = id;
-                        break;
-                    }
-                }
-                search_pos = id_pos + 5;
+    // Define crop regions and prophecy color tints.
+    struct ShardDef {
+        double cx, cy, cw, ch;  // crop region (normalized 0..1)
+        double tr, tg, tb;      // tint multiplier (RGB)
+        bool dominant;
+        const char* label;
+    };
+    static const ShardDef defs[] = {
+        // Dominant: center crop, warm gold tint, slightly brighter.
+        {0.20, 0.15, 0.60, 0.60,  1.08, 1.02, 0.88,  true,  "dominant"},
+        // Non-dominant: various crops with distinct color casts.
+        {0.00, 0.00, 0.45, 0.45,  0.88, 0.82, 1.15,  false, "violet"},
+        {0.55, 0.00, 0.45, 0.45,  1.12, 0.95, 0.85,  false, "amber"},
+        {0.00, 0.55, 0.45, 0.45,  0.85, 1.05, 1.10,  false, "teal"},
+        {0.55, 0.55, 0.45, 0.45,  1.05, 0.88, 1.05,  false, "rose"},
+        {0.10, 0.30, 0.80, 0.40,  0.95, 1.00, 1.08,  false, "mist"},
+    };
+    int num_defs = static_cast<int>(sizeof(defs) / sizeof(defs[0]));
+
+    // Pre-allocate vector. Elements are constructed in-place,
+    // avoiding move/copy of FutureShard (which has no move ctor).
+    shards.resize(num_defs);
+
+    for (int i = 0; i < num_defs; ++i) {
+        const ShardDef& def = defs[i];
+        FutureShard& shard = shards[i];  // direct reference, no copy
+
+        shard.workspace_id = i + 1;
+        shard.is_dominant = def.dominant;
+        shard.is_active = def.dominant;
+
+        // Crop the background image to this shard's region.
+        int src_x = static_cast<int>(def.cx * bg.width);
+        int src_y = static_cast<int>(def.cy * bg.height);
+        int src_w = static_cast<int>(def.cw * bg.width);
+        int src_h = static_cast<int>(def.ch * bg.height);
+        src_w = std::max(1, std::min(src_w, bg.width - src_x));
+        src_h = std::max(1, std::min(src_h, bg.height - src_y));
+
+        shard.image.pixels = static_cast<uint8_t*>(malloc(src_w * src_h * 4));
+        if (!shard.image.pixels) {
+            std::cerr << "[lockscreen] malloc failed for shard " << i << "\n";
+            continue;
+        }
+        shard.image.width = src_w;
+        shard.image.height = src_h;
+        shard.image.channels = 4;
+        shard.image.loaded = true;
+
+        // Copy with prophecy tint applied per-pixel.
+        for (int row = 0; row < src_h; ++row) {
+            const uint8_t* src_row = bg.pixels
+                + ((src_y + row) * bg.width + src_x) * 4;
+            uint8_t* dst_row = shard.image.pixels + row * src_w * 4;
+            for (int col = 0; col < src_w; ++col) {
+                const uint8_t* sp = src_row + col * 4;
+                uint8_t* dp = dst_row + col * 4;
+                dp[0] = static_cast<uint8_t>(std::clamp(sp[0] * def.tr, 0.0, 255.0));
+                dp[1] = static_cast<uint8_t>(std::clamp(sp[1] * def.tg, 0.0, 255.0));
+                dp[2] = static_cast<uint8_t>(std::clamp(sp[2] * def.tb, 0.0, 255.0));
+                dp[3] = sp[3];
             }
         }
-    }
-    if (active_id < 0) active_id = 1;
 
-    std::string dir = ensure_runtime_dir();
-    int max_futures = 6;
-    int captured = 0;
-
-    // Parse workspace objects from the JSON array.
-    // Each workspace has: {"id":N, "name":"...", "focused":bool, ...}
-    std::size_t pos = 0;
-    while (captured < max_futures) {
-        auto obj_start = json.find('{', pos);
-        if (obj_start == std::string::npos) break;
-        auto obj_end = json.find('}', obj_start);
-        if (obj_end == std::string::npos) break;
-        std::string ws = json.substr(obj_start, obj_end - obj_start + 1);
-        pos = obj_end + 1;
-
-        int ws_id = extract_int(ws, "id");
-        if (ws_id <= 0) continue;
-
-        // Capture this workspace using grim.
-        std::string path = dir + "/ws-" + std::to_string(ws_id) + ".png";
-        std::string cmd = "grim -o $(hyprctl activeworkspace -j 2>/dev/null | tr -d '\"{} ' | sed 's/,/ /g' | awk -F: '{for(i=1;i<=NF;i++) if($i==\"name\") print $(i+1)}') " + path + " 2>/dev/null";
-
-        // Simpler approach: capture the full output where this workspace is visible.
-        // Since we can't easily capture per-workspace with grim, capture the current
-        // active workspace and use it as the source for all shards.
-        // This is a pragmatic first implementation — each shard gets a different
-        // crop/transform of the same capture.
-        if (captured == 0) {
-            // First capture: the active workspace.
-            cmd = "grim - " + dir + "/ws-active.png 2>/dev/null";
-        } else {
-            // Subsequent captures: use the same active workspace capture.
-            // Each shard will be rendered with different UV coordinates for variety.
-            continue;
-        }
-
-        int result = system(cmd.c_str());
-        if (result != 0) {
-            std::cerr << "[lockscreen] grim capture failed for workspace " << ws_id << "\n";
-            continue;
-        }
-
-        // Load the captured image.
-        LoadedImage img;
-        img.pixels = stbi_load(path.c_str(), &img.width, &img.height, &img.channels, 4);
-        img.loaded = (img.pixels != nullptr);
-        if (!img.loaded) {
-            std::cerr << "[lockscreen] failed to load captured image: " << path << "\n";
-            continue;
-        }
-
-        std::cerr << "[lockscreen] captured workspace " << ws_id
-                  << " (" << img.width << "x" << img.height << ")\n";
-
-        bool is_dominant = (ws_id == active_id);
-        shards.push_back(FutureShard{});
-        shards.back().image = img;
-        shards.back().workspace_id = ws_id;
-        shards.back().is_dominant = is_dominant;
-        shards.back().is_active = is_dominant;
-        captured++;
+        std::cerr << "[lockscreen] future shard " << i
+                  << " crop=(" << def.cx << "," << def.cy << ","
+                  << def.cw << "," << def.ch << ") tint=" << def.label
+                  << (def.dominant ? " [DOMINANT]" : "") << "\n";
     }
 
-    // If we captured fewer than 4 workspaces, add wallpaper-only futures.
-    // Each wallpaper future uses the same captured image but with a different
-    // UV crop region, creating variety from a single source.
-    while (shards.size() < 4) {
-        shards.push_back(FutureShard{});
-        shards.back().workspace_id = -static_cast<int>(shards.size());
-        // Mark as wallpaper-only — will be rendered with default background.
-        shards.back().is_dominant = false;
-        shards.back().is_active = false;
-    }
+    std::cerr << "[lockscreen] total futures: " << shards.size() << "\n";
 }
 
 // ---- State tracking ----
@@ -655,8 +592,9 @@ AppState g_state;
 
 // ---- Rendering ----
 
-// Render a single prophecy shard with privacy blur.
-// The shard is rendered as a blurred, dimmed, desaturated rectangle.
+// Render a single prophecy shard with privacy blur and prophecy aesthetic.
+// The shard is a "vision" — dimmed, slightly blurred, with glowing edges
+// and a prophecy color cast (violet/gold tint).
 static void render_shard(void* dst, int32_t dst_stride, int32_t dst_w, int32_t dst_h,
                          const FutureShard& shard) {
     if (shard.dest_w <= 0 || shard.dest_h <= 0) return;
@@ -670,100 +608,182 @@ static void render_shard(void* dst, int32_t dst_stride, int32_t dst_w, int32_t d
         src_w = shard.blurred_w;
         src_h = shard.blurred_h;
     } else if (shard.image.loaded) {
-        // No blurred cache yet — create it on first render.
-        // We need a non-const pointer to create the blurred cache.
-        // This is a const_cast, but the function only reads the source.
-        // The blurred cache is written to the mutable FutureShard.
-        // Since we can't modify a const ref, we'll use a simpler approach:
-        // just render the original at reduced scale (natural nearest-neighbor blur).
         src = shard.image.pixels;
         src_w = shard.image.width;
         src_h = shard.image.height;
         src_ch = shard.image.channels;
     } else {
-        // Wallpaper-only future: render a dark tinted rectangle.
+        // No image: render a dark future placeholder with subtle internal gradient.
         for (int dy = 0; dy < shard.dest_h; ++dy) {
             int py = shard.dest_y + dy;
             if (py < 0 || py >= dst_h) continue;
             for (int dx = 0; dx < shard.dest_w; ++dx) {
                 int px = shard.dest_x + dx;
                 if (px < 0 || px >= dst_w) continue;
-                // Dark purple-tinted future with subtle variation.
-                uint32_t tint = (shard.workspace_id & 1) ? 0xFF1A0A2E : 0xFF0E1A2E;
-                *pixel_at(dst, dst_stride, px, py) = tint;
+                float fx = static_cast<float>(dx) / shard.dest_w;
+                float fy_local = static_cast<float>(dy) / shard.dest_h;
+                // Dark gradient: center slightly brighter than edges.
+                float center = (1.0f - std::abs(fx - 0.5f) * 2.0f) * (1.0f - std::abs(fy_local - 0.5f) * 2.0f);
+                center = std::max(0.0f, center) * 0.3f;
+                uint8_t r = static_cast<uint8_t>(20 + center * 30);
+                uint8_t g = static_cast<uint8_t>(8 + center * 15);
+                uint8_t b = static_cast<uint8_t>(35 + center * 40);
+                *pixel_at(dst, dst_stride, px, py) = (0xFFu << 24) | (r << 16) | (g << 8) | b;
             }
         }
         return;
     }
 
-    // Render the shard image at reduced scale for natural privacy blur.
-    // Use nearest-neighbor downsampling: the GPU/CPU naturally loses detail.
-    // Further dim the result by 20% for privacy.
+    // --- Prophecy color overlay per shard ---
+    // Each shard gets a strong color overlay to make the dark background content
+    // visible as a colored "prophecy vision". The background is near-black,
+    // so we use a brightness lift + color tint to make shards visually distinct.
+    struct ProphecyColor {
+        float overlay_r, overlay_g, overlay_b;  // color overlay (0..1)
+        float lift;   // brightness multiplier for source content
+        float overlay_mix;  // how much of the overlay color to blend in
+        float edge_r, edge_g, edge_b;  // edge glow color
+    };
+    static const ProphecyColor colors[] = {
+        // Dominant: warm gold — bright, inviting.
+        {1.0f, 0.85f, 0.4f,  5.0f, 0.35f,  0.9f, 0.75f, 0.3f},
+        // Violet: cool, mystical.
+        {0.55f, 0.3f, 0.85f, 4.5f, 0.40f,  0.55f, 0.3f, 0.85f},
+        // Amber: warm, mysterious.
+        {0.95f, 0.65f, 0.25f, 4.5f, 0.40f,  0.95f, 0.65f, 0.25f},
+        // Teal: deep, arcane.
+        {0.25f, 0.75f, 0.8f,  4.5f, 0.40f,  0.25f, 0.75f, 0.8f},
+        // Rose: ethereal, soft.
+        {0.85f, 0.35f, 0.55f, 4.5f, 0.40f,  0.85f, 0.35f, 0.55f},
+        // Mist: pale blue-white, dreamlike.
+        {0.6f, 0.65f, 0.9f,   4.0f, 0.35f,  0.6f, 0.65f, 0.9f},
+    };
+    // Pick color by shard index (dominant shard is always index 0 in defs).
+    int color_idx = shard.is_dominant ? 0 : ((shard.workspace_id - 1) % 5 + 1);
+    const ProphecyColor& pc = colors[color_idx];
+
+    float opacity = shard.is_dominant ? 0.92f : 0.78f;
+
+    // --- Render each pixel with brightness lift, color overlay, and vignette ---
     for (int dy = 0; dy < shard.dest_h; ++dy) {
         int py = shard.dest_y + dy;
         if (py < 0 || py >= dst_h) continue;
-        int sy = dy * src_h / shard.dest_h;
-        if (sy >= src_h) sy = src_h - 1;
+
+        float fy = static_cast<float>(dy) / shard.dest_h;
+        float vignette_y = 1.0f - (std::abs(fy - 0.5f) * 2.0f);
+        vignette_y = 0.85f + vignette_y * 0.15f;  // range [0.85, 1.0] — gentle
 
         for (int dx = 0; dx < shard.dest_w; ++dx) {
             int px = shard.dest_x + dx;
             if (px < 0 || px >= dst_w) continue;
+
+            float fx = static_cast<float>(dx) / shard.dest_w;
+            float vignette_x = 1.0f - (std::abs(fx - 0.5f) * 2.0f);
+            vignette_x = 0.85f + vignette_x * 0.15f;
+            float vignette = vignette_y * vignette_x;
+
+            // Sample source image (nearest-neighbor).
             int sx = dx * src_w / shard.dest_w;
-            if (sx >= src_w) sx = src_w - 1;
+            int sy = dy * src_h / shard.dest_h;
+            sx = std::min(sx, src_w - 1);
+            sy = std::min(sy, src_h - 1);
 
             const uint8_t* sp = src + (sy * src_w + sx) * src_ch;
-            uint32_t* dp = pixel_at(dst, dst_stride, px, py);
+            uint8_t sa = (src_ch == 4) ? sp[3] : 255;
+            if (sa == 0) continue;
 
-            // Dim by 30% for privacy (multiply by 0.7).
-            uint8_t r = static_cast<uint8_t>(sp[0] * 7 / 10);
-            uint8_t g = static_cast<uint8_t>(sp[1] * 7 / 10);
-            uint8_t b = static_cast<uint8_t>(sp[2] * 7 / 10);
-            uint8_t a = (src_ch == 4) ? sp[3] : 255;
+            // Brightness lift: scale up the very-dark source so detail becomes visible.
+            float src_r = sp[0] * pc.lift;
+            float src_g = sp[1] * pc.lift;
+            float src_b = sp[2] * pc.lift;
 
-            // Desaturate by 40% (blend with grayscale).
-            uint8_t gray = static_cast<uint8_t>((r * 77 + g * 150 + b * 29) / 256);
-            r = static_cast<uint8_t>(r * 6 / 10 + gray * 4 / 10);
-            g = static_cast<uint8_t>(g * 6 / 10 + gray * 4 / 10);
-            b = static_cast<uint8_t>(b * 6 / 10 + gray * 4 / 10);
+            // Blend source with the prophecy color overlay.
+            float r = src_r * (1.0f - pc.overlay_mix) + pc.overlay_r * 255.0f * pc.overlay_mix;
+            float g = src_g * (1.0f - pc.overlay_mix) + pc.overlay_g * 255.0f * pc.overlay_mix;
+            float b = src_b * (1.0f - pc.overlay_mix) + pc.overlay_b * 255.0f * pc.overlay_mix;
 
-            if (a == 0) continue;
-            if (a == 255) {
-                *dp = (0xFFu << 24) | (r << 16) | (g << 8) | b;
+            // Slight desaturation (15%) for the prophecy "haze" feel.
+            float lum = r * 0.299f + g * 0.587f + b * 0.114f;
+            r = r * 0.85f + lum * 0.15f;
+            g = g * 0.85f + lum * 0.15f;
+            b = b * 0.85f + lum * 0.15f;
+
+            // Apply gentle vignette.
+            r *= vignette;
+            g *= vignette;
+            b *= vignette;
+
+            // Clamp.
+            uint8_t fr = static_cast<uint8_t>(std::clamp(r, 0.0f, 255.0f));
+            uint8_t fg = static_cast<uint8_t>(std::clamp(g, 0.0f, 255.0f));
+            uint8_t fb = static_cast<uint8_t>(std::clamp(b, 0.0f, 255.0f));
+            uint8_t fa = static_cast<uint8_t>(std::clamp(sa * opacity, 0.0f, 255.0f));
+
+            // Alpha-blend onto destination.
+            if (fa == 0) continue;
+            if (fa >= 255) {
+                *pixel_at(dst, dst_stride, px, py) = (0xFFu << 24) | (fr << 16) | (fg << 8) | fb;
             } else {
+                uint32_t* dp = pixel_at(dst, dst_stride, px, py);
                 uint8_t da_r = (*dp >> 16) & 0xFF;
                 uint8_t da_g = (*dp >> 8) & 0xFF;
                 uint8_t da_b = *dp & 0xFF;
-                uint8_t out_r = static_cast<uint8_t>((r * a + da_r * (255 - a)) / 255);
-                uint8_t out_g = static_cast<uint8_t>((g * a + da_g * (255 - a)) / 255);
-                uint8_t out_b = static_cast<uint8_t>((b * a + da_b * (255 - a)) / 255);
+                uint8_t out_r = static_cast<uint8_t>((fr * fa + da_r * (255 - fa)) / 255);
+                uint8_t out_g = static_cast<uint8_t>((fg * fa + da_g * (255 - fa)) / 255);
+                uint8_t out_b = static_cast<uint8_t>((fb * fa + da_b * (255 - fa)) / 255);
                 *dp = (0xFFu << 24) | (out_r << 16) | (out_g << 8) | out_b;
             }
         }
     }
 
-    // Draw a subtle glowing edge around the shard.
-    uint32_t edge_color = shard.is_dominant ? 0x44CCAAFF : 0x22AA88CC;
-    int edge_thickness = 1;
-    // Top edge.
+    // --- Glowing edge effect ---
+    // Bright inner border + softer glow in the shard's prophecy color.
+    auto make_argb = [](float r, float g, float b, uint8_t a) -> uint32_t {
+        return (static_cast<uint32_t>(a) << 24)
+             | (static_cast<uint32_t>(std::clamp(r, 0.0f, 255.0f)) << 16)
+             | (static_cast<uint32_t>(std::clamp(g, 0.0f, 255.0f)) << 8)
+             | static_cast<uint32_t>(std::clamp(b, 0.0f, 255.0f));
+    };
+    uint32_t inner_color = make_argb(pc.edge_r * 255, pc.edge_g * 255, pc.edge_b * 255, 0xAA);
+    uint32_t outer_color = make_argb(pc.edge_r * 255, pc.edge_g * 255, pc.edge_b * 255, 0x44);
+
+    // Inner edge (1px, bright).
     draw_hline(dst, dst_stride, dst_w, dst_h,
                shard.dest_x, shard.dest_x + shard.dest_w - 1,
-               shard.dest_y, edge_color, edge_thickness);
-    // Bottom edge.
+               shard.dest_y, inner_color, 1);
     draw_hline(dst, dst_stride, dst_w, dst_h,
                shard.dest_x, shard.dest_x + shard.dest_w - 1,
-               shard.dest_y + shard.dest_h - 1, edge_color, edge_thickness);
-    // Left edge.
+               shard.dest_y + shard.dest_h - 1, inner_color, 1);
     for (int dy = 0; dy < shard.dest_h; ++dy) {
         int py = shard.dest_y + dy;
-        if (in_bounds(shard.dest_x, py, dst_w, dst_h)) {
-            *pixel_at(dst, dst_stride, shard.dest_x, py) = edge_color;
-        }
+        if (in_bounds(shard.dest_x, py, dst_w, dst_h))
+            *pixel_at(dst, dst_stride, shard.dest_x, py) = inner_color;
+        if (in_bounds(shard.dest_x + shard.dest_w - 1, py, dst_w, dst_h))
+            *pixel_at(dst, dst_stride, shard.dest_x + shard.dest_w - 1, py) = inner_color;
     }
-    // Right edge.
-    for (int dy = 0; dy < shard.dest_h; ++dy) {
-        int py = shard.dest_y + dy;
-        if (in_bounds(shard.dest_x + shard.dest_w - 1, py, dst_w, dst_h)) {
-            *pixel_at(dst, dst_stride, shard.dest_x + shard.dest_w - 1, py) = edge_color;
+
+    // Outer glow (2px, softer, extends inward from edges).
+    for (int i = 0; i < 2; ++i) {
+        int inset = i + 1;
+        int x0 = shard.dest_x + inset;
+        int x1 = shard.dest_x + shard.dest_w - 1 - inset;
+        int y0 = shard.dest_y + inset;
+        int y1 = shard.dest_y + shard.dest_h - 1 - inset;
+        if (x0 > x1 || y0 > y1) continue;
+
+        // Top glow row.
+        draw_hline(dst, dst_stride, dst_w, dst_h, x0, x1, y0, outer_color, 1);
+        // Bottom glow row.
+        draw_hline(dst, dst_stride, dst_w, dst_h, x0, x1, y1, outer_color, 1);
+        // Left glow column.
+        for (int dy = y0; dy <= y1; ++dy) {
+            if (in_bounds(x0, dy, dst_w, dst_h))
+                *pixel_at(dst, dst_stride, x0, dy) = outer_color;
+        }
+        // Right glow column.
+        for (int dy = y0; dy <= y1; ++dy) {
+            if (in_bounds(x1, dy, dst_w, dst_h))
+                *pixel_at(dst, dst_stride, x1, dy) = outer_color;
         }
     }
 }
@@ -843,37 +863,26 @@ void render_lock_surface(Output& out) {
         g_state.images_loaded = true;
     }
 
-    // Capture and load workspace shards on first render.
-    if (!g_state.shards_loaded) {
-        capture_workspace_snapshots(g_state.shards, w, h);
+    // Build prophecy shards on first render (after background is loaded).
+    if (!g_state.shards_loaded && g_state.background.loaded) {
+        build_prophecy_shards(g_state.shards, g_state.background, w, h);
 
-        // Compute layout for the shards we captured.
-        auto layout = realmheart::services::ProphecyLayoutEngine::compute(
-            g_state.prophecy_seed, g_state.shards.size(), w, h);
+        // Compute layout positions using the layout engine.
+        if (!g_state.shards.empty()) {
+            auto layout = realmheart::services::ProphecyLayoutEngine::compute(
+                g_state.prophecy_seed, g_state.shards.size(), w, h);
 
-        // Assign layout positions to shards.
-        for (std::size_t i = 0; i < g_state.shards.size() && i < layout.futures.size(); ++i) {
-            auto& fg = layout.futures[i];
-            auto& shard = g_state.shards[i];
-            shard.dest_x = static_cast<int>(fg.x * w);
-            shard.dest_y = static_cast<int>(fg.y * h);
-            shard.dest_w = static_cast<int>(fg.width * w);
-            shard.dest_h = static_cast<int>(fg.height * h);
-
-            // Create blurred version for privacy distortion.
-            if (shard.image.loaded) {
-                shard.blurred_pixels = create_blurred(
-                    shard.image.pixels, shard.image.width, shard.image.height,
-                    shard.image.channels, 2, shard.blurred_w, shard.blurred_h);
+            for (std::size_t i = 0; i < g_state.shards.size() && i < layout.futures.size(); ++i) {
+                auto& shard = g_state.shards[i];
+                const auto& fg = layout.futures[i];
+                shard.dest_x = static_cast<int>(fg.x * w);
+                shard.dest_y = static_cast<int>(fg.y * h);
+                shard.dest_w = static_cast<int>(fg.width * w);
+                shard.dest_h = static_cast<int>(fg.height * h);
             }
-
-            std::cerr << "[lockscreen] shard " << i
-                      << " ws=" << shard.workspace_id
-                      << " pos=(" << shard.dest_x << "," << shard.dest_y
-                      << ") size=" << shard.dest_w << "x" << shard.dest_h
-                      << (shard.is_dominant ? " [DOMINANT]" : "") << "\n";
+            std::cerr << "[lockscreen] layout computed for " << g_state.shards.size()
+                      << " shards, seed=" << g_state.prophecy_seed << "\n";
         }
-
         g_state.shards_loaded = true;
     }
 
@@ -1469,19 +1478,6 @@ static void cleanup_prophecy() {
     if (g_state.cached_clock_pixels) {
         delete[] g_state.cached_clock_pixels;
         g_state.cached_clock_pixels = nullptr;
-    }
-    // Clean up captured snapshot files.
-    const char* xdg = getenv("XDG_RUNTIME_DIR");
-    std::string dir = std::string(xdg ? xdg : "/tmp") + "/realmheart/prophecy";
-    DIR* d = opendir(dir.c_str());
-    if (d) {
-        struct dirent* ent;
-        while ((ent = readdir(d)) != nullptr) {
-            if (ent->d_name[0] == '.') continue;
-            std::string path = dir + "/" + ent->d_name;
-            unlink(path.c_str());
-        }
-        closedir(d);
     }
 }
 
