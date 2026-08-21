@@ -70,8 +70,9 @@ struct CrystalShaderRenderer::State {
             return TRUE;
         }
 
-        if (shaders == nullptr || !shaders->ensure_loaded()) {
-            fail("crystal shader unavailable");
+        std::string shader_error;
+        if (shaders == nullptr || !shaders->ensure_loaded(&shader_error)) {
+            fail("crystal shader unavailable: " + shader_error);
             return TRUE;
         }
         const GLuint program = shaders->crystal_program();

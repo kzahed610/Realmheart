@@ -894,13 +894,22 @@ public:
     }
 
     void lock_session() {
+        // Ignore re-entry while already locked (SUPER+L while locked must not
+        // toggle back to the desktop).
+        if (lock_surface_ != nullptr && lock_surface_->visible()) return;
+
         // Native Broken Seal lockscreen. If it fails to initialize within 2s,
         // fall back to hyprlock so the session is never left unlocked.
         if (lock_surface_ == nullptr) {
             lock_surface_ = std::make_unique<lockscreen::LockSurface>(application_);
+            lock_surface_->set_unlocked_callback([this] {
+                session_->disable_lockscreen_blur();
+            });
         }
-        lock_surface_->show();
+        // Apply the blur layerrule BEFORE the surface maps so Hyprland matches
+        // it at map time.
         session_->enable_lockscreen_blur();
+        lock_surface_->show();
 
         services::SessionManager* session = session_.get();
         lockscreen::LockSurface* surface = lock_surface_.get();

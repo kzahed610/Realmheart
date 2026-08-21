@@ -112,8 +112,38 @@ float sdHorn(vec2 p, out float u, out float side) {
     return best - width;
 }
 
+float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float noise2(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(hash12(i), hash12(i + vec2(1.0, 0.0)), u.x),
+        mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0)), u.x),
+        u.y
+    );
+}
+
+float fbm(vec2 p) {
+    float value = 0.0;
+    float amplitude = 0.55;
+    for (int octave = 0; octave < 4; ++octave) {
+        value += noise2(p) * amplitude;
+        p = p * 2.03 + vec2(9.7, 3.1);
+        amplitude *= 0.5;
+    }
+    return value;
+}
+
 // Material for one horn: obsidian base, ribbed transverse ridges, satin
 // highlight on the outer/upper curve. No colored rim.
+// 2.5D shading: a rounded-volume gradient (darker core, lighter edges) plus a
+// specular sheen that follows the curve, giving the horn a subtle 3D feel.
 vec3 shade_horn(float u, float side, float d) {
     vec3 colour = kBaseColour;
 
@@ -123,10 +153,20 @@ vec3 shade_horn(float u, float side, float d) {
     colour = mix(colour, kShadowColour, ridge * 0.60);
     colour = mix(colour, kShadowColour, (1.0 - smoothstep(0.2, 0.6, rib)) * 0.30);
 
-    // Satin highlight on the outer curve, stronger near the base.
-    float outer = smoothstep(0.0, 0.06, side);
+    // Rounded-volume shading: light falls off toward the center of the band
+    // and catches the edges, so the horn reads as a rounded 3D form rather
+    // than a flat cutout.
+    float edge_light = exp(-abs(d) * 18.0) * 0.35;      // rim light on both edges
+    float core_shade = exp(-abs(d + 0.03) * 9.0) * 0.5; // darker toward the core
+    colour = mix(colour, kHighlightColour, edge_light);
+    colour = mix(colour, kShadowColour, core_shade);
+
+    // Specular sheen on the outer curve, stronger near the base, that shifts
+    // with the side so the light wraps around the volume.
+    float outer = smoothstep(0.0, 0.10, side);
     float near_base = 1.0 - smoothstep(0.10, 0.55, u);
-    colour = mix(colour, kHighlightColour, outer * (0.25 + 0.45 * near_base));
+    float sheen = outer * (0.30 + 0.45 * near_base);
+    colour = mix(colour, kHighlightColour, sheen);
 
     return colour;
 }
@@ -186,8 +226,34 @@ void main() {
     float halo = exp(-max(d_eff, 0.0) * 2.4) * 0.12;
     vec3 halo_colour = kShadowColour;
 
-    float alpha_out = clamp(inside + halo, 0.0, 1.0) * alpha * uOpacity;
-    vec3 rgb = colour * inside + halo_colour * halo;
+    // Drop shadow: a soft dark offset copy of the silhouette, cast downward
+    // onto the desktop behind the horns. Gated per-pixel by the reveal so the
+    // shadow only appears where the horn has actually grown (no phantom tip
+    // shadow during the emergence).
+    vec2 shadow_offset = vec2(0.006, 0.02) / max(scale, 0.001);
+    float shadow_u_l;
+    float shadow_u_r;
+    float d_shadow_l = sdHorn(p - shadow_offset, shadow_u_l, side_l);
+    float d_shadow_r = sdHorn(vec2(-(p.x - shadow_offset.x), p.y - shadow_offset.y), shadow_u_r, side_r);
+    // Gate each horn's shadow by its own grown arc position, then take the
+    // nearer one (matching the min() union of the distances).
+    float grown_l = smoothstep(0.0, 0.06, reveal - shadow_u_l);
+    float grown_r = smoothstep(0.0, 0.06, reveal - shadow_u_r);
+    float d_shadow = min(
+        max(d_shadow_l, (1.0 - grown_l) * 0.1),
+        max(d_shadow_r, (1.0 - grown_r) * 0.1)
+    );
+    float shadow = exp(-max(d_shadow, 0.0) * 6.0) * (1.0 - inside) * 0.55;
+
+    // Void-style aether: faint fbm nebula wisps hugging the horns, palette
+    // driven, so the lockscreen ties into the shell's visual language.
+    float nebula = fbm(p * 4.0 + vec2(2.3, 7.7));
+    float wisp = exp(-max(d_eff, 0.0) * 5.0) * nebula * 0.12;
+    vec3 wisp_colour = mix(kShadowColour, kHighlightColour, nebula);
+
+    float alpha_out = clamp(inside + halo + shadow + wisp, 0.0, 1.0) * alpha * uOpacity;
+    vec3 rgb = colour * inside + halo_colour * halo +
+        kShadowColour * shadow + wisp_colour * wisp;
 
     // Premultiplied alpha for clean compositing over the blurred desktop.
     fragColor = vec4(rgb * alpha_out, alpha_out);

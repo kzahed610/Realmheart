@@ -2,6 +2,7 @@
 
 #include <gtk/gtk.h>
 
+#include <functional>
 #include <memory>
 
 namespace realmheart::ui::lockscreen {
@@ -22,9 +23,12 @@ public:
     LockSurface(const LockSurface&) = delete;
     LockSurface& operator=(const LockSurface&) = delete;
 
+    // Invoked when the user authenticates successfully and the surface hides.
+    void set_unlocked_callback(std::function<void()> callback);
+
     [[nodiscard]] GtkWindow* window() const noexcept;
 
-    // Presents the surface and starts the crystal emergence animation.
+    // Presents the surface and starts the horn emergence animation.
     void show();
 
     // Starts the closing animation; the surface hides when it completes.
@@ -39,6 +43,7 @@ private:
     void force_transparent_surface();
     void ensure_tick();
     gboolean advance_frame();
+    gboolean submit_password();
 
     struct State;
     State* state_ = nullptr;
