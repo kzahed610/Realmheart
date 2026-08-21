@@ -41,7 +41,7 @@ public:
 private:
     void setup_layout();
     void force_transparent_surface();
-    void ensure_tick();
+    gboolean ensure_tick();
     gboolean advance_frame();
     gboolean submit_password();
 

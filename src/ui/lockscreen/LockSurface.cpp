@@ -266,19 +266,35 @@ bool LockSurface::visible() const noexcept {
         gtk_widget_get_visible(GTK_WIDGET(state_->window));
 }
 
-void LockSurface::ensure_tick() {
-    if (state_ == nullptr || state_->tick_source_id != 0) return;
+gboolean LockSurface::ensure_tick() {
+    if (state_ == nullptr) return FALSE;
+    if (state_->tick_source_id != 0 && g_main_context_find_source_by_id(
+            nullptr, state_->tick_source_id) != nullptr) {
+        return TRUE; // live tick already running
+    }
+    // Stale id: the tick stopped itself (Typing phase) without clearing the
+    // field, which previously blocked hide()'s Closing animation forever.
+    state_->tick_source_id = 0;
+    state_->last_frame_time_us = 0;
     state_->tick_source_id = g_timeout_add(
         kFrameIntervalMs,
         +[](gpointer data) -> gboolean {
             auto* state = static_cast<State*>(data);
-            if (state->owner == nullptr) return G_SOURCE_REMOVE;
-            return state->state_machine->needs_frame()
-                ? state->owner->advance_frame()
-                : G_SOURCE_REMOVE;
+            if (state->owner == nullptr) {
+                state->tick_source_id = 0;
+                return G_SOURCE_REMOVE;
+                }
+            if (!state->state_machine->needs_frame()) {
+                // Tick owns its shutdown: clear the id so a later
+                // ensure_tick() can restart it.
+                state->tick_source_id = 0;
+                return G_SOURCE_REMOVE;
+            }
+            return state->owner->advance_frame();
         },
         state_
     );
+    return TRUE;
 }
 
 gboolean LockSurface::advance_frame() {
@@ -334,11 +350,16 @@ gboolean LockSurface::submit_password() {
     }
 
     const char* text = gtk_editable_get_text(GTK_EDITABLE(state_->entry));
-    if (text == nullptr || *text == '\0') return TRUE;
+    if (text == nullptr || *text == '\0') {
+        std::cerr << "[BrokenSeal] submit ignored: empty entry\n";
+        return TRUE;
+    }
 
     // Copy the password for the async worker.
     std::string password(text);
     gtk_editable_set_text(GTK_EDITABLE(state_->entry), "");
+    std::cerr << "[BrokenSeal] submitted " << password.size()
+              << " chars" << std::endl;
 
     // Resolve the current user.
     const char* user = g_get_user_name();

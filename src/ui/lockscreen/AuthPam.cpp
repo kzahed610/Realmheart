@@ -5,6 +5,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cerrno>
+#include <cstring>
 #include <atomic>
 #include <cstdio>
 #include <iostream>
@@ -54,7 +56,12 @@ void AuthPam::verify_async(
         const std::string helper = auth_helper_path();
         bool success = false;
 
-        if (!helper.empty()) {
+        if (helper.empty()) {
+            std::cerr << "[BrokenSeal] auth: cannot resolve helper path\n";
+        } else if (::access(helper.c_str(), X_OK) != 0) {
+            std::cerr << "[BrokenSeal] auth: helper missing/not executable: "
+                      << helper << "\n";
+        } else {
             // Spawn the setuid helper: argv = [helper, username], stdin = password.
             int pipefd[2]{};
             if (::pipe(pipefd) == 0) {
@@ -66,6 +73,8 @@ void AuthPam::verify_async(
                     ::close(pipefd[1]);
                     ::execl(helper.c_str(), helper.c_str(), username.c_str(),
                             static_cast<char*>(nullptr));
+                    std::cerr << "[BrokenSeal] auth: execl failed: "
+                              << std::strerror(errno) << "\n";
                     _exit(127);
                 }
                 // Parent: write the password, close, reap.
@@ -86,16 +95,30 @@ void AuthPam::verify_async(
                 int status = 0;
                 ::waitpid(pid, &status, 0);
                 success = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+                std::cerr << "[BrokenSeal] auth: helper pid=" << pid
+                          << " exited=" << (WIFEXITED(status) ? WEXITSTATUS(status) : -1)
+                          << " signaled=" << (WIFSIGNALED(status) ? WTERMSIG(status) : 0)
+                          << " -> " << (success ? "SUCCESS" : "FAIL") << "\n";
+            } else {
+                std::cerr << "[BrokenSeal] auth: pipe() failed: "
+                          << std::strerror(errno) << "\n";
             }
         }
 
-        // Deliver on the main thread.
-        g_idle_add(+[](gpointer data) -> gboolean {
-            auto* ctx = static_cast<std::pair<bool, ResultCallback>*>(data);
-            if (ctx->second) ctx->second(ctx->first);
-            delete ctx;
-            return G_SOURCE_REMOVE;
-        }, new std::pair<bool, ResultCallback>(success, std::move(callback)));
+        // Deliver on the main thread at HIGH idle priority — the default
+        // priority queues behind GTK redraw/resize work, delaying the
+        // unlock by seconds on a busy compositor frame.
+        g_idle_add_full(
+            G_PRIORITY_HIGH_IDLE,
+            +[](gpointer data) -> gboolean {
+                auto* ctx = static_cast<std::pair<bool, ResultCallback>*>(data);
+                if (ctx->second) ctx->second(ctx->first);
+                delete ctx;
+                return G_SOURCE_REMOVE;
+            },
+            new std::pair<bool, ResultCallback>(success, std::move(callback)),
+            nullptr
+        );
 
         state_->active.store(false);
     }).detach();
