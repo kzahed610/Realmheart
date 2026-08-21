@@ -1,5 +1,6 @@
 #include "ui/GtkApp.hpp"
 #include "ui/LayerSurface.hpp"
+#include "ui/lockscreen/LockSurface.hpp"
 #include "ui/bar/VerticalBar.hpp"
 #include "ui/sidebar/RightSidebar.hpp"
 #include "ui/ThemeStyles.hpp"
@@ -122,6 +123,28 @@ struct TimedSidebarController {
     std::unique_ptr<sidebar::RightSidebar> sidebar;
 };
 
+void activate_lockscreen_test(GtkApplication* app, gpointer data) {
+    auto* state = static_cast<TimedLayerState*>(data);
+    schedule_application_quit(state);
+
+    auto* surface = static_cast<lockscreen::LockSurface*>(
+        g_object_get_data(G_OBJECT(app), "realmheart-timed-lockscreen-surface")
+    );
+    if (surface == nullptr) {
+        auto owned = std::make_unique<lockscreen::LockSurface>(app);
+        surface = owned.release();
+        g_object_set_data_full(
+            G_OBJECT(app),
+            "realmheart-timed-lockscreen-surface",
+            surface,
+            +[](gpointer value) { delete static_cast<lockscreen::LockSurface*>(value); }
+        );
+    }
+
+    attach_escape_controller(GTK_WIDGET(surface->window()), app);
+    surface->show();
+}
+
 void activate_bar(GtkApplication* app, gpointer data) {
     auto* state = static_cast<TimedLayerState*>(data);
     schedule_application_quit(state);
@@ -205,6 +228,10 @@ int run_bar(int timeout_seconds) {
 
 int run_sidebar(int timeout_seconds) {
     return run_timed_application("dev.realmheart.sidebar", timeout_seconds, G_CALLBACK(activate_sidebar));
+}
+
+int run_lockscreen_test(int timeout_seconds) {
+    return run_timed_application("dev.realmheart.lockscreen-test", timeout_seconds, G_CALLBACK(activate_lockscreen_test));
 }
 
 } // namespace realmheart::ui

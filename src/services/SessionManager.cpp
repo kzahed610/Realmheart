@@ -29,4 +29,16 @@ bool SessionManager::is_locked() const {
     return executor_->run_capture_succeeded({"pgrep", "hyprlock"});
 }
 
+bool SessionManager::enable_lockscreen_blur() const {
+    return executor_->run_background({
+        "hyprctl", "keyword", "layerrule", "blur, realmheart-broken_seal"
+    });
+}
+
+bool SessionManager::disable_lockscreen_blur() const {
+    return executor_->run_background({
+        "hyprctl", "keyword", "layerrule", "unset, realmheart-broken_seal"
+    });
+}
+
 } // namespace realmheart::services

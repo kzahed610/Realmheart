@@ -38,6 +38,11 @@ public:
     bool power_off();
     bool is_locked() const;
 
+    // Adds/removes the Hyprland layer-shell blur rule for the Broken Seal
+    // lockscreen surface namespace.
+    bool enable_lockscreen_blur() const;
+    bool disable_lockscreen_blur() const;
+
 private:
     std::unique_ptr<ICommandExecutor> executor_;
 };

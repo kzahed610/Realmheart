@@ -7,5 +7,6 @@ namespace realmheart::ui {
 int run_test_layer(int timeout_seconds);
 int run_bar(int timeout_seconds);
 int run_sidebar(int timeout_seconds);
+int run_lockscreen_test(int timeout_seconds);
 
 } // namespace realmheart::ui

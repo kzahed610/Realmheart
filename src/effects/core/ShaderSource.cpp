@@ -186,4 +186,34 @@ bool validate_workspace_morph_shader_contract(
     return true;
 }
 
+bool validate_lockscreen_shader_contract(
+    std::string_view source,
+    std::string* missing_symbol
+) noexcept {
+    constexpr std::array<std::string_view, 12> kRequiredSymbols{{
+        "uniform float progress",
+        "uniform vec2 resolution",
+        "uniform float opening",
+        "uniform float uOpacity",
+        "uniform float uSplit",
+        "uniform float uAngle",
+        "uniform float uOffsetX",
+        "uniform float uOffsetY",
+        "uniform vec3 uInterior",
+        "uniform vec3 uVein",
+        "uniform vec3 uEdge",
+        "out vec4 fragColor",
+    }};
+
+    for (const auto symbol : kRequiredSymbols) {
+        if (!contains_symbol(source, symbol)) {
+            if (missing_symbol != nullptr) *missing_symbol = std::string{symbol};
+            return false;
+        }
+    }
+
+    if (missing_symbol != nullptr) missing_symbol->clear();
+    return true;
+}
+
 } // namespace realmheart::effects
