@@ -39,4 +39,9 @@ struct ShaderSource {
     std::string* missing_symbol = nullptr
 ) noexcept;
 
+[[nodiscard]] bool validate_lockscreen_shader_contract(
+    std::string_view source,
+    std::string* missing_symbol = nullptr
+) noexcept;
+
 } // namespace realmheart::effects

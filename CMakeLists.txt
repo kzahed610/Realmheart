@@ -169,7 +169,10 @@ add_library(realmheart_ui STATIC
     src/ui/NotificationToast.cpp
     src/ui/NowPlayingOverlay.cpp
     src/ui/OSDOverlay.cpp
-    src/ui/lockscreen/LockScreen.cpp
+    src/ui/lockscreen/LockStateMachine.cpp
+    src/ui/lockscreen/ShaderManager.cpp
+    src/ui/lockscreen/CrystalShaderRenderer.cpp
+    src/ui/lockscreen/LockSurface.cpp
     src/ui/powermenu/PowerMenuConfirmation.cpp
     src/ui/powermenu/PowerMenuControls.cpp
     src/ui/powermenu/PowerMenuLayout.cpp
@@ -250,6 +253,27 @@ target_link_libraries(realmheart_power_menu_renderer PRIVATE
 )
 
 add_dependencies(realmheart realmheart_power_menu_renderer)
+
+# Standalone Broken Seal lockscreen surface harness. Not registered with CTest
+# because layer-shell windows require the user's live Wayland session.
+add_executable(realmheart_lockscreen_test
+    src/lockscreen-test/main.cpp
+)
+set_target_properties(realmheart_lockscreen_test PROPERTIES
+    OUTPUT_NAME "realmheart-lockscreen-test"
+)
+target_include_directories(realmheart_lockscreen_test PRIVATE src third_party)
+target_compile_options(realmheart_lockscreen_test PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_link_libraries(realmheart_lockscreen_test PRIVATE
+    realmheart_ui
+    PkgConfig::GIO
+    PkgConfig::GTK4
+    PkgConfig::GTK4_LAYER_SHELL
+    PkgConfig::GDK_PIXBUF
+    PkgConfig::JPEG
+    PkgConfig::EPOXY
+    Threads::Threads
+)
 
 set(REALMHEART_NATIVE_WALLPAPER_BUILT OFF)
 if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
@@ -761,6 +785,17 @@ if(BUILD_TESTING)
 
     add_executable(realmheart_shell_state_tests tests/ShellStateTests.cpp)
     realmheart_register_test(realmheart_shell_state_tests)
+
+    add_executable(
+        realmheart_lock_state_machine_tests
+        tests/LockStateMachineTests.cpp
+        src/ui/lockscreen/LockStateMachine.cpp
+    )
+    target_link_libraries(
+        realmheart_lock_state_machine_tests
+        PRIVATE GTest::gtest GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_lock_state_machine_tests)
 
     add_executable(realmheart_theme_service_tests tests/ThemeServiceTests.cpp src/services/ThemeService.cpp)
     realmheart_register_test(realmheart_theme_service_tests)

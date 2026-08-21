@@ -45,6 +45,7 @@ void print_usage() {
               << "  realmheart --sidebar [--timeout N] Show the right sidebar MVP layer surface\n"
               << "  realmheart --bar [--timeout N]     Show the safe vertical bar MVP layer surface\n"
               << "  realmheart --test-layer [--timeout N] Show a temporary GTK layer-shell test surface\n"
+              << "  realmheart --lockscreen-test [--timeout N] Show the Broken Seal lockscreen surface\n"
               << "  realmheart --help                Show this help\n";
 }
 
@@ -315,6 +316,17 @@ int main(int argc, char** argv) {
         }
 
         return realmheart::ui::run_test_layer(timeout_seconds);
+    }
+
+    if (command == "--lockscreen-test") {
+        int timeout_seconds = 5;
+        const int parse_status = parse_timeout_option(argc, argv, timeout_seconds, "--lockscreen-test");
+        if (parse_status != 0) {
+            print_usage();
+            return parse_status;
+        }
+
+        return realmheart::ui::run_lockscreen_test(timeout_seconds);
     }
 
     std::cerr << "Unknown argument: " << command << "\n";

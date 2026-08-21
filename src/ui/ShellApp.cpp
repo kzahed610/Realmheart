@@ -30,6 +30,7 @@
 #include "ui/bar/VerticalBar.hpp"
 #include "ui/launcher/CommandReceiptOverlay.hpp"
 #include "ui/launcher/LauncherOverlay.hpp"
+#include "ui/lockscreen/LockSurface.hpp"
 #include "ui/powermenu/PowerMenuProcess.hpp"
 #include "ui/sidebar/RightSidebar.hpp"
 #include "ui/sidebar/SidebarFrame.hpp"
@@ -379,6 +380,7 @@ public:
         workspace_overview_.reset();
         launcher_overlay_.reset();
         command_receipts_.reset();
+        lock_surface_.reset();
         notes_overlay_.reset();
         toast_.reset();
         osd_.reset();
@@ -892,7 +894,32 @@ public:
     }
 
     void lock_session() {
-        session_->lock();
+        // Native Broken Seal lockscreen. If it fails to initialize within 2s,
+        // fall back to hyprlock so the session is never left unlocked.
+        if (lock_surface_ == nullptr) {
+            lock_surface_ = std::make_unique<lockscreen::LockSurface>(application_);
+        }
+        lock_surface_->show();
+        session_->enable_lockscreen_blur();
+
+        services::SessionManager* session = session_.get();
+        lockscreen::LockSurface* surface = lock_surface_.get();
+        struct LockFallback {
+            lockscreen::LockSurface* surface;
+            services::SessionManager* session;
+        };
+        auto* fallback = new LockFallback{surface, session};
+        g_timeout_add(2000, +[](gpointer data) -> gboolean {
+            auto* fb = static_cast<LockFallback*>(data);
+            if (fb->surface == nullptr || fb->surface->visible()) {
+                delete fb;
+                return G_SOURCE_REMOVE;
+            }
+            std::cerr << "[BrokenSeal] surface failed to map, falling back to hyprlock\n";
+            if (fb->session != nullptr) fb->session->lock();
+            delete fb;
+            return G_SOURCE_REMOVE;
+        }, fallback);
     }
 
     void open_logout_menu(
@@ -1731,6 +1758,7 @@ private:
     std::unique_ptr<CommandReceiptOverlay> command_receipts_;
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
     std::unique_ptr<workspace::WorkspaceOverviewOverlay> workspace_overview_;
+    std::unique_ptr<lockscreen::LockSurface> lock_surface_;
     services::WorkspaceSnapshot workspace_snapshot_;
     powermenu::PowerMenuProcess power_menu_process_;
     std::unique_ptr<realmheart::mana_core::ManaCoresSelector> mana_cores_selector_;
