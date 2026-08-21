@@ -30,11 +30,26 @@ int pam_conversation(
     );
     if (responses == nullptr) return PAM_BUF_ERR;
     for (int i = 0; i < num_msg; ++i) {
-        if (msg[i] == nullptr || msg[i]->msg_style != PAM_PROMPT_ECHO_OFF) {
+        if (msg[i] == nullptr) {
             free(responses);
             return PAM_CONV_ERR;
         }
-        responses[i].resp = strdup(password->c_str());
+        switch (msg[i]->msg_style) {
+        case PAM_PROMPT_ECHO_OFF:
+        case PAM_PROMPT_ECHO_ON:
+            responses[i].resp = strdup(password->c_str());
+            break;
+        case PAM_TEXT_INFO:
+        case PAM_ERROR_MSG:
+            // Informational/error messages must not abort authentication
+            // (Prophecy renderer answered these politely; mirror that).
+            std::fprintf(stderr, "[auth-helper] pam msg: %s\n", msg[i]->msg);
+            responses[i].resp = strdup("");
+            break;
+        default:
+            responses[i].resp = strdup("");
+            break;
+        }
         if (responses[i].resp == nullptr) {
             free(responses);
             return PAM_BUF_ERR;
@@ -68,8 +83,20 @@ int main(int argc, char** argv) {
     int ret = pam_start("realmheart-lockscreen", argv[1], &conv, &handle);
     if (ret == PAM_SUCCESS) {
         ret = pam_authenticate(handle, 0);
-        if (ret == PAM_SUCCESS) ret = pam_acct_mgmt(handle, 0);
+        if (ret != PAM_SUCCESS) {
+            std::fprintf(stderr, "[auth-helper] pam_authenticate: %s\n",
+                         pam_strerror(handle, ret));
+        }
+        if (ret == PAM_SUCCESS) {
+            ret = pam_acct_mgmt(handle, 0);
+            if (ret != PAM_SUCCESS) {
+                std::fprintf(stderr, "[auth-helper] pam_acct_mgmt: %s\n",
+                             pam_strerror(handle, ret));
+            }
+        }
         pam_end(handle, ret);
+    } else {
+        std::fprintf(stderr, "[auth-helper] pam_start failed: %d\n", ret);
     }
     return ret == PAM_SUCCESS ? 0 : 1;
 }
