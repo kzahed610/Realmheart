@@ -1,7 +1,8 @@
 // Standalone harness for the Broken Seal lockscreen surface.
-// Renders the crystal emergence animation on the live Wayland session without
-// PAM, input grab, or lock integration. Press Esc or close the window to exit.
+// Renders the horn pair on the live Wayland session without PAM or input
+// grab. Press Esc or close the window to exit.
 
+#include "services/SessionManager.hpp"
 #include "ui/lockscreen/LockSurface.hpp"
 
 #include <gtk/gtk.h>
@@ -16,6 +17,7 @@ constexpr int kTimeoutSeconds = 15;
 struct TestState {
     GtkApplication* application = nullptr;
     std::unique_ptr<realmheart::ui::lockscreen::LockSurface> surface;
+    std::unique_ptr<realmheart::services::SessionManager> session;
     gboolean activate_fired = FALSE;
 };
 
@@ -40,6 +42,12 @@ void on_activate(GtkApplication* app, gpointer data) {
     // Construct the surface inside activate so the GTK display exists before
     // the GtkGLArea widget is created.
     state->surface = std::make_unique<realmheart::ui::lockscreen::LockSurface>(app);
+
+    // Apply the Hyprland blur layerrule BEFORE the surface maps so the rule
+    // matches at map time (Hyprland layerrules only match new surfaces).
+    state->session = std::make_unique<realmheart::services::SessionManager>();
+    state->session->enable_lockscreen_blur();
+
     state->surface->show();
 
     GtkEventController* key_controller = gtk_event_controller_key_new();
@@ -56,6 +64,19 @@ void on_activate(GtkApplication* app, gpointer data) {
 
     std::cout << "[BrokenSeal test] surface presented (namespace "
                  "realmheart-broken_seal)\n";
+
+    // Debug: report focus state after the animation completes.
+    g_timeout_add(3000, +[](gpointer data) -> gboolean {
+        auto* surface = static_cast<realmheart::ui::lockscreen::LockSurface*>(data);
+        GtkWidget* window = GTK_WIDGET(surface->window());
+        GtkWidget* focused = gtk_window_get_focus(GTK_WINDOW(window));
+        std::cout << "[BrokenSeal test] focus: "
+                  << (focused != nullptr ? gtk_widget_get_name(focused) : "(none)")
+                  << " mapped=" << gtk_widget_get_mapped(window)
+                  << " visible=" << gtk_widget_get_visible(window)
+                  << std::endl;
+        return G_SOURCE_REMOVE;
+    }, state->surface.get());
 }
 
 } // namespace
