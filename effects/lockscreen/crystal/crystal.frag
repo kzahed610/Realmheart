@@ -1,9 +1,10 @@
-// Broken Seal — horn pair.
-// A pair of symmetrical, large ram-like horns that emerge from the upper
-// sides, thick at the base, arcing outward and downward, with sharp tips
-// curling inward. Dark matte obsidian with a subtle cool purplish tint and
-// ribbed transverse ridges. The horns are fixed (no split/slide); the
-// password is typed in the gap between them. No link between the horns.
+// Broken Seal — "The Punch-Through" v4: smooth-silhouette raymarch edition.
+// Lesson from the clay-stack incident: plates are SHADING, not geometry.
+// The silhouette is one continuous smooth C-curl; armor ridges live only in
+// normals + albedo so light breaks across them without deforming the form.
+// True 3D swept-tube SDF, marched per-pixel during entrance/close only.
+// 2D decal pass: breach cracks, torn flecks, contact shadow — calibrated
+// for arbitrary (including bright) wallpapers.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #version 300 es
@@ -16,43 +17,67 @@ uniform vec2 resolution;
 uniform float opening;
 uniform float uOpacity;
 
-// Kept for the shared lockscreen contract; the horns do not split.
+// Kept for the shared lockscreen contract; unused by this scene.
 uniform float uSplit;
 uniform float uAngle;
 uniform float uOffsetX;
 uniform float uOffsetY;
-
 uniform vec3 uInterior;
 uniform vec3 uVein;
 uniform vec3 uEdge;
 
 layout(location = 0) out vec4 fragColor;
 
-// --- Horn palette (from the Horns.md spec) ---
-const vec3 kBaseColour = vec3(0.169, 0.169, 0.196);      // #2B2B32 mid-tone
-const vec3 kShadowColour = vec3(0.102, 0.102, 0.118);    // #1A1A1E deep crevice
-const vec3 kHighlightColour = vec3(0.298, 0.298, 0.353); // #4C4C5A satin sheen
-const vec3 kRimColour = vec3(0.780, 0.490, 1.0);         // faint aether violet
+// --- Palette ---
+const vec3 kHornBlack = vec3(0.110, 0.110, 0.128);
+const vec3 kPlateDark = vec3(0.045, 0.045, 0.056);
+const vec3 kPlateLite = vec3(0.290, 0.285, 0.320);
+const vec3 kRimViolet = vec3(0.780, 0.490, 1.0);
+const vec3 kShadowCol = vec3(0.30, 0.29, 0.33);
+const vec3 kCrackDark = vec3(0.16, 0.14, 0.19);
+const vec3 kTornEdge  = vec3(0.72, 0.70, 0.78);
 
-// --- Left horn spine (y-down space: base at top, tip at bottom) ---
-// The spine is a polyline from the thick base, sweeping outward and down,
-// then hooking inward at the tip. The right horn is its mirror image.
-const int kSpineCount = 6;
-const vec2 kSpine[6] = vec2[6](
-    vec2(-0.16, -0.36), // base (thick, top)
-    vec2(-0.36, -0.22), // sweep outward-left
-    vec2(-0.42,  0.00), // far left, mid height
-    vec2(-0.34,  0.18), // curving back inward
-    vec2(-0.22,  0.28), // hook
-    vec2(-0.10,  0.30)  // tip (razor, curled inward-down)
+const float kPlates = 9.0;
+const float kPi = 3.14159265;
+
+// --- Left horn spine in 3D (y-down, z+ toward viewer).
+// Smooth C-curl sweeping out-left and down, tip flicking outward-in at the
+// end. Belly pushes toward the viewer mid-arc.
+const int kSpineCount = 25;
+const vec3 kSpine[25] = vec3[25](
+    vec3(-0.1180, -0.2720, 0.020),
+    vec3(-0.1497, -0.2895, 0.035),
+    vec3(-0.1950, -0.3123, 0.055),
+    vec3(-0.2400, -0.3200, 0.071),
+    vec3(-0.2828, -0.3029, 0.087),
+    vec3(-0.3253, -0.2707, 0.101),
+    vec3(-0.3600, -0.2320, 0.112),
+    vec3(-0.3838, -0.1875, 0.118),
+    vec3(-0.3997, -0.1364, 0.120),
+    vec3(-0.4090, -0.0850, 0.117),
+    vec3(-0.4125, -0.0337, 0.111),
+    vec3(-0.4093, 0.0179, 0.100),
+    vec3(-0.3980, 0.0650, 0.087),
+    vec3(-0.3735, 0.1073, 0.070),
+    vec3(-0.3409, 0.1452, 0.052),
+    vec3(-0.3140, 0.1750, 0.036),
+    vec3(-0.2979, 0.1956, 0.026),
+    vec3(-0.2876, 0.2081, 0.020),
+    vec3(-0.2820, 0.2120, 0.020),
+    vec3(-0.2811, 0.2047, 0.020),
+    vec3(-0.2849, 0.1889, 0.020),
+    vec3(-0.2920, 0.1720, 0.020),
+    vec3(-0.3046, 0.1542, 0.020),
+    vec3(-0.3205, 0.1353, 0.020),
+    vec3(-0.3320, 0.1220, 0.020)
 );
-// Horn width along the spine: thick base -> razor tip.
-const float kWidths[6] = float[6](0.100, 0.078, 0.055, 0.032, 0.015, 0.006);
-// Normalized cumulative arc-length at each spine sample.
-const float kLens[6] = float[6](0.0, 0.258, 0.499, 0.707, 0.872, 1.0);
+const float kWidths[25] = float[25](
+    0.0880, 0.0890, 0.0915, 0.0920, 0.0917, 0.0914, 0.0874, 0.0846, 0.0782, 0.0720, 0.0646, 0.0545, 0.0491, 0.0381, 0.0340, 0.0270, 0.0230, 0.0220, 0.0219, 0.0216, 0.0200, 0.0174, 0.0139, 0.0108, 0.0100
+);
+const float kLens[25] = float[25](
+    0.0000, 0.0409, 0.0981, 0.1496, 0.2016, 0.2619, 0.3205, 0.3775, 0.4379, 0.4969, 0.5549, 0.6132, 0.6679, 0.7231, 0.7796, 0.8248, 0.8543, 0.8726, 0.8803, 0.8886, 0.9069, 0.9277, 0.9523, 0.9801, 1.0000
+);
 
-// Interpolated horn width at normalized arc position u (0 = base, 1 = tip),
-// with smoothstep easing between knots so the taper never shows a seam.
 float width_at(float u) {
     for (int i = 0; i < kSpineCount - 1; ++i) {
         if (u <= kLens[i + 1]) {
@@ -65,51 +90,37 @@ float width_at(float u) {
     return kWidths[kSpineCount - 1];
 }
 
-// Signed distance to the tapered horn spine. Also outputs the normalized arc
-// position u (for ribs/highlights) and side (+1 = outer curve for the left
-// horn, -1 = inner).
-// The spine is a polyline (keeping the horn's segmented, organic character).
-// To avoid the boxy inner-corner artifact where the thick base meets the next
-// segment, the width grows slightly near each interior joint on the inner
-// (concave) side only, blending the sections while preserving the outer
-// silhouette.
-float sdHorn(vec2 p, out float u, out float side) {
+// Distance to the SMOOTH tube (no geometric plate modulation).
+float sdHorn3D(vec3 q, out float u, out vec3 radial, out vec3 tangent) {
     float best = 1e9;
-    vec2 best_q = vec2(0.0);
-    vec2 best_dir = vec2(1.0, 0.0);
+    vec3 best_q = vec3(0.0);
+    vec3 best_dir = vec3(1.0, 0.0, 0.0);
+    u = 0.0;
     for (int i = 0; i < kSpineCount - 1; ++i) {
-        vec2 a = kSpine[i];
-        vec2 b = kSpine[i + 1];
-        vec2 ab = b - a;
+        vec3 a = kSpine[i];
+        vec3 b = kSpine[i + 1];
+        vec3 ab = b - a;
         float len2 = dot(ab, ab);
-        float t = clamp(dot(p - a, ab) / len2, 0.0, 1.0);
-        vec2 q = a + ab * t;
-        float d = length(p - q);
+        float t = clamp(dot(q - a, ab) / len2, 0.0, 1.0);
+        vec3 proj = a + ab * t;
+        float d = length(q - proj);
         if (d < best) {
             best = d;
-            best_q = q;
+            best_q = proj;
             best_dir = ab;
             u = kLens[i] + t * (kLens[i + 1] - kLens[i]);
         }
     }
-    vec2 to_p = p - best_q;
-    side = sign(to_p.x * best_dir.y - to_p.y * best_dir.x);
-    float width = width_at(u);
+    vec3 to_q = q - best_q;
+    tangent = normalize(best_dir);
+    float tl = length(to_q);
+    radial = tl > 1e-5 ? to_q / tl : vec3(0.0, 0.0, 1.0);
+    return best - width_at(u);
+}
 
-    // Round the inner (concave) corner: grow the width slightly near the
-    // spine joints on the inner side only, so the sections blend into each
-    // other instead of leaving a boxy bulge. The outer curve keeps its exact
-    // polyline silhouette.
-    float joint = 1.0;
-    joint = min(joint, abs(u - 0.258));
-    joint = min(joint, abs(u - 0.499));
-    joint = min(joint, abs(u - 0.707));
-    joint = min(joint, abs(u - 0.872));
-    joint = 1.0 - smoothstep(0.0, 0.09, joint);
-    float inner = smoothstep(0.0, 0.02, -side);
-    width *= 1.0 + joint * inner * 0.10;
-
-    return best - width;
+bool in_horn_bounds(vec3 q) {
+    vec3 c = vec3(-0.30, -0.06, 0.07);
+    return dot(q - c, q - c) < 0.52 * 0.52;
 }
 
 float hash12(vec2 p) {
@@ -121,11 +132,11 @@ float hash12(vec2 p) {
 float noise2(vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);
-    vec2 u = f * f * (3.0 - 2.0 * f);
+    vec2 w = f * f * (3.0 - 2.0 * f);
     return mix(
-        mix(hash12(i), hash12(i + vec2(1.0, 0.0)), u.x),
-        mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0)), u.x),
-        u.y
+        mix(hash12(i), hash12(i + vec2(1.0, 0.0)), w.x),
+        mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0)), w.x),
+        w.y
     );
 }
 
@@ -140,35 +151,15 @@ float fbm(vec2 p) {
     return value;
 }
 
-// Material for one horn: obsidian base, ribbed transverse ridges, satin
-// highlight on the outer/upper curve. No colored rim.
-// 2.5D shading: a rounded-volume gradient (darker core, lighter edges) plus a
-// specular sheen that follows the curve, giving the horn a subtle 3D feel.
-vec3 shade_horn(float u, float side, float d) {
-    vec3 colour = kBaseColour;
-
-    // Transverse ribs (~10 ridges along the horn).
-    float rib = 0.5 + 0.5 * sin(u * 62.8319);
-    float ridge = smoothstep(0.35, 0.8, rib);
-    colour = mix(colour, kShadowColour, ridge * 0.60);
-    colour = mix(colour, kShadowColour, (1.0 - smoothstep(0.2, 0.6, rib)) * 0.30);
-
-    // Rounded-volume shading: light falls off toward the center of the band
-    // and catches the edges, so the horn reads as a rounded 3D form rather
-    // than a flat cutout.
-    float edge_light = exp(-abs(d) * 18.0) * 0.35;      // rim light on both edges
-    float core_shade = exp(-abs(d + 0.03) * 9.0) * 0.5; // darker toward the core
-    colour = mix(colour, kHighlightColour, edge_light);
-    colour = mix(colour, kShadowColour, core_shade);
-
-    // Specular sheen on the outer curve, stronger near the base, that shifts
-    // with the side so the light wraps around the volume.
-    float outer = smoothstep(0.0, 0.10, side);
-    float near_base = 1.0 - smoothstep(0.10, 0.55, u);
-    float sheen = outer * (0.30 + 0.45 * near_base);
-    colour = mix(colour, kHighlightColour, sheen);
-
-    return colour;
+float crack_field(vec2 p, vec2 c, float spike_count, float seed) {
+    vec2 d = p - c;
+    float r = length(d);
+    float ang = atan(d.y, d.x) + hash12(vec2(seed)) * kPi;
+    float spokes = pow(0.5 + 0.5 * cos(ang * spike_count + seed), 7.0);
+    float jitter = fbm(p * 16.0 + seed) - 0.5;
+    float line = spokes * exp(-r * 5.5) * (0.75 + 0.5 * jitter);
+    float mouth = exp(-r * 30.0);
+    return clamp(line + mouth, 0.0, 1.0);
 }
 
 void main() {
@@ -176,85 +167,144 @@ void main() {
     float aspect = resolution.x / max(resolution.y, 1.0);
     vec2 p = (uv - 0.5) * vec2(aspect, 1.0);
 
-    // Emergence: the horns fade in while they grow from base to tip (the
-    // reveal below). No scale pop — the growth IS the emergence.
-    float scale = 1.0;
-    float alpha = 1.0;
-    if (opening > 0.5) {
-        float t = clamp(progress, 0.0, 1.0);
-        alpha = smoothstep(0.0, 0.35, t);
+    float t_open = clamp(progress, 0.0, 1.0);
+    bool closing = opening < 0.5;
+    float alpha;
+    float drive;
+    float settle;
+    float fracture;
+    if (!closing) {
+        alpha = smoothstep(0.0, 0.28, t_open);
+        fracture = smoothstep(0.02, 0.45, t_open);
+        drive = smoothstep(0.22, 0.92, t_open);
+        settle = 1.0 + 0.08 * (1.0 - smoothstep(0.25, 0.95, t_open));
     } else {
-        float t = clamp(1.0 - progress, 0.0, 1.0);
-        scale = mix(0.2, 1.0, t * t);
-        alpha = t * t;
-    }
-    p /= max(scale, 0.001);
-
-    // Growth reveal: the horns form from the base (u=0) toward the tip (u=1)
-    // during the Opening phase, so it looks like they grow out of the top.
-    // Outside Opening the horns are fully grown.
-    float reveal = 1.0;
-    if (opening > 0.5) {
-        float t = clamp(progress, 0.0, 1.0);
-        reveal = smoothstep(0.05, 0.95, t);
+        float tc = clamp(1.0 - progress, 0.0, 1.0);
+        alpha = tc * tc;
+        drive = tc * tc;
+        settle = 1.0;
+        fracture = tc * tc;
     }
 
-    // Left horn + mirrored right horn.
-    float u_l;
-    float side_l;
-    float dl = sdHorn(p, u_l, side_l);
+    vec2 breach_l = vec2(-0.118, -0.272);
+    vec2 breach_r = vec2(0.118, -0.272);
+    vec2 ps = breach_l + (p - breach_l) * settle;
 
-    vec2 mp = vec2(-p.x, p.y);
-    float u_r;
-    float side_r;
-    float dr = sdHorn(mp, u_r, side_r);
+    // Camera: gentle perspective down -z.
+    vec3 ro = vec3(ps * 0.92, 1.35);
+    vec3 rd = normalize(vec3(ps * 0.10, -1.0));
+    vec3 ro_r = vec3(-ro.x, ro.y, ro.z);
+    vec3 rd_r = vec3(-rd.x, rd.y, rd.z);
 
-    // Only show the portion of each horn that has grown so far.
-    dl = max(dl, (u_l - reveal) * 0.02);
-    dr = max(dr, (u_r - reveal) * 0.02);
+    // --- Raymarch both horns ---
+    float u_hit = 0.0;
+    vec3 n_hit = vec3(0.0, 0.0, 1.0);
+    float t_hit = -1.0;
+    for (int side = 0; side < 2 && t_hit < 0.0; ++side) {
+        vec3 o = side == 0 ? ro : ro_r;
+        vec3 d = side == 0 ? rd : rd_r;
+        if (!in_horn_bounds(o) &&
+            !in_horn_bounds(o + d * 0.5) &&
+            !in_horn_bounds(o + d * 1.2)) {
+            continue;
+        }
+        float t = 0.0;
+        for (int step_i = 0; step_i < 44; ++step_i) {
+            vec3 q = o + d * t;
+            float uu;
+            vec3 rad; vec3 tan;
+            float dist = sdHorn3D(q, uu, rad, tan);
+            dist = max(dist, (uu - drive) * 0.05);
+            if (dist < 0.0022) {
+                t_hit = t;
+                u_hit = uu;
+                const vec2 e = vec2(0.004, -0.004);
+                float u1; vec3 r1; vec3 t1;
+                float u2; vec3 r2; vec3 t2;
+                float u3; vec3 r3; vec3 t3;
+                float u4; vec3 r4; vec3 t4;
+                float d1 = sdHorn3D(q + e.xyy * 1.5, u1, r1, t1);
+                float d2 = sdHorn3D(q + e.yyx * 1.5, u2, r2, t2);
+                float d3 = sdHorn3D(q + e.yxy * 1.5, u3, r3, t3);
+                float d4 = sdHorn3D(q + e.xxx * 1.5, u4, r4, t4);
+                n_hit = normalize(vec3(d1 - d2, d3 - d4, d1 + d2 - (d3 + d4)));
+                break;
+            }
+            t += dist * 0.85;
+            if (t > 2.6) break;
+        }
+    }
 
-    float d_eff = min(dl, dr);
+    // --- Horn shading: smooth body, plates as LIGHT only ---
+    vec3 colour = vec3(0.0);
+    float horn_alpha = 0.0;
+    if (t_hit > 0.0) {
+        horn_alpha = alpha;
+        vec3 light_dir = normalize(vec3(0.55, -0.45, 0.70));
+        float diff = max(dot(n_hit, light_dir), 0.0);
 
-    // Shade each horn in its own space; blend by whichever is closer.
-    vec3 colour_l = shade_horn(u_l, side_l, dl);
-    vec3 colour_r = shade_horn(u_r, side_r, dr);
-    float left_weight = 1.0 - smoothstep(0.0, 0.02, dl - dr);
-    vec3 colour = mix(colour_r, colour_l, left_weight);
+        // Plate ridges perturb the NORMAL subtly (lighting ridges, not lumps)
+        // and modulate albedo — silhouette stays untouched.
+        float phase = fract(u_hit * kPlates);
+        float ridge = sin(phase * 2.0 * kPi);
+        // Re-derive the true tube tangent at the hit point (stable at
+        // silhouettes, unlike screen-space derivatives).
+        float u_t; vec3 rad_t; vec3 tan_t;
+        vec3 q_hit = ro + rd * t_hit;
+        if (ro.x < 0.0) { sdHorn3D(q_hit, u_t, rad_t, tan_t); }
+        else { sdHorn3D(vec3(-q_hit.x, q_hit.yz), u_t, rad_t, tan_t);
+               tan_t = vec3(-tan_t.x, tan_t.yz); }
+        n_hit.xy -= normalize(tan_t.xy + 1e-5) * ridge * 0.15;
+        n_hit = normalize(n_hit);
 
-    // Hard silhouette with a faint dark halo.
-    float inside = 1.0 - smoothstep(0.0, 0.006, d_eff);
-    float halo = exp(-max(d_eff, 0.0) * 2.4) * 0.12;
-    vec3 halo_colour = kShadowColour;
+        // Plate look: narrow dark groove band + subtle bevel catch after it.
+        float groove = smoothstep(0.02, 0.14, phase)
+            * smoothstep(0.30, 0.18, phase);
+        float plate_tone = 0.86 + 0.14 * hash12(vec2(floor(u_hit * kPlates), 7.0));
+        vec3 albedo = mix(kHornBlack, kPlateDark * 0.7, groove);
+        // Broad satin roll along the tube crest facing the key light.
+        float crest = smoothstep(0.15, 0.9,
+            dot(normalize(n_hit.xy + vec2(1e-4)), normalize(light_dir.xy)));
+        albedo = mix(albedo, kPlateLite, (1.0 - groove) * crest * 0.40);
 
-    // Drop shadow: a soft dark offset copy of the silhouette, cast downward
-    // onto the desktop behind the horns. Gated per-pixel by the reveal so the
-    // shadow only appears where the horn has actually grown (no phantom tip
-    // shadow during the emergence).
-    vec2 shadow_offset = vec2(0.006, 0.02) / max(scale, 0.001);
-    float shadow_u_l;
-    float shadow_u_r;
-    float d_shadow_l = sdHorn(p - shadow_offset, shadow_u_l, side_l);
-    float d_shadow_r = sdHorn(vec2(-(p.x - shadow_offset.x), p.y - shadow_offset.y), shadow_u_r, side_r);
-    // Gate each horn's shadow by its own grown arc position, then take the
-    // nearer one (matching the min() union of the distances).
-    float grown_l = smoothstep(0.0, 0.06, reveal - shadow_u_l);
-    float grown_r = smoothstep(0.0, 0.06, reveal - shadow_u_r);
-    float d_shadow = min(
-        max(d_shadow_l, (1.0 - grown_l) * 0.1),
-        max(d_shadow_r, (1.0 - grown_r) * 0.1)
-    );
-    float shadow = exp(-max(d_shadow, 0.0) * 6.0) * (1.0 - inside) * 0.55;
+        float ao = mix(0.85, 1.0, clamp(n_hit.y * -0.5 + 0.5, 0.0, 1.0));
+        vec3 half_dir = normalize(light_dir + vec3(0.0, 0.0, 1.0));
+        float spec = pow(max(dot(n_hit, half_dir), 0.0), 26.0) * 0.13;
+        colour = albedo * plate_tone * ao * (0.42 + diff * 1.05);
+        colour += kPlateLite * spec;
+        float fresnel = pow(1.0 - clamp(n_hit.z, 0.0, 1.0), 4.0);
+        colour += kRimViolet * fresnel * 0.05;
+        colour = colour * 1.74 + vec3(0.006);
+    }
 
-    // Void-style aether: faint fbm nebula wisps hugging the horns, palette
-    // driven, so the lockscreen ties into the shell's visual language.
-    float nebula = fbm(p * 4.0 + vec2(2.3, 7.7));
-    float wisp = exp(-max(d_eff, 0.0) * 5.0) * nebula * 0.12;
-    vec3 wisp_colour = mix(kShadowColour, kHighlightColour, nebula);
+    // --- 2D decal pass on the glass plane ---
+    vec2 pcx = p - vec2(0.0, 0.02);
+    float web_l = crack_field(pcx, breach_l, 11.0, 1.7);
+    float web_r = crack_field(vec2(-pcx.x, pcx.y), breach_r, 11.0, 5.3);
+    float web = clamp(web_l + web_r, 0.0, 1.0) * fracture;
 
-    float alpha_out = clamp(inside + halo + shadow + wisp, 0.0, 1.0) * alpha * uOpacity;
-    vec3 rgb = colour * inside + halo_colour * halo +
-        kShadowColour * shadow + wisp_colour * wisp;
+    float fleck_zone_l = exp(-length(pcx - breach_l) * 20.0);
+    float fleck_zone_r = exp(-length(vec2(-pcx.x, pcx.y) - breach_r) * 20.0);
+    float flecks = clamp(fleck_zone_l + fleck_zone_r, 0.0, 1.0)
+        * step(0.72, fbm(pcx * 34.0 + 4.2)) * fracture * 0.40;
 
-    // Premultiplied alpha for clean compositing over the blurred desktop.
+    vec2 shadow_off = vec2(-0.07, 0.09);
+    float sh_l = exp(-length(pcx - shadow_off - vec2(-0.24, 0.02)) * 4.6);
+    float sh_r = exp(-length(pcx - shadow_off - vec2(0.24, 0.02)) * 4.6);
+    float cast_shadow = clamp(sh_l + sh_r, 0.0, 1.0) * 0.38
+        * (1.0 - horn_alpha) * smoothstep(0.30, 0.85, drive);
+
+    // --- Composite premultiplied ---
+    float crack_a = clamp(web * 0.50 + flecks, 0.0, 1.0);
+    float shadow_a = clamp(cast_shadow, 0.0, 1.0);
+    float alpha_out = clamp(
+        horn_alpha + crack_a * alpha + shadow_a * alpha,
+        0.0, 1.0
+    ) * uOpacity;
+    vec3 rgb = colour
+        + kCrackDark * web * fracture * 0.75
+        + kTornEdge * flecks
+        + kShadowCol * cast_shadow;
+
     fragColor = vec4(rgb * alpha_out, alpha_out);
 }

@@ -19,6 +19,11 @@ void LockStateMachine::present() noexcept {
     progress_ = 0.0;
 }
 
+void LockStateMachine::present_instant() noexcept {
+    phase_ = LockPhase::Typing;
+    progress_ = 0.0;
+}
+
 void LockStateMachine::dismiss() noexcept {
     if (phase_ == LockPhase::Hidden) return;
     phase_ = LockPhase::Closing;

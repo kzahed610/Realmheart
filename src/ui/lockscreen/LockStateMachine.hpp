@@ -21,6 +21,10 @@ public:
     // restarts the emergence).
     void present() noexcept;
 
+    // Opens the seal already fully composed (mana-core style): skips the
+    // emergence and lands directly in Typing. Closing still plays on dismiss.
+    void present_instant() noexcept;
+
     // Dismisses the seal: any active phase -> Closing.
     void dismiss() noexcept;
 

@@ -85,6 +85,8 @@ std::filesystem::path user_media_directory(GUserDirectory directory, const char*
 
 constexpr int kHotspotHitWidth = 16;
 constexpr std::string_view kManaCoresWorkspaceName = "realmheart-mana-core";
+// Empty named workspace the lock choreography slides windows off to.
+constexpr std::string_view kLockWorkspaceName = "realmheart-lock";
 
 template <typename... Args>
 void sidebar_input_debug(Args&&... args) {
@@ -366,6 +368,10 @@ public:
         // Stop callbacks that capture this before tearing down UI/controllers.
         runtime_async_state_->alive.store(false);
         runtime_async_state_->owner.store(nullptr);
+        if (lock_surface_ != nullptr) {
+            lock_surface_->hide_immediately();
+        }
+        ++lock_choreography_generation_;
         ++runtime_async_state_->volume_generation;
         ++runtime_async_state_->brightness_generation;
         ++runtime_async_state_->theme_generation;
@@ -904,11 +910,67 @@ public:
             lock_surface_ = std::make_unique<lockscreen::LockSurface>(application_);
             lock_surface_->set_unlocked_callback([this] {
                 session_->disable_lockscreen_blur();
+                finish_lock_unlock();
             });
         }
-        // Apply the blur layerrule BEFORE the surface maps so Hyprland matches
-        // it at map time.
-        session_->enable_lockscreen_blur();
+
+        // Lock choreography (mana-core style): hide the bar, switch to an
+        // empty named workspace so Hyprland's own workspace animation slides
+        // every window off-stage, and only then present the seal over the
+        // bare wallpaper. The veil blooms after emergence; blur snaps on at
+        // full coverage and hides under its peak.
+        lock_choreography_pending_ = true;
+        lock_surface_->hide_immediately();
+        lock_choreography_workspace_ =
+            services::HyprlandWorkspaces::active_workspace_id().value_or(0);
+        lock_choreography_bar_was_visible_ =
+            bar_ != nullptr && state_.bar_visible();
+        if (lock_choreography_bar_was_visible_) {
+            gtk_widget_set_visible(bar_->get_window(), FALSE);
+        }
+
+        const std::uint64_t generation = ++lock_choreography_generation_;
+        const auto async_state = runtime_async_state_;
+        core::shared_task_executor().post([async_state, generation] {
+            const bool switched =
+                services::HyprlandWorkspaces::active_workspace_id().has_value() &&
+                services::HyprlandWorkspaces::switch_to_named(
+                    kLockWorkspaceName
+                );
+            struct Payload {
+                std::shared_ptr<RuntimeAsyncState> state;
+                std::uint64_t generation = 0;
+                bool switched = false;
+            };
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,
+                +[](gpointer raw) -> gboolean {
+                    auto* payload = static_cast<Payload*>(raw);
+                    ShellRuntime* owner = payload->state->owner.load();
+                    if (payload->state->alive.load() && owner != nullptr) {
+                        owner->finish_lock_choreography(
+                            payload->generation,
+                            payload->switched
+                        );
+                    }
+                    return G_SOURCE_REMOVE;
+                },
+                new Payload{async_state, generation, switched},
+                +[](gpointer raw) { delete static_cast<Payload*>(raw); }
+            );
+        });
+    }
+
+    void finish_lock_choreography(std::uint64_t generation, bool switched) {
+        if (generation != lock_choreography_generation_) {
+            return;
+        }
+        lock_choreography_pending_ = false;
+        lock_choreography_switched_ = switched;
+
+        // No compositor blur by design: the lock stage shows only the
+        // wallpaper on an empty workspace — no windows, nothing to hide.
+
         lock_surface_->show();
 
         services::SessionManager* session = session_.get();
@@ -929,6 +991,19 @@ public:
             delete fb;
             return G_SOURCE_REMOVE;
         }, fallback);
+    }
+
+    void finish_lock_unlock() {
+        // Reverse choreography: bar back, original workspace back — windows
+        // slide home on Hyprland's own animation.
+        if (lock_choreography_switched_ && lock_choreography_workspace_ != 0) {
+            services::HyprlandWorkspaces::switch_to(lock_choreography_workspace_);
+        }
+        if (lock_choreography_bar_was_visible_ && bar_ != nullptr) {
+            gtk_widget_set_visible(bar_->get_window(), TRUE);
+        }
+        lock_choreography_switched_ = false;
+        lock_choreography_workspace_ = 0;
     }
 
     void open_logout_menu(
@@ -1768,6 +1843,12 @@ private:
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
     std::unique_ptr<workspace::WorkspaceOverviewOverlay> workspace_overview_;
     std::unique_ptr<lockscreen::LockSurface> lock_surface_;
+    // Lock choreography state (mana-core style workspace slide).
+    bool lock_choreography_pending_ = false;
+    bool lock_choreography_switched_ = false;
+    bool lock_choreography_bar_was_visible_ = false;
+    int lock_choreography_workspace_ = 0;
+    std::uint64_t lock_choreography_generation_ = 0;
     services::WorkspaceSnapshot workspace_snapshot_;
     powermenu::PowerMenuProcess power_menu_process_;
     std::unique_ptr<realmheart::mana_core::ManaCoresSelector> mana_cores_selector_;

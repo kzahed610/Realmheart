@@ -213,6 +213,8 @@ void LockSurface::force_transparent_surface() {
 
 void LockSurface::show() {
     if (state_ == nullptr) return;
+    // The punch-through: surface maps instantly, then cracks spiderweb and
+    // the horns drive through base->tip (all content-side, mana-core style).
     state_->state_machine->present();
     if (state_->title_label != nullptr) {
         gtk_widget_set_visible(state_->title_label, TRUE);
