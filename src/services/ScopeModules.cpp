@@ -42,7 +42,7 @@ realmheart::core::ModuleRegistry build_confirmed_module_registry() {
 
     registry.add(ModuleDescriptor{
         "lockscreen.broken-seal",
-        "Native Broken Seal lockscreen: horn pair emergence, password entry, PAM auth",
+        "Native lockscreen: password entry, PAM auth",
         ModulePhase::Lock,
         {"auth", "background", "blur", "animations", "hyprland"},
         true

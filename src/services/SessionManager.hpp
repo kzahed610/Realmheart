@@ -38,13 +38,6 @@ public:
     bool power_off();
     bool is_locked() const;
 
-    // Adds/removes the Hyprland layer-shell blur rule for the Broken Seal
-    // lockscreen surface namespace. Enable is called at veil-full coverage
-    // (the pop hides under the veil); disable also sweeps stale rules so a
-    // killed shell can never leave blur armed for the next lock.
-    bool enable_lockscreen_blur() const;
-    bool disable_lockscreen_blur() const;
-
 private:
     std::unique_ptr<ICommandExecutor> executor_;
 };

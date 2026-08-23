@@ -6,9 +6,9 @@
 
 namespace realmheart::ui::lockscreen {
 
-// Owns the compiled lockscreen GL programs. Loads shader text from
+// Owns the compiled lockscreen GL program. Loads shader text from
 // effects/lockscreen/, validates it against the lockscreen shader contract,
-// compiles + links to a program, and hot-reloads when a shader file changes
+// compiles + links the program, and hot-reloads when the shader file changes
 // (250 ms watcher). Must only be used while a GL context is current.
 class ShaderManager {
 public:
@@ -18,11 +18,11 @@ public:
     ShaderManager(const ShaderManager&) = delete;
     ShaderManager& operator=(const ShaderManager&) = delete;
 
-    // Compiles (and later hot-reloads) the crystal shader program. Returns
+    // Compiles (and later hot-reloads) the scales shader program. Returns
     // false and fills error if the shader cannot be loaded or compiled.
     [[nodiscard]] bool ensure_loaded(std::string* error = nullptr);
 
-    [[nodiscard]] unsigned int crystal_program() const noexcept;
+    [[nodiscard]] unsigned int program() const noexcept;
 
 private:
     struct Program;

@@ -904,21 +904,19 @@ public:
         // toggle back to the desktop).
         if (lock_surface_ != nullptr && lock_surface_->visible()) return;
 
-        // Native Broken Seal lockscreen. If it fails to initialize within 2s,
+        // Native lockscreen. If it fails to initialize within 2s,
         // fall back to hyprlock so the session is never left unlocked.
         if (lock_surface_ == nullptr) {
             lock_surface_ = std::make_unique<lockscreen::LockSurface>(application_);
             lock_surface_->set_unlocked_callback([this] {
-                session_->disable_lockscreen_blur();
                 finish_lock_unlock();
             });
         }
 
         // Lock choreography (mana-core style): hide the bar, switch to an
         // empty named workspace so Hyprland's own workspace animation slides
-        // every window off-stage, and only then present the seal over the
-        // bare wallpaper. The veil blooms after emergence; blur snaps on at
-        // full coverage and hides under its peak.
+        // every window off-stage, and only then present the lockscreen over
+        // the bare wallpaper.
         lock_choreography_pending_ = true;
         lock_surface_->hide_immediately();
         lock_choreography_workspace_ =
@@ -970,7 +968,6 @@ public:
 
         // No compositor blur by design: the lock stage shows only the
         // wallpaper on an empty workspace — no windows, nothing to hide.
-
         lock_surface_->show();
 
         services::SessionManager* session = session_.get();
@@ -986,7 +983,7 @@ public:
                 delete fb;
                 return G_SOURCE_REMOVE;
             }
-            std::cerr << "[BrokenSeal] surface failed to map, falling back to hyprlock\n";
+            std::cerr << "[Lockscreen] surface failed to map, falling back to hyprlock\n";
             if (fb->session != nullptr) fb->session->lock();
             delete fb;
             return G_SOURCE_REMOVE;

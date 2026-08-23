@@ -3,18 +3,13 @@
 #include <gtk/gtk.h>
 
 #include <functional>
-#include <memory>
 
 namespace realmheart::ui::lockscreen {
 
-class CrystalShaderRenderer;
-class LockStateMachine;
-class ShaderManager;
-
-// Fullscreen Broken Seal lockscreen surface. A layer-shell overlay window
-// (namespace realmheart-broken_seal, exclusive keyboard) hosting the crystal
-// shader renderer plus the "BROKEN SEAL" header, clock, and password entry.
-// Owns the 16 ms animation tick loop that drives the state machine.
+// Broken Seal lockscreen surface. A layer-shell overlay window
+// (namespace realmheart-broken_seal, exclusive keyboard) hosting the scales
+// GL scene as the base layer, with the password entry and "BROKEN SEAL"
+// title as GTK widgets above it. PAM auth via AuthPam.
 class LockSurface {
 public:
     explicit LockSurface(GtkApplication* app);
@@ -28,12 +23,12 @@ public:
 
     [[nodiscard]] GtkWindow* window() const noexcept;
 
-    // Presents the surface and starts the horn emergence animation.
+    // Presents the surface, starts the Forming animation, and focuses the
+    // password entry.
     void show();
 
-    // Starts the closing animation; the surface hides when it completes.
+    // Plays the Closing erosion, then hides on completion.
     void hide();
-
     void hide_immediately();
 
     [[nodiscard]] bool visible() const noexcept;
@@ -41,9 +36,13 @@ public:
 private:
     void setup_layout();
     void force_transparent_surface();
-    gboolean ensure_tick();
-    gboolean advance_frame();
     gboolean submit_password();
+    void start_tick();
+    void stop_tick();
+    void advance_frame();
+    void push_frame();
+    // Safety net: completes the unlock even if the closing animation stalls.
+    void force_unlock();
 
     struct State;
     State* state_ = nullptr;

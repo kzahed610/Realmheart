@@ -2,31 +2,28 @@
 
 namespace realmheart::ui::lockscreen {
 
-// Phase machine for the Broken Seal lockscreen.
-enum class LockPhase {
+// Phase machine for the Broken Seal scales lockscreen.
+enum class ScalesPhase {
     Hidden,
-    Opening,
-    Splitting,
-    Typing,
-    Snapped,
-    Combining,
+    Forming,
+    Idle,
+    Failing,
     Closing,
 };
 
 // Tracks a 0..1 timeline for the currently animating phase and derives eased
 // outputs for the scene. Non-animating phases return progress() == 0.
-class LockStateMachine {
+class ScalesStateMachine {
 public:
-    // Opens the seal: Hidden -> Opening. Re-entrant (Opening during Closing
-    // restarts the emergence).
+    // Hidden -> Forming. Re-entrant (Forming during Closing restarts the
+    // emergence).
     void present() noexcept;
 
-    // Opens the seal already fully composed (mana-core style): skips the
-    // emergence and lands directly in Typing. Closing still plays on dismiss.
-    void present_instant() noexcept;
-
-    // Dismisses the seal: any active phase -> Closing.
+    // Any active phase -> Closing (unlock/dismiss). Idle is skipped.
     void dismiss() noexcept;
+
+    // Forming/Idle -> Failing (wrong password). Clears after the flash.
+    void fail() noexcept;
 
     // Immediately returns to Hidden without animation.
     void hide_immediately() noexcept;
@@ -35,14 +32,14 @@ public:
     // above one second are ignored/clamped so a stall never causes a jump.
     void advance(double delta_seconds) noexcept;
 
-    [[nodiscard]] LockPhase phase() const noexcept { return phase_; }
+    [[nodiscard]] ScalesPhase phase() const noexcept { return phase_; }
     [[nodiscard]] double progress() const noexcept { return progress_; }
 
     // True while a phase needs continuous frames.
     [[nodiscard]] bool needs_frame() const noexcept;
 
 private:
-    LockPhase phase_ = LockPhase::Hidden;
+    ScalesPhase phase_ = ScalesPhase::Hidden;
     double progress_ = 0.0;
 };
 

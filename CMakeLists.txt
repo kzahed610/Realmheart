@@ -169,11 +169,11 @@ add_library(realmheart_ui STATIC
     src/ui/NotificationToast.cpp
     src/ui/NowPlayingOverlay.cpp
     src/ui/OSDOverlay.cpp
-    src/ui/lockscreen/LockStateMachine.cpp
-    src/ui/lockscreen/ShaderManager.cpp
-    src/ui/lockscreen/CrystalShaderRenderer.cpp
     src/ui/lockscreen/AuthPam.cpp
     src/ui/lockscreen/LockSurface.cpp
+    src/ui/lockscreen/ScalesRenderer.cpp
+    src/ui/lockscreen/ScalesStateMachine.cpp
+    src/ui/lockscreen/ShaderManager.cpp
     src/ui/powermenu/PowerMenuConfirmation.cpp
     src/ui/powermenu/PowerMenuControls.cpp
     src/ui/powermenu/PowerMenuLayout.cpp
@@ -224,7 +224,6 @@ target_link_libraries(realmheart_ui PRIVATE
     PkgConfig::JPEG
     PkgConfig::EPOXY
     Threads::Threads
-    pam
 )
 
 target_link_libraries(realmheart PRIVATE
@@ -256,7 +255,7 @@ target_link_libraries(realmheart_power_menu_renderer PRIVATE
 
 add_dependencies(realmheart realmheart_power_menu_renderer)
 
-# Setuid-root PAM helper for the Broken Seal lockscreen. Installed with the
+# Setuid-root PAM helper for the lockscreen. Installed with the
 # setuid bit so the user shell can authenticate without root.
 add_executable(realmheart_auth_helper
     src/auth-helper/main.cpp
@@ -268,12 +267,10 @@ target_include_directories(realmheart_auth_helper PRIVATE src third_party)
 target_compile_options(realmheart_auth_helper PRIVATE ${REALMHEART_WARNING_FLAGS})
 target_link_libraries(realmheart_auth_helper PRIVATE pam)
 
-# Standalone Broken Seal lockscreen surface harness. Not registered with CTest
+# Standalone lockscreen surface harness. Not registered with CTest
 # because layer-shell windows require the user's live Wayland session.
 add_executable(realmheart_lockscreen_test
     src/lockscreen-test/main.cpp
-    src/core/Command.cpp
-    src/services/SessionManager.cpp
 )
 set_target_properties(realmheart_lockscreen_test PROPERTIES
     OUTPUT_NAME "realmheart-lockscreen-test"
@@ -390,7 +387,7 @@ endif()
 install(DIRECTORY assets/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/assets)
 install(DIRECTORY styles/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/styles)
 install(DIRECTORY effects/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/effects)
-# PAM service for the Broken Seal lockscreen (requires root at install time).
+# PAM service for the lockscreen (requires root at install time).
 install(FILES config/pam/realmheart-lockscreen DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/pam.d)
 
 include(CTest)
@@ -806,17 +803,6 @@ if(BUILD_TESTING)
 
     add_executable(realmheart_shell_state_tests tests/ShellStateTests.cpp)
     realmheart_register_test(realmheart_shell_state_tests)
-
-    add_executable(
-        realmheart_lock_state_machine_tests
-        tests/LockStateMachineTests.cpp
-        src/ui/lockscreen/LockStateMachine.cpp
-    )
-    target_link_libraries(
-        realmheart_lock_state_machine_tests
-        PRIVATE GTest::gtest GTest::gtest_main
-    )
-    realmheart_register_test(realmheart_lock_state_machine_tests)
 
     add_executable(realmheart_theme_service_tests tests/ThemeServiceTests.cpp src/services/ThemeService.cpp)
     realmheart_register_test(realmheart_theme_service_tests)

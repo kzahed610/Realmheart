@@ -1,8 +1,8 @@
 #include "ui/lockscreen/LockSurface.hpp"
 
 #include "ui/lockscreen/AuthPam.hpp"
-#include "ui/lockscreen/CrystalShaderRenderer.hpp"
-#include "ui/lockscreen/LockStateMachine.hpp"
+#include "ui/lockscreen/ScalesRenderer.hpp"
+#include "ui/lockscreen/ScalesStateMachine.hpp"
 #include "ui/lockscreen/ShaderManager.hpp"
 #include "ui/LayerSurface.hpp"
 
@@ -10,50 +10,90 @@
 #include <gtk4-layer-shell/gtk4-layer-shell.h>
 
 #include <algorithm>
-#include <chrono>
+#include <cmath>
 #include <iostream>
 #include <memory>
+#include <string>
+#include <utility>
 
 namespace realmheart::ui::lockscreen {
 
-constexpr int kFrameIntervalMs = 16;
-constexpr double kMaxDeltaSeconds = 0.10;
+// The shader's blob coverage (uTarget) — must match the renderer default.
+constexpr double kBlobTarget = 0.20;
+// The GL scene's seed; stable per process so the field looks identical on
+// every lock/unlock cycle.
+constexpr float kSceneSeed = 0.618034F;
 
 struct LockSurface::State {
     LockSurface* owner = nullptr;
     GtkApplication* application = nullptr;
     GtkWindow* window = nullptr;
     GtkWidget* entry = nullptr;
-    GtkWidget* title_label = nullptr;
+    GtkWidget* error_label = nullptr;
     std::function<void()> unlocked_callback;
 
-    std::unique_ptr<LockStateMachine> state_machine;
-    std::shared_ptr<ShaderManager> shaders;
-    std::unique_ptr<CrystalShaderRenderer> crystal;
     std::unique_ptr<AuthPam> auth;
+    std::unique_ptr<ScalesRenderer> scales;
+    std::unique_ptr<ShaderManager> shaders;
+    std::unique_ptr<ScalesStateMachine> machine;
 
     guint tick_source_id = 0;
-    gint64 last_frame_time_us = 0;
+    gint64 last_tick_us = 0;
+
+    // Idle continues to shimmer: the tick keeps running while visible.
+    bool tick_running = false;
+    bool closing = false;
+    // Watchdog so a stalled closing animation can never leave the user
+    // locked out: force-complete + fire the unlock callback.
+    guint closing_watchdog_id = 0;
+
+    void start_tick() noexcept {
+        if (tick_running) return;
+        tick_running = true;
+        last_tick_us = g_get_monotonic_time();
+    }
 
     void stop_tick() noexcept {
+        tick_running = false;
         if (tick_source_id != 0) {
             g_source_remove(tick_source_id);
             tick_source_id = 0;
         }
-        last_frame_time_us = 0;
+    }
+
+    void arm_closing_watchdog() noexcept {
+        if (closing_watchdog_id != 0) return;
+        closing_watchdog_id = g_timeout_add(
+            2500,
+            +[](gpointer data) -> gboolean {
+                auto* state = static_cast<State*>(data);
+                state->closing_watchdog_id = 0;
+                std::cerr << "[LockSurface] closing watchdog fired — forcing unlock\n";
+                if (state->owner != nullptr) state->owner->force_unlock();
+                return G_SOURCE_REMOVE;
+            },
+            this
+        );
+    }
+
+    void disarm_closing_watchdog() noexcept {
+        if (closing_watchdog_id != 0) {
+            g_source_remove(closing_watchdog_id);
+            closing_watchdog_id = 0;
+        }
     }
 };
 
 LockSurface::LockSurface(GtkApplication* app) : state_(new State) {
     state_->owner = this;
     state_->application = app;
-    state_->state_machine = std::make_unique<LockStateMachine>();
-    state_->shaders = std::make_shared<ShaderManager>();
-    state_->crystal = std::make_unique<CrystalShaderRenderer>(state_->shaders);
     state_->auth = std::make_unique<AuthPam>();
+    state_->scales = std::make_unique<ScalesRenderer>();
+    state_->shaders = std::make_unique<ShaderManager>();
+    state_->machine = std::make_unique<ScalesStateMachine>();
 
     state_->window = GTK_WINDOW(gtk_application_window_new(app));
-    gtk_window_set_title(state_->window, "Realmheart Broken Seal");
+    gtk_window_set_title(state_->window, "Realmheart Lockscreen");
     gtk_window_set_decorated(state_->window, FALSE);
     gtk_window_set_resizable(state_->window, TRUE);
     gtk_widget_add_css_class(GTK_WIDGET(state_->window), "realmheart-broken-seal-window");
@@ -61,14 +101,6 @@ LockSurface::LockSurface(GtkApplication* app) : state_(new State) {
     // receive keyboard events. Individual non-interactive children opt out.
     apply_layer_surface(state_->window, make_lockscreen_surface_spec());
 
-    g_signal_connect(
-        state_->window,
-        "realize",
-        G_CALLBACK(+[](GtkWidget*, gpointer data) {
-            static_cast<State*>(data)->crystal->set_opacity(0.0);
-        }),
-        state_
-    );
     g_signal_connect(
         state_->window,
         "map",
@@ -81,7 +113,7 @@ LockSurface::LockSurface(GtkApplication* app) : state_(new State) {
                 GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE
             );
             // Never advertise opacity, or the compositor skips alpha blending
-            // and the shader's transparent pixels become a black rectangle.
+            // and the surface's transparent pixels become a black rectangle.
             if (GdkSurface* surface = gtk_native_get_surface(
                     GTK_NATIVE(widget));
                 surface != nullptr) {
@@ -91,7 +123,6 @@ LockSurface::LockSurface(GtkApplication* app) : state_(new State) {
                 G_GNUC_END_IGNORE_DEPRECATIONS
                 cairo_region_destroy(region);
             }
-            state->crystal->set_opacity(1.0);
             // Focus the password entry once the surface is mapped so keys
             // reach it (grab_focus before map is a silent no-op).
             if (state->entry != nullptr && gtk_widget_get_mapped(state->entry)) {
@@ -112,6 +143,11 @@ LockSurface::~LockSurface() {
         g_signal_handlers_disconnect_by_data(state_->window, state_);
         gtk_window_destroy(state_->window);
     }
+    // GL/widget resources are intentionally leaked on process exit per the
+    // established renderer lifetime pattern (the GL context is gone by the
+    // time destructors run after g_application_run returns).
+    state_->scales.release();
+    state_->shaders.release();
     delete state_;
     state_ = nullptr;
 }
@@ -128,44 +164,38 @@ void LockSurface::setup_layout() {
     GtkWidget* overlay = gtk_overlay_new();
     gtk_widget_set_hexpand(overlay, TRUE);
     gtk_widget_set_vexpand(overlay, TRUE);
-    gtk_widget_set_can_target(overlay, FALSE);
 
-    GtkWidget* crystal_widget = state_->crystal->widget();
-    gtk_overlay_set_child(GTK_OVERLAY(overlay), crystal_widget);
-    gtk_overlay_set_clip_overlay(GTK_OVERLAY(overlay), crystal_widget, TRUE);
+    // Base layer: the scales GL scene, filling the window.
+    GtkWidget* gl = state_->scales->widget();
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), gl);
 
-    GtkWidget* title = gtk_label_new(nullptr);
-    gtk_label_set_markup(
-        GTK_LABEL(title),
-        "<span font='Sans 22' weight='bold' letter_spacing='8' "
-        "foreground='#E8C15A'>B R O K E N &#160; S E A L</span>"
-    );
-    gtk_widget_add_css_class(title, "realmheart-broken-seal-title");
-    gtk_widget_set_halign(title, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(title, GTK_ALIGN_END);
-    gtk_widget_set_margin_bottom(title, 42);
-    gtk_widget_set_can_target(title, FALSE);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), title);
-    state_->title_label = title;
-
-    // Password entry: sits in the gap between the two horns.
+    // Password entry: bare input bar, centered, above the scales.
     GtkWidget* entry = gtk_password_entry_new();
     gtk_widget_add_css_class(entry, "realmheart-broken-seal-entry");
     gtk_widget_set_halign(entry, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(entry, GTK_ALIGN_CENTER);
-    gtk_widget_set_margin_top(entry, 180);
     gtk_widget_set_size_request(entry, 260, 44);
-    gtk_widget_set_visible(entry, FALSE);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), entry);
     state_->entry = entry;
 
-    GtkWidget* clock = gtk_label_new("");
-    gtk_widget_add_css_class(clock, "realmheart-broken-seal-clock");
-    gtk_widget_set_halign(clock, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(clock, GTK_ALIGN_END);
-    gtk_widget_set_margin_bottom(clock, 100);
-    gtk_widget_set_can_target(clock, FALSE);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), clock);
+    // "seal remains" label, hidden until a wrong password.
+    GtkWidget* error_label = gtk_label_new("seal remains");
+    gtk_widget_add_css_class(error_label, "realmheart-broken-seal-error-label");
+    gtk_widget_set_halign(error_label, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(error_label, GTK_ALIGN_CENTER);
+    gtk_widget_set_margin_top(error_label, 72);
+    gtk_widget_set_visible(error_label, FALSE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), error_label);
+    state_->error_label = error_label;
+
+    // "BROKEN SEAL" title: golden, letter-spaced, bottom-center. Part of the
+    // GTK layer, not the shader.
+    GtkWidget* title = gtk_label_new("BROKEN SEAL");
+    gtk_widget_add_css_class(title, "realmheart-broken-seal-title");
+    gtk_widget_set_halign(title, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(title, GTK_ALIGN_END);
+    gtk_widget_set_margin_bottom(title, 42);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), title);
 
     gtk_window_set_child(state_->window, overlay);
 
@@ -213,17 +243,16 @@ void LockSurface::force_transparent_surface() {
 
 void LockSurface::show() {
     if (state_ == nullptr) return;
-    // The punch-through: surface maps instantly, then cracks spiderweb and
-    // the horns drive through base->tip (all content-side, mana-core style).
-    state_->state_machine->present();
-    if (state_->title_label != nullptr) {
-        gtk_widget_set_visible(state_->title_label, TRUE);
+    std::cerr << "[LockSurface] show() called" << '\n';
+
+    std::string error;
+    if (!state_->scales->present(&error)) {
+        // The scene is optional: the input bar must still work without it.
+        std::cerr << "[Lockscreen] scales renderer unavailable: " << error << '\n';
     }
-    CrystalSceneFrame frame;
-    frame.progress = 0.0;
-    frame.opening = true;
-    state_->crystal->update(frame);
-    state_->crystal->set_opacity(1.0);
+
+    state_->closing = false;
+    state_->machine->present();
     gtk_window_present(state_->window);
     force_transparent_surface();
 
@@ -236,30 +265,56 @@ void LockSurface::show() {
         );
     }
 
-    ensure_tick();
-
     // Show and focus the password entry.
     if (state_->entry != nullptr) {
         gtk_widget_set_visible(state_->entry, TRUE);
         gtk_widget_grab_focus(state_->entry);
     }
+    if (state_->error_label != nullptr) {
+        gtk_widget_set_visible(state_->error_label, FALSE);
+    }
+
+    start_tick();
+    push_frame();
 }
 
 void LockSurface::hide() {
-    if (state_ == nullptr) return;
-    if (state_->state_machine->phase() == LockPhase::Hidden) return;
-    state_->state_machine->dismiss();
-    ensure_tick();
+    if (state_ == nullptr || state_->closing) return;
+    std::cerr << "[LockSurface] hide() — starting closing animation" << '\n';
+    state_->closing = true;
+    state_->machine->dismiss();
+    // The member start_tick() self-guards: if the tick is already running it
+    // is a no-op, if not it adds the timeout source (never trust the flag
+    // alone — it can be set without a live source).
+    start_tick();
+    state_->arm_closing_watchdog();
+    push_frame();
 }
 
 void LockSurface::hide_immediately() {
     if (state_ == nullptr) return;
+    state_->closing = false;
+    state_->machine->hide_immediately();
     state_->stop_tick();
-    state_->state_machine->hide_immediately();
-    state_->crystal->finish();
+    if (state_->scales != nullptr) state_->scales->finish();
     if (state_->window != nullptr &&
         gtk_widget_get_visible(GTK_WIDGET(state_->window))) {
         gtk_widget_set_visible(GTK_WIDGET(state_->window), FALSE);
+    }
+}
+
+void LockSurface::force_unlock() {
+    if (state_ == nullptr) return;
+    state_->disarm_closing_watchdog();
+    if (state_->closing) {
+        state_->closing = false;
+        state_->machine->hide_immediately();
+        state_->stop_tick();
+        if (state_->scales != nullptr) state_->scales->finish();
+        if (state_->window != nullptr) {
+            gtk_widget_set_visible(GTK_WIDGET(state_->window), FALSE);
+        }
+        if (state_->unlocked_callback) state_->unlocked_callback();
     }
 }
 
@@ -268,82 +323,95 @@ bool LockSurface::visible() const noexcept {
         gtk_widget_get_visible(GTK_WIDGET(state_->window));
 }
 
-gboolean LockSurface::ensure_tick() {
-    if (state_ == nullptr) return FALSE;
-    if (state_->tick_source_id != 0 && g_main_context_find_source_by_id(
-            nullptr, state_->tick_source_id) != nullptr) {
-        return TRUE; // live tick already running
-    }
-    // Stale id: the tick stopped itself (Typing phase) without clearing the
-    // field, which previously blocked hide()'s Closing animation forever.
-    state_->tick_source_id = 0;
-    state_->last_frame_time_us = 0;
+void LockSurface::start_tick() {
+    if (state_ == nullptr || state_->tick_running) return;
+    state_->start_tick();
     state_->tick_source_id = g_timeout_add(
-        kFrameIntervalMs,
+        16,
         +[](gpointer data) -> gboolean {
             auto* state = static_cast<State*>(data);
-            if (state->owner == nullptr) {
-                state->tick_source_id = 0;
-                return G_SOURCE_REMOVE;
-                }
-            if (!state->state_machine->needs_frame()) {
-                // Tick owns its shutdown: clear the id so a later
-                // ensure_tick() can restart it.
-                state->tick_source_id = 0;
-                return G_SOURCE_REMOVE;
-            }
-            return state->owner->advance_frame();
+            state->owner->advance_frame();
+            return G_SOURCE_CONTINUE;
         },
         state_
     );
-    return TRUE;
 }
 
-gboolean LockSurface::advance_frame() {
-    if (state_ == nullptr) return G_SOURCE_REMOVE;
+void LockSurface::stop_tick() {
+    if (state_ == nullptr) return;
+    state_->stop_tick();
+}
 
-    const gint64 now = g_get_monotonic_time();
-    double delta_seconds = 1.0 / 60.0;
-    if (state_->last_frame_time_us != 0) {
-        delta_seconds = static_cast<double>(now - state_->last_frame_time_us) /
-            1'000'000.0;
-    }
-    state_->last_frame_time_us = now;
-    delta_seconds = std::clamp(delta_seconds, 0.0, kMaxDeltaSeconds);
-
-    state_->state_machine->advance(delta_seconds);
-
-    const LockPhase phase = state_->state_machine->phase();
-    const double progress = state_->state_machine->progress();
-
-    // Build the per-frame scene. Opening: horns pop in with easeOutBack.
-    // The horns are FIXED — no split/slide animation. Typing happens in the
-    // gap between them. Closing: fade/scale out.
-    // Only Opening and Closing animate the emergence scale; Splitting/Typing
-    // hold at progress 1.0 so the pop-in never runs a second time.
-    CrystalSceneFrame frame;
-    frame.opening = phase != LockPhase::Closing;
-    if (phase == LockPhase::Opening || phase == LockPhase::Closing) {
-        frame.progress = progress;
-    } else {
-        frame.progress = 1.0;
+void LockSurface::advance_frame() {
+    if (state_ == nullptr || !state_->tick_running) {
+        std::cerr << "[LockSurface] advance_frame skipped (tick not running)"
+                  << '\n';
+        return;
     }
 
-    // Title + entry are shown once by show(); do not toggle them per frame
-    // (hiding during Opening would steal focus from the entry).
-    state_->crystal->update(frame);
+    // Manual 16 ms frame pacing: monotonic delta, clamped and finite-guarded.
+    const gint64 now_us = g_get_monotonic_time();
+    double delta = static_cast<double>(now_us - state_->last_tick_us) / 1e6;
+    state_->last_tick_us = now_us;
+    if (!std::isfinite(delta)) delta = 0.0;
+    delta = std::clamp(delta, 0.0, 0.1);
 
-    if (phase == LockPhase::Hidden) {
+    state_->machine->advance(delta);
+    push_frame();
+
+    const bool hidden = state_->machine->phase() == ScalesPhase::Hidden;
+    if (state_->closing && hidden) {
+        std::cerr << "[LockSurface] closing complete — hiding window, firing unlock callback" << '\n';
+        state_->disarm_closing_watchdog();
+        // Unlock/dismiss completed: fire the callback, then hide.
+        if (state_->unlocked_callback) state_->unlocked_callback();
+        state_->closing = false;
         state_->stop_tick();
-        state_->crystal->finish();
-        if (state_->window != nullptr &&
-            gtk_widget_get_visible(GTK_WIDGET(state_->window))) {
+        if (state_->scales != nullptr) state_->scales->finish();
+        if (state_->window != nullptr) {
             gtk_widget_set_visible(GTK_WIDGET(state_->window), FALSE);
         }
-        return G_SOURCE_REMOVE;
+        return;
     }
 
-    return G_SOURCE_CONTINUE;
+    // Idle keeps shimmering; stop ticking only once the window hides.
+    if (!state_->machine->needs_frame() && !state_->closing) {
+        state_->stop_tick();
+    }
+}
+
+void LockSurface::push_frame() {
+    if (state_ == nullptr || state_->scales == nullptr) return;
+
+    SceneFrame frame;
+    const ScalesPhase phase = state_->machine->phase();
+    const double progress = state_->machine->progress();
+
+    frame.opening = phase != ScalesPhase::Closing;
+    frame.progress = progress;
+    frame.target = kBlobTarget;
+    frame.seed = kSceneSeed;
+    frame.time_s = static_cast<double>(g_get_monotonic_time()) / 1e6;
+
+    switch (phase) {
+    case ScalesPhase::Forming:
+        frame.reveal = progress;
+        break;
+    case ScalesPhase::Idle:
+        frame.reveal = 1.0;
+        break;
+    case ScalesPhase::Failing:
+        frame.reveal = 1.0;
+        frame.warn = progress;
+        break;
+    case ScalesPhase::Closing:
+        frame.reveal = progress;
+        break;
+    case ScalesPhase::Hidden:
+        return;
+    }
+
+    state_->scales->update(frame);
 }
 
 gboolean LockSurface::submit_password() {
@@ -353,14 +421,14 @@ gboolean LockSurface::submit_password() {
 
     const char* text = gtk_editable_get_text(GTK_EDITABLE(state_->entry));
     if (text == nullptr || *text == '\0') {
-        std::cerr << "[BrokenSeal] submit ignored: empty entry\n";
+        std::cerr << "[Lockscreen] submit ignored: empty entry\n";
         return TRUE;
     }
 
     // Copy the password for the async worker.
     std::string password(text);
     gtk_editable_set_text(GTK_EDITABLE(state_->entry), "");
-    std::cerr << "[BrokenSeal] submitted " << password.size()
+    std::cerr << "[Lockscreen] submitted " << password.size()
               << " chars" << std::endl;
 
     // Resolve the current user.
@@ -372,18 +440,24 @@ gboolean LockSurface::submit_password() {
         std::move(password),
         [this](bool success) {
             if (!success) {
-                std::cerr << "[BrokenSeal] authentication failed\n";
-                // Refocus for another attempt.
-                if (state_ != nullptr && state_->entry != nullptr) {
+                std::cerr << "[Lockscreen] authentication failed\n";
+                if (state_ == nullptr) return;
+                // Red flash + "seal remains", then refocus for another try.
+                state_->machine->fail();
+                start_tick();
+                if (state_->error_label != nullptr) {
+                    gtk_widget_set_visible(state_->error_label, TRUE);
+                }
+                if (state_->entry != nullptr) {
                     gtk_widget_grab_focus(state_->entry);
                 }
                 return;
             }
-            std::cout << "[BrokenSeal] authentication succeeded\n";
-            if (state_ != nullptr) {
-                if (state_->unlocked_callback) state_->unlocked_callback();
-                state_->owner->hide();
-            }
+            std::cout << "[Lockscreen] authentication succeeded\n";
+            if (state_ == nullptr) return;
+            // Erode the scales (Closing), then fire the callback only once
+            // the surface is hidden — the choreography reverses underneath.
+            state_->owner->hide();
         }
     );
     return TRUE;

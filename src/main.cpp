@@ -45,7 +45,7 @@ void print_usage() {
               << "  realmheart --sidebar [--timeout N] Show the right sidebar MVP layer surface\n"
               << "  realmheart --bar [--timeout N]     Show the safe vertical bar MVP layer surface\n"
               << "  realmheart --test-layer [--timeout N] Show a temporary GTK layer-shell test surface\n"
-              << "  realmheart --lockscreen-test [--timeout N] Show the Broken Seal lockscreen surface\n"
+              << "  realmheart --lockscreen-test [--timeout N] Show the lockscreen surface\n"
               << "  realmheart --help                Show this help\n";
 }
 

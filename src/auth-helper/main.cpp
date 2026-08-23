@@ -1,4 +1,4 @@
-// realmheart-auth-helper — setuid-root PAM verifier for the Broken Seal
+// realmheart-auth-helper — setuid-root PAM verifier for the
 // lockscreen. The shell runs as the user, which cannot read /etc/shadow;
 // pam_unix needs root for that. This tiny helper is installed setuid-root and
 // performs the PAM check on the shell's behalf.
