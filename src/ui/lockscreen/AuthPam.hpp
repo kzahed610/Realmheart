@@ -5,7 +5,7 @@
 
 namespace realmheart::ui::lockscreen {
 
-// Asynchronous PAM authentication for the Broken Seal lockscreen.
+// Asynchronous PAM authentication for the lockscreen.
 // Spawns the setuid-root realmheart-auth-helper (which can read /etc/shadow)
 // on a worker thread and invokes the callback on the main (GTK) thread with
 // the result. Keeps the render loop unblocked.

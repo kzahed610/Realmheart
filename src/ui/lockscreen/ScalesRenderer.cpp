@@ -1,0 +1,389 @@
+#include "ui/lockscreen/ScalesRenderer.hpp"
+
+#include "effects/core/ShaderSource.hpp"
+
+#include <epoxy/gl.h>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <iostream>
+#include <string>
+#include <string_view>
+#include <utility>
+
+namespace realmheart::ui::lockscreen {
+namespace {
+
+constexpr std::string_view kShaderAsset = "lockscreen/scales/scales.frag";
+
+constexpr std::string_view kVertexShader = R"GLSL(#version 300 es
+precision highp float;
+
+out vec2 v_texcoord;
+
+void main() {
+    vec2 corner = vec2(
+        float((gl_VertexID << 1) & 2),
+        float(gl_VertexID & 2)
+    );
+    v_texcoord = vec2(corner.x, 1.0 - corner.y);
+    gl_Position = vec4(corner * 2.0 - 1.0, 0.0, 1.0);
+}
+)GLSL";
+
+void set_error(std::string* error, std::string message) {
+    if (error != nullptr) *error = std::move(message);
+}
+
+GLuint compile_shader(
+    GLenum type,
+    std::string_view source,
+    std::string* error
+) {
+    const GLuint shader = glCreateShader(type);
+    const char* source_pointer = source.data();
+    const GLint source_length = static_cast<GLint>(source.size());
+    glShaderSource(shader, 1, &source_pointer, &source_length);
+    glCompileShader(shader);
+
+    GLint compiled = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+    if (compiled == GL_TRUE) return shader;
+
+    GLint length = 0;
+    glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &length);
+    std::string log(static_cast<std::size_t>(std::max(length, 1)), '\0');
+    glGetShaderInfoLog(shader, length, nullptr, log.data());
+    glDeleteShader(shader);
+    set_error(error, std::move(log));
+    return 0;
+}
+
+GLuint link_program(
+    std::string_view fragment_source,
+    std::string* error
+) {
+    std::string vertex_error;
+    const GLuint vertex = compile_shader(
+        GL_VERTEX_SHADER,
+        kVertexShader,
+        &vertex_error
+    );
+    if (vertex == 0) {
+        set_error(error, "vertex shader compilation failed: " + vertex_error);
+        return 0;
+    }
+
+    std::string fragment_error;
+    const GLuint fragment = compile_shader(
+        GL_FRAGMENT_SHADER,
+        fragment_source,
+        &fragment_error
+    );
+    if (fragment == 0) {
+        glDeleteShader(vertex);
+        set_error(error, "fragment shader compilation failed: " + fragment_error);
+        return 0;
+    }
+
+    const GLuint program = glCreateProgram();
+    glAttachShader(program, vertex);
+    glAttachShader(program, fragment);
+    glLinkProgram(program);
+    glDeleteShader(vertex);
+    glDeleteShader(fragment);
+
+    GLint linked = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (linked == GL_TRUE) return program;
+
+    GLint length = 0;
+    glGetProgramiv(program, GL_INFO_LOG_LENGTH, &length);
+    std::string log(static_cast<std::size_t>(std::max(length, 1)), '\0');
+    glGetProgramInfoLog(program, length, nullptr, log.data());
+    glDeleteProgram(program);
+    set_error(error, "shader link failed: " + log);
+    return 0;
+}
+
+} // namespace
+
+struct ScalesRenderer::State {
+    GtkWidget* gl_area = nullptr;
+
+    bool active = false;
+
+    std::string fragment_source;
+    GLuint program = 0;
+    GLuint vertex_array = 0;
+
+    double progress = 0.0;
+    bool opening = true;
+    double reveal = 0.0;
+    double target = 0.2;
+    double warn = 0.0;
+    double time_s = 0.0;
+    float seed = 0.0F;
+
+    static constexpr std::array<float, 3> kBg{0.090F, 0.078F, 0.110F};    // #17141c
+    static constexpr std::array<float, 3> kLine{0.353F, 0.333F, 0.388F};  // #5a5563
+    static constexpr std::array<float, 3> kGlow{0.910F, 0.757F, 0.353F};  // #E8C15A
+    static constexpr std::array<float, 3> kWarnC{0.702F, 0.149F, 0.118F}; // #b3261e
+
+    void release_gl_resources() noexcept {
+        if (gl_area == nullptr || !gtk_widget_get_realized(gl_area)) {
+            vertex_array = 0;
+            program = 0;
+            return;
+        }
+
+        gtk_gl_area_make_current(GTK_GL_AREA(gl_area));
+        if (gtk_gl_area_get_error(GTK_GL_AREA(gl_area)) != nullptr) return;
+
+        if (vertex_array != 0) glDeleteVertexArrays(1, &vertex_array);
+        if (program != 0) glDeleteProgram(program);
+        vertex_array = 0;
+        program = 0;
+    }
+
+    void fail(std::string message) noexcept {
+        std::cerr << "[BrokenSeal] GL fallback: " << message << '\n';
+        active = false;
+        if (gl_area != nullptr) {
+            gtk_widget_set_opacity(gl_area, 0.0);
+            gtk_widget_set_visible(gl_area, FALSE);
+        }
+    }
+
+    bool ensure_program(std::string* error) {
+        if (program != 0) return true;
+        if (fragment_source.empty()) {
+            set_error(error, "scales shader source is empty");
+            return false;
+        }
+
+        program = link_program(fragment_source, error);
+        if (program == 0) return false;
+        glGenVertexArrays(1, &vertex_array);
+        return true;
+    }
+
+    gboolean render(GtkGLArea* area) noexcept {
+        if (!active) return TRUE;
+
+        if (const GError* gl_error = gtk_gl_area_get_error(area);
+            gl_error != nullptr) {
+            fail(gl_error->message != nullptr
+                ? gl_error->message
+                : "OpenGL context error");
+            return TRUE;
+        }
+
+        std::string error;
+        if (!ensure_program(&error)) {
+            fail(std::move(error));
+            return TRUE;
+        }
+
+        const int scale = std::max(
+            gtk_widget_get_scale_factor(GTK_WIDGET(area)),
+            1
+        );
+        const int width = std::max(
+            gtk_widget_get_width(GTK_WIDGET(area)) * scale,
+            1
+        );
+        const int height = std::max(
+            gtk_widget_get_height(GTK_WIDGET(area)) * scale,
+            1
+        );
+
+        glViewport(0, 0, width, height);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_BLEND);
+        glClearColor(0.0F, 0.0F, 0.0F, 0.0F);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        glUseProgram(program);
+        glBindVertexArray(vertex_array);
+
+        glUniform2f(
+            glGetUniformLocation(program, "uResolution"),
+            static_cast<float>(width),
+            static_cast<float>(height)
+        );
+        glUniform1f(
+            glGetUniformLocation(program, "uTime"),
+            static_cast<float>(time_s)
+        );
+        glUniform1f(
+            glGetUniformLocation(program, "uProgress"),
+            static_cast<float>(progress)
+        );
+        glUniform1f(
+            glGetUniformLocation(program, "uOpening"),
+            opening ? 1.0F : 0.0F
+        );
+        glUniform1f(
+            glGetUniformLocation(program, "uReveal"),
+            static_cast<float>(reveal)
+        );
+        glUniform1f(
+            glGetUniformLocation(program, "uTarget"),
+            static_cast<float>(target)
+        );
+        glUniform1f(
+            glGetUniformLocation(program, "uWarn"),
+            static_cast<float>(warn)
+        );
+        glUniform1f(glGetUniformLocation(program, "uSeed"), seed);
+        glUniform3fv(glGetUniformLocation(program, "uBg"), 1, kBg.data());
+        glUniform3fv(glGetUniformLocation(program, "uLine"), 1, kLine.data());
+        glUniform3fv(glGetUniformLocation(program, "uGlow"), 1, kGlow.data());
+        glUniform3fv(glGetUniformLocation(program, "uWarnC"), 1, kWarnC.data());
+
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glBindVertexArray(0);
+        glUseProgram(0);
+
+        const GLenum draw_error = glGetError();
+        if (draw_error != GL_NO_ERROR) {
+            fail("OpenGL draw failed with error " +
+                 std::to_string(static_cast<unsigned int>(draw_error)));
+            return TRUE;
+        }
+
+        return TRUE;
+    }
+};
+
+ScalesRenderer::ScalesRenderer() : state_(new State) {
+    state_->gl_area = gtk_gl_area_new();
+    g_object_ref_sink(state_->gl_area);
+    gtk_widget_set_hexpand(state_->gl_area, TRUE);
+    gtk_widget_set_vexpand(state_->gl_area, TRUE);
+    gtk_widget_set_halign(state_->gl_area, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(state_->gl_area, GTK_ALIGN_FILL);
+    gtk_widget_set_can_target(state_->gl_area, FALSE);
+    gtk_widget_set_focusable(state_->gl_area, FALSE);
+    gtk_widget_add_css_class(state_->gl_area, "realmheart-broken-seal-scales");
+    gtk_widget_remove_css_class(state_->gl_area, "background");
+    gtk_widget_set_visible(state_->gl_area, FALSE);
+    gtk_widget_set_opacity(state_->gl_area, 0.0);
+
+    gtk_gl_area_set_allowed_apis(
+        GTK_GL_AREA(state_->gl_area),
+        GDK_GL_API_GLES
+    );
+    gtk_gl_area_set_required_version(GTK_GL_AREA(state_->gl_area), 3, 0);
+    gtk_gl_area_set_auto_render(GTK_GL_AREA(state_->gl_area), FALSE);
+    gtk_gl_area_set_has_depth_buffer(GTK_GL_AREA(state_->gl_area), FALSE);
+    gtk_gl_area_set_has_stencil_buffer(GTK_GL_AREA(state_->gl_area), FALSE);
+
+    g_signal_connect(
+        state_->gl_area,
+        "render",
+        G_CALLBACK(+[](
+            GtkGLArea* area,
+            GdkGLContext*,
+            gpointer data
+        ) -> gboolean {
+            return static_cast<State*>(data)->render(area);
+        }),
+        state_
+    );
+    g_signal_connect(
+        state_->gl_area,
+        "unrealize",
+        G_CALLBACK(+[](GtkWidget*, gpointer data) {
+            static_cast<State*>(data)->release_gl_resources();
+        }),
+        state_
+    );
+}
+
+ScalesRenderer::~ScalesRenderer() {
+    if (state_ == nullptr) return;
+    finish();
+    state_->release_gl_resources();
+    if (state_->gl_area != nullptr) {
+        g_signal_handlers_disconnect_by_data(state_->gl_area, state_);
+        g_object_unref(state_->gl_area);
+        state_->gl_area = nullptr;
+    }
+    delete state_;
+    state_ = nullptr;
+}
+
+GtkWidget* ScalesRenderer::widget() const noexcept {
+    return state_ != nullptr ? state_->gl_area : nullptr;
+}
+
+bool ScalesRenderer::active() const noexcept {
+    return state_ != nullptr && state_->active;
+}
+
+bool ScalesRenderer::present(std::string* error) {
+    if (state_ == nullptr) {
+        set_error(error, "scales renderer is unavailable");
+        return false;
+    }
+
+    if (state_->fragment_source.empty()) {
+        std::string load_error;
+        const auto shader = realmheart::effects::load_shader_source(
+            kShaderAsset,
+            &load_error
+        );
+        if (!shader) {
+            set_error(error, std::move(load_error));
+            return false;
+        }
+
+        std::string missing_symbol;
+        if (!realmheart::effects::validate_lockscreen_shader_contract(
+                shader->text,
+                &missing_symbol)) {
+            set_error(error, "scales shader contract is missing: " + missing_symbol);
+            return false;
+        }
+        state_->fragment_source = shader->text;
+    }
+
+    state_->active = true;
+    gtk_widget_set_visible(state_->gl_area, TRUE);
+    gtk_widget_set_opacity(state_->gl_area, 1.0);
+    gtk_gl_area_queue_render(GTK_GL_AREA(state_->gl_area));
+
+    if (error != nullptr) error->clear();
+    return true;
+}
+
+void ScalesRenderer::update(const SceneFrame& frame) noexcept {
+    if (state_ == nullptr || !state_->active) return;
+
+    const auto finite = [](double value, double fallback) {
+        return std::isfinite(value) ? value : fallback;
+    };
+    state_->progress = finite(frame.progress, state_->progress);
+    state_->opening = frame.opening;
+    state_->reveal = finite(frame.reveal, state_->reveal);
+    state_->target = finite(frame.target, state_->target);
+    state_->warn = finite(frame.warn, state_->warn);
+    state_->time_s = finite(frame.time_s, state_->time_s);
+    state_->seed = std::isfinite(frame.seed) ? frame.seed : state_->seed;
+    gtk_gl_area_queue_render(GTK_GL_AREA(state_->gl_area));
+}
+
+void ScalesRenderer::finish() noexcept {
+    if (state_ == nullptr) return;
+    state_->active = false;
+    if (state_->gl_area != nullptr) {
+        gtk_widget_set_opacity(state_->gl_area, 0.0);
+        gtk_widget_set_visible(state_->gl_area, FALSE);
+    }
+}
+
+} // namespace realmheart::ui::lockscreen

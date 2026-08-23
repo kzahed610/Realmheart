@@ -8,7 +8,7 @@ effects/
 ├── windows/       Hyprland window-transition effect packages
 ├── power-menu/    Power-menu-only shaders and supporting effect assets
 ├── workspace/     Workspace-overview transition shaders
-└── lockscreen/    Broken Seal lockscreen shaders (horn pair)
+└── lockscreen/    Lockscreen (Broken Seal) shaders
 ```
 
 Window effects are manifest-driven. Each direct child of `effects/windows/`
@@ -23,6 +23,6 @@ Workspace effects are likewise native-shell assets. They are owned by the
 workspace overview's transition renderer and must stay under
 `effects/workspace/`; they are not window-effect manifests.
 
-Lockscreen effects are native-shell assets owned by the Broken Seal surface's
-`ShaderManager` (hot-reloaded at 250 ms) and must stay under
-`effects/lockscreen/`; they are not window-effect manifests.
+Lockscreen effects are native-shell assets owned by the Broken Seal lockscreen
+surface and must stay under `effects/lockscreen/`; they are not window-effect
+manifests.

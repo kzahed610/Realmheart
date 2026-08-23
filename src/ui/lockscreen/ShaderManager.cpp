@@ -15,7 +15,7 @@
 namespace realmheart::ui::lockscreen {
 namespace {
 
-constexpr std::string_view kCrystalShaderAsset = "lockscreen/crystal/crystal.frag";
+constexpr std::string_view kScalesShaderAsset = "lockscreen/scales/scales.frag";
 constexpr int kShaderReloadIntervalMs = 250;
 
 // Fullscreen triangle vertex shader shared by all lockscreen fragments. It
@@ -121,7 +121,7 @@ struct ShaderManager::Program {
 };
 
 struct ShaderManager::State {
-    Program crystal;
+    Program scales;
     guint reload_source_id = 0;
     bool watching = false;
 
@@ -134,9 +134,9 @@ struct ShaderManager::State {
     }
 
     void delete_programs() noexcept {
-        if (crystal.program != 0) {
-            glDeleteProgram(crystal.program);
-            crystal.program = 0;
+        if (scales.program != 0) {
+            glDeleteProgram(scales.program);
+            scales.program = 0;
         }
     }
 };
@@ -151,7 +151,7 @@ ShaderManager::~ShaderManager() {
     state_ = nullptr;
 }
 
-// Reloads one program if its source file changed since the last check.
+// Reloads the program if its source file changed since the last check.
 void ShaderManager::reload_program_if_changed(Program& program) {
     if (program.path.empty()) return;
 
@@ -189,7 +189,7 @@ void ShaderManager::reload_program_if_changed(Program& program) {
 gboolean ShaderManager::reload_tick(gpointer data) {
     auto* state = static_cast<ShaderManager::State*>(data);
     if (!state->watching) return G_SOURCE_REMOVE;
-    reload_program_if_changed(state->crystal);
+    reload_program_if_changed(state->scales);
     return G_SOURCE_CONTINUE;
 }
 
@@ -198,10 +198,10 @@ bool ShaderManager::ensure_loaded(std::string* error) {
         set_error(error, "shader manager is unavailable");
         return false;
     }
-    if (state_->crystal.program != 0) return true;
+    if (state_->scales.program != 0) return true;
 
     const auto shader = realmheart::effects::load_shader_source(
-        kCrystalShaderAsset,
+        kScalesShaderAsset,
         error
     );
     if (!shader) return false;
@@ -210,18 +210,18 @@ bool ShaderManager::ensure_loaded(std::string* error) {
     if (!realmheart::effects::validate_lockscreen_shader_contract(
             shader->text,
             &missing_symbol)) {
-        set_error(error, "crystal shader contract is missing: " + missing_symbol);
+        set_error(error, "scales shader contract is missing: " + missing_symbol);
         return false;
     }
 
     const GLuint program = link_program(shader->text, error);
     if (program == 0) return false;
 
-    state_->crystal.program = program;
-    state_->crystal.source = shader->text;
-    state_->crystal.path = shader->path;
+    state_->scales.program = program;
+    state_->scales.source = shader->text;
+    state_->scales.path = shader->path;
     std::error_code stat_error;
-    state_->crystal.last_write_time = std::filesystem::last_write_time(
+    state_->scales.last_write_time = std::filesystem::last_write_time(
         shader->path,
         stat_error
     );
@@ -237,8 +237,8 @@ bool ShaderManager::ensure_loaded(std::string* error) {
     return true;
 }
 
-unsigned int ShaderManager::crystal_program() const noexcept {
-    return state_ != nullptr ? state_->crystal.program : 0;
+unsigned int ShaderManager::program() const noexcept {
+    return state_ != nullptr ? state_->scales.program : 0;
 }
 
 } // namespace realmheart::ui::lockscreen

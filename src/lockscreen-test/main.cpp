@@ -1,24 +1,29 @@
-// Standalone harness for the Broken Seal lockscreen surface.
-// Renders the horn pair on the live Wayland session without PAM or input
-// grab. Press Esc or close the window to exit.
+// Standalone harness for the lockscreen surface.
+// Renders the input bar + scales on the live Wayland session without PAM or
+// input grab. Press Esc or close the window to exit.
+// --auto-unlock N: after N seconds, fire the unlocked callback and hide the
+// surface (exercises the closing/erosion path without real auth).
 
-#include "services/SessionManager.hpp"
 #include "ui/lockscreen/LockSurface.hpp"
 
 #include <gtk/gtk.h>
 
+#include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <string>
+#include <string_view>
 
 namespace {
 
-constexpr int kTimeoutSeconds = 15;
+constexpr int kTimeoutSeconds = 30;
 
 struct TestState {
     GtkApplication* application = nullptr;
     std::unique_ptr<realmheart::ui::lockscreen::LockSurface> surface;
-    std::unique_ptr<realmheart::services::SessionManager> session;
     gboolean activate_fired = FALSE;
+    int auto_unlock_after_seconds = 0;
+    bool unlocked = false;
 };
 
 gboolean on_escape(
@@ -37,18 +42,32 @@ void on_activate(GtkApplication* app, gpointer data) {
     auto* state = static_cast<TestState*>(data);
     state->application = app;
     state->activate_fired = TRUE;
-    std::cout << "[BrokenSeal test] activate fired" << std::endl;
+    std::cout << "[lockscreen test] activate fired" << std::endl;
 
     // Construct the surface inside activate so the GTK display exists before
-    // the GtkGLArea widget is created.
+    // the surface is presented.
     state->surface = std::make_unique<realmheart::ui::lockscreen::LockSurface>(app);
-
-    // Apply the Hyprland blur layerrule BEFORE the surface maps so the rule
-    // matches at map time (Hyprland layerrules only match new surfaces).
-    state->session = std::make_unique<realmheart::services::SessionManager>();
-    state->session->enable_lockscreen_blur();
-
+    state->surface->set_unlocked_callback([state] {
+        std::cout << "[lockscreen test] unlocked callback fired\n";
+        state->unlocked = true;
+    });
     state->surface->show();
+
+    // Optional auto-unlock: exercise the closing path without real auth.
+    if (state->auto_unlock_after_seconds > 0) {
+        g_timeout_add_seconds(
+            state->auto_unlock_after_seconds,
+            +[](gpointer data) -> gboolean {
+                auto* state = static_cast<TestState*>(data);
+                if (!state->unlocked) {
+                    std::cout << "[lockscreen test] auto-unlock: hiding surface\n";
+                    state->surface->hide();
+                }
+                return G_SOURCE_REMOVE;
+            },
+            state
+        );
+    }
 
     GtkEventController* key_controller = gtk_event_controller_key_new();
     g_signal_connect(
@@ -62,15 +81,15 @@ void on_activate(GtkApplication* app, gpointer data) {
         key_controller
     );
 
-    std::cout << "[BrokenSeal test] surface presented (namespace "
+    std::cout << "[lockscreen test] surface presented (namespace "
                  "realmheart-broken_seal)\n";
 
-    // Debug: report focus state after the animation completes.
+    // Debug: report focus state shortly after present.
     g_timeout_add(3000, +[](gpointer data) -> gboolean {
         auto* surface = static_cast<realmheart::ui::lockscreen::LockSurface*>(data);
         GtkWidget* window = GTK_WIDGET(surface->window());
         GtkWidget* focused = gtk_window_get_focus(GTK_WINDOW(window));
-        std::cout << "[BrokenSeal test] focus: "
+        std::cout << "[lockscreen test] focus: "
                   << (focused != nullptr ? gtk_widget_get_name(focused) : "(none)")
                   << " mapped=" << gtk_widget_get_mapped(window)
                   << " visible=" << gtk_widget_get_visible(window)
@@ -88,6 +107,20 @@ int main(int argc, char** argv) {
     );
 
     auto state = std::make_unique<TestState>();
+    // --auto-unlock N: fire the unlock path after N seconds. Strip it from
+    // argv before GTK parses the rest.
+    int out_argc = 0;
+    char** out_argv = new char*[argc];
+    for (int i = 0; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--auto-unlock") {
+            if (i + 1 < argc) {
+                state->auto_unlock_after_seconds = std::atoi(argv[i + 1]);
+                ++i; // consume the value
+            }
+            continue;
+        }
+        out_argv[out_argc++] = argv[i];
+    }
     g_signal_connect(application, "activate", G_CALLBACK(on_activate), state.get());
 
     // Fallback quit after kTimeoutSeconds so a stalled session can't hang.
@@ -100,11 +133,8 @@ int main(int argc, char** argv) {
         application
     );
 
-    const int status = g_application_run(G_APPLICATION(application), argc, argv);
-    // Intentionally leak state so the LockSurface destructor never runs after
-    // the GL context is gone (g_application_run tears it down on return).
-    // The process exit reclaims the surface and its GL programs, matching the
-    // power-menu renderer's approach.
+    const int status = g_application_run(G_APPLICATION(application), out_argc, out_argv);
+    delete[] out_argv;
     state.release();
     g_object_unref(application);
     return status;

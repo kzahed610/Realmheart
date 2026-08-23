@@ -57,9 +57,9 @@ void AuthPam::verify_async(
         bool success = false;
 
         if (helper.empty()) {
-            std::cerr << "[BrokenSeal] auth: cannot resolve helper path\n";
+            std::cerr << "[Lockscreen] auth: cannot resolve helper path\n";
         } else if (::access(helper.c_str(), X_OK) != 0) {
-            std::cerr << "[BrokenSeal] auth: helper missing/not executable: "
+            std::cerr << "[Lockscreen] auth: helper missing/not executable: "
                       << helper << "\n";
         } else {
             // Spawn the setuid helper: argv = [helper, username], stdin = password.
@@ -73,7 +73,7 @@ void AuthPam::verify_async(
                     ::close(pipefd[1]);
                     ::execl(helper.c_str(), helper.c_str(), username.c_str(),
                             static_cast<char*>(nullptr));
-                    std::cerr << "[BrokenSeal] auth: execl failed: "
+                    std::cerr << "[Lockscreen] auth: execl failed: "
                               << std::strerror(errno) << "\n";
                     _exit(127);
                 }
@@ -95,12 +95,12 @@ void AuthPam::verify_async(
                 int status = 0;
                 ::waitpid(pid, &status, 0);
                 success = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-                std::cerr << "[BrokenSeal] auth: helper pid=" << pid
+                std::cerr << "[Lockscreen] auth: helper pid=" << pid
                           << " exited=" << (WIFEXITED(status) ? WEXITSTATUS(status) : -1)
                           << " signaled=" << (WIFSIGNALED(status) ? WTERMSIG(status) : 0)
                           << " -> " << (success ? "SUCCESS" : "FAIL") << "\n";
             } else {
-                std::cerr << "[BrokenSeal] auth: pipe() failed: "
+                std::cerr << "[Lockscreen] auth: pipe() failed: "
                           << std::strerror(errno) << "\n";
             }
         }

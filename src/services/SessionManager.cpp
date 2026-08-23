@@ -29,25 +29,4 @@ bool SessionManager::is_locked() const {
     return executor_->run_capture_succeeded({"pgrep", "hyprlock"});
 }
 
-bool SessionManager::enable_lockscreen_blur() const {
-    return executor_->run_background({
-        "hyprctl", "eval", "layerrule = \"blur, realmheart-broken_seal\""
-    });
-}
-
-bool SessionManager::disable_lockscreen_blur() const {
-    // Sweep ALL rule state for the seal namespace (not just blur): a shell
-    // killed mid-lock (TTY escape, crash) leaves its rules behind, and the
-    // next lock would then start with stale blur/noanim already armed —
-    // which is exactly the "blur is always there" symptom.
-    const bool unset_all = executor_->run_background({
-        "hyprctl", "eval", "layerrule = \"unset, realmheart-broken_seal\""
-    });
-    executor_->run_background({
-        "hyprctl", "eval",
-        "layerrule = \"unset, realmheart-broken_seal, blur\""
-    });
-    return unset_all;
-}
-
 } // namespace realmheart::services
