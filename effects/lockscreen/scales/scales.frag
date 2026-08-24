@@ -112,7 +112,7 @@ void main() {
     // lattice rotation turns it into a rounded DIAMOND on screen (the scale
     // silhouette), and the y-squash elongates it. A diamond SDF here would
     // rotate BACK to upright squares on screen — the exact bug this fixes.
-    float half_sz = 0.46 * cell;                  // half-extent, tight seam gap
+    float half_sz = 0.475 * cell;                 // half-extent, tight seam gap
     float rb = 0.16 * cell;                       // corner rounding
     vec2 dq = abs(lp) - (half_sz - rb);
     float sd = length(max(dq, vec2(0.0))) + min(max(dq.x, dq.y), 0.0) - rb;
@@ -140,7 +140,7 @@ void main() {
 
     const vec3 kMoss = vec3(0.282, 0.271, 0.243);     // #48453e moss cap
     const vec3 kBody = vec3(0.150, 0.150, 0.168);     // dark grey body
-    vec3 cloth = kMoss;                          // seam = same olive as the caps
+    vec3 cloth = kMoss * 0.52;                   // mid olive, opaque seams
     // Every scale carries its own gradient: body falls from grey (top) to
     // darker grey (bottom), then the moss caps the top ~25%.
     vec3 body = kBody * (0.75 + 0.55 * grad_t)
@@ -150,18 +150,19 @@ void main() {
     plate_face = mix(plate_face, kMoss, 0.35 * accent);
     plate_face *= 1.0 - 0.30 * crease;           // rim seam darkens the face
 
-    // Directional drop shadow: light from top-left, so each plate casts a
-    // soft crescent into the gap at its bottom-right. The shadow is the
-    // plate's own SDF sampled at a screen-space offset (converted back to
-    // lattice space), drawn only on the cloth — never on the caster.
-    float sh_m = 0.09 * cell;                    // offset magnitude
+    // Directional drop shadow, imbricate-style: light from top-left, so
+    // each plate casts a soft crescent ONTO the plate below-right of it
+    // (the overlap zone) and into the seam. Shadow-on-plate is what makes
+    // real overlapping scales read as layered — shadow in a dark gap is
+    // invisible. The shadow is the plate's own SDF sampled at a screen-
+    // space offset (converted back to lattice space).
+    float sh_m = 0.11 * cell;                    // offset magnitude
     vec2 sh_dir = normalize(vec2(0.55, 1.0));    // screen: down-right
     vec2 sh_lat = mat2(0.7071, -0.7071, 0.7071, 0.7071)
         * vec2(sh_dir.x * sh_m, sh_dir.y * sh_m * kSquash);
     vec2 sq2 = abs(lp - sh_lat) - (half_sz - rb);
     float sd_sh = length(max(sq2, vec2(0.0))) + min(max(sq2.x, sq2.y), 0.0) - rb;
-    float scale_shadow = (1.0 - smoothstep(-0.05 * cell, 0.0, sd_sh))
-        * (1.0 - plate);
+    float scale_shadow = 1.0 - smoothstep(-0.07 * cell, 0.0, sd_sh);
 
     // Detail: a faint inner ridge following the plate contour, visible on
     // the top-lit face — the growth ring that makes plates read as scales
@@ -182,28 +183,45 @@ void main() {
                                 cell_dist + jitter + 0.07, erosion);
     float life = uOpening > 0.5 ? reveal_here : 1.0 - dissolve;
 
-    // Region gate: whole cells outside the torn patch never render.
-    float region = 1.0 - smoothstep(blob_edge, blob_edge + 0.05, cell_dist);
+    // Region: the cloth fades out over the rim band, but ONLY under the
+    // rounded plate SDF — so rim cells show complete rounded scales with
+    // wallpaper gaps between them. No cell-square silhouette, no hard
+    // corners at the boundary; the edge is a ring of whole scales.
+    float rim = 1.0 - smoothstep(blob_edge - 0.09, blob_edge, cell_dist);
+    float region = rim * plate;
 
-    // The patch is ONE continuous dark cloth: near-opaque base everywhere
-    // inside the torn edge, plate shading on top. No wallpaper bleed, no
-    // halo feather — the drop shadow alone grounds the silhouette.
+    // The patch: interior = continuous cloth + plates; rim = whole rounded
+    // scales dissolving out (cloth only exists under plates there).
+    float interior = 1.0 - smoothstep(blob_edge - 0.09, blob_edge - 0.02, cell_dist);
     float cloth_a = 0.96 * region * life;
     vec3 rgb = mix(cloth, plate_face, plate);
-    rgb *= 1.0 - 0.40 * scale_shadow * region * life;
+    rgb = mix(rgb, cloth * plate, 1.0 - interior);   // rim: olive under plates only
+    rgb *= 1.0 - 0.60 * scale_shadow * region * life;
+    // Ridge boost folds into the same rim-faded plate mask — rim plates
+    // sink into the olive cloth instead of re-emerging via the ridge term.
     plate_face *= 1.0 + 0.28 * ridge;
     rgb = mix(rgb, plate_face, plate);
     float a = cloth_a;
 
     // ---- Keystroke ignition: the scales ARE the input bar ----
-    // uLit lights the first uLit fraction of scales, ordered LEFT→RIGHT
-    // across the patch (screen-space x of each cell center). Deterministic
-    // horizontal sweep — no radial scattershot. The frontier scale (the
-    // newest keystroke) pulses brighter.
-    float rank = clamp((cc.x + blob_edge) / max(2.0 * blob_edge, 1e-4), 0.0, 1.0);
+    // ONE scale per character, on the patch's horizontal center row. The
+    // run is anchored at the MIDDLE and grows right-first: n chars light
+    // columns [-floor((n-1)/2), +floor(n/2)] — so a short password lights
+    // the center scales, never just the left edge. The newest char's scale
+    // (the run's right end) pulses as the frontier.
+    const float kLitChars = 12.0;                 // must match kMaxLitChars
+    float n_chars = floor(uLit * kLitChars + 0.5);
+    vec2 cc_px = cc * uResolution.y;              // normalized -> pixels
+    float col_f = cc_px.x / (0.7071 * cell);      // lattice columns across
+    float row_f = cc_px.y / (0.7071 * cell / kSquash); // lattice rows down
+    float run_start = -floor((n_chars - 1.0) * 0.5);
+    float run_end = floor(n_chars * 0.5);
+    float in_run = step(run_start - 0.5, col_f) * step(col_f, run_end + 0.5);
+    float in_row = 1.0 - smoothstep(0.45, 0.75, abs(row_f));
     float lit_active = step(0.001, uLit);
-    float lit = lit_active * (1.0 - step(uLit, rank));
-    float frontier = lit_active * exp(-pow((rank - uLit) * 30.0, 2.0));
+    float lit = lit_active * in_run * in_row;
+    float frontier = lit_active * in_row
+        * exp(-pow((col_f - run_end) * 2.0, 2.0));
     vec3 lit_col = mix(plate_face, uGlow, 0.45);
     rgb = mix(rgb, lit_col, lit * plate * 0.55 * region * life);
     rgb += uGlow * frontier * plate * 0.35 * region * life;
@@ -229,19 +247,17 @@ void main() {
     // Deliberately NOT gated by region/life — they live outside the patch.
     float twinkle = sweep_band * glint_gate * 0.22 * plate;
 
-    // Wrong-password: seams turn red and blink; red pulse on the patch edge.
+    // Wrong-password: the SCALES flush red — plates tint toward uWarnC with
+    // a slow pulse, seams blink red. The old edge halo is gone.
     float red_blink = 0.5 + 0.5 * sin(uTime * 8.0);
     vec3 seam_c = mix(uGlow, uWarnC, uWarn);
     float seam_a = mix(glow_a, glow_a * (0.4 + 0.6 * red_blink), uWarn);
-    // Under alarm, the whole cloth's warm sheen desaturates to red.
+    float warn_flush = uWarn * (0.55 + 0.20 * red_blink);
+    rgb = mix(rgb, uWarnC, warn_flush * plate * region * life);
     rgb = mix(rgb, rgb * vec3(0.9, 0.45, 0.42), uWarn * 0.35);
 
-    float edge_pulse = (1.0 - smoothstep(0.0, 0.03, abs(length(c) - blob_edge)))
-        * uWarn * (0.3 + 0.7 * red_blink) * 0.4;
-
     // Premultiplied output (blend GL_ONE, GL_ONE_MINUS_SRC_ALPHA).
-    a += seam_a + twinkle * (1.0 - uWarn) + edge_pulse;
-    rgb += uGlow * seam_a + plate_face * twinkle * (1.0 - uWarn)
-         + seam_c * edge_pulse;
+    a += seam_a + twinkle * (1.0 - uWarn);
+    rgb += uGlow * seam_a + plate_face * twinkle * (1.0 - uWarn);
     fragColor = vec4(rgb * a, a);
 }

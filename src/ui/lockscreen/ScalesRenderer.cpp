@@ -121,7 +121,7 @@ struct ScalesRenderer::State {
     double progress = 0.0;
     bool opening = true;
     double reveal = 0.0;
-    double target = 0.2;
+    double target = 0.23;
     double warn = 0.0;
     double time_s = 0.0;
     float seed = 0.0F;

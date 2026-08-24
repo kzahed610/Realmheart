@@ -6,6 +6,8 @@
 
 #include "ui/lockscreen/LockSurface.hpp"
 
+#include "ui/styles/CssModuleLoader.hpp"
+
 #include <gtk/gtk.h>
 
 #include <cstdlib>
@@ -47,6 +49,23 @@ void on_activate(GtkApplication* app, gpointer data) {
     // Construct the surface inside activate so the GTK display exists before
     // the surface is presented.
     state->surface = std::make_unique<realmheart::ui::lockscreen::LockSurface>(app);
+
+    // Same modular CSS the shell loads, so title/entry styling matches.
+    {
+        static const std::array<std::string_view, 1> kModules{
+            "lockscreen/lockscreen.css"
+        };
+        const std::string css = realmheart::ui::styles::load_css_modules(kModules);
+        auto* provider = gtk_css_provider_new();
+        gtk_css_provider_load_from_string(provider, css.c_str());
+        gtk_style_context_add_provider_for_display(
+            gdk_display_get_default(),
+            GTK_STYLE_PROVIDER(provider),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
+        );
+        g_object_unref(provider);
+    }
+
     state->surface->set_unlocked_callback([state] {
         std::cout << "[lockscreen test] unlocked callback fired\n";
         state->unlocked = true;

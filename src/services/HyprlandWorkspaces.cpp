@@ -1,5 +1,7 @@
 #include "services/HyprlandWorkspaces.hpp"
 
+#include <iostream>
+
 #include "core/Command.hpp"
 #include "nlohmann_json/json.hpp"
 
@@ -80,6 +82,37 @@ bool HyprlandWorkspaces::switch_to_named(
     );
     return result.succeeded() &&
         result.output.find("error:") == std::string::npos;
+}
+
+bool HyprlandWorkspaces::set_submap(
+    std::string_view submap_name,
+    const realmheart::core::CommandOptions& options
+) {
+    if (submap_name.empty() ||
+        !realmheart::core::command_exists("hyprctl")) {
+        return false;
+    }
+
+    // "reset" is the reserved keyword returning to the default bind map;
+    // anything else names a submap. A submap with zero declared binds
+    // disables every compositor bind — the lockscreen jail.
+    const std::string dispatcher =
+        submap_name == "reset"
+            ? std::string{"hl.dsp.submap(\"reset\")"}
+            : "hl.dsp.submap(\"" + std::string(submap_name) + "\")";
+    const auto result = realmheart::core::run_capture(
+        {"hyprctl", "dispatch", dispatcher},
+        options
+    );
+    // The bind jail is a security control: never let a failed dispatch be
+    // silent (e.g. the Lua bridge rejecting an unregistered submap name).
+    if (!result.succeeded() ||
+        result.output.find("error:") != std::string::npos) {
+        std::cerr << "[Realmheart] submap dispatch failed ('" << submap_name
+                  << "'): " << result.output << '\n';
+        return false;
+    }
+    return true;
 }
 
 std::optional<int> HyprlandWorkspaces::active_workspace_id(

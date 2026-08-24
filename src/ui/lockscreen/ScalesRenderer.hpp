@@ -11,7 +11,7 @@ struct SceneFrame {
     double progress = 0.0; // 0..1 forming (0->1) or closing (1->0)
     bool opening = true;   // true = forming, false = closing
     double reveal = 0.0;   // blob growth, 0..1
-    double target = 0.2;   // final blob coverage
+    double target = 0.23;  // final blob coverage (+20% scale count)
     double warn = 0.0;     // wrong-password flash 0..1
     double time_s = 0.0;
     float seed = 0.0F;

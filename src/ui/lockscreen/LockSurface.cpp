@@ -20,7 +20,8 @@
 namespace realmheart::ui::lockscreen {
 
 // The shader's blob coverage (uTarget) — must match the renderer default.
-constexpr double kBlobTarget = 0.20;
+// 0.23 ≈ +20% scale count over the original 0.20.
+constexpr double kBlobTarget = 0.23;
 // The GL scene's seed; stable per process so the field looks identical on
 // every lock/unlock cycle.
 constexpr float kSceneSeed = 0.618034F;
@@ -35,6 +36,9 @@ struct LockSurface::State {
     GtkWindow* window = nullptr;
     GtkWidget* entry = nullptr;
     GtkWidget* error_label = nullptr;
+    GtkWidget* title = nullptr;
+    GtkWidget* title_aura = nullptr;
+    double aura_t = 0.0;
     std::function<void()> unlocked_callback;
 
     std::unique_ptr<AuthPam> auth;
@@ -187,24 +191,39 @@ void LockSurface::setup_layout() {
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), entry);
     state_->entry = entry;
 
-    // "seal remains" label, hidden until a wrong password.
+    // "seal remains" label, hidden until a wrong password. Bottom-center,
+    // under the patch, so it never collides with the scales or the entry.
     GtkWidget* error_label = gtk_label_new("seal remains");
     gtk_widget_add_css_class(error_label, "realmheart-broken-seal-error-label");
     gtk_widget_set_halign(error_label, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(error_label, GTK_ALIGN_CENTER);
-    gtk_widget_set_margin_top(error_label, 72);
+    gtk_widget_set_valign(error_label, GTK_ALIGN_END);
+    gtk_widget_set_margin_bottom(error_label, 120);
     gtk_widget_set_visible(error_label, FALSE);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), error_label);
     state_->error_label = error_label;
 
-    // "BROKEN SEAL" title: golden, letter-spaced, bottom-center. Part of the
-    // GTK layer, not the shader.
+    // "BROKEN SEAL" title: two stacked labels — a soft gold AURA ghost
+    // behind (fat blurred glow via text-shadow) and the crisp gold front.
+    // The 16ms tick breathes both (opacity sine, counter-phase) so the
+    // title has a living aura without any relayout cost.
+    GtkWidget* title_aura = gtk_label_new("BROKEN SEAL");
+    gtk_widget_add_css_class(title_aura, "realmheart-broken-seal-title");
+    gtk_widget_add_css_class(title_aura, "realmheart-broken-seal-title-aura");
+    gtk_widget_set_halign(title_aura, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(title_aura, GTK_ALIGN_START);
+    gtk_widget_set_margin_top(title_aura, 122);
+    gtk_widget_set_can_target(title_aura, FALSE);
+    gtk_widget_set_focusable(title_aura, FALSE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), title_aura);
+    state_->title_aura = title_aura;
+
     GtkWidget* title = gtk_label_new("BROKEN SEAL");
     gtk_widget_add_css_class(title, "realmheart-broken-seal-title");
     gtk_widget_set_halign(title, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(title, GTK_ALIGN_END);
-    gtk_widget_set_margin_bottom(title, 42);
+    gtk_widget_set_valign(title, GTK_ALIGN_START);
+    gtk_widget_set_margin_top(title, 122);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), title);
+    state_->title = title;
 
     gtk_window_set_child(state_->window, overlay);
 
@@ -391,6 +410,17 @@ void LockSurface::advance_frame() {
     delta = std::clamp(delta, 0.0, 0.1);
 
     state_->machine->advance(delta);
+
+    // Title aura: slow sine breathing, counter-phased between the crisp
+    // front label and the soft ghost behind it. Opacity-only — no relayout.
+    state_->aura_t += delta;
+    {
+        const double t = state_->aura_t;
+        const double breath = 0.5 + 0.5 * std::sin(t * 1.1);      // ~5.7s cycle
+        gtk_widget_set_opacity(state_->title, 0.82 + 0.18 * breath);
+        gtk_widget_set_opacity(state_->title_aura, 0.30 + 0.55 * (1.0 - breath));
+    }
+
     push_frame();
 
     const bool hidden = state_->machine->phase() == ScalesPhase::Hidden;

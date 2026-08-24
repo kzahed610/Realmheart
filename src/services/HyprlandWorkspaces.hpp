@@ -41,6 +41,14 @@ public:
         std::string_view workspace_name,
         const realmheart::core::CommandOptions& options = {}
     );
+    // Enter a named Hyprland submap ("reset" returns to the default map).
+    // Used by the lockscreen to jail compositor binds while locked: a
+    // submap with no declared binds makes SUPER+num and friends inert, so
+    // locked windows cannot be peeked at via workspace switching.
+    static bool set_submap(
+        std::string_view submap_name,
+        const realmheart::core::CommandOptions& options = {}
+    );
     [[nodiscard]] static std::optional<int> active_workspace_id(
         const realmheart::core::CommandOptions& options = {}
     );
