@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -23,6 +24,10 @@ constexpr double kBlobTarget = 0.20;
 // The GL scene's seed; stable per process so the field looks identical on
 // every lock/unlock cycle.
 constexpr float kSceneSeed = 0.618034F;
+// Scales lit per typed character, as a fraction of the center-out rank
+// range. 12 chars ≈ the full patch lit; anything longer clamps there.
+constexpr double kLitPerChar = 0.083;
+constexpr size_t kMaxLitChars = 12;
 
 struct LockSurface::State {
     LockSurface* owner = nullptr;
@@ -39,6 +44,8 @@ struct LockSurface::State {
 
     guint tick_source_id = 0;
     gint64 last_tick_us = 0;
+    // 0..1: how much of the scale field is lit by the current password.
+    double lit = 0.0;
 
     // Idle continues to shimmer: the tick keeps running while visible.
     bool tick_running = false;
@@ -169,12 +176,14 @@ void LockSurface::setup_layout() {
     GtkWidget* gl = state_->scales->widget();
     gtk_overlay_set_child(GTK_OVERLAY(overlay), gl);
 
-    // Password entry: bare input bar, centered, above the scales.
+    // Password entry: an invisible input region centered on the patch —
+    // the scales themselves are the visible input (keystrokes light them).
     GtkWidget* entry = gtk_password_entry_new();
     gtk_widget_add_css_class(entry, "realmheart-broken-seal-entry");
     gtk_widget_set_halign(entry, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(entry, GTK_ALIGN_CENTER);
     gtk_widget_set_size_request(entry, 260, 44);
+    gtk_widget_set_opacity(entry, 0.0);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), entry);
     state_->entry = entry;
 
@@ -209,6 +218,7 @@ void LockSurface::setup_layout() {
         }),
         state_
     );
+    // Escape clears the entry (window-level key controller).
     GtkEventController* key_controller = gtk_event_controller_key_new();
     g_signal_connect(
         key_controller,
@@ -224,6 +234,29 @@ void LockSurface::setup_layout() {
         state_
     );
     gtk_widget_add_controller(GTK_WIDGET(state_->window), key_controller);
+
+    // Keystroke ignition: any text change (typing, paste, backspace)
+    // re-lights the scales — the field itself is the password input.
+    g_signal_connect(
+        entry,
+        "notify::text",
+        G_CALLBACK(+[](GObject*, GParamSpec*, gpointer data) -> void {
+            static_cast<LockSurface::State*>(data)->owner->sync_lit();
+        }),
+        state_
+    );
+}
+
+void LockSurface::sync_lit() {
+    if (state_ == nullptr || state_->entry == nullptr) return;
+    const char* text = gtk_editable_get_text(GTK_EDITABLE(state_->entry));
+    const size_t len = text != nullptr ? strlen(text) : 0;
+    state_->lit = static_cast<double>(
+        std::min(len, kMaxLitChars)) * kLitPerChar;
+    if (state_->scales != nullptr && state_->machine != nullptr &&
+        state_->machine->phase() != ScalesPhase::Hidden) {
+        push_frame();
+    }
 }
 
 void LockSurface::force_transparent_surface() {
@@ -253,6 +286,7 @@ void LockSurface::show() {
 
     state_->closing = false;
     state_->machine->present();
+    state_->lit = 0.0;
     gtk_window_present(state_->window);
     force_transparent_surface();
 
@@ -391,6 +425,7 @@ void LockSurface::push_frame() {
     frame.progress = progress;
     frame.target = kBlobTarget;
     frame.seed = kSceneSeed;
+    frame.lit = state_->lit;
     frame.time_s = static_cast<double>(g_get_monotonic_time()) / 1e6;
 
     switch (phase) {

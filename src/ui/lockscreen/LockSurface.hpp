@@ -35,6 +35,7 @@ public:
 
 private:
     void setup_layout();
+    void sync_lit();
     void force_transparent_surface();
     gboolean submit_password();
     void start_tick();

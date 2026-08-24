@@ -125,6 +125,7 @@ struct ScalesRenderer::State {
     double warn = 0.0;
     double time_s = 0.0;
     float seed = 0.0F;
+    double lit = 0.0;
 
     static constexpr std::array<float, 3> kBg{0.090F, 0.078F, 0.110F};    // #17141c
     static constexpr std::array<float, 3> kLine{0.353F, 0.333F, 0.388F};  // #5a5563
@@ -202,7 +203,9 @@ struct ScalesRenderer::State {
         glViewport(0, 0, width, height);
         glDisable(GL_DEPTH_TEST);
         glDisable(GL_CULL_FACE);
-        glDisable(GL_BLEND);
+        // Premultiplied alpha: the shader outputs vec4(rgb*alpha, alpha).
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         glClearColor(0.0F, 0.0F, 0.0F, 0.0F);
         glClear(GL_COLOR_BUFFER_BIT);
 
@@ -239,6 +242,8 @@ struct ScalesRenderer::State {
             static_cast<float>(warn)
         );
         glUniform1f(glGetUniformLocation(program, "uSeed"), seed);
+        glUniform1f(glGetUniformLocation(program, "uLit"),
+            static_cast<float>(lit));
         glUniform3fv(glGetUniformLocation(program, "uBg"), 1, kBg.data());
         glUniform3fv(glGetUniformLocation(program, "uLine"), 1, kLine.data());
         glUniform3fv(glGetUniformLocation(program, "uGlow"), 1, kGlow.data());
@@ -374,6 +379,7 @@ void ScalesRenderer::update(const SceneFrame& frame) noexcept {
     state_->warn = finite(frame.warn, state_->warn);
     state_->time_s = finite(frame.time_s, state_->time_s);
     state_->seed = std::isfinite(frame.seed) ? frame.seed : state_->seed;
+    state_->lit = finite(frame.lit, state_->lit);
     gtk_gl_area_queue_render(GTK_GL_AREA(state_->gl_area));
 }
 
