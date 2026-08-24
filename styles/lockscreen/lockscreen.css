@@ -1,0 +1,33 @@
+/* Broken Seal lockscreen — GTK layer styling.
+   The shader draws the scales; this file styles the widgets above it. */
+
+label.realmheart-broken-seal-title {
+    font-size: 46px;
+    font-weight: 800;
+    letter-spacing: 16px;
+    color: #E8C15A;
+    text-shadow: 0 1px 2px alpha(#000000, 0.65),
+                 0 0 14px alpha(#E8C15A, 0.55),
+                 0 0 34px alpha(#E8C15A, 0.30);
+}
+
+/* The aura ghost: same text, pure glow — fat soft gold halo that the tick
+   breathes. Slightly scaled-up letter-spacing so the halo reads wider than
+   the crisp label. */
+label.realmheart-broken-seal-title-aura {
+    letter-spacing: 19px;
+    color: alpha(#E8C15A, 0.0);
+    text-shadow: 0 0 18px alpha(#E8C15A, 0.85),
+                 0 0 46px alpha(#E8C15A, 0.55),
+                 0 0 90px alpha(#E8C15A, 0.30);
+}
+
+/* "seal remains" — wrong-password message, bottom-center under the patch. */
+label.realmheart-broken-seal-error-label {
+    font-size: 19px;
+    font-weight: 600;
+    letter-spacing: 8px;
+    color: #D24A42;
+    text-shadow: 0 1px 2px alpha(#000000, 0.65),
+                 0 0 16px alpha(#D24A42, 0.50);
+}
