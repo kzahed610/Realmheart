@@ -1,11 +1,15 @@
 // Broken Seal — Realmheart lockscreen.
-// A living field of scales grows over the center of the screen, breathes in
-// idle, flashes red on a wrong password, and erodes on unlock. The password
-// entry and "BROKEN SEAL" title are GTK widgets above this GL surface.
-// The field is ref-faithful to the Scales.md pattern: a fine diagonal lattice
-// of rounded diamonds, faint lavender-grey on the dark aether base, with a
-// gentle hand-drawn scallop. No quilted fabric lighting — the breathing seam
-// glow is the only lighting on the pattern.
+// A torn patch of dragon-scale plating over the center of the screen (~20%
+// of the area); the rest stays transparent so the wallpaper shows through.
+//
+// Material model (ref: Realmheart-Docs/Lockscreen/Scales.md — cloth panel):
+//   each scale is a solid rounded plate of dark charcoal-plum material,
+//   slightly LIFTED toward its center and falling into a DARK crease where
+//   it overlaps its neighbors. The patch reads as one continuous dark cloth
+//   surface cut into scales — not lines on transparency.
+//   Palette: deep void base #17141c, plate face lifted toward lavender-grey
+//   #5a5563, golden seam-glow #E8C15A breathing at the lattice nodes,
+//   red #b3261e wrong-password flash.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #version 300 es
@@ -16,13 +20,14 @@ uniform vec2 uResolution;
 uniform float uTime;
 uniform float uProgress; // 0..1: forming (0->1) or closing (1->0)
 uniform float uOpening;  // 1.0 = forming, 0.0 = closing
-uniform float uReveal;   // 0..1: how far the blob has grown (authoritative)
-uniform float uTarget;   // final blob coverage, ~0.20
+uniform float uReveal;   // 0..1: blob growth (forming) / erosion (closing)
+uniform float uTarget;   // final blob radius in screen-height fractions (~0.34)
 uniform float uWarn;     // 0..1: wrong-password flash
 uniform float uSeed;
+uniform float uLit;      // 0..1: fraction of scales lit by password input
 uniform vec3 uBg;    // #17141c deep void
-uniform vec3 uLine;  // #5a5563 lavender-grey scale lattice
-uniform vec3 uGlow;  // #E8C15A golden seam/breath glow
+uniform vec3 uLine;  // #5a5563 lavender-grey plate lift
+uniform vec3 uGlow;  // #E8C15A golden seam glow
 uniform vec3 uWarnC; // #b3261e wrong-password red
 
 layout(location = 0) out vec4 fragColor;
@@ -52,108 +57,191 @@ float ease_out_cubic(float t) {
     return 1.0 - f * f * f;
 }
 
-// Rounded-diamond SDF in diamond-local space (|x|+|y| <= 1, rounded by r).
-float rounded_diamond(vec2 p, float r) {
-    float d = (abs(p.x) + abs(p.y) - 1.0 + r) / (1.0 + r);
-    return length(max(vec2(d, 0.0), vec2(0.0))) + min(max(d, 0.0), 0.0) - r;
-}
-
 void main() {
     vec2 uv = v_texcoord;
     vec2 aspect = vec2(uResolution.x / max(uResolution.y, 1.0), 1.0);
     vec2 c = (uv - 0.5) * aspect;
 
-    // The forming/eroding blob: an irregular fbm-torn seed that grows from
-    // ~4 scales to uTarget screen coverage. Everything outside stays fully
-    // transparent so the wallpaper shows through. Radius is in screen-height
-    // fractions, so uTarget 0.20 ≈ a circle covering ~20% of the screen
-    // height; the fbm-torn edge keeps it from reading as a perfect circle.
-    float target = uTarget;
-    float radius = mix(0.04, target, ease_out_cubic(uReveal));
+    // The torn central patch: an irregular fbm-torn blob growing to uTarget
+    // radius (~20% of the screen area). Outside it, nothing renders.
+    float radius = mix(0.05, uTarget, ease_out_cubic(uReveal));
     float tendril = fbm(c * 3.0 + uSeed) - 0.5;
     float blob_edge = radius * (1.0 + tendril * 0.35);
-    float region_edge = smoothstep(blob_edge, blob_edge + 0.025, length(c));
 
-    // ---- The scale field ----
-    // Rotate UV by 45° and build a diamond grid. Each cell gets hash-derived
-    // size/phase/drift so scales don't look stamped.
-    vec2 rotated = mat2(0.7071, -0.7071, 0.7071, 0.7071) * (uv * uResolution);
-    float cell = 0.045 * uResolution.y;
-    vec2 grid = rotated / cell;
+    // ---- The honeycomb lattice ----
+    // Rotate by 45°; the lattice is the grid lines of that space (the
+    // Scales.md "45° and -45° intersecting" pattern).
+    // Vertical squash before rotation: cells render ~1.4x taller than wide
+    // on screen, so scales read as elongated diamonds, not cushions.
+    const float kSquash = 0.72; // on-screen scale height = cell / kSquash
+    vec2 rot = mat2(0.7071, -0.7071, 0.7071, 0.7071)
+        * (vec2(uv.x, uv.y * kSquash) * uResolution);
+    float cell = 0.048 * uResolution.y;
+    vec2 grid = rot / cell;
     vec2 cell_id = floor(grid);
     vec2 cell_p = fract(grid) - 0.5;
 
+    // Cell center, back in the same normalized space as `c` — this is what
+    // gates the region. (The pixel's own offset within its cell is NOT a
+    // distance from the screen center.)
+    vec2 rc = (cell_id + 0.5) * cell;
+    vec2 pq = mat2(0.7071, 0.7071, -0.7071, 0.7071) * rc; // un-rotate
+    vec2 cc = (vec2(pq.x, pq.y / kSquash) / uResolution - 0.5) * aspect;
+    float cell_dist = length(cc);
+
+    // Per-cell hash: variance + shimmer phase + reveal/erosion stagger.
     float h1 = hash12(cell_id + uSeed);
     float h2 = hash12(cell_id + 7.7 + uSeed);
     float h3 = hash12(cell_id + 31.3 + uSeed);
-    float size_v = 0.55 + 0.45 * h1;
-    float phase = h3 * 6.2831;
+    float phase = h1 * 6.2831;
+    float jitter = h2 * 0.25;
 
-    // Gentle hand-drawn scallop: a low-frequency wobble bends the lattice
-    // slightly (a soft chain-link curvature, NOT a fabric-tension warp).
-    vec2 warp = 0.015 * vec2(
-        sin(grid.y * 1.7 + uSeed * 3.1),
-        cos(grid.x * 1.7 + uSeed * 1.3)
-    );
+    // Gentle hand-drawn scallop: each line family bows slightly, so the
+    // plates sit like soft chain-link scales rather than stamped tiles.
+    float scallop = 0.020 * cell;
+    float u = rot.x + scallop * sin(grid.y * 2.2 + uSeed * 11.0);
+    float v = rot.y + scallop * cos(grid.x * 2.2 + uSeed * 7.0);
 
-    vec2 p = (cell_p + warp) / (size_v * 0.5);
-    float d = rounded_diamond(p, 0.09);
+    // ---- Plate material (per cell) ----
+    // Work in cell-local pixels. Each scale is a SOLID rounded diamond
+    // plate: lit face falling into a dark overlap crease, sitting on the
+    // dark membrane between plates. This is what makes it read as scales,
+    // not wireframe diamonds.
+    vec2 lp = vec2(u, v) - (cell_id + 0.5) * cell;
+    // Rounded plate: an axis-aligned rounded BOX in LATTICE space. The 45°
+    // lattice rotation turns it into a rounded DIAMOND on screen (the scale
+    // silhouette), and the y-squash elongates it. A diamond SDF here would
+    // rotate BACK to upright squares on screen — the exact bug this fixes.
+    float half_sz = 0.46 * cell;                  // half-extent, tight seam gap
+    float rb = 0.16 * cell;                       // corner rounding
+    vec2 dq = abs(lp) - (half_sz - rb);
+    float sd = length(max(dq, vec2(0.0))) + min(max(dq.x, dq.y), 0.0) - rb;
 
-    // Edges are thin (~1px), soft, faint at rest.
-    float line_w = 1.5 / cell;
-    float edge = smoothstep(line_w * 0.5, -line_w * 0.5, d);
-    float line_alpha = edge * 0.13;
+    // Thin dark seam right at the plate rim (where the next scale tucks
+    // over it); the face stays lit toward the center.
+    float crease = smoothstep(-0.05 * cell, -0.006 * cell, sd);
+    // Plate body: inside the SDF (plates touch at the edge midpoints).
+    float plate = 1.0 - smoothstep(-0.008 * cell, 0.008 * cell, sd);
 
-    // ---- Region gate: the pattern lives only inside the central blob ----
-    // Cell-center distance from the blob center; the whole cell is gated by
-    // its own position, so no stray scales can appear outside the region.
-    float cell_dist = length(cell_p * cell / max(uResolution.y, 1.0)) * 2.0;
-    float region = 1.0 - smoothstep(blob_edge, blob_edge + 0.06, cell_dist);
-    line_alpha *= region;
-    // The seam glow follows the same gate so no gold lines can exist outside
-    // the blob either.
-    float seam_alpha = region;
+    // Screen-space local offset (undo rotation, then undo the squash) so
+    // the gradient runs top-to-bottom of the scale as seen on screen.
+    vec2 lq = mat2(0.7071, 0.7071, -0.7071, 0.7071) * lp;
+    vec2 lps = vec2(lq.x, lq.y / kSquash);
+    float scale_h = cell / kSquash;
+    float grad_t = clamp(0.5 - lps.y / scale_h, 0.0, 1.0);
 
-    // Fading with reveal: scales appear one by one and interconnect, ordered
-    // by their distance from the seed point. Only scales whose cell lies
-    // inside the region can fade in.
-    float reveal_here = smoothstep(0.15, 0.85, uReveal * 2.0 - cell_dist);
-    line_alpha *= reveal_here;
+    // Cloth folds: broad low-frequency drift across the patch + per-scale
+    // variance. LOW contrast — the pattern whispers, like the reference.
+    float mottle = (fbm(rot / (cell * 5.5) + uSeed * 5.0) - 0.5) * 0.14
+                 + (h3 - 0.5) * 0.09;
 
-    // Per-scale shimmer: a slow global drift plus a faint opacity oscillation.
-    float shimmer = 0.75 + 0.25 * sin(uTime * 1.2 + phase);
-    line_alpha *= shimmer;
+    // Rare accent scales catch a little more light (~5% of plates).
+    float accent = step(0.95, h1);
 
-    // A few outlying scales inside the blob, ahead of its edge, matching the
-    // "scales increase in random areas" feel of the reference. Hash-gated to
-    // ~2% of cells so they read as sparse, not full-screen.
-    float fringe = 0.0;
-    if (uReveal > 0.55) {
-        float far = length((fract(grid) - 0.5) * 2.0);
-        float chance = smoothstep(0.55, 1.0, uReveal) * step(0.985, h1);
-        fringe = step(far, 0.30) * chance;
-    }
-    line_alpha = mix(line_alpha, 0.13 * shimmer, fringe * region);
+    const vec3 kMoss = vec3(0.282, 0.271, 0.243);     // #48453e moss cap
+    const vec3 kBody = vec3(0.150, 0.150, 0.168);     // dark grey body
+    vec3 cloth = kMoss;                          // seam = same olive as the caps
+    // Every scale carries its own gradient: body falls from grey (top) to
+    // darker grey (bottom), then the moss caps the top ~25%.
+    vec3 body = kBody * (0.75 + 0.55 * grad_t)
+              * (0.92 + 0.20 * h3 + mottle * 0.5);
+    float cap = smoothstep(0.68, 0.90, grad_t + (h3 - 0.5) * 0.05);
+    vec3 plate_face = mix(body, kMoss, cap);
+    plate_face = mix(plate_face, kMoss, 0.35 * accent);
+    plate_face *= 1.0 - 0.30 * crease;           // rim seam darkens the face
 
-    // ---- The seam glow ----
-    // Where a scale edge meets its neighbor, a thin gold line breathes.
-    float seam_band = 1.0 - smoothstep(0.0, 0.02, abs(d));
+    // Directional drop shadow: light from top-left, so each plate casts a
+    // soft crescent into the gap at its bottom-right. The shadow is the
+    // plate's own SDF sampled at a screen-space offset (converted back to
+    // lattice space), drawn only on the cloth — never on the caster.
+    float sh_m = 0.09 * cell;                    // offset magnitude
+    vec2 sh_dir = normalize(vec2(0.55, 1.0));    // screen: down-right
+    vec2 sh_lat = mat2(0.7071, -0.7071, 0.7071, 0.7071)
+        * vec2(sh_dir.x * sh_m, sh_dir.y * sh_m * kSquash);
+    vec2 sq2 = abs(lp - sh_lat) - (half_sz - rb);
+    float sd_sh = length(max(sq2, vec2(0.0))) + min(max(sq2.x, sq2.y), 0.0) - rb;
+    float scale_shadow = (1.0 - smoothstep(-0.05 * cell, 0.0, sd_sh))
+        * (1.0 - plate);
+
+    // Detail: a faint inner ridge following the plate contour, visible on
+    // the top-lit face — the growth ring that makes plates read as scales
+    // instead of blank tiles.
+    vec2 dq_in = abs(lp) - (half_sz - rb - 0.16 * cell);
+    float sd_in = length(max(dq_in, vec2(0.0)))
+                + min(max(dq_in.x, dq_in.y), 0.0) - rb;
+    float ridge = (1.0 - smoothstep(0.0, 0.035 * cell, abs(sd_in))) * plate;
+    ridge *= 0.45 + 0.55 * clamp(0.5 - lps.y / scale_h, 0.0, 1.0);
+
+    // ---- Life: staggered reveal / erosion (geometry unchanged) ----
+    // Opening pops scales in ONE BY ONE: each cell transitions over a narrow
+    // ~0.14 window (same snap as the closing dissolve), staggered by its
+    // distance from the seed + per-cell jitter. No global fade wash.
+    float reveal_here = smoothstep(0.44, 0.58, uReveal * 2.0 - cell_dist - jitter);
+    float erosion = 1.0 - uReveal;
+    float dissolve = smoothstep(cell_dist + jitter - 0.07,
+                                cell_dist + jitter + 0.07, erosion);
+    float life = uOpening > 0.5 ? reveal_here : 1.0 - dissolve;
+
+    // Region gate: whole cells outside the torn patch never render.
+    float region = 1.0 - smoothstep(blob_edge, blob_edge + 0.05, cell_dist);
+
+    // The patch is ONE continuous dark cloth: near-opaque base everywhere
+    // inside the torn edge, plate shading on top. No wallpaper bleed, no
+    // halo feather — the drop shadow alone grounds the silhouette.
+    float cloth_a = 0.96 * region * life;
+    vec3 rgb = mix(cloth, plate_face, plate);
+    rgb *= 1.0 - 0.40 * scale_shadow * region * life;
+    plate_face *= 1.0 + 0.28 * ridge;
+    rgb = mix(rgb, plate_face, plate);
+    float a = cloth_a;
+
+    // ---- Keystroke ignition: the scales ARE the input bar ----
+    // uLit lights the first uLit fraction of scales, ordered LEFT→RIGHT
+    // across the patch (screen-space x of each cell center). Deterministic
+    // horizontal sweep — no radial scattershot. The frontier scale (the
+    // newest keystroke) pulses brighter.
+    float rank = clamp((cc.x + blob_edge) / max(2.0 * blob_edge, 1e-4), 0.0, 1.0);
+    float lit_active = step(0.001, uLit);
+    float lit = lit_active * (1.0 - step(uLit, rank));
+    float frontier = lit_active * exp(-pow((rank - uLit) * 30.0, 2.0));
+    vec3 lit_col = mix(plate_face, uGlow, 0.45);
+    rgb = mix(rgb, lit_col, lit * plate * 0.55 * region * life);
+    rgb += uGlow * frontier * plate * 0.35 * region * life;
+
+    // ---- Breathing seam glow at the lattice nodes ----
+    // Gold light seeps through the tiny gaps where four plate corners meet
+    // — the grid CORNER, not the cell center.
+    vec2 gp = fract(vec2(u, v) / cell);
+    vec2 nx = min(gp, 1.0 - gp);
+    float node_dist = length(nx) * cell;
+    float node_dot = 1.0 - smoothstep(0.0, 4.5, node_dist);
     float breath = 0.5 + 0.5 * sin(uTime * 1.5 + phase);
-    float glow_a = seam_band * breath * 0.10 * seam_alpha;
+    float glow_a = node_dot * breath * 0.13 * region * life;
 
-    // Wrong-password: the seam glow turns red and blinks; a red flash pulse
-    // rings along the blob edge.
+    // Occasional glints: a slow sheen sweeping diagonally across the cloth,
+    // lighting one plate at a time as it passes.
+    float sweep_t = mod(uTime / 11.0, 1.0);
+    float sweep_pos = sweep_t * (aspect.x + 0.9) - 0.45;
+    float sweep_band = exp(-pow((c.x + c.y * 0.6 - sweep_pos) * 5.5, 2.0));
+    float glint_gate = step(0.75, h2);             // ~25% of scales glint
+    // Shaped by the plate mask: scattered glints read as tiny rounded
+    // diamonds drifting on the wallpaper (user-liked motes), not squares.
+    // Deliberately NOT gated by region/life — they live outside the patch.
+    float twinkle = sweep_band * glint_gate * 0.22 * plate;
+
+    // Wrong-password: seams turn red and blink; red pulse on the patch edge.
     float red_blink = 0.5 + 0.5 * sin(uTime * 8.0);
     vec3 seam_c = mix(uGlow, uWarnC, uWarn);
     float seam_a = mix(glow_a, glow_a * (0.4 + 0.6 * red_blink), uWarn);
+    // Under alarm, the whole cloth's warm sheen desaturates to red.
+    rgb = mix(rgb, rgb * vec3(0.9, 0.45, 0.42), uWarn * 0.35);
 
-    float edge_pulse = smoothstep(0.02, 0.0, abs(length(c) - blob_edge)) *
-        uWarn * (0.3 + 0.7 * red_blink) * 0.5 * region_edge;
+    float edge_pulse = (1.0 - smoothstep(0.0, 0.03, abs(length(c) - blob_edge)))
+        * uWarn * (0.3 + 0.7 * red_blink) * 0.4;
 
     // Premultiplied output (blend GL_ONE, GL_ONE_MINUS_SRC_ALPHA).
-    float alpha = line_alpha + seam_a + edge_pulse;
-    vec3 rgb = uLine * line_alpha +
-               seam_c * (seam_a + edge_pulse) +
-               uBg * (1.0 - alpha);
-    fragColor = vec4(rgb * alpha, alpha);
+    a += seam_a + twinkle * (1.0 - uWarn) + edge_pulse;
+    rgb += uGlow * seam_a + plate_face * twinkle * (1.0 - uWarn)
+         + seam_c * edge_pulse;
+    fragColor = vec4(rgb * a, a);
 }

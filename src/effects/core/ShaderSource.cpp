@@ -190,7 +190,7 @@ bool validate_lockscreen_shader_contract(
     std::string_view source,
     std::string* missing_symbol
 ) noexcept {
-    constexpr std::array<std::string_view, 13> kRequiredSymbols{{
+    constexpr std::array<std::string_view, 14> kRequiredSymbols{{
         "uniform vec2 uResolution",
         "uniform float uTime",
         "uniform float uProgress",
@@ -199,6 +199,7 @@ bool validate_lockscreen_shader_contract(
         "uniform float uTarget",
         "uniform float uWarn",
         "uniform float uSeed",
+        "uniform float uLit",
         "uniform vec3 uBg",
         "uniform vec3 uLine",
         "uniform vec3 uGlow",

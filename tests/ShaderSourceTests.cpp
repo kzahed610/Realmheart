@@ -95,6 +95,7 @@ TEST(ShaderSourceTests, LoadsLockscreenScalesShaderAndValidatesContract) {
     EXPECT_TRUE(validate_lockscreen_shader_contract(shader->text, &missing))
         << missing;
     EXPECT_NE(shader->text.find("uWarn"), std::string::npos);
+    EXPECT_NE(shader->text.find("uLit"), std::string::npos);
 }
 
 TEST(ShaderSourceTests, ReportsMissingLockscreenContractSymbol) {

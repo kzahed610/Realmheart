@@ -15,6 +15,7 @@ struct SceneFrame {
     double warn = 0.0;     // wrong-password flash 0..1
     double time_s = 0.0;
     float seed = 0.0F;
+    double lit = 0.0;      // 0..1: fraction of scales lit by password input
 };
 
 // Full-screen transparent GtkGLArea that renders the Broken Seal scales
