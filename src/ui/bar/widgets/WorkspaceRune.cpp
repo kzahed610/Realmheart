@@ -47,11 +47,9 @@ constexpr int kPreviewOffsetY = -5;
 WorkspaceRune::WorkspaceRune(
     services::WorkspaceState state,
     std::function<void(int)> on_activate,
-    std::function<void()> on_right_click,
     std::function<void(GtkPopover*)> request_exclusive_open
 ) : state_(std::move(state)),
     on_activate_(std::move(on_activate)),
-    on_right_click_(std::move(on_right_click)),
     request_exclusive_open_(std::move(request_exclusive_open)) {
     button_ = gtk_button_new();
     gtk_widget_add_css_class(button_, "realmheart-workspace-rune");
@@ -75,21 +73,10 @@ WorkspaceRune::WorkspaceRune(
         if (self->on_activate_) self->on_activate_(self->state_.id);
     }), this);
 
-    GtkGesture* right_click = gtk_gesture_click_new();
-    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(right_click), GDK_BUTTON_SECONDARY);
-    gtk_event_controller_set_propagation_phase(
-        GTK_EVENT_CONTROLLER(right_click), GTK_PHASE_CAPTURE
-    );
-    g_signal_connect(right_click, "pressed", G_CALLBACK(+[](
-        GtkGestureClick*, int, double, double, gpointer data
-    ) {
-        auto* self = static_cast<WorkspaceRune*>(data);
-        if (self->morph_suppressed_) return;
-        self->cancel_preview_hide();
-        gtk_popover_popdown(GTK_POPOVER(self->popover_));
-        if (self->on_right_click_) self->on_right_click_();
-    }), this);
-    gtk_widget_add_controller(button_, GTK_EVENT_CONTROLLER(right_click));
+    // Right-click lives on the workspace pill (VerticalBar's
+    // realmheart-workspace-stack), not per-rune — the whole capsule toggles
+    // the overview so blind right-clicks land. A rune-level gesture here
+    // would double-fire against the pill's capture-phase handler.
 
     popover_ = gtk_popover_new();
     gtk_widget_add_css_class(popover_, "realmheart-workspace-preview");

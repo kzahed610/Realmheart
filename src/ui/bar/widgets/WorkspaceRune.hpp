@@ -12,7 +12,6 @@ public:
     WorkspaceRune(
         services::WorkspaceState state,
         std::function<void(int)> on_activate,
-        std::function<void()> on_right_click,
         std::function<void(GtkPopover*)> request_exclusive_open
     );
     ~WorkspaceRune();
@@ -51,7 +50,6 @@ private:
     GtkWidget* preview_box_ = nullptr;
     services::WorkspaceState state_;
     std::function<void(int)> on_activate_;
-    std::function<void()> on_right_click_;
     std::function<void(GtkPopover*)> request_exclusive_open_;
     guint hide_timer_id_ = 0;
     guint hover_tick_id_ = 0;

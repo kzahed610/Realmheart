@@ -222,6 +222,24 @@ void VerticalBar::setup_layout() {
     gtk_widget_set_halign(workspace_box_, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(workspace_box_, GTK_ALIGN_CENTER);
 
+    // The pill itself is the right-click target for the workspace overview,
+    // not the individual runes. GTK delivers events over a widget's padding
+    // to the widget itself, so the whole capsule - separators, spacing, and
+    // runes alike - toggles the overview. Blind clicks welcome.
+    GtkGesture* pill_right_click = gtk_gesture_click_new();
+    gtk_gesture_single_set_button(
+        GTK_GESTURE_SINGLE(pill_right_click),
+        GDK_BUTTON_SECONDARY
+    );
+    g_signal_connect(pill_right_click, "pressed", G_CALLBACK(+[](
+        GtkGestureClick*, int, double, double, gpointer data
+    ) {
+        auto* bar = static_cast<VerticalBar*>(data);
+        if (bar->workspace_morph_active_) return;
+        bar->request_workspace_overview_toggle();
+    }), this);
+    gtk_widget_add_controller(workspace_box_, GTK_EVENT_CONTROLLER(pill_right_click));
+
     GtkWidget* workspace_section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(workspace_section, "realmheart-workspace-section");
     gtk_widget_set_halign(workspace_section, GTK_ALIGN_CENTER);
@@ -694,7 +712,6 @@ void VerticalBar::apply_workspaces(services::WorkspaceSnapshot snapshot) {
         auto rune = std::make_unique<widgets::WorkspaceRune>(
             state,
             [this](int workspace_id) { activate_workspace(workspace_id); },
-            [this] { request_workspace_overview_toggle(); },
             [this](GtkPopover* popover) { open_exclusive_popover(popover); }
         );
         rune->set_morph_suppressed(workspace_morph_active_);
