@@ -11,3 +11,6 @@ __pycache__/
 # Krita temporary files
 *.kra~
 *.kra-autosave.kra
+
+# Raster editor temp files
+*.png~
