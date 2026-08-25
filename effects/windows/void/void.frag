@@ -4,6 +4,8 @@
 // through), star specks glitter in the smoke, then everything sinks into nothing.
 // OPEN is the recession: the ring recedes while the see-through iris shrinks away,
 // revealing the window edges-first. After the Realmheart void transition.
+// Shader adapted from Selene hyprfx (commit d680dab); GPL-3.0-or-later applies
+// to this file per that lineage.
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #version 300 es
