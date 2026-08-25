@@ -83,5 +83,29 @@ TEST(ShaderSourceTests, ReportsMissingWorkspaceMorphContractSymbol) {
     EXPECT_EQ(missing, "uniform float opening");
 }
 
+TEST(ShaderSourceTests, LoadsLockscreenScalesShaderAndValidatesContract) {
+    std::string error;
+    const auto shader = load_shader_source(
+        "lockscreen/scales/scales.frag",
+        &error
+    );
+    ASSERT_TRUE(shader.has_value()) << error;
+
+    std::string missing;
+    EXPECT_TRUE(validate_lockscreen_shader_contract(shader->text, &missing))
+        << missing;
+    EXPECT_NE(shader->text.find("uWarn"), std::string::npos);
+    EXPECT_NE(shader->text.find("uLit"), std::string::npos);
+}
+
+TEST(ShaderSourceTests, ReportsMissingLockscreenContractSymbol) {
+    std::string missing;
+    EXPECT_FALSE(validate_lockscreen_shader_contract(
+        "uniform float uTime; out vec4 fragColor;",
+        &missing
+    ));
+    EXPECT_EQ(missing, "uniform vec2 uResolution");
+}
+
 } // namespace
 } // namespace realmheart::effects

@@ -186,4 +186,36 @@ bool validate_workspace_morph_shader_contract(
     return true;
 }
 
+bool validate_lockscreen_shader_contract(
+    std::string_view source,
+    std::string* missing_symbol
+) noexcept {
+    constexpr std::array<std::string_view, 14> kRequiredSymbols{{
+        "uniform vec2 uResolution",
+        "uniform float uTime",
+        "uniform float uProgress",
+        "uniform float uOpening",
+        "uniform float uReveal",
+        "uniform float uTarget",
+        "uniform float uWarn",
+        "uniform float uSeed",
+        "uniform float uLit",
+        "uniform vec3 uBg",
+        "uniform vec3 uLine",
+        "uniform vec3 uGlow",
+        "uniform vec3 uWarnC",
+        "out vec4 fragColor",
+    }};
+
+    for (const auto symbol : kRequiredSymbols) {
+        if (!contains_symbol(source, symbol)) {
+            if (missing_symbol != nullptr) *missing_symbol = std::string{symbol};
+            return false;
+        }
+    }
+
+    if (missing_symbol != nullptr) missing_symbol->clear();
+    return true;
+}
+
 } // namespace realmheart::effects

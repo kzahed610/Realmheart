@@ -1,0 +1,7 @@
+#%PAM-1.0
+# Lockscreen: verify the password WITHOUT the global pam_faillock
+# lockout, so failed unlock attempts can never lock the user out of sudo or
+# other system-auth services.
+auth       sufficient   pam_unix.so
+auth       required     pam_deny.so
+account    required     pam_unix.so

@@ -169,7 +169,11 @@ add_library(realmheart_ui STATIC
     src/ui/NotificationToast.cpp
     src/ui/NowPlayingOverlay.cpp
     src/ui/OSDOverlay.cpp
-    src/ui/lockscreen/LockScreen.cpp
+    src/ui/lockscreen/AuthPam.cpp
+    src/ui/lockscreen/LockSurface.cpp
+    src/ui/lockscreen/ScalesRenderer.cpp
+    src/ui/lockscreen/ScalesStateMachine.cpp
+    src/ui/lockscreen/ShaderManager.cpp
     src/ui/powermenu/PowerMenuConfirmation.cpp
     src/ui/powermenu/PowerMenuControls.cpp
     src/ui/powermenu/PowerMenuLayout.cpp
@@ -250,6 +254,39 @@ target_link_libraries(realmheart_power_menu_renderer PRIVATE
 )
 
 add_dependencies(realmheart realmheart_power_menu_renderer)
+
+# Setuid-root PAM helper for the lockscreen. Installed with the
+# setuid bit so the user shell can authenticate without root.
+add_executable(realmheart_auth_helper
+    src/auth-helper/main.cpp
+)
+set_target_properties(realmheart_auth_helper PROPERTIES
+    OUTPUT_NAME "realmheart-auth-helper"
+)
+target_include_directories(realmheart_auth_helper PRIVATE src third_party)
+target_compile_options(realmheart_auth_helper PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_link_libraries(realmheart_auth_helper PRIVATE pam)
+
+# Standalone lockscreen surface harness. Not registered with CTest
+# because layer-shell windows require the user's live Wayland session.
+add_executable(realmheart_lockscreen_test
+    src/lockscreen-test/main.cpp
+)
+set_target_properties(realmheart_lockscreen_test PROPERTIES
+    OUTPUT_NAME "realmheart-lockscreen-test"
+)
+target_include_directories(realmheart_lockscreen_test PRIVATE src third_party)
+target_compile_options(realmheart_lockscreen_test PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_link_libraries(realmheart_lockscreen_test PRIVATE
+    realmheart_ui
+    PkgConfig::GIO
+    PkgConfig::GTK4
+    PkgConfig::GTK4_LAYER_SHELL
+    PkgConfig::GDK_PIXBUF
+    PkgConfig::JPEG
+    PkgConfig::EPOXY
+    Threads::Threads
+)
 
 set(REALMHEART_NATIVE_WALLPAPER_BUILT OFF)
 if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
@@ -341,12 +378,17 @@ if(TARGET realmheart_fx)
 endif()
 
 install(TARGETS realmheart realmheart_power_menu_renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS realmheart_auth_helper RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/realmheart)
+# Set the setuid bit on the auth helper so the user shell can use PAM.
+install(CODE "execute_process(COMMAND chmod u+s \"\$ENV{DESTDIR}${CMAKE_INSTALL_FULL_LIBEXECDIR}/realmheart/realmheart-auth-helper\")")
 if(REALMHEART_NATIVE_WALLPAPER_BUILT)
     install(TARGETS realmheart-wallpaper-renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 install(DIRECTORY assets/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/assets)
 install(DIRECTORY styles/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/styles)
 install(DIRECTORY effects/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/effects)
+# PAM service for the lockscreen (requires root at install time).
+install(FILES config/pam/realmheart-lockscreen DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/pam.d)
 
 include(CTest)
 if(BUILD_TESTING)

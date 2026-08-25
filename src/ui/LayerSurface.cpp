@@ -120,6 +120,19 @@ LayerSurfaceSpec make_test_surface_spec() {
     return spec;
 }
 
+LayerSurfaceSpec make_lockscreen_surface_spec() {
+    LayerSurfaceSpec spec;
+    spec.surface_namespace = "realmheart-broken_seal";
+    spec.layer = LayerSurfaceLevel::Overlay;
+    spec.keyboard_mode = LayerKeyboardMode::Exclusive;
+    spec.anchor_left = true;
+    spec.anchor_right = true;
+    spec.anchor_top = true;
+    spec.anchor_bottom = true;
+    spec.exclusive_zone = -1;
+    return spec;
+}
+
 void set_layer_surface_level(GtkWindow* window, LayerSurfaceLevel layer) {
     if (window == nullptr) return;
     gtk_layer_set_layer(window, to_gtk_layer(layer));

@@ -41,10 +41,10 @@ realmheart::core::ModuleRegistry build_confirmed_module_registry() {
     });
 
     registry.add(ModuleDescriptor{
-        "lockscreen.centered-clock",
-        "Native C++ lock screen with Realmheart's centered-clock visual design",
+        "lockscreen.broken-seal",
+        "Native lockscreen: password entry, PAM auth",
         ModulePhase::Lock,
-        {"auth", "background", "clock", "animations"},
+        {"auth", "background", "blur", "animations", "hyprland"},
         true
     });
 

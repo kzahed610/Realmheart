@@ -30,6 +30,7 @@
 #include "ui/bar/VerticalBar.hpp"
 #include "ui/launcher/CommandReceiptOverlay.hpp"
 #include "ui/launcher/LauncherOverlay.hpp"
+#include "ui/lockscreen/LockSurface.hpp"
 #include "ui/powermenu/PowerMenuProcess.hpp"
 #include "ui/sidebar/RightSidebar.hpp"
 #include "ui/sidebar/SidebarFrame.hpp"
@@ -91,6 +92,13 @@ constexpr int kWorkspaceOverviewPrewarmDelayMs = 12000;
 // maps never contend for the frame clock on the same tick.
 constexpr int kRightSidebarPrewarmDelayMs = 12500;
 constexpr std::string_view kManaCoresWorkspaceName = "realmheart-mana-core";
+// Empty named workspace the lock choreography slides windows off to.
+constexpr std::string_view kLockWorkspaceName = "realmheart-lock";
+// Hyprland submap entered while the lockscreen is up. It declares no binds,
+// so every compositor keybind (SUPER+num workspace peeks included) goes
+// dead while locked; the lockscreen's own layer-shell keyboard grab still
+// receives keystrokes for the password entry.
+constexpr std::string_view kLockSubmapName = "realmheart-locked";
 
 template <typename... Args>
 void sidebar_input_debug(Args&&... args) {
@@ -375,6 +383,10 @@ public:
         // Stop callbacks that capture this before tearing down UI/controllers.
         runtime_async_state_->alive.store(false);
         runtime_async_state_->owner.store(nullptr);
+        if (lock_surface_ != nullptr) {
+            lock_surface_->hide_immediately();
+        }
+        ++lock_choreography_generation_;
         ++runtime_async_state_->volume_generation;
         ++runtime_async_state_->brightness_generation;
         ++runtime_async_state_->theme_generation;
@@ -389,6 +401,7 @@ public:
         workspace_overview_.reset();
         launcher_overlay_.reset();
         command_receipts_.reset();
+        lock_surface_.reset();
         notes_overlay_.reset();
         toast_.reset();
         osd_.reset();
@@ -980,7 +993,129 @@ public:
     }
 
     void lock_session() {
-        session_->lock();
+        // Ignore re-entry while already locked (SUPER+L while locked must not
+        // toggle back to the desktop).
+        if (lock_surface_ != nullptr && lock_surface_->visible()) return;
+
+        // Native lockscreen. If it fails to initialize within 2s,
+        // fall back to hyprlock so the session is never left unlocked.
+        if (lock_surface_ == nullptr) {
+            lock_surface_ = std::make_unique<lockscreen::LockSurface>(application_);
+            lock_surface_->set_unlocked_callback([this] {
+                finish_lock_unlock();
+            });
+        }
+
+        // Lock choreography (mana-core style): hide the bar, switch to an
+        // empty named workspace so Hyprland's own workspace animation slides
+        // every window off-stage, and only then present the lockscreen over
+        // the bare wallpaper.
+        lock_choreography_pending_ = true;
+        lock_surface_->hide_immediately();
+        // Jail compositor binds BEFORE anything else: from this instant,
+        // SUPER+num and friends cannot move focus to a workspace with real
+        // windows. The layer-shell keyboard grab keeps the password entry
+        // working inside the empty-bind submap.
+        services::HyprlandWorkspaces::set_submap(kLockSubmapName);
+        lock_choreography_workspace_ =
+            services::HyprlandWorkspaces::active_workspace_id().value_or(0);
+        lock_choreography_bar_was_visible_ =
+            bar_ != nullptr && state_.bar_visible();
+        if (lock_choreography_bar_was_visible_) {
+            gtk_widget_set_visible(bar_->get_window(), FALSE);
+        }
+
+        const std::uint64_t generation = ++lock_choreography_generation_;
+        const auto async_state = runtime_async_state_;
+        core::shared_task_executor().post([async_state, generation] {
+            const bool switched =
+                services::HyprlandWorkspaces::active_workspace_id().has_value() &&
+                services::HyprlandWorkspaces::switch_to_named(
+                    kLockWorkspaceName
+                );
+            struct Payload {
+                std::shared_ptr<RuntimeAsyncState> state;
+                std::uint64_t generation = 0;
+                bool switched = false;
+            };
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,
+                +[](gpointer raw) -> gboolean {
+                    auto* payload = static_cast<Payload*>(raw);
+                    ShellRuntime* owner = payload->state->owner.load();
+                    if (payload->state->alive.load() && owner != nullptr) {
+                        owner->finish_lock_choreography(
+                            payload->generation,
+                            payload->switched
+                        );
+                    }
+                    return G_SOURCE_REMOVE;
+                },
+                new Payload{async_state, generation, switched},
+                +[](gpointer raw) { delete static_cast<Payload*>(raw); }
+            );
+        });
+    }
+
+    void finish_lock_choreography(std::uint64_t generation, bool switched) {
+        if (generation != lock_choreography_generation_) {
+            return;
+        }
+        lock_choreography_pending_ = false;
+        lock_choreography_switched_ = switched;
+
+        // No compositor blur by design: the lock stage shows only the
+        // wallpaper on an empty workspace — no windows, nothing to hide.
+        lock_surface_->show();
+
+        services::SessionManager* session = session_.get();
+        lockscreen::LockSurface* surface = lock_surface_.get();
+        struct LockFallback {
+            lockscreen::LockSurface* surface;
+            services::SessionManager* session;
+        };
+        auto* fallback = new LockFallback{surface, session};
+        g_timeout_add(2000, +[](gpointer data) -> gboolean {
+            auto* fb = static_cast<LockFallback*>(data);
+            if (fb->surface == nullptr || fb->surface->visible()) {
+                delete fb;
+                return G_SOURCE_REMOVE;
+            }
+            std::cerr << "[Lockscreen] surface failed to map, falling back to hyprlock\n";
+            if (fb->session != nullptr) fb->session->lock();
+            // hyprlock's own unlock exits silently — watch for its exit so
+            // the bind jail is lifted even when the native surface lost the
+            // race. Without this the session comes back with dead keybinds.
+            g_timeout_add(500, +[](gpointer) -> gboolean {
+                const auto hyprlock = realmheart::core::run_capture(
+                    {"pgrep", "-x", "hyprlock"}
+                );
+                if (!hyprlock.succeeded() || hyprlock.output.find_first_not_of(
+                        " \t\n\r0123456789") != std::string::npos) {
+                    // pgrep failed or found no hyprlock: release the jail.
+                    services::HyprlandWorkspaces::set_submap("reset");
+                    return G_SOURCE_REMOVE;
+                }
+                return G_SOURCE_CONTINUE;
+            }, nullptr);
+            delete fb;
+            return G_SOURCE_REMOVE;
+        }, fallback);
+    }
+
+    void finish_lock_unlock() {
+        // Reverse choreography: binds back first (the desktop is about to be
+        // visible again), then bar back, original workspace back — windows
+        // slide home on Hyprland's own animation.
+        services::HyprlandWorkspaces::set_submap("reset");
+        if (lock_choreography_switched_ && lock_choreography_workspace_ != 0) {
+            services::HyprlandWorkspaces::switch_to(lock_choreography_workspace_);
+        }
+        if (lock_choreography_bar_was_visible_ && bar_ != nullptr) {
+            gtk_widget_set_visible(bar_->get_window(), TRUE);
+        }
+        lock_choreography_switched_ = false;
+        lock_choreography_workspace_ = 0;
     }
 
     void open_logout_menu(
@@ -1821,6 +1956,13 @@ private:
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
     std::unique_ptr<workspace::WorkspaceOverviewOverlay> workspace_overview_;
     guint workspace_overview_prewarm_id_ = 0;
+    std::unique_ptr<lockscreen::LockSurface> lock_surface_;
+    // Lock choreography state (mana-core style workspace slide).
+    bool lock_choreography_pending_ = false;
+    bool lock_choreography_switched_ = false;
+    bool lock_choreography_bar_was_visible_ = false;
+    int lock_choreography_workspace_ = 0;
+    std::uint64_t lock_choreography_generation_ = 0;
     services::WorkspaceSnapshot workspace_snapshot_;
     powermenu::PowerMenuProcess power_menu_process_;
     std::unique_ptr<realmheart::mana_core::ManaCoresSelector> mana_cores_selector_;
@@ -2000,6 +2142,11 @@ int run_shell(wallpaper::WallpaperBackendType wallpaper_backend) {
         G_APPLICATION_DEFAULT_FLAGS
     );
     auto runtime = std::make_unique<ShellRuntime>(application, wallpaper_backend);
+
+    // Safety: a previous session that died while the lockscreen bind jail
+    // was active would leave every compositor keybind dead. Reset the submap
+    // unconditionally at startup.
+    services::HyprlandWorkspaces::set_submap("reset");
 
     g_action_map_add_action_entries(
         G_ACTION_MAP(application),
