@@ -71,6 +71,14 @@ public:
     [[nodiscard]] bool animate_character_out(std::function<void()> completion);
     [[nodiscard]] bool character_enabled() const noexcept { return character_enabled_; }
     GtkWidget* get_window() const { return window_; }
+    // One-time boot warmup: maps the panel once at opacity 0 for a single
+    // frame tick so the first real open skips first-map pipeline costs.
+    // No-op after the first call; never grabs keyboard (OnDemand mode).
+    void prewarm();
+    // Aborts an in-flight prewarm frame (restores opacity, drops the tick).
+    // Called by the real toggle path so a warm-frame unmap can never fight
+    // a genuine open.
+    void cancel_prewarm();
 
 private:
     void update_geometry_on_realize(GtkWidget* widget);
@@ -128,6 +136,9 @@ private:
     realmheart::animation::character::CharacterHairMode character_hair_mode_ =
         realmheart::animation::character::CharacterHairMode::Mesh;
     bool sidebar_presented_ = false;
+    bool prewarmed_ = false;
+    bool prewarm_frame_active_ = false;
+    guint prewarm_tick_id_ = 0;
     guint character_hide_timeout_ = 0;
     std::function<void()> character_hide_completion_;
     std::vector<std::unique_ptr<components::BaseWidget>> modules_;

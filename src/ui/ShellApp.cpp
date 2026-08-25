@@ -87,6 +87,9 @@ constexpr int kHotspotHitWidth = 16;
 // to stay out of the startup critical path, short enough to be warm before
 // a user realistically presses the overview keybind.
 constexpr int kWorkspaceOverviewPrewarmDelayMs = 12000;
+// Staggered 500ms after the overview prewarm so the two hidden-frame warm
+// maps never contend for the frame clock on the same tick.
+constexpr int kRightSidebarPrewarmDelayMs = 12500;
 constexpr std::string_view kManaCoresWorkspaceName = "realmheart-mana-core";
 
 template <typename... Args>
@@ -367,6 +370,7 @@ public:
                 power_menu_process_.close();
 
         cancel_workspace_overview_prewarm();
+        cancel_right_sidebar_prewarm();
 
         // Stop callbacks that capture this before tearing down UI/controllers.
         runtime_async_state_->alive.store(false);
@@ -417,6 +421,7 @@ public:
         state_.show_bar();
         apply_bar_visibility();
         schedule_workspace_overview_prewarm();
+        schedule_right_sidebar_prewarm();
         const std::string current_path = utilities_->load_wallpaper_path();
         if (current_path.empty()) return;
         request_wallpaper(current_path, "Unable to restore wallpaper");
@@ -433,7 +438,9 @@ public:
     }
 
     void toggle_right_sidebar() {
+        cancel_right_sidebar_prewarm();
         ensure_sidebar_initialized();
+        sidebar_->cancel_prewarm();
         const bool before = state_.right_sidebar_visible();
         state_.toggle_right_sidebar();
         if (state_.right_sidebar_visible()) {
@@ -687,6 +694,40 @@ public:
         if (workspace_overview_prewarm_id_ != 0) {
             g_source_remove(workspace_overview_prewarm_id_);
             workspace_overview_prewarm_id_ = 0;
+        }
+    }
+
+    // One-time boot warmup for the right sidebar: constructing the panel and
+    // its fullscreen backdrop costs ~450ms on the first toggle. Build both at
+    // boot-idle (mapping nothing), then map the panel once at opacity 0 for a
+    // single frame tick so its first real open is as cheap as later ones.
+    // The backdrop is deliberately NOT mapped - its first map is cheap and a
+    // fullscreen input surface has no business appearing uninvited.
+    void prewarm_right_sidebar() {
+        ensure_sidebar_initialized();
+        sidebar_->prewarm();
+    }
+
+    void schedule_right_sidebar_prewarm() {
+        if (right_sidebar_prewarm_id_ != 0) return;
+        right_sidebar_prewarm_id_ = g_timeout_add_full(
+            G_PRIORITY_LOW,
+            kRightSidebarPrewarmDelayMs,
+            +[](gpointer raw) -> gint {
+                auto* runtime = static_cast<ShellRuntime*>(raw);
+                runtime->right_sidebar_prewarm_id_ = 0;
+                runtime->prewarm_right_sidebar();
+                return G_SOURCE_REMOVE;
+            },
+            this,
+            nullptr
+        );
+    }
+
+    void cancel_right_sidebar_prewarm() {
+        if (right_sidebar_prewarm_id_ != 0) {
+            g_source_remove(right_sidebar_prewarm_id_);
+            right_sidebar_prewarm_id_ = 0;
         }
     }
 
@@ -1771,6 +1812,7 @@ private:
     GtkWindow* hotspot_ = nullptr;
     GtkWindow* sidebar_backdrop_ = nullptr;
     std::unique_ptr<sidebar::RightSidebar> sidebar_;
+    guint right_sidebar_prewarm_id_ = 0;
     effects::TransitionTimeline sidebar_transition_{{0.22, 0.16}};
     guint sidebar_tick_id_ = 0;
     gint64 sidebar_last_frame_time_ = 0;

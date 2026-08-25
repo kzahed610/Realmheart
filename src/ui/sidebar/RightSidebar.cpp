@@ -505,6 +505,7 @@ RightSidebar::RightSidebar(
 
 RightSidebar::~RightSidebar() {
     cancel_character_hide_timeout();
+    cancel_prewarm();
     if (power_feedback_timeout_ != 0) {
         g_source_remove(power_feedback_timeout_);
         power_feedback_timeout_ = 0;
@@ -658,6 +659,48 @@ gboolean RightSidebar::finish_character_hide(gpointer raw) {
     self->character_hide_completion_ = {};
     if (!self->sidebar_presented_ && completion) completion();
     return G_SOURCE_REMOVE;
+}
+
+void RightSidebar::prewarm() {
+    if (prewarmed_) return;
+    if (window_ == nullptr) return;
+    prewarmed_ = true;
+
+    // First-map pipeline warmup: realize geometry, then map once at opacity
+    // 0 and let exactly one frame clock tick render through GSK/EGL before
+    // unmapping. The panel is invisible throughout; OnDemand keyboard mode
+    // means the map never grabs input.
+    apply_geometry();
+    gtk_widget_set_opacity(window_, 0.0);
+    gtk_widget_set_visible(window_, TRUE);
+
+    prewarm_frame_active_ = true;
+    prewarm_tick_id_ = gtk_widget_add_tick_callback(
+        window_,
+        +[](GtkWidget*, GdkFrameClock*, gpointer data) -> gboolean {
+            auto* self = static_cast<RightSidebar*>(data);
+            self->prewarm_tick_id_ = 0;
+            self->prewarm_frame_active_ = false;
+            if (!self->sidebar_presented_) {
+                gtk_widget_set_visible(self->window_, FALSE);
+            }
+            gtk_widget_set_opacity(self->window_, 1.0);
+            return G_SOURCE_REMOVE;
+        },
+        this,
+        nullptr
+    );
+}
+
+void RightSidebar::cancel_prewarm() {
+    if (prewarm_tick_id_ != 0 && window_ != nullptr) {
+        gtk_widget_remove_tick_callback(window_, prewarm_tick_id_);
+        prewarm_tick_id_ = 0;
+    }
+    if (prewarm_frame_active_) {
+        prewarm_frame_active_ = false;
+        if (window_ != nullptr) gtk_widget_set_opacity(window_, 1.0);
+    }
 }
 
 void RightSidebar::animate_character_in() {
