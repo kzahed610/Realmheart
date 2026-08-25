@@ -5,15 +5,15 @@
 
 namespace realmheart::ui {
 
-NotesOverlay::NotesOverlay(GtkApplication* app, services::NotesService* notes_service) 
+NotesOverlay::NotesOverlay(GtkApplication* app, services::NotesService* notes_service)
     : notes_service_(notes_service) {
     lifetime_->owner = this;
-    
+
     window_ = GTK_WIDGET(gtk_application_window_new(app));
     gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Notes");
     gtk_window_set_default_size(GTK_WINDOW(window_), 600, 800);
     gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
-    
+
     LayerSurfaceSpec spec;
     spec.surface_namespace = "realmheart-notes";
     spec.layer = LayerSurfaceLevel::Overlay;
@@ -26,19 +26,35 @@ NotesOverlay::NotesOverlay(GtkApplication* app, services::NotesService* notes_se
     text_view_ = gtk_text_view_new_with_buffer(buffer_);
     gtk_widget_add_css_class(text_view_, "realmheart-notes-editor");
     gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(text_view_), GTK_WRAP_WORD);
-    
+    // Keep the text off the frame edges; CSS padding is unreliable on
+    // GtkTextView, margins are the supported route.
+    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(text_view_), 18);
+    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(text_view_), 18);
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(text_view_), 14);
+    gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(text_view_), 16);
+
     gtk_text_buffer_set_text(buffer_, notes_service_->get_content().c_str(), -1);
 
     GtkWidget* scrolled = gtk_scrolled_window_new();
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled), text_view_);
 
     GtkWidget* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_vexpand(scrolled, TRUE);
-    gtk_box_append(GTK_BOX(root), scrolled);
+
+    GtkWidget* header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_widget_add_css_class(header, "realmheart-notes-header");
+    GtkWidget* title = gtk_label_new("NOTES");
+    gtk_widget_add_css_class(title, "realmheart-notes-title");
+    gtk_label_set_xalign(GTK_LABEL(title), 0.0F);
+    gtk_box_append(GTK_BOX(header), title);
     status_label_ = gtk_label_new("Saved");
     gtk_widget_add_css_class(status_label_, "realmheart-notes-save-state");
-    gtk_label_set_xalign(GTK_LABEL(status_label_), 1.0F);
-    gtk_box_append(GTK_BOX(root), status_label_);
+    gtk_widget_set_halign(status_label_, GTK_ALIGN_END);
+    gtk_widget_set_valign(status_label_, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(header), status_label_);
+    gtk_box_append(GTK_BOX(root), header);
+
+    gtk_widget_set_vexpand(scrolled, TRUE);
+    gtk_box_append(GTK_BOX(root), scrolled);
     gtk_window_set_child(GTK_WINDOW(window_), root);
 
     g_signal_connect(buffer_, "changed", G_CALLBACK(on_text_changed_callback), this);
