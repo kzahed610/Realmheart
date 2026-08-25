@@ -252,7 +252,7 @@ window.realmheart-system-monitor-layer-window .realmheart-attached-popover-fill 
 }
 
 .realmheart-identity-header {
-  margin-bottom: 23px;
+  margin-bottom: 18px;
   padding: 4px 5px 11px 5px;
   background-color: transparent;
   border: 0;
@@ -290,7 +290,7 @@ window.realmheart-system-monitor-layer-window .realmheart-attached-popover-fill 
   font-size: 0.64em;
 }
 
-.realmheart-sidebar-section { margin-bottom: 27px; }
+.realmheart-sidebar-section { margin-bottom: 21px; }
 
 .realmheart-section-title,
 .realmheart-notifications-title {
@@ -473,7 +473,7 @@ scale.realmheart-rune-scale slider {
   opacity: 0;
 }
 
-.realmheart-power-section { margin-bottom: 26px; }
+.realmheart-power-section { margin-bottom: 20px; }
 .realmheart-power-segments {
   margin-top: 3px;
   padding: 3px;
@@ -544,7 +544,7 @@ button.realmheart-power-segment.failed {
   border-radius: 0;
   box-shadow: none;
 }
-.realmheart-notifications-header { padding: 11px 3px 8px 3px; }
+.realmheart-notifications-header { padding: 5px 3px 6px 3px; }
 .realmheart-notifications-count {
   min-width: 16px;
   min-height: 16px;
@@ -578,6 +578,7 @@ button.realmheart-notifications-clear:active {
 }
 button.realmheart-notifications-clear:disabled { opacity: 0.38; }
 .realmheart-notifications-scroller {
+  margin-bottom: 30px;
   background-image: linear-gradient(to bottom, alpha(#0a1012, 0.74), alpha(#060a0c, 0.64));
   background-color: alpha(#070c0e, 0.68);
   border: 1px solid alpha(#9d7138, 0.20);
@@ -592,6 +593,17 @@ button.realmheart-notifications-clear:disabled { opacity: 0.38; }
 }
 .realmheart-notifications-scroller viewport { background-color: transparent; }
 .realmheart-notifications-list { padding: 8px 8px 10px 8px; }
+/* Swipe-to-dismiss slot: pure transform container around each row. Rounded
+   so the overflow-hidden clip matches the row silhouette while sliding. */
+realmheart-notification-slot {
+  border-radius: 11px;
+}
+.realmheart-notification-row.swipe-armed {
+  border-color: alpha(@rh_primary, 0.45);
+  box-shadow:
+    0 0 16px alpha(@rh_primary, 0.14),
+    0 6px 14px alpha(#000000, 0.14);
+}
 .realmheart-notification-row {
   padding: 10px 11px 11px 12px;
   background-image: linear-gradient(to bottom, alpha(#121a1c, 0.70), alpha(#0a1012, 0.78));

@@ -33,6 +33,102 @@ bool is_inside_button(GtkWidget* widget, GtkWidget* stop_at) {
     return false;
 }
 
+// Swipe bin: a bare GtkWidget subclass whose snapshot applies a horizontal
+// translate to its child. Sliding a notification row therefore never
+// triggers relayout — it is a pure render-stage transform, so it stays
+// buttery even next to the character compositor.
+typedef struct _RealmheartSwipeBin {
+    GtkWidget parent_instance;
+    double translate_x;
+} RealmheartSwipeBin;
+
+typedef struct _RealmheartSwipeBinClass {
+    GtkWidgetClass parent_class;
+} RealmheartSwipeBinClass;
+
+G_DEFINE_TYPE(RealmheartSwipeBin, realmheart_swipe_bin, GTK_TYPE_WIDGET)
+
+void realmheart_swipe_bin_snapshot(GtkWidget* widget, GtkSnapshot* snapshot) {
+    auto* self = reinterpret_cast<RealmheartSwipeBin*>(widget);
+    GtkWidget* child = gtk_widget_get_first_child(widget);
+    if (child == nullptr) return;
+    if (self->translate_x != 0.0) {
+        const graphene_point_t offset = GRAPHENE_POINT_INIT(
+            static_cast<float>(self->translate_x),
+            0.0F
+        );
+        gtk_snapshot_translate(snapshot, &offset);
+    }
+    gtk_widget_snapshot_child(widget, child, snapshot);
+}
+
+void realmheart_swipe_bin_measure(
+    GtkWidget* widget,
+    GtkOrientation orientation,
+    int for_size,
+    int* minimum,
+    int* natural,
+    int* minimum_baseline,
+    int* natural_baseline
+) {
+    GtkWidget* child = gtk_widget_get_first_child(widget);
+    if (child != nullptr) {
+        gtk_widget_measure(
+            child, orientation, for_size,
+            minimum, natural, minimum_baseline, natural_baseline
+        );
+        return;
+    }
+    *minimum = 0;
+    *natural = 0;
+    if (minimum_baseline != nullptr) *minimum_baseline = -1;
+    if (natural_baseline != nullptr) *natural_baseline = -1;
+}
+
+void realmheart_swipe_bin_size_allocate(
+    GtkWidget* widget,
+    int width,
+    int height,
+    int baseline
+) {
+    GtkWidget* child = gtk_widget_get_first_child(widget);
+    if (child != nullptr) {
+        const GtkAllocation allocation{0, 0, width, height};
+        gtk_widget_size_allocate(child, &allocation, baseline);
+    }
+}
+
+void realmheart_swipe_bin_dispose(GObject* object) {
+    GtkWidget* child = gtk_widget_get_first_child(GTK_WIDGET(object));
+    if (child != nullptr) gtk_widget_unparent(child);
+    G_OBJECT_CLASS(realmheart_swipe_bin_parent_class)->dispose(object);
+}
+
+void realmheart_swipe_bin_class_init(RealmheartSwipeBinClass* klass) {
+    GtkWidgetClass* widget_class = GTK_WIDGET_CLASS(klass);
+    widget_class->snapshot = realmheart_swipe_bin_snapshot;
+    widget_class->measure = realmheart_swipe_bin_measure;
+    widget_class->size_allocate = realmheart_swipe_bin_size_allocate;
+    GObjectClass* object_class = G_OBJECT_CLASS(klass);
+    object_class->dispose = realmheart_swipe_bin_dispose;
+    gtk_widget_class_set_css_name(widget_class, "realmheart-notification-slot");
+}
+
+void realmheart_swipe_bin_init(RealmheartSwipeBin* self) {
+    self->translate_x = 0.0;
+    gtk_widget_set_overflow(GTK_WIDGET(self), GTK_OVERFLOW_HIDDEN);
+}
+
+void realmheart_swipe_bin_set_translate(GtkWidget* widget, double offset) {
+    auto* self = reinterpret_cast<RealmheartSwipeBin*>(widget);
+    if (self->translate_x == offset) return;
+    self->translate_x = offset;
+    gtk_widget_queue_draw(widget);
+}
+
+constexpr double kSwipeDismissFraction = 0.30;
+constexpr gint64 kSwipeAnimDurationUs = 180000;
+
 } // namespace
 
 NotificationWidget::NotificationWidget(services::NotificationHistory& history)
@@ -75,8 +171,9 @@ NotificationWidget::NotificationWidget(services::NotificationHistory& history)
     gtk_scrolled_window_set_policy(
         GTK_SCROLLED_WINDOW(scroller_), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC
     );
-    gtk_widget_set_vexpand(scroller_, FALSE);
-    gtk_widget_set_size_request(scroller_, -1, 286);
+    // Let the notifications area absorb all spare vertical space in the
+    // sidebar instead of being pinned to a fixed 286px strip.
+    gtk_widget_set_vexpand(scroller_, TRUE);
     gtk_widget_set_cursor_from_name(scroller_, "grab");
 
     vertical_adjustment_ = gtk_scrolled_window_get_vadjustment(
@@ -115,6 +212,43 @@ NotificationWidget::NotificationWidget(services::NotificationHistory& history)
     }), this);
     gtk_widget_add_controller(scroller_, GTK_EVENT_CONTROLLER(drag));
 
+    // Horizontal swipe-to-dismiss on rows. Lives on the scroller so the
+    // whole row area is fair game; begin_row_swipe() resolves which row
+    // (if any) the pointer actually started on.
+    GtkGesture* swipe = gtk_gesture_drag_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(swipe), GDK_BUTTON_PRIMARY);
+    gtk_gesture_single_set_exclusive(GTK_GESTURE_SINGLE(swipe), FALSE);
+    gtk_event_controller_set_propagation_phase(
+        GTK_EVENT_CONTROLLER(swipe), GTK_PHASE_CAPTURE
+    );
+    g_signal_connect(swipe, "drag-begin", G_CALLBACK(+[](
+        GtkGestureDrag* gesture, double start_x, double start_y, gpointer data
+    ) {
+        static_cast<NotificationWidget*>(data)->begin_row_swipe(
+            gesture, start_x, start_y
+        );
+    }), this);
+    g_signal_connect(swipe, "drag-update", G_CALLBACK(+[](
+        GtkGestureDrag* gesture, double offset_x, double offset_y, gpointer data
+    ) {
+        static_cast<NotificationWidget*>(data)->update_row_swipe(
+            gesture, offset_x, offset_y
+        );
+    }), this);
+    g_signal_connect(swipe, "drag-end", G_CALLBACK(+[](
+        GtkGestureDrag* gesture, double, double, gpointer data
+    ) {
+        static_cast<NotificationWidget*>(data)->end_row_swipe(gesture);
+    }), this);
+    g_signal_connect(swipe, "cancel", G_CALLBACK(+[](
+        GtkGesture* gesture, GdkEventSequence*, gpointer data
+    ) {
+        static_cast<NotificationWidget*>(data)->end_row_swipe(
+            GTK_GESTURE_DRAG(gesture)
+        );
+    }), this);
+    gtk_widget_add_controller(scroller_, GTK_EVENT_CONTROLLER(swipe));
+
     list_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_widget_add_css_class(list_, "realmheart-notifications-list");
     gtk_widget_set_vexpand(list_, TRUE);
@@ -143,6 +277,7 @@ NotificationWidget::NotificationWidget(services::NotificationHistory& history)
 }
 
 NotificationWidget::~NotificationWidget() {
+    cancel_swipe_animation();
     subscription_.reset();
     state_->alive = false;
     state_->owner = nullptr;
@@ -227,6 +362,7 @@ void NotificationWidget::end_drag_scroll() {
 }
 
 void NotificationWidget::refresh() {
+    cancel_swipe_animation();
     clear_box(list_);
 
     const auto snapshot = history_.snapshot();
@@ -330,8 +466,243 @@ void NotificationWidget::refresh() {
         }), this);
         gtk_box_append(GTK_BOX(row), dismiss);
 
-        gtk_box_append(GTK_BOX(list_), row);
+        // Wrap the row in a swipe bin: horizontal drags translate the bin
+        // (pure snapshot transform), release either dismisses the entry or
+        // springs the row back.
+        GtkWidget* slot = static_cast<GtkWidget*>(
+            g_object_new(realmheart_swipe_bin_get_type(), nullptr)
+        );
+        gtk_widget_set_parent(row, slot);
+        g_object_set_data(
+            G_OBJECT(slot),
+            "realmheart-notification-id",
+            GUINT_TO_POINTER(entry.id)
+        );
+        gtk_box_append(GTK_BOX(list_), slot);
     }
+}
+
+void NotificationWidget::begin_row_swipe(
+    GtkGestureDrag* /*gesture*/,
+    double start_x,
+    double start_y
+) {
+    swipe_blocked_ = false;
+    if (swipe_row_ != nullptr) return;
+
+    GtkWidget* picked = gtk_widget_pick(
+        scroller_, start_x, start_y, GTK_PICK_DEFAULT
+    );
+    if (picked == nullptr || is_inside_button(picked, scroller_)) {
+        swipe_blocked_ = true;
+        return;
+    }
+
+    // Walk up to the swipe bin wrapping the row under the pointer.
+    GtkWidget* slot = picked;
+    while (slot != nullptr && slot != list_) {
+        if (G_TYPE_CHECK_INSTANCE_TYPE(
+                slot, realmheart_swipe_bin_get_type()
+            )) {
+            break;
+        }
+        slot = gtk_widget_get_parent(slot);
+    }
+    if (slot == nullptr || slot == list_) {
+        swipe_blocked_ = true;
+        return;
+    }
+
+    cancel_swipe_animation();
+    swipe_row_ = slot;
+    swipe_id_ = GPOINTER_TO_UINT(g_object_get_data(
+        G_OBJECT(slot), "realmheart-notification-id"
+    ));
+    swipe_offset_ = 0.0;
+    swipe_will_dismiss_ = false;
+}
+
+void NotificationWidget::update_row_swipe(
+    GtkGestureDrag* gesture,
+    double offset_x,
+    double offset_y
+) {
+    if (swipe_blocked_ || swipe_row_ == nullptr) return;
+
+    if (!swipe_active_) {
+        // Only claim horizontal intent — vertical drags keep feeding the
+        // scroll-drag gesture.
+        if (!gtk_drag_check_threshold(
+                scroller_,
+                0, 0,
+                static_cast<int>(offset_x), static_cast<int>(offset_y)
+            )) {
+            return;
+        }
+        if (std::abs(offset_x) < std::abs(offset_y)) {
+            swipe_blocked_ = true;
+            gtk_gesture_set_state(
+                GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED
+            );
+            return;
+        }
+        swipe_active_ = true;
+        gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+    }
+
+    // Rubber-band past the edges so the row never flies away mid-drag.
+    const double width = std::max(
+        static_cast<double>(gtk_widget_get_width(swipe_row_)), 1.0
+    );
+    double target = offset_x;
+    const double limit = width;
+    if (target > limit) target = limit + (target - limit) * 0.25;
+    if (target < -limit) target = -limit + (target + limit) * 0.25;
+
+    swipe_offset_ = target;
+    const double threshold = width * kSwipeDismissFraction;
+    const bool will_dismiss = std::abs(target) >= threshold;
+    if (will_dismiss != swipe_will_dismiss_) {
+        swipe_will_dismiss_ = will_dismiss;
+        GtkWidget* row = gtk_widget_get_first_child(swipe_row_);
+        if (will_dismiss) {
+            if (row != nullptr) gtk_widget_add_css_class(row, "swipe-armed");
+        } else if (row != nullptr) {
+            gtk_widget_remove_css_class(row, "swipe-armed");
+        }
+    }
+    set_swipe_translate(target);
+}
+
+void NotificationWidget::end_row_swipe(GtkGestureDrag* gesture) {
+    if (swipe_blocked_) {
+        swipe_blocked_ = false;
+        return;
+    }
+    if (swipe_row_ == nullptr) return;
+
+    double start_x = 0.0, start_y = 0.0;
+    gtk_gesture_drag_get_start_point(gesture, &start_x, &start_y);
+    double end_x = 0.0, end_y = 0.0;
+    double offset_x = 0.0;
+    if (gtk_gesture_drag_get_offset(gesture, &end_x, &end_y)) {
+        offset_x = end_x - start_x;
+    }
+    (void)start_y;
+    (void)end_y;
+
+    GtkWidget* row = swipe_row_;
+    const std::uint32_t id = swipe_id_;
+    const double width = std::max(
+        static_cast<double>(gtk_widget_get_width(row)), 1.0
+    );
+
+    // Flick detection: a fast horizontal release dismisses even below the
+    // distance threshold. Rough px/ms velocity over the last gesture.
+    const bool flick = std::abs(offset_x) > 90.0;
+
+    const bool dismiss =
+        std::abs(swipe_offset_) >= width * kSwipeDismissFraction || flick;
+
+    gtk_widget_remove_css_class(row, "swipe-armed");
+    GtkWidget* row_child = gtk_widget_get_first_child(row);
+    if (row_child != nullptr) {
+        gtk_widget_remove_css_class(row_child, "swipe-armed");
+    }
+    if (dismiss) {
+        const double direction = swipe_offset_ != 0.0
+            ? (swipe_offset_ > 0.0 ? 1.0 : -1.0)
+            : (offset_x > 0.0 ? 1.0 : -1.0);
+        swipe_id_ = id;
+        animate_swipe_release(direction * (width + 24.0), true);
+    } else {
+        animate_swipe_release(0.0, false);
+    }
+    // swipe_row_ is cleared by the animation tick (or cancel) so a second
+    // gesture cannot grab the same mid-animation row.
+}
+
+void NotificationWidget::animate_swipe_release(
+    double target,
+    bool dismiss_after
+) {
+    // Kill only a previous release tick — NOT the whole swipe state.
+    // cancel_swipe_animation() would null swipe_row_ and snap the translate
+    // back to 0, so the fly-out/spring-back could never start (and a
+    // dismiss release would silently become a no-op).
+    if (swipe_tick_id_ != 0 && scroller_ != nullptr) {
+        gtk_widget_remove_tick_callback(scroller_, swipe_tick_id_);
+        swipe_tick_id_ = 0;
+    }
+    if (swipe_row_ == nullptr) return;
+    swipe_anim_start_ = swipe_offset_;
+    swipe_anim_target_ = target;
+    swipe_anim_start_us_ = g_get_monotonic_time();
+    swipe_anim_dismiss_ = dismiss_after;
+    swipe_tick_id_ = gtk_widget_add_tick_callback(
+        scroller_, &NotificationWidget::swipe_tick, this, nullptr
+    );
+}
+
+gboolean NotificationWidget::swipe_tick(
+    GtkWidget*,
+    GdkFrameClock* frame_clock,
+    gpointer data
+) {
+    auto* self = static_cast<NotificationWidget*>(data);
+    self->swipe_tick_id_ = 0;
+
+    const gint64 now = gdk_frame_clock_get_frame_time(frame_clock);
+    double linear = static_cast<double>(now - self->swipe_anim_start_us_) /
+        static_cast<double>(kSwipeAnimDurationUs);
+    linear = std::clamp(linear, 0.0, 1.0);
+    const double eased = 1.0 - (1.0 - linear) * (1.0 - linear);
+    const double value = self->swipe_anim_start_ +
+        (self->swipe_anim_target_ - self->swipe_anim_start_) * eased;
+
+    if (linear < 1.0) {
+        self->set_swipe_translate(value);
+        self->swipe_tick_id_ = gtk_widget_add_tick_callback(
+            self->scroller_, &NotificationWidget::swipe_tick, self, nullptr
+        );
+        return G_SOURCE_REMOVE;
+    }
+
+    GtkWidget* row = self->swipe_row_;
+    self->swipe_row_ = nullptr;
+    self->swipe_offset_ = 0.0;
+    if (self->swipe_anim_dismiss_ && row != nullptr) {
+        const auto id = GPOINTER_TO_UINT(g_object_get_data(
+            G_OBJECT(row), "realmheart-notification-id"
+        ));
+        self->set_swipe_translate(0.0);
+        self->dismiss_notification(id);
+    } else {
+        self->set_swipe_translate(0.0);
+    }
+    return G_SOURCE_REMOVE;
+}
+
+void NotificationWidget::set_swipe_translate(double offset) {
+    swipe_offset_ = offset;
+    if (swipe_row_ != nullptr) {
+        realmheart_swipe_bin_set_translate(swipe_row_, offset);
+    }
+}
+
+void NotificationWidget::cancel_swipe_animation() {
+    if (swipe_tick_id_ != 0 && scroller_ != nullptr) {
+        gtk_widget_remove_tick_callback(scroller_, swipe_tick_id_);
+        swipe_tick_id_ = 0;
+    }
+    if (swipe_row_ != nullptr) {
+        realmheart_swipe_bin_set_translate(swipe_row_, 0.0);
+    }
+    swipe_row_ = nullptr;
+    swipe_id_ = 0;
+    swipe_offset_ = 0.0;
+    swipe_active_ = false;
+    swipe_will_dismiss_ = false;
 }
 
 } // namespace realmheart::ui::components

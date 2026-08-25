@@ -292,8 +292,10 @@ public:
     QuickControlTile(
         const char* label,
         const char* icon_path,
-        std::function<void()> activated
-    ) : activated_(std::move(activated)) {
+        std::function<void()> activated,
+        std::function<void()> settings_activated = nullptr
+    ) : activated_(std::move(activated)),
+        settings_activated_(std::move(settings_activated)) {
         button_ = gtk_button_new();
         gtk_widget_add_css_class(button_, "realmheart-quick-tile");
         gtk_widget_set_hexpand(button_, TRUE);
@@ -330,6 +332,24 @@ public:
             self->show_click_feedback();
             if (self->activated_) self->activated_();
         }), this);
+
+        // Right-click opens the tile's settings panel (wifi networks, bluetooth
+        // devices, night light temperature). Keep Awake has no settings, so it
+        // simply omits the callback and right-click is a no-op.
+        GtkGesture* right_click = gtk_gesture_click_new();
+        gtk_gesture_single_set_button(
+            GTK_GESTURE_SINGLE(right_click), GDK_BUTTON_SECONDARY
+        );
+        gtk_event_controller_set_propagation_phase(
+            GTK_EVENT_CONTROLLER(right_click), GTK_PHASE_CAPTURE
+        );
+        g_signal_connect(right_click, "pressed", G_CALLBACK(+[](
+            GtkGestureClick*, int, double, double, gpointer data
+        ) {
+            auto* self = static_cast<QuickControlTile*>(data);
+            if (self->settings_activated_) self->settings_activated_();
+        }), this);
+        gtk_widget_add_controller(button_, GTK_EVENT_CONTROLLER(right_click));
     }
 
     ~QuickControlTile() {
@@ -380,6 +400,7 @@ private:
     GtkWidget* button_ = nullptr;
     GtkWidget* status_ = nullptr;
     std::function<void()> activated_;
+    std::function<void()> settings_activated_;
     guint click_feedback_timeout_ = 0;
 };
 
@@ -869,28 +890,55 @@ void RightSidebar::build_quick_controls() {
     gtk_grid_set_column_homogeneous(GTK_GRID(grid), TRUE);
 
     wifi_tile_ = std::make_unique<QuickControlTile>(
-        "Wi-Fi", "Realmheart-Icons/wifi.svg", [this] {
+        "Wi-Fi", "Realmheart-Icons/wifi.svg",
+        [this] {
+            // Left click: hard toggle the radio. post_control_action runs the
+            // mutation on the task executor and refreshes tile state after.
+            post_control_action([] {
+                const auto state = services::Wifi::read();
+                if (!state) return;
+                static_cast<void>(services::Wifi::set_enabled(!state->enabled));
+            });
+        },
+        [this] {
             if (bluetooth_panel_) bluetooth_panel_->hide();
             if (night_light_panel_) night_light_panel_->hide();
             if (wifi_panel_) wifi_panel_->toggle();
         }
     );
     bluetooth_tile_ = std::make_unique<QuickControlTile>(
-        "Bluetooth", "Realmheart-Icons/bluetooth.svg", [this] {
+        "Bluetooth", "Realmheart-Icons/bluetooth.svg",
+        [this] {
+            post_control_action([] {
+                const auto state = services::Bluetooth::read();
+                if (!state) return;
+                static_cast<void>(services::Bluetooth::set_powered(!state->powered));
+            });
+        },
+        [this] {
             if (wifi_panel_) wifi_panel_->hide();
             if (night_light_panel_) night_light_panel_->hide();
             if (bluetooth_panel_) bluetooth_panel_->toggle();
         }
     );
     night_light_tile_ = std::make_unique<QuickControlTile>(
-        "Night Light", "Realmheart-Icons/night-light.svg", [this] {
+        "Night Light", "Realmheart-Icons/night-light.svg",
+        [this] {
+            post_control_action([] {
+                const auto state = services::NightLight::read();
+                if (!state) return;
+                static_cast<void>(services::NightLight::set_enabled(!state->enabled));
+            });
+        },
+        [this] {
             if (wifi_panel_) wifi_panel_->hide();
             if (bluetooth_panel_) bluetooth_panel_->hide();
             if (night_light_panel_) night_light_panel_->toggle();
         }
     );
     keep_awake_tile_ = std::make_unique<QuickControlTile>(
-        "Keep Awake", "Realmheart-Icons/keep-awake.svg", [this] {
+        "Keep Awake", "Realmheart-Icons/keep-awake.svg",
+        [this] {
             const bool enabled = !keep_awake_->active();
             post_control_action([keep_awake = keep_awake_, enabled] {
                 static_cast<void>(keep_awake->set_enabled(enabled));
@@ -1066,7 +1114,8 @@ void RightSidebar::populate_modules() {
         notification_history_
     );
     GtkWidget* notification_widget = notifications->get_widget();
-    gtk_widget_set_vexpand(notification_widget, FALSE);
+    // Notifications absorb the spare vertical space below the power section.
+    gtk_widget_set_vexpand(notification_widget, TRUE);
     gtk_box_append(GTK_BOX(container_), notification_widget);
     modules_.push_back(std::move(notifications));
 }
