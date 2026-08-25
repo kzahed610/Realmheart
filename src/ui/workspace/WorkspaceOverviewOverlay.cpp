@@ -3081,6 +3081,66 @@ void WorkspaceOverviewOverlay::toggle() {
     if (morph_timeline_.target_visible()) hide(); else show();
 }
 
+void WorkspaceOverviewOverlay::prewarm() {
+    if (prewarmed_) return;
+    if (window_ == nullptr || canvas_ == nullptr) return;
+    if (morph_timeline_.target_visible()) {
+        // Real show() already does this work visibly; mark warm.
+        prewarmed_ = true;
+        return;
+    }
+    prewarmed_ = true;
+
+    // CPU-side first-open work: asset decode + overlay rasterization.
+    synchronize_active_workspace();
+    normalize_selection();
+    static_cast<void>(ensure_assets());
+    static_cast<void>(rebuild_dirty_overlays());
+
+    // GPU-side first-open work: map once at opacity 0 and let exactly one
+    // frame clock tick produce a real frame through the full GSK/EGL
+    // pipeline. The window stays invisible the whole time, so there is no
+    // perceptible flash even on a fast display.
+    gtk_widget_set_opacity(GTK_WIDGET(window_), 0.0);
+    gtk_window_present(window_);
+    gtk_widget_queue_draw(canvas_);
+
+    struct PrewarmFrameState {
+        guint tick_id = 0;
+        WorkspaceOverviewOverlay* self = nullptr;
+    };
+    auto* state = new PrewarmFrameState{0, this};
+    state->tick_id = gtk_widget_add_tick_callback(
+        canvas_,
+        +[](
+            GtkWidget*,
+            GdkFrameClock*,
+            gpointer data
+        ) -> gboolean {
+            auto* frame_state = static_cast<PrewarmFrameState*>(data);
+            auto* overlay = frame_state->self;
+            gtk_widget_remove_tick_callback(
+                GTK_WIDGET(overlay->canvas_),
+                frame_state->tick_id
+            );
+            delete frame_state;
+            // Only unmap when still in the hidden prewarm state — a real
+            // toggle that raced us owns the window from here on. Restoring
+            // opacity is safe either way: show()/hide() paths set their own
+            // visual state every transition.
+            const bool still_hidden =
+                !overlay->morph_timeline_.target_visible();
+            if (still_hidden) {
+                gtk_widget_set_visible(GTK_WIDGET(overlay->window_), FALSE);
+            }
+            gtk_widget_set_opacity(GTK_WIDGET(overlay->window_), 1.0);
+            return G_SOURCE_REMOVE;
+        },
+        state,
+        nullptr
+    );
+}
+
 bool WorkspaceOverviewOverlay::visible() const {
     return window_ != nullptr && gtk_widget_get_visible(GTK_WIDGET(window_));
 }

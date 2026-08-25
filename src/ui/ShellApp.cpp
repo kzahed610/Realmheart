@@ -83,6 +83,10 @@ std::filesystem::path user_media_directory(GUserDirectory directory, const char*
 }
 
 constexpr int kHotspotHitWidth = 16;
+// Boot-idle delay before the workspace overview prewarm fires. Long enough
+// to stay out of the startup critical path, short enough to be warm before
+// a user realistically presses the overview keybind.
+constexpr int kWorkspaceOverviewPrewarmDelayMs = 12000;
 constexpr std::string_view kManaCoresWorkspaceName = "realmheart-mana-core";
 
 template <typename... Args>
@@ -362,6 +366,8 @@ public:
     ~ShellRuntime() {
                 power_menu_process_.close();
 
+        cancel_workspace_overview_prewarm();
+
         // Stop callbacks that capture this before tearing down UI/controllers.
         runtime_async_state_->alive.store(false);
         runtime_async_state_->owner.store(nullptr);
@@ -410,6 +416,7 @@ public:
         ensure_core_initialized();
         state_.show_bar();
         apply_bar_visibility();
+        schedule_workspace_overview_prewarm();
         const std::string current_path = utilities_->load_wallpaper_path();
         if (current_path.empty()) return;
         request_wallpaper(current_path, "Unable to restore wallpaper");
@@ -616,40 +623,80 @@ public:
         ));
     }
 
-    void toggle_workspace_overview() {
-        ensure_core_initialized();
-        if (!workspace_overview_) {
-            workspace_overview_ =
-                std::make_unique<workspace::WorkspaceOverviewOverlay>(
-                    application_,
-                    [this](int workspace_id) {
-                        activate_overview_workspace(workspace_id);
-                    },
-                    [this](int workspace_id, std::string address) {
-                        activate_overview_window(
-                            workspace_id,
-                            std::move(address)
-                        );
-                    },
-                    [this](int workspace_id, std::string address) {
-                        move_overview_window(
-                            workspace_id,
-                            std::move(address)
-                        );
-                    },
-                    [this](bool active) {
-                        if (bar_ != nullptr) {
-                            bar_->set_workspace_morph_active(active);
-                        }
-                    },
-                    [this](double progress) {
-                        if (bar_ != nullptr) {
-                            bar_->set_workspace_morph_progress(progress);
-                        }
+    void ensure_workspace_overview() {
+        if (workspace_overview_) return;
+        workspace_overview_ =
+            std::make_unique<workspace::WorkspaceOverviewOverlay>(
+                application_,
+                [this](int workspace_id) {
+                    activate_overview_workspace(workspace_id);
+                },
+                [this](int workspace_id, std::string address) {
+                    activate_overview_window(
+                        workspace_id,
+                        std::move(address)
+                    );
+                },
+                [this](int workspace_id, std::string address) {
+                    move_overview_window(
+                        workspace_id,
+                        std::move(address)
+                    );
+                },
+                [this](bool active) {
+                    if (bar_ != nullptr) {
+                        bar_->set_workspace_morph_active(active);
                     }
-                );
-            workspace_overview_->set_workspace_snapshot(workspace_snapshot_);
+                },
+                [this](double progress) {
+                    if (bar_ != nullptr) {
+                        bar_->set_workspace_morph_progress(progress);
+                    }
+                }
+            );
+    }
+
+    // One-time boot warmup: the overview's first open costs ~600 ms of asset
+    // decode + overlay rasterization + first-surface GL pipeline warmup. Pay
+    // that at boot-idle instead of on the user's first keybind press. The
+    // hidden-frame warm map keeps the surface mapped-but-invisible; measured
+    // idle cost is ~0.7 MB RSS and zero GPU work when not animating.
+    void prewarm_workspace_overview() {
+        ensure_workspace_overview();
+        workspace_overview_->set_workspace_snapshot(workspace_snapshot_);
+        workspace_overview_->prewarm();
+    }
+
+    void schedule_workspace_overview_prewarm() {
+        if (workspace_overview_prewarm_id_ != 0) return;
+        workspace_overview_prewarm_id_ = g_timeout_add_full(
+            G_PRIORITY_LOW,
+            kWorkspaceOverviewPrewarmDelayMs,
+            +[](gpointer raw) -> gint {
+                auto* runtime = static_cast<ShellRuntime*>(raw);
+                runtime->workspace_overview_prewarm_id_ = 0;
+                runtime->prewarm_workspace_overview();
+                return G_SOURCE_REMOVE;
+            },
+            this,
+            nullptr
+        );
+    }
+
+    void cancel_workspace_overview_prewarm() {
+        if (workspace_overview_prewarm_id_ != 0) {
+            g_source_remove(workspace_overview_prewarm_id_);
+            workspace_overview_prewarm_id_ = 0;
         }
+    }
+
+    void toggle_workspace_overview() {
+        cancel_workspace_overview_prewarm();
+        ensure_core_initialized();
+        ensure_workspace_overview();
+        // Refresh the snapshot on every toggle so a boot-time prewarm never
+        // serves stale workspace data at open time.
+        workspace_overview_->set_workspace_snapshot(workspace_snapshot_);
         workspace_overview_->set_morph_sources(
             bar_ != nullptr
                 ? bar_->workspace_morph_sources()
@@ -1731,6 +1778,7 @@ private:
     std::unique_ptr<CommandReceiptOverlay> command_receipts_;
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
     std::unique_ptr<workspace::WorkspaceOverviewOverlay> workspace_overview_;
+    guint workspace_overview_prewarm_id_ = 0;
     services::WorkspaceSnapshot workspace_snapshot_;
     powermenu::PowerMenuProcess power_menu_process_;
     std::unique_ptr<realmheart::mana_core::ManaCoresSelector> mana_cores_selector_;

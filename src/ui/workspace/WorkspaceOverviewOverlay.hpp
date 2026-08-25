@@ -36,6 +36,11 @@ public:
     void show();
     void hide();
     void toggle();
+    // One-time boot warmup: performs the expensive first-open work (asset
+    // decode, overlay rasterization, GL pipeline warmup) while invisible so
+    // the first real open is as fast as every subsequent one. Safe to call
+    // any number of times; a no-op after the first.
+    void prewarm();
     void set_workspace_snapshot(const services::WorkspaceSnapshot& snapshot);
     void set_morph_sources(
         std::vector<animation::WorkspaceMorphSource> sources
@@ -199,6 +204,7 @@ private:
     int active_index_ = 1;
     int selected_card_index_ = -1;
     guint animation_tick_id_ = 0;
+    bool prewarmed_ = false;
     gint64 animation_start_time_us_ = 0;
     gint64 card_animation_start_time_us_ = 0;
     gint64 overflow_animation_start_time_us_ = 0;
