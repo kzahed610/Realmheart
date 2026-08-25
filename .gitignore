@@ -1,25 +1,13 @@
 /build*/
-.hermes/
-.hermes.md
 *.bak*
 *.orig
 *.rej
 *.o
 *.a
 *.so
-
-# Generated wallpaper profiling output
-tests/results/
 __pycache__/
 *.pyc
-
-/build/
-/build-*/
 
 # Krita temporary files
 *.kra~
 *.kra-autosave.kra
-
-# Private session context (never publish)
-AGENTS.md
-docs/current-state.md

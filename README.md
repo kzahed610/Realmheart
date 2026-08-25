@@ -190,7 +190,8 @@ The native renderer runs as a separate process and provides:
 Once a wallpaper is accepted, Realmheart asks Matugen for a dark palette,
 validates the result, caches it, and updates one display-wide GTK CSS provider.
 
-See [`docs/wallpaper-backends.md`](docs/wallpaper-backends.md) for backend details.
+Wallpaper backends (GTK vs native renderer) are documented inline in
+`src/services/WallpaperService.hpp` and `wallpaper-native/`.
 
 ### Utilities
 
