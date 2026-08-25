@@ -174,8 +174,9 @@ VerticalBar::~VerticalBar() {
     wifi_button_.reset();
     battery_widget_.reset();
     clock_.reset();
-    workspace_runes_.clear();
+    for (auto& rune : workspace_runes_) rune->begin_teardown();
     clear_box(workspace_box_);
+    workspace_runes_.clear();
     system_monitor_widget_.reset();
     media_widget_.reset();
     launcher_button_.reset();
@@ -705,8 +706,13 @@ void VerticalBar::apply_workspaces(services::WorkspaceSnapshot snapshot) {
         return;
     }
 
-    workspace_runes_.clear();
+    // Teardown order matters: stop each rune's timers and arm its guard
+    // while the objects are alive, then unparent the buttons (GTK emits
+    // synthesized crossing events during unmap — those must hit live,
+    // guarded objects, not freed ones), and only then destroy the runes.
+    for (auto& rune : workspace_runes_) rune->begin_teardown();
     clear_box(workspace_box_);
+    workspace_runes_.clear();
     workspace_runes_.reserve(states.size());
     for (const auto& state : states) {
         auto rune = std::make_unique<widgets::WorkspaceRune>(
