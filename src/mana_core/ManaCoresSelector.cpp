@@ -369,7 +369,12 @@ void ManaCoresSelector::present(GtkApplication* app) {
             layout_ = ManaCoresLayout::for_height(geom.height, geom.width);
             g_object_unref(monitor);
         }
-        g_object_unref(monitors);
+        // NOTE: `monitors` is a borrowed reference — gdk_display_get_monitors()
+        // is documented as "owned by the instance" (docs.gtk.org). Never unref
+        // it: doing so finalizes GTK's own monitor list and the next
+        // gtk_widget_get_scale_factor() (e.g. inside gtk_widget_realize())
+        // segfaults in g_list_model_get_item(). This was the first-toggle
+        // cold-boot crash.
     } else {
         layout_ = ManaCoresLayout::for_height(1080, 1920);
     }
