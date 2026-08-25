@@ -123,6 +123,8 @@ private:
 
     void setup_window();
     void setup_ui();
+    void sync_mode_chip();
+    void set_entry_text_quiet(const std::string& text);
     void refresh_wallpaper();
     void refresh_idle_content();
     void clear_launcher_icon_cache();
@@ -251,6 +253,8 @@ private:
     GtkWidget* root_ = nullptr;
     GtkWidget* dismiss_ = nullptr;
     GtkWidget* search_entry_ = nullptr;
+    GtkWidget* search_slot_ = nullptr;
+    GtkWidget* mode_chip_ = nullptr;
     GtkWidget* wallpaper_picture_ = nullptr;
     GtkWidget* centre_column_ = nullptr;
     GtkWidget* centre_shader_host_ = nullptr;
@@ -268,6 +272,7 @@ private:
     GtkWidget* result_selection_indicator_ = nullptr;
 
     SearchMode search_mode_ = SearchMode::Normal;
+    bool entry_text_programmatic_ = false;
     std::shared_ptr<ClipboardAsyncState> clipboard_async_state_;
     std::string clipboard_history_output_;
     std::string clipboard_filter_;
@@ -344,7 +349,7 @@ private:
     bool central_shader_preparing_ = false;
     bool central_shader_fallback_ = false;
     std::unique_ptr<effects::shell::ShellShaderRenderer> centre_shader_renderer_;
-    effects::TransitionTimeline central_transition_{{0.48, 0.40}};
+    effects::TransitionTimeline central_transition_{{0.18, 0.12}};
     bool constellation_layout_loaded_ = false;
     bool constellation_target_visible_ = true;
 };

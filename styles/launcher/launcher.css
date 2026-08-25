@@ -488,3 +488,21 @@ popover.realmheart-launcher-constellation-menu > contents {
   background-color: alpha(@rh_error, 0.24);
   border-color: alpha(@rh_error, 0.52);
 }
+
+/* Mode chip: stubborn ">clip" / ">emoji" pill beside the search entry.
+   The entry holds only the filter text; Esc exits the mode. */
+.realmheart-launcher-mode-chip {
+  margin: 0 0 0 2px;
+  padding: 5px 13px 6px 13px;
+  border-radius: 999px;
+  background-color: alpha(#0a1014, 0.88);
+  border: 1px solid alpha(@rh_primary, 0.38);
+  color: alpha(@rh_text, 0.92);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.82em;
+  font-weight: 600;
+  text-shadow: 0 1px 2px alpha(#000000, 0.65);
+  box-shadow:
+    0 2px 10px alpha(#000000, 0.38),
+    inset 0 1px 0 alpha(#ffffff, 0.05);
+}

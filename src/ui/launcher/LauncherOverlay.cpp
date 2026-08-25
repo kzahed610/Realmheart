@@ -56,7 +56,7 @@ namespace {
 namespace fs = std::filesystem;
 
 const effects::EffectId kLauncherSurfaceEffect = effects::resolve_effect(
-    effects::EffectId::Void,
+    effects::EffectId::FadeScale,
     effects::EffectTargetType::Launcher,
     effects::EffectId::FadeScale
 );
@@ -127,7 +127,9 @@ constexpr double kPositionEpsilon = 0.08;
 constexpr double kVelocityEpsilon = 2.0;
 constexpr double kConstellationRevealThreshold = 0.68;
 constexpr int kCentreFinalTopMargin = 166;
-constexpr int kCentreStartTopMargin = 150;
+// Drop-in distance for the slide-down entrance: the centre column starts
+// 34px higher and settles at the final margin while fading in.
+constexpr int kCentreStartTopMargin = 132;
 constexpr int kCentreFinalWidth = 648;
 constexpr int kCentreStartWidth = 600;
 constexpr int kCentreHeight = 200;
@@ -1051,7 +1053,8 @@ void LauncherOverlay::setup_ui() {
         "Search apps, calculate, or run a command"
     );
     gtk_widget_set_size_request(search_entry_, 360, 50);
-    gtk_widget_set_halign(search_entry_, GTK_ALIGN_CENTER);
+    gtk_widget_set_hexpand(search_entry_, TRUE);
+    gtk_widget_set_halign(search_entry_, GTK_ALIGN_FILL);
     gtk_widget_set_valign(search_entry_, GTK_ALIGN_CENTER);
     gtk_widget_add_css_class(search_entry_, "realmheart-launcher-search");
     g_signal_connect(search_entry_, "changed", G_CALLBACK(+[](GtkEditable*, gpointer data) {
@@ -1060,7 +1063,24 @@ void LauncherOverlay::setup_ui() {
     g_signal_connect(search_entry_, "activate", G_CALLBACK(+[](GtkEntry*, gpointer data) {
         static_cast<LauncherOverlay*>(data)->activate_selected();
     }), this);
-    gtk_overlay_add_overlay(GTK_OVERLAY(wallpaper_frame_), search_entry_);
+
+    // Mode chip: a stubborn ">clip" / ">emoji" pill shown while a special
+    // mode is active. The entry itself only ever holds the filter text, so
+    // Ctrl+A + typing replaces the filter freely; Esc exits the mode.
+    mode_chip_ = gtk_label_new("CLIP");
+    gtk_widget_add_css_class(mode_chip_, "realmheart-launcher-mode-chip");
+    gtk_widget_set_valign(mode_chip_, GTK_ALIGN_CENTER);
+    gtk_widget_set_halign(mode_chip_, GTK_ALIGN_CENTER);
+    gtk_widget_set_can_target(mode_chip_, FALSE);
+    gtk_widget_set_visible(mode_chip_, FALSE);
+
+    search_slot_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_widget_add_css_class(search_slot_, "realmheart-launcher-search-slot");
+    gtk_box_append(GTK_BOX(search_slot_), mode_chip_);
+    gtk_box_append(GTK_BOX(search_slot_), search_entry_);
+    gtk_widget_set_halign(search_slot_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(search_slot_, GTK_ALIGN_CENTER);
+    gtk_overlay_add_overlay(GTK_OVERLAY(wallpaper_frame_), search_slot_);
 
     GtkWidget* centre_surface = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_set_hexpand(centre_surface, TRUE);
@@ -4364,10 +4384,44 @@ void LauncherOverlay::rebuild_results() {
     schedule_visible_clipboard_thumbnails();
 }
 
+void LauncherOverlay::sync_mode_chip() {
+    if (mode_chip_ == nullptr) return;
+    if (search_mode_ == SearchMode::Clipboard ||
+        search_mode_ == SearchMode::ClipboardClear) {
+        gtk_label_set_text(GTK_LABEL(mode_chip_), ">clip");
+        gtk_widget_set_tooltip_text(
+            mode_chip_,
+            "Clipboard mode — Esc exits"
+        );
+        gtk_widget_set_visible(mode_chip_, TRUE);
+    } else if (search_mode_ == SearchMode::Emoji) {
+        gtk_label_set_text(GTK_LABEL(mode_chip_), ">emoji");
+        gtk_widget_set_tooltip_text(
+            mode_chip_,
+            "Emoji mode — Esc exits"
+        );
+        gtk_widget_set_visible(mode_chip_, TRUE);
+    } else {
+        gtk_widget_set_visible(mode_chip_, FALSE);
+    }
+}
+
+void LauncherOverlay::set_entry_text_quiet(const std::string& text) {
+    // Swap the entry text without re-entering on_search_changed(): the
+    // caller has already applied the mode/filter this text represents.
+    entry_text_programmatic_ = true;
+    gtk_editable_set_text(GTK_EDITABLE(search_entry_), text.c_str());
+    entry_text_programmatic_ = false;
+}
+
 void LauncherOverlay::on_search_changed() {
+    if (entry_text_programmatic_) return;
+
     const char* raw = gtk_editable_get_text(GTK_EDITABLE(search_entry_));
     const std::string query = raw != nullptr ? raw : "";
-    const bool searching = query.find_first_not_of(" \t\n\r") != std::string::npos;
+    const bool searching =
+        search_mode_ != SearchMode::Normal ||
+        query.find_first_not_of(" \t\n\r") != std::string::npos;
 
     const bool show_constellation = !searching &&
         central_transition_.target_visible() &&
@@ -4400,37 +4454,60 @@ void LauncherOverlay::on_search_changed() {
     );
 
     if (!searching) {
-        leave_clipboard_mode();
-        leave_emoji_mode();
-        current_results_.clear();
-        selected_result_row_ = nullptr;
-        result_selection_target_visible_ = false;
-        result_row_motions_.clear();
-        clipboard_rows_.clear();
-        ++clipboard_view_generation_;
-        clear_list(results_list_);
-        set_selected_result(nullptr);
-        retarget_result_selection(nullptr);
-        return;
+        if (search_mode_ == SearchMode::Normal) {
+            leave_clipboard_mode();
+            leave_emoji_mode();
+            sync_mode_chip();
+            current_results_.clear();
+            selected_result_row_ = nullptr;
+            result_selection_target_visible_ = false;
+            result_row_motions_.clear();
+            clipboard_rows_.clear();
+            ++clipboard_view_generation_;
+            clear_list(results_list_);
+            set_selected_result(nullptr);
+            retarget_result_selection(nullptr);
+            return;
+        }
     }
 
+    // Explicit prefix commands still work while typing (">clip", ">emoji",
+    // ">clear"). While a special mode is active, plain text is the FILTER
+    // for that mode — never an exit back to app search.
     std::string clipboard_filter;
     if (parse_clipboard_query(query, clipboard_filter)) {
         enter_clipboard_mode(std::move(clipboard_filter));
+        sync_mode_chip();
+        set_entry_text_quiet(clipboard_filter_);
         return;
     }
     if (parse_clipboard_clear_query(query)) {
         enter_clipboard_clear_mode();
+        sync_mode_chip();
+        set_entry_text_quiet(std::string{});
         return;
     }
     std::string emoji_filter;
     if (parse_emoji_query(query, emoji_filter)) {
         enter_emoji_mode(std::move(emoji_filter));
+        sync_mode_chip();
+        set_entry_text_quiet(emoji_filter_);
+        return;
+    }
+
+    if (search_mode_ == SearchMode::Clipboard ||
+        search_mode_ == SearchMode::ClipboardClear) {
+        enter_clipboard_mode(query);
+        return;
+    }
+    if (search_mode_ == SearchMode::Emoji) {
+        enter_emoji_mode(query);
         return;
     }
 
     leave_clipboard_mode();
     leave_emoji_mode();
+    sync_mode_chip();
     current_results_ = services::launcher_command_suggestions(query);
     if (current_results_.empty()) {
         current_results_ = service_.search(query, kResultCount);
@@ -4783,6 +4860,16 @@ void LauncherOverlay::activate_result(std::size_t index) {
 
 bool LauncherOverlay::handle_key(guint keyval, GdkModifierType modifiers) {
     if (keyval == GDK_KEY_Escape) {
+        // Esc in a special mode returns to the default launcher: chip off,
+        // empty bar, constellations back. A second Esc clears/hides as usual.
+        if (search_mode_ != SearchMode::Normal) {
+            leave_clipboard_mode();
+            leave_emoji_mode();
+            sync_mode_chip();
+            set_entry_text_quiet(std::string{});
+            on_search_changed();
+            return true;
+        }
         const char* text = gtk_editable_get_text(GTK_EDITABLE(search_entry_));
         if (text != nullptr && *text != '\0') {
             gtk_editable_set_text(GTK_EDITABLE(search_entry_), "");
@@ -4801,8 +4888,9 @@ bool LauncherOverlay::handle_key(guint keyval, GdkModifierType modifiers) {
     }
 
     const char* query_text = gtk_editable_get_text(GTK_EDITABLE(search_entry_));
-    const bool searching = query_text != nullptr &&
-        std::string_view(query_text).find_first_not_of(" \t\n\r") != std::string_view::npos;
+    const bool searching = search_mode_ != SearchMode::Normal ||
+        (query_text != nullptr &&
+        std::string_view(query_text).find_first_not_of(" \t\n\r") != std::string_view::npos);
 
     if (!searching) {
         switch (keyval) {
@@ -4888,6 +4976,7 @@ bool LauncherOverlay::handle_key(guint keyval, GdkModifierType modifiers) {
 }
 
 bool LauncherOverlay::search_query_active() const {
+    if (search_mode_ != SearchMode::Normal) return true;
     if (search_entry_ == nullptr) return false;
     const char* text = gtk_editable_get_text(GTK_EDITABLE(search_entry_));
     return text != nullptr &&
@@ -4950,9 +5039,9 @@ void LauncherOverlay::apply_central_final_geometry() {
         kApertureFinalHeight
     );
     gtk_widget_set_opacity(wallpaper_picture_, 1.0);
-    gtk_widget_set_size_request(search_entry_, kSearchFinalWidth, 50);
-    gtk_widget_set_opacity(search_entry_, 1.0);
-    gtk_widget_set_margin_bottom(search_entry_, 0);
+    gtk_widget_set_size_request(search_slot_, kSearchFinalWidth, 50);
+    gtk_widget_set_opacity(search_slot_, 1.0);
+    gtk_widget_set_margin_bottom(search_slot_, 0);
 
     if (activation_sweep_ != nullptr) {
         gtk_widget_set_visible(activation_sweep_, FALSE);
@@ -5048,7 +5137,7 @@ void LauncherOverlay::apply_central_motion() {
         interpolate(0.18, 1.0, aperture)
     );
     gtk_widget_set_size_request(
-        search_entry_,
+        search_slot_,
         static_cast<int>(std::lround(interpolate(
             kSearchStartWidth,
             kSearchFinalWidth,
@@ -5056,9 +5145,9 @@ void LauncherOverlay::apply_central_motion() {
         ))),
         50
     );
-    gtk_widget_set_opacity(search_entry_, interpolate(0.10, 1.0, search));
+    gtk_widget_set_opacity(search_slot_, interpolate(0.10, 1.0, search));
     gtk_widget_set_margin_bottom(
-        search_entry_,
+        search_slot_,
         static_cast<int>(std::lround(interpolate(10.0, 0.0, search)))
     );
 
@@ -5292,6 +5381,7 @@ void LauncherOverlay::finish_central_hide() {
     gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
     leave_clipboard_mode();
     leave_emoji_mode();
+    sync_mode_chip();
 }
 
 void LauncherOverlay::toggle() {
@@ -5350,7 +5440,19 @@ void LauncherOverlay::show() {
 }
 
 void LauncherOverlay::show_with_query(std::string query) {
+    // Keybind toggle: SUPER+V / SUPER+. while their mode is already open
+    // closes the launcher instead of relaunching the same view.
     std::string clipboard_filter;
+    std::string emoji_filter;
+    if (gtk_widget_get_visible(GTK_WIDGET(window_)) &&
+        ((search_mode_ == SearchMode::Clipboard &&
+          parse_clipboard_query(query, clipboard_filter)) ||
+         (search_mode_ == SearchMode::Emoji &&
+          parse_emoji_query(query, emoji_filter)))) {
+        hide();
+        return;
+    }
+
     if (search_mode_ == SearchMode::Clipboard &&
         parse_clipboard_query(query, clipboard_filter)) {
         // A repeated SUPER+V should re-read cliphist even when the entry text is
