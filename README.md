@@ -55,7 +55,7 @@ I build it for my own machine first. Everything else is secondary.
 | **Wallpaper engine** | Native Wayland/EGL renderer with output-aware cropping and smooth transitions. Every wallpaper change also regenerates the theme colors. |
 | **Wallpaper switcher** | Carousel overlay to cycle through, preview, and apply wallpapers from your library. |
 | **Notifications** | D-Bus server, transient toasts, unread state, persistent history. |
-| **Utilities** | Screenshots, region capture, OCR-to-clipboard, screen recording, brightness/volume OSDs. |
+| **Utilities** | Screenshots, region capture, screen recording, brightness/volume OSDs. |
 | **Hyprland plugin** *(optional)* | Compositor-level window open/close effects. |
 
 [▶ Showcase video — full shell tour (74s)](assets/Showcase/Video/ShowcaseVideo.mp4)
@@ -90,7 +90,6 @@ Optional extras:
 | --- | --- |
 | `grim` + `slurp` | Screenshots and region capture |
 | `wl-clipboard` + `cliphist` | Clipboard integration and history |
-| `tesseract` | Region OCR |
 | `wf-recorder` | Screen recording |
 | `hyprlock` / `hypridle` | Lock action and idle handling |
 | `hyprsunset` | Night Light |
