@@ -56,7 +56,24 @@ bool WallpaperService::validate_image(const std::filesystem::path& path) const {
 std::optional<std::filesystem::path> WallpaperService::load_path() const {
     std::ifstream input(state_file_);
     std::string saved_path;
-    if (!input || !std::getline(input, saved_path) || saved_path.empty()) return std::nullopt;
+    if (!input || !std::getline(input, saved_path) || saved_path.empty()) {
+        // State file missing or empty — fall back to bundled default wallpaper.
+        // Check REALMHEART_ASSET_DIR env var first, then common install locations.
+        const char* asset_dir = std::getenv("REALMHEART_ASSET_DIR");
+        std::error_code ec;
+
+        if (asset_dir && *asset_dir) {
+            auto candidate = std::filesystem::path(asset_dir) / "Showcase/Wallpapers/Arthur_Leywin_Void.png";
+            if (std::filesystem::is_regular_file(candidate, ec)) return candidate;
+        }
+
+        if (const char* home = std::getenv("HOME"); home && *home) {
+            auto candidate = std::filesystem::path(home) / ".local/share/realmheart/assets/Showcase/Wallpapers/Arthur_Leywin_Void.png";
+            if (std::filesystem::is_regular_file(candidate, ec)) return candidate;
+        }
+
+        return std::nullopt;
+    }
     if (!saved_path.empty() && saved_path.back() == '\r') saved_path.pop_back();
     if (saved_path.empty()) return std::nullopt;
 

@@ -170,7 +170,13 @@ bool UtilityManager::generate_colors(const std::string& path) {
 
 std::string UtilityManager::load_wallpaper_path() {
     auto path = wallpaper_service_->load_path();
-    return path ? path->string() : "";
+    if (path) {
+        // Persist the default wallpaper path so we don't re-scan assets on
+        // subsequent startup attempts.
+        static_cast<void>(wallpaper_service_->persist_path(*path));
+        return path->string();
+    }
+    return "";
 }
 
 bool UtilityManager::start_recording(const std::string& path) {
