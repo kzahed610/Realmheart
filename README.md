@@ -60,6 +60,14 @@ I build it for my own machine first. Everything else is secondary.
 
 ![Lock screen](assets/Showcase/Screenshots/Lockscreen.png)
 
+---
+
+## Showcase Video
+
+https://github.com/user-attachments/assets/0efbbdd1-fc3a-41f3-87fb-a696f99375a5
+
+---
+
 ## Features
 
 | | |
@@ -75,7 +83,7 @@ I build it for my own machine first. Everything else is secondary.
 | **Utilities** | Screenshots, region capture, screen recording, brightness/volume OSDs. |
 | **Hyprland plugin** *(optional)* | Compositor-level window open/close effects. |
 
-https://github.com/user-attachments/assets/0efbbdd1-fc3a-41f3-87fb-a696f99375a5
+
 
 ---
 
