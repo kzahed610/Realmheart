@@ -154,6 +154,34 @@ Autostart with Hyprland:
 exec-once = /absolute/path/to/Realmheart/build-hybrid/realmheart --shell --wallpaper-backend native
 ```
 
+### Hyprland config setup
+
+Realmheart ships portable Hyprland configs under `config/`. To install them
+into your `~/.config/hypr/` directory, use the installer script. It backs up
+your entire existing `hypr/` folder before copying:
+
+```bash
+./install-hypr-configs.sh
+```
+
+Each existing file is saved as `<file>.bak.<timestamp>` before the portable
+version is written. The script auto-detects root-owned files and will prompt
+for sudo when needed. After copying, reload Hyprland:
+
+```bash
+hyprctl reload
+```
+
+### Optional: FX plugin
+
+The window open/close effects plugin is optional. After building, load it:
+
+```bash
+hyprctl plugin load ~/Realmheart/build-hybrid/realmheart-fx.so
+```
+
+It auto-loads at Hyprland startup via `realmheart_fx.lua` once installed.
+
 A running shell is controlled without restarting the session:
 
 ```bash
