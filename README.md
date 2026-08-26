@@ -23,15 +23,6 @@
   <img alt="Status" src="https://img.shields.io/badge/status-active%20development-C084FC?style=flat-square" />
 </p>
 
-<p align="center">
-  <img src="assets/Showcase/Screenshots/TaskbarAndSidebar.png" alt="Bar and control panel" width="49%" />
-  <img src="assets/Showcase/Screenshots/AppLauncher.png" alt="Launcher" width="49%" />
-  <img src="assets/Showcase/Screenshots/WorkspaceOverview.png" alt="Workspace overview" width="49%" />
-  <img src="assets/Showcase/Screenshots/PowerMenu.png" alt="Power menu" width="49%" />
-  <img src="assets/Showcase/Screenshots/Lockscreen.png" alt="Lock screen" width="49%" />
-  <img src="assets/Showcase/Screenshots/WallpaperSwitcher.png" alt="Wallpaper switcher" width="49%" />
-</p>
-
 ---
 
 ## What is Realmheart?
@@ -42,6 +33,32 @@ one program. It's written in C++ and GTK 4, everything runs natively on
 Wayland, and the whole look comes from The Beginning After the End.
 
 I build it for my own machine first. Everything else is secondary.
+
+## Screenshots
+
+### Status bar and control panel
+
+![Status bar and control panel](assets/Showcase/Screenshots/TaskbarAndSidebar.png)
+
+### Launcher
+
+![Launcher](assets/Showcase/Screenshots/AppLauncher.png)
+
+### Workspace overview
+
+![Workspace overview](assets/Showcase/Screenshots/WorkspaceOverview.png)
+
+### Wallpaper switcher
+
+![Wallpaper switcher](assets/Showcase/Screenshots/WallpaperSwitcher.png)
+
+### Power menu
+
+![Power menu](assets/Showcase/Screenshots/PowerMenu.png)
+
+### Lock screen
+
+![Lock screen](assets/Showcase/Screenshots/Lockscreen.png)
 
 ## Features
 
@@ -58,7 +75,7 @@ I build it for my own machine first. Everything else is secondary.
 | **Utilities** | Screenshots, region capture, screen recording, brightness/volume OSDs. |
 | **Hyprland plugin** *(optional)* | Compositor-level window open/close effects. |
 
-[▶ Showcase video — full shell tour (74s)](assets/Showcase/Video/ShowcaseVideo.mp4)
+https://github.com/user-attachments/assets/0efbbdd1-fc3a-41f3-87fb-a696f99375a5
 
 ---
 
