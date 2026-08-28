@@ -134,9 +134,21 @@ Optional extras:
 git clone https://github.com/kzahed610/Realmheart.git
 cd Realmheart
 
+# ⚠️  FRESH ACCOUNT / COPIED FROM ANOTHER MACHINE?
+# The build tree (build-hybrid/) does NOT transfer between accounts or machines.
+# It bakes your home path into CMAKE_SOURCE_DIR; a stale build-hybrid/ copied in
+# from another checkout produces the cryptic
+#   "CMakeCache.txt directory ... is different" / "Permission denied" errors.
+# Always nuke any pre-existing build dir first (no-op if it isn't there):
+rm -rf build-hybrid
+
+# IMPORTANT: never run cmake/build with sudo. Running as root changes the
+# effective user and trips CMake's source-cache mismatch check. sudo is only
+# needed for the system PAM service (see install-hypr-configs.sh).
 cmake -S . -B build-hybrid -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DREALMHEART_ENABLE_NATIVE_WALLPAPER=ON
+  -DREALMHEART_ENABLE_NATIVE_WALLPAPER=ON \
+  -DBUILD_TESTING=ON
 
 cmake --build build-hybrid -j"$(nproc)"
 ```
@@ -157,19 +169,31 @@ exec-once = /absolute/path/to/Realmheart/build-hybrid/realmheart --shell --wallp
 ### Hyprland config setup
 
 Realmheart ships portable Hyprland configs under `config/`. To install them
-into your `~/.config/hypr/` directory, use the installer script. It backs up
-your entire existing `hypr/` folder before copying:
+into your `~/.config/hypr/` and `~/.config/realmheart/` directories, plus a
+helper into `~/.local/bin/realmheart-fx-load`, use the installer:
 
 ```bash
 ./install-hypr-configs.sh
 ```
 
-Each existing file is saved as `<file>.bak.<timestamp>` before the portable
-version is written. The script auto-detects root-owned files and will prompt
-for sudo when needed. After copying, reload Hyprland:
+The installer walks `config/hypr/`, `config/realmheart/`, `config/bin/` and
+`config/pam/`, copying each file to the matching destination under `$HOME`
+and saving any existing file as `<file>.bak.<timestamp>`. It auto-detects
+root-owned files and prompts for sudo. After copying, reload Hyprland:
 
 ```bash
 hyprctl reload
+```
+
+If you ever see absolute paths from a previous checkout baked into the
+binary (the classic "/home/you path error"), delete the build tree and
+reconfigure from scratch:
+
+```bash
+rm -rf build-hybrid
+cmake -S . -B build-hybrid -G Ninja \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DREALMHEART_ENABLE_NATIVE_WALLPAPER=ON
 ```
 
 ### Optional: FX plugin
@@ -180,7 +204,10 @@ The window open/close effects plugin is optional. After building, load it:
 hyprctl plugin load ~/Realmheart/build-hybrid/realmheart-fx.so
 ```
 
-It auto-loads at Hyprland startup via `realmheart_fx.lua` once installed.
+Once `install-hypr-configs.sh` has copied `realmheart-fx-load` into
+`~/.local/bin/`, it will auto-load at Hyprland startup via
+`realmheart_fx.lua`. The loader searches the build tree first, then common
+install locations.
 
 A running shell is controlled without restarting the session:
 

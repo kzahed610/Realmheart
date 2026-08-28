@@ -4,7 +4,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace {
 
@@ -338,6 +340,65 @@ std::filesystem::path defaultWindowEffectConfigPath() {
     }
 
     return {};
+}
+
+std::filesystem::path defaultWindowEffectAssetRoot() {
+    // 1. Explicit override wins.
+    if (const char* overrideRoot = std::getenv("REALMHEART_EFFECTS_DIR");
+        overrideRoot != nullptr && *overrideRoot != '\0') {
+        return overrideRoot;
+    }
+
+    // 2. Discover the loaded .so's own directory from /proc/self/maps and look
+    //    for the effects directory relative to it. This makes the plugin work
+    //    when the repo (and its build tree) is copied to a fresh account,
+    //    instead of baking-in the original absolute source path.
+    std::ifstream maps("/proc/self/maps");
+    std::string line;
+    std::vector<std::filesystem::path> selfDirs;
+    while (maps && std::getline(maps, line)) {
+        // Look for a mapping of realmheart-fx.so.
+        const auto marker = line.find("realmheart-fx.so");
+        if (marker == std::string::npos) continue;
+
+        const auto pathStart = line.find('/', marker > 3 ? marker - 3 : 0);
+        if (pathStart == std::string::npos) continue;
+        const auto pathEnd = line.find('\n', pathStart);
+        const std::string mappedPath = line.substr(
+            pathStart,
+            pathEnd == std::string::npos ? std::string::npos : pathEnd - pathStart
+        );
+        if (mappedPath.empty()) continue;
+
+        std::filesystem::path soPath{mappedPath};
+        const auto soDir = soPath.parent_path();
+        if (soDir.empty()) continue;
+
+        // Candidates relative to the .so directory, in preference order.
+        for (const auto& candidate : {
+                 soDir / "effects" / "windows",
+                 soDir / ".." / "effects" / "windows",
+                 soDir / ".." / "realmheart" / "effects" / "windows",
+             }) {
+            std::error_code error;
+            if (std::filesystem::is_directory(candidate, error) && !error) {
+                return candidate;
+            }
+        }
+    }
+
+    // 3. Compile-time constant as a last resort (original behaviour). The
+    //    macro name varies by target (plugin vs test vs GL probe); any one that
+    //    is defined becomes the fallback.
+#if defined(REALMHEART_WINDOW_EFFECT_ASSET_DIR)
+    return REALMHEART_WINDOW_EFFECT_ASSET_DIR;
+#elif defined(REALMHEART_TEST_WINDOW_EFFECT_DIR)
+    return REALMHEART_TEST_WINDOW_EFFECT_DIR;
+#elif defined(REALMHEART_SOURCE_WINDOW_EFFECT_DIR)
+    return REALMHEART_SOURCE_WINDOW_EFFECT_DIR;
+#else
+    return {};
+#endif
 }
 
 SWindowEffectConfigLoadResult loadWindowEffectConfig(

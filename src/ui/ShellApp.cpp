@@ -795,11 +795,9 @@ public:
             return;
         }
 
+        // No active wallpaper is fine: load_wallpapers_from_library() discovers
+        // ~/Pictures/Wallpapers on its own and picks index 0 when the path is empty.
         const std::string current_path = utilities_->load_wallpaper_path();
-        if (current_path.empty()) {
-            std::cerr << "[ManaCores] current wallpaper path is unavailable\n";
-            return;
-        }
 
         // Dismiss transient shell surfaces and hide the bar
         power_menu_process_.close();

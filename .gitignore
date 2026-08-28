@@ -14,3 +14,14 @@ __pycache__/
 
 # Raster editor temp files
 *.png~
+
+# Personal helper scripts (not part of the public repo)
+/scripts/fresh-account-setup.sh
+
+# Private session notes / local logs (never publish)
+/docs/current-state.md
+/docs/current-state.md.bak
+/docs/log.txt
+
+# CTest transient output
+/Testing/

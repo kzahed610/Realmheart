@@ -406,8 +406,7 @@ GLuint createProgram(const std::string& vertex, const std::string& fragment) {
 
 std::string readEffectShader(const SWindowEffectSpec& effect) {
     const std::filesystem::path shaderPath =
-        std::filesystem::path{REALMHEART_WINDOW_EFFECT_ASSET_DIR} /
-        effect.fragmentShaderAsset;
+        defaultWindowEffectAssetRoot() / effect.fragmentShaderAsset;
     std::ifstream stream(shaderPath, std::ios::binary);
     if (!stream) {
         throw std::runtime_error(
@@ -2110,7 +2109,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         );
     }
 
-    const auto registry = loadWindowEffectRegistry(REALMHEART_WINDOW_EFFECT_ASSET_DIR);
+    const auto registry = loadWindowEffectRegistry(defaultWindowEffectAssetRoot());
     if (!registry.success)
         throw std::runtime_error("Realmheart FX effect registry failed: " + registry.error);
 

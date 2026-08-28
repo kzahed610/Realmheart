@@ -1,9 +1,12 @@
 #include "effects/core/ShaderSource.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <limits.h>
+#include <unistd.h>
 
 #ifndef REALMHEART_INSTALL_EFFECT_DIR
 #define REALMHEART_INSTALL_EFFECT_DIR ""
@@ -22,6 +25,41 @@ void set_error(std::string* error, std::string message) {
 
 bool contains_symbol(std::string_view source, std::string_view symbol) noexcept {
     return source.find(symbol) != std::string_view::npos;
+}
+
+// Resolves the current executable's own directory via /proc/self/exe. Returns
+// an empty path on failure. Unlike the FX plugin (loaded into Hyprland), the
+// shell + helper renderer binaries own their executable image, so /proc/self/exe
+// reliably points at the real binary.
+std::filesystem::path self_executable_dir() {
+    std::array<char, 4096> buffer{};
+    const ssize_t length = ::readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
+    if (length <= 0) return {};
+    const std::filesystem::path exe{
+        std::string{buffer.data(), static_cast<std::size_t>(length)}
+    };
+    return exe.parent_path();
+}
+
+// Appends self-relative candidates (beside the binary and one level up) so a
+// copied repo still finds its own effects/ directory regardless of the absolute
+// path baked in at compile time. Keeps duplicates out.
+void append_self_relative_roots(std::vector<std::filesystem::path>& roots) {
+    const auto exe_dir = self_executable_dir();
+    if (exe_dir.empty()) return;
+
+    for (const auto& candidate : {
+             exe_dir / "effects",
+             exe_dir / ".." / "effects",
+             exe_dir / ".." / "realmheart" / "effects",
+         }) {
+        std::error_code error;
+        if (!std::filesystem::is_directory(candidate, error) || error) continue;
+        const auto absolute = std::filesystem::absolute(candidate, error);
+        if (error || absolute.empty()) continue;
+        if (std::find(roots.begin(), roots.end(), absolute) != roots.end()) continue;
+        roots.emplace_back(absolute);
+    }
 }
 
 } // namespace
@@ -44,12 +82,16 @@ bool is_safe_shader_asset_path(std::string_view asset_path) noexcept {
 
 std::vector<std::filesystem::path> shader_search_roots() {
     std::vector<std::filesystem::path> roots;
-    roots.reserve(3);
+    roots.reserve(6);
 
     if (const char* override_dir = std::getenv("REALMHEART_EFFECT_DIR");
         override_dir != nullptr && *override_dir != '\0') {
         roots.emplace_back(override_dir);
     }
+
+    // Self-location first: a copied repo finds its own effects/ directory even
+    // when the compile-time source path points at the original machine.
+    append_self_relative_roots(roots);
 
     if (std::string_view{REALMHEART_SOURCE_EFFECT_DIR}.empty() == false) {
         roots.emplace_back(REALMHEART_SOURCE_EFFECT_DIR);

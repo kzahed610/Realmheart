@@ -41,6 +41,11 @@ struct SWindowEffectConfigLoadResult {
 
 [[nodiscard]] SWindowEffectConfig builtInWindowEffectConfig();
 [[nodiscard]] std::filesystem::path defaultWindowEffectConfigPath();
+// Resolves the directory holding effect manifests + fragment shaders at
+// runtime (env override -> self-location relative to the loaded .so ->
+// compile-time constant as a last resort). Keeps the FX plugin working when
+// the repo is copied to a different absolute path (e.g. a fresh account).
+[[nodiscard]] std::filesystem::path defaultWindowEffectAssetRoot();
 [[nodiscard]] SWindowEffectConfigLoadResult loadWindowEffectConfig(
     const std::filesystem::path& path
 );

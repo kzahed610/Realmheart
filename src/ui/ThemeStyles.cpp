@@ -87,6 +87,33 @@ ThemeStyles::ThemeStyles(std::shared_ptr<services::ThemeService> theme_service)
             background: transparent;
             background-color: transparent;
         }
+        window.realmheart-vertical-bar-window,
+        window.realmheart-vertical-bar-window > * {
+            background: transparent;
+            background-color: transparent;
+            background-image: none;
+            box-shadow: none;
+        }
+        /* Bar buttons/rune buttons are nested inside layout boxes (not direct
+           children of the window), so the rule above misses them and Adwaita
+           paints a white background on fresh accounts that lack a dark gtk.css.
+           Target the specific button classes so separators/layout boxes keep
+           their borders, and active-state classes still win (they attach a
+           second class for higher specificity). */
+        window.realmheart-vertical-bar-window .realmheart-bar-icon-button,
+        window.realmheart-vertical-bar-window .realmheart-workspace-rune {
+            background: transparent;
+            background-color: transparent;
+            background-image: none;
+            border: none;
+            box-shadow: none;
+        }
+        /* GTK default Adwaita is light-themed; force the colour scheme so the
+           bar/buttons render against the user's wallpaper palette even when
+           no Matugen gtk.css has been generated for this account yet. */
+        :root {
+            color-scheme: dark;
+        }
     )CSS";
 
     subscription_ = theme_service_->subscribe([this](const services::Palette& palette) {

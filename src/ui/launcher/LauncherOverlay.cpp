@@ -11,6 +11,8 @@
 #include "ui/launcher/CommandReceiptOverlay.hpp"
 #include "ui/bar/widgets/ThemedSvgIcon.hpp"
 
+#include "services/EmojiData.hpp"
+
 #include <gtk4-layer-shell.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 
@@ -3094,6 +3096,8 @@ void LauncherOverlay::enter_emoji_mode(std::string filter) {
     if (mode_changed && !emoji_loading_ && !emoji_database_loaded_) {
         request_emoji_database();
     }
+    // If emoji_loading_ is already true, an in-flight request is handling it —
+    // rebuild_emoji_results() in the worker will pick up the new filter.
 }
 
 void LauncherOverlay::request_emoji_database() {
@@ -3138,6 +3142,8 @@ void LauncherOverlay::request_emoji_database() {
         owner->emoji_database_text_ = std::move(completion->contents);
         owner->emoji_database_loaded_ = true;
         owner->emoji_status_message_.clear();
+        std::cerr << "[Launcher] emoji index loaded ("
+                  << completion->contents.size() << " bytes)\n";
         owner->rebuild_emoji_results();
         return G_SOURCE_REMOVE;
     };
@@ -3146,6 +3152,7 @@ void LauncherOverlay::request_emoji_database() {
         [state, generation, callback] {
             constexpr std::uintmax_t maximum_size = 2U * 1024U * 1024U;
             const fs::path path = emoji_script_path();
+            std::cerr << "[Launcher] resolving emoji script at " << path << '\n';
             std::error_code error;
             const std::uintmax_t size = fs::file_size(path, error);
             bool succeeded = !error && size <= maximum_size;
@@ -3163,6 +3170,29 @@ void LauncherOverlay::request_emoji_database() {
                 } else {
                     succeeded = false;
                 }
+            }
+
+            // Fall back to the built-in emoji index so the picker works on a
+            // fresh account with zero installed data instead of failing
+            // opaquely. The external fuzzel-emoji.sh is still read first and
+            // still overrides the built-ins when valid.
+            if (!succeeded) {
+                std::string reason;
+                if (error) {
+                    reason = "file unavailable (" + error.message() + ")";
+                } else if (size > maximum_size) {
+                    reason = "oversize (" + std::to_string(size) + " bytes)";
+                } else if (!fs::exists(path)) {
+                    reason = "file not found";
+                } else {
+                    std::ifstream probe(path);
+                    reason = probe ? "missing ### DATA ### marker" : "unreadable";
+                }
+                std::cerr << "[Launcher] emoji script at " << path
+                          << " (" << reason
+                          << "), using built-in fallback\n";
+                contents = std::string(realmheart::services::kEmojiDataFallback);
+                succeeded = !contents.empty();
             }
 
             auto* completion = new Completion{

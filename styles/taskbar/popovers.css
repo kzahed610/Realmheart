@@ -21,16 +21,31 @@ window.realmheart-media-layer-window,
 window.realmheart-media-dismiss-window,
 window.realmheart-system-monitor-layer-window {
   color: @rh_text;
-  background-color: transparent;
+  background-color: alpha(@rh_background, 0.0);
   background-image: none;
   border: none;
   border-radius: 0;
   box-shadow: none;
 }
 
+/* The Cairo shell fill reads this `color` through gtk_widget_get_color(); it is
+   painted by the draw func as the rounded shell body. Do NOT set an opaque
+   background-color here — that would paint a square rectangle behind the
+   rounded Cairo path and leak past the corners. Only neutralise Adwaita's
+   gradient so the transparent drawing area never shows it. */
 window.realmheart-media-layer-window .realmheart-attached-popover-fill,
 window.realmheart-system-monitor-layer-window .realmheart-attached-popover-fill {
   color: alpha(@rh_background, 0.94);
+  background-color: transparent;
+  background-image: none;
+}
+
+/* Native children of the stats/media surface (labels, progress troughs) must
+   never inherit Adwaita's light button/window gradient. */
+window.realmheart-media-layer-window .realmheart-attached-popover-content,
+window.realmheart-system-monitor-layer-window .realmheart-attached-popover-content {
+  background-color: transparent;
+  background-image: none;
 }
 
 /* Workspace and battery deliberately remain compact informational popovers. */
@@ -59,6 +74,7 @@ window.realmheart-system-monitor-layer-window .realmheart-attached-popover-fill 
 .realmheart-attached-popover-fill {
   color: alpha(@rh_background, 0.94);
   background-color: transparent;
+  background-image: none;
 }
 
 .realmheart-expanding-popover .realmheart-attached-popover-fill {
@@ -563,10 +579,12 @@ button.realmheart-notifications-clear {
   color: alpha(@rh_text, 0.82);
   font-size: 0.74em;
   font-weight: 650;
-  background-color: transparent;
-  border: 1px solid transparent;
+  background-color: alpha(@rh_surface_variant, 0.30);
+  background-image: none;
+  border: 1px solid alpha(@rh_outline, 0.28);
   border-radius: 9px;
   box-shadow: none;
+  outline: none;
 }
 button.realmheart-notifications-clear:hover {
   color: @rh_primary;

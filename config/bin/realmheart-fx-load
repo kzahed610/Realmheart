@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Realmheart FX plugin loader.
+#
+# Loads the compositor plugin (realmheart-fx.so) into Hyprland. The plugin is
+# ABI-coupled to Hyprland, so it only exists if it was built against matching
+# headers. This loader resolves the shared library from the build tree or an
+# installed location and never double-loads.
+#
+# Override the search with REALMHEART_FX_SO=/path/to/realmheart-fx.so
+
+set -uo pipefail
+
+if command -v hyprctl >/dev/null 2>&1; then
+    if hyprctl plugin list 2>/dev/null | grep -q -i "realmheart-fx"; then
+        echo "realmheart-fx: already loaded"
+        exit 0
+    fi
+else
+    echo "realmheart-fx: hyprctl not found — is Hyprland running?" >&2
+    exit 1
+fi
+
+candidates=(
+    "${REALMHEART_FX_SO:-}"
+    "${HOME}/Realmheart/build-hybrid/realmheart-fx.so"
+    "${HOME}/.local/lib/realmheart-fx.so"
+    "/usr/lib/realmheart/realmheart-fx.so"
+    "/usr/local/lib/realmheart/realmheart-fx.so"
+)
+
+so=""
+for candidate in "${candidates[@]}"; do
+    if [[ -n "$candidate" && -f "$candidate" ]]; then
+        so="$candidate"
+        break
+    fi
+done
+
+if [[ -z "$so" ]]; then
+    echo "realmheart-fx: plugin library not found. Enable REALMHEART_BUILD_HYPRLAND_PLUGIN=ON and build against matching Hyprland headers." >&2
+    exit 1
+fi
+
+hyprctl plugin load "$so"
+echo "realmheart-fx: loaded $so"

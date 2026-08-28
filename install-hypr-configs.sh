@@ -4,9 +4,10 @@ set -euo pipefail
 # =============================================================================
 # Realmheart Hyprland Config Installer
 # =============================================================================
-# Copies all portable config files from ./config/ into ~/.config/hypr/ and
-# ~/.config/realmheart/. Creates .bak backups with timestamps before
-# overwriting. Safe to re-run — always backs up, never deletes.
+# Copies all portable config files from ./config/ into ~/.config/hypr/,
+# ~/.config/realmheart/, and ~/.local/bin/ (for helper executables like the
+# FX plugin loader). Creates .bak backups with timestamps before overwriting.
+# Safe to re-run — always backs up, never deletes.
 #
 # Usage:
 #   ./install-hypr-configs.sh
@@ -18,6 +19,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_SRC="$SCRIPT_DIR/config"
 HYPRLAND_DIR="${HOME}/.config/hypr"
 REALMHEART_DIR="${HOME}/.config/realmheart"
+LOCAL_BIN_DIR="${HOME}/.local/bin"
+
+# If invoked through sudo, resolve the real user's home from SUDO_USER so we
+# never write config files into /root. Refuse silently if the variable isn't
+# set (e.g. direct root login) so the caller must run as a normal user.
+if [[ -n "${SUDO_USER:-}" ]]; then
+    REAL_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    if [[ -z "$REAL_HOME" ]]; then
+        echo "Error: unable to resolve home for SUDO_USER=$SUDO_USER" >&2
+        exit 1
+    fi
+    HYPRLAND_DIR="${REAL_HOME}/.config/hypr"
+    REALMHEART_DIR="${REAL_HOME}/.config/realmheart"
+    LOCAL_BIN_DIR="${REAL_HOME}/.local/bin"
+fi
 
 # Determine whether we need sudo
 need_sudo() {
@@ -77,6 +93,8 @@ while IFS= read -r -d '' src; do
         dest_base="$HYPRLAND_DIR/${rel#hypr/}"
     elif [[ "$rel" == realmheart/* ]]; then
         dest_base="$REALMHEART_DIR/${rel#realmheart/}"
+    elif [[ "$rel" == bin/* ]]; then
+        dest_base="$LOCAL_BIN_DIR/${rel#bin/}"
     elif [[ "$rel" == pam/* ]]; then
         dest_base="$HYPRLAND_DIR/${rel#pam/}"
     else

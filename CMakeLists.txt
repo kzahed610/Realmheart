@@ -1,6 +1,43 @@
 cmake_minimum_required(VERSION 3.25)
 project(Realmheart VERSION 0.5.0 LANGUAGES C CXX)
 
+# Refuse to reuse a build tree that was generated from a different source
+# directory. Compiled-in paths (asset/style directories, plugin locations, etc.)
+# are derived from CMAKE_SOURCE_DIR at configure time and become wrong when the
+# repo is moved or copied without a clean configure — the result is the cryptic
+# "/home/zahed paths" failure reported on fresh accounts. Auto-deletion of a
+# build tree would be unfriendly, so we detect and explain instead.
+get_filename_component(_rh_current_source_dir "${CMAKE_CURRENT_SOURCE_DIR}" ABSOLUTE)
+if(EXISTS "${CMAKE_BINARY_DIR}/CMakeCache.txt")
+    file(READ "${CMAKE_BINARY_DIR}/CMakeCache.txt" _rh_cache)
+    # CMake's MATCH regex doesn't reliably anchor on \n across versions, so we
+    # split the cache into lines and search for the exact key prefix.
+    string(REPLACE "\n" ";" _rh_lines "${_rh_cache}")
+    set(_rh_cached_source "")
+    foreach(_rh_line IN LISTS _rh_lines)
+        if(_rh_line MATCHES "^CMAKE_HOME_DIRECTORY:INTERNAL=(.+)$")
+            set(_rh_cached_source "${CMAKE_MATCH_1}")
+            break()
+        endif()
+    endforeach()
+    if(_rh_cached_source AND NOT _rh_cached_source STREQUAL _rh_current_source_dir)
+        message(FATAL_ERROR
+            "Realmheart: this build tree was generated from\n"
+            "  ${_rh_cached_source}\n"
+            "but is being reconfigured from\n"
+            "  ${_rh_current_source_dir}\n"
+            "Path-bearing compile definitions would silently point at the old location.\n"
+            "Reconfigure with a fresh build tree:\n"
+            "    rm -rf <build-dir> && cmake -S . -B <build-dir> -G Ninja ..."
+        )
+    endif()
+endif()
+unset(_rh_current_source_dir)
+unset(_rh_cache)
+unset(_rh_lines)
+unset(_rh_line)
+unset(_rh_cached_source)
+
 include(GNUInstallDirs)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -751,6 +788,23 @@ if(BUILD_TESTING)
     )
     target_link_libraries(realmheart_launcher_service_tests PRIVATE GTest::gtest GTest::gtest_main PkgConfig::GIO)
     realmheart_register_test(realmheart_launcher_service_tests)
+
+    add_executable(realmheart_fuzzel_emoji_script_tests
+        tests/FuzzelEmojiScriptTests.cpp
+        src/core/Command.cpp
+        src/services/LauncherService.cpp
+        src/services/HyprlandApplicationMonitor.cpp
+        src/services/HyprlandEventMonitor.cpp
+        src/services/HyprlandSession.cpp
+    )
+    target_link_libraries(realmheart_fuzzel_emoji_script_tests PRIVATE GTest::gtest GTest::gtest_main PkgConfig::GIO)
+    realmheart_register_test(realmheart_fuzzel_emoji_script_tests)
+
+    add_executable(realmheart_emoji_fallback_tests
+        tests/EmojiDataFallbackTests.cpp
+    )
+    target_link_libraries(realmheart_emoji_fallback_tests PRIVATE GTest::gtest GTest::gtest_main PkgConfig::GIO)
+    realmheart_register_test(realmheart_emoji_fallback_tests)
 
     add_executable(realmheart_matugen_parser_tests tests/MatugenParserTests.cpp src/services/MatugenParser.cpp src/services/ThemeService.cpp)
     realmheart_register_test(realmheart_matugen_parser_tests)
