@@ -88,6 +88,7 @@
   margin-top: 0;
   color: @rh_text;
   background-color: alpha(@rh_surface, 0.14);
+  background-image: none;
   border: 1px solid alpha(@rh_primary, 0.2);
   border-radius: 19px;
   box-shadow: none;

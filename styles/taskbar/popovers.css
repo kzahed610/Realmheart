@@ -216,6 +216,7 @@ window.realmheart-system-monitor-layer-window .realmheart-attached-popover-conte
   padding: 4px 9px;
   color: @rh_text;
   background-color: alpha(@rh_surface_variant, 0.72);
+  background-image: none;
   border: 1px solid alpha(@rh_outline, 0.34);
   border-radius: 9px;
   box-shadow: none;
@@ -677,6 +678,7 @@ button.realmheart-notification-dismiss {
   font-size: 1.04em;
   font-weight: 650;
   background-color: transparent;
+  background-image: none;
   border: 1px solid transparent;
   border-radius: 999px;
   box-shadow: none;
