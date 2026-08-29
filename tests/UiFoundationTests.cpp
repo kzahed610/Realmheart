@@ -3,10 +3,12 @@
 #include "ui/ImageFileFilters.hpp"
 #include "ui/styles/CssModuleLoader.hpp"
 
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -15,6 +17,25 @@ void require(bool condition, const std::string& message) {
         std::cerr << "FAIL: " << message << '\n';
         std::exit(1);
     }
+}
+
+void require_css_rule_property(
+    const std::string& css,
+    std::string_view selector,
+    std::string_view property
+) {
+    const auto selector_offset = css.find(selector);
+    require(selector_offset != std::string::npos,
+            "CSS selector must exist: " + std::string(selector));
+
+    const auto body_start = css.find('{', selector_offset);
+    const auto body_end = css.find('}', body_start);
+    require(body_start != std::string::npos && body_end != std::string::npos,
+            "CSS selector must have a complete declaration block: " + std::string(selector));
+
+    const std::string_view body(css.data() + body_start + 1, body_end - body_start - 1);
+    require(body.find(property) != std::string_view::npos,
+            std::string(selector) + " must declare " + std::string(property));
 }
 
 void test_asset_resolver_accepts_known_icons_and_rejects_escape_paths() {
@@ -58,6 +79,29 @@ void test_style_resolver_uses_dedicated_roots_and_rejects_escape_paths() {
     ), "style resolver must reject traversal after a valid prefix");
     require(!realmheart::ui::styles::resolve_style_module("/tmp/bar.css"),
             "style resolver must reject absolute paths");
+}
+
+void test_taskbar_native_nodes_clear_inherited_theme_layers() {
+    constexpr std::array<std::string_view, 1> modules = {
+        "taskbar/popovers.css",
+    };
+    const std::string css = realmheart::ui::styles::load_css_modules(modules);
+
+    require_css_rule_property(
+        css, ".realmheart-compact-popover > arrow", "background-image: none"
+    );
+    require_css_rule_property(
+        css, ".realmheart-compact-popover > arrow", "background-color:"
+    );
+    require_css_rule_property(
+        css, ".realmheart-system-usage-bar trough", "background-image: none"
+    );
+    require_css_rule_property(
+        css, ".realmheart-system-usage-bar trough", "border: none"
+    );
+    require_css_rule_property(
+        css, ".realmheart-system-usage-bar trough", "box-shadow: none"
+    );
 }
 
 void test_bar_surface_spec_is_reusable_and_reserves_its_width() {
@@ -122,6 +166,7 @@ int main() {
     test_asset_resolver_accepts_known_icons_and_rejects_escape_paths();
     test_project_asset_resolver_allows_safe_nested_realmheart_assets();
     test_style_resolver_uses_dedicated_roots_and_rejects_escape_paths();
+    test_taskbar_native_nodes_clear_inherited_theme_layers();
     test_bar_surface_spec_is_reusable_and_reserves_its_width();
     test_wallpaper_surface_spec_is_fullscreen_background_and_noninteractive();
     test_test_surface_spec_is_nonexclusive();

@@ -81,7 +81,7 @@ https://github.com/user-attachments/assets/0efbbdd1-fc3a-41f3-87fb-a696f99375a5
 | **Wallpaper switcher** | Carousel overlay to cycle through, preview, and apply wallpapers from your library. |
 | **Notifications** | D-Bus server, transient toasts, unread state, persistent history. |
 | **Utilities** | Screenshots, region capture, screen recording, brightness/volume OSDs. |
-| **Hyprland plugin** *(optional)* | Compositor-level window open/close effects. |
+| **Hyprland FX plugin** | Required compositor-side rendering for window transitions and the lock-screen/power-menu presentation. |
 
 
 
@@ -98,11 +98,23 @@ sudo pacman -S --needed \
   libjpeg-turbo libepoxy
 ```
 
-The native wallpaper renderer is built automatically when these are present:
+The native wallpaper renderer and compositor integration use:
 
 ```bash
 sudo pacman -S --needed wayland wayland-protocols wlr-protocols mesa
 ```
+
+`realmheart-fx.so` is an essential part of the shell. It builds against the
+currently installed Hyprland plugin ABI, so the matching Hyprland development
+files must be available through `pkg-config`:
+
+```bash
+pkg-config --exists hyprland glesv2
+```
+
+On the supported Arch/CachyOS baseline, the normal Hyprland and Mesa packages
+provide these files. Treat CMake's `Realmheart FX plugin disabled` message as a
+missing dependency, not a harmless optional-build notice.
 
 ### Runtime
 
@@ -123,14 +135,14 @@ Optional extras:
 
 ## Install and run
 
-> [!WARNING]
-> This shell is in heavy development. Don't put it on a machine you care about.
-
-> [!NOTE]
-> A proper setup script is coming. Until then, expect to assemble things by
-> hand.
+> [!IMPORTANT]
+> The current build is stable on the validated baseline: CachyOS/Arch Linux,
+> Hyprland 0.56.x, and a 1920x1080 display at scale 1, with the dependencies
+> above installed. Other distributions, resolutions, scale factors and mixed
+> monitor setups are still experimental; use a throwaway account for those.
 
 ```bash
+cd ~
 git clone https://github.com/kzahed610/Realmheart.git
 cd Realmheart
 
@@ -151,39 +163,34 @@ cmake -S . -B build-hybrid -G Ninja \
   -DBUILD_TESTING=ON
 
 cmake --build build-hybrid -j"$(nproc)"
+
+# Required. If this file is missing, stop and fix the Hyprland/GLES development
+# dependencies before installing Realmheart.
+test -f build-hybrid/realmheart-fx.so
 ```
 
-Check your environment first, then start the shell:
+Check your environment before installing the shell integration:
 
 ```bash
 ./build-hybrid/realmheart --doctor
-./build-hybrid/realmheart --shell --wallpaper-backend native
-```
-
-Autostart with Hyprland:
-
-```ini
-exec-once = /absolute/path/to/Realmheart/build-hybrid/realmheart --shell --wallpaper-backend native
 ```
 
 ### Hyprland config setup
 
-Realmheart ships portable Hyprland configs under `config/`. To install them
-into your `~/.config/hypr/` and `~/.config/realmheart/` directories, plus a
-helper into `~/.local/bin/realmheart-fx-load`, use the installer:
+Realmheart ships portable Hyprland configs under `config/`. The installer
+copies them into `~/.config/hypr/` and `~/.config/realmheart/`, installs the FX
+loader into `~/.local/bin/`, and creates the user unit at
+`~/.config/systemd/user/realmheart.service`:
 
 ```bash
 ./install-hypr-configs.sh
 ```
 
-The installer walks `config/hypr/`, `config/realmheart/`, `config/bin/` and
-`config/pam/`, copying each file to the matching destination under `$HOME`
-and saving any existing file as `<file>.bak.<timestamp>`. It auto-detects
-root-owned files and prompts for sudo. After copying, reload Hyprland:
-
-```bash
-hyprctl reload
-```
+The installer saves every replaced file as `<file>.bak.<timestamp>` and only
+uses sudo when a destination cannot be written normally. The shipped Hyprland
+startup hooks start `realmheart.service` and load `realmheart-fx.so`
+automatically. Log out and back into Hyprland after the first install; there is
+no separate plugin-load or shell-autostart command to maintain.
 
 If you ever see absolute paths from a previous checkout baked into the
 binary (the classic "/home/you path error"), delete the build tree and
@@ -196,18 +203,16 @@ cmake -S . -B build-hybrid -G Ninja \
   -DREALMHEART_ENABLE_NATIVE_WALLPAPER=ON
 ```
 
-### Optional: FX plugin
+### Required FX plugin
 
-The window open/close effects plugin is optional. After building, load it:
+The lock screen, power menu and Realmheart's window transitions depend on
+`realmheart-fx.so`. `install-hypr-configs.sh` installs both the loader and its
+Hyprland startup hook, so loading is automatic. The loader finds the plugin in
+`~/Realmheart/build-hybrid/` or the supported local/system install locations
+and refuses to load it twice.
 
-```bash
-hyprctl plugin load ~/Realmheart/build-hybrid/realmheart-fx.so
-```
-
-Once `install-hypr-configs.sh` has copied `realmheart-fx-load` into
-`~/.local/bin/`, it will auto-load at Hyprland startup via
-`realmheart_fx.lua`. The loader searches the build tree first, then common
-install locations.
+The plugin is ABI-coupled to Hyprland. Rebuild Realmheart after every Hyprland
+update, then start a fresh Hyprland session so the matching plugin is loaded.
 
 A running shell is controlled without restarting the session:
 
@@ -229,11 +234,12 @@ it roughly to a Hyprland release from the same period.
 Currently used elsewhere: GTK 4.12 or newer (development on 4.22),
 gtk4-layer-shell 1.3, matugen 4.x.
 
-The optional FX plugin compiles against Hyprland's internal plugin ABI and
+The required FX plugin compiles against Hyprland's internal plugin ABI and
 must be rebuilt after every Hyprland update. The current build targets the
 0.56 ABI.
 
-Tested setup: CachyOS, Hyprland 0.56.2, GTK 4.22, 1080p, 8 GB RAM laptop.
+Stable, clean-account-tested baseline: CachyOS/Arch Linux, Hyprland 0.56.2,
+GTK 4.22, 1920x1080 at scale 1, and an 8 GB RAM laptop.
 
 If your combination looks different (other distro, odd resolution, older
 Hyprland) it may still work. Try it in a throwaway user account first, not
@@ -260,7 +266,7 @@ whatever turns out to be fun to build.
 ## Notes
 
 - Realmheart is licensed under the GPL-3.0. See [LICENSE](LICENSE).
-- The optional plugin under `plugins/realmheart-fx/` is ABI-coupled to Hyprland
+- The required plugin under `plugins/realmheart-fx/` is ABI-coupled to Hyprland
   and must be rebuilt after Hyprland updates. Extra attribution lives in
   `plugins/realmheart-fx/`.
 - Unofficial fan project inspired by The Beginning After the End, not

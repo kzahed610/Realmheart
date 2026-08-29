@@ -61,7 +61,10 @@ window.realmheart-system-monitor-layer-window .realmheart-attached-popover-conte
 
 .realmheart-compact-popover > arrow {
   color: alpha(@rh_background, 0.97);
+  background-color: alpha(@rh_background, 0.97);
+  background-image: none;
   border-color: alpha(@rh_primary, 0.52);
+  box-shadow: none;
 }
 
 .realmheart-attached-popover-shell,
@@ -241,13 +244,19 @@ window.realmheart-system-monitor-layer-window .realmheart-attached-popover-conte
 .realmheart-system-usage-bar trough {
   min-height: 5px;
   background-color: alpha(@rh_surface_variant, 0.68);
+  background-image: none;
+  border: none;
   border-radius: 999px;
+  box-shadow: none;
 }
 
 .realmheart-system-usage-bar progress {
   min-height: 5px;
   background-color: @rh_primary;
+  background-image: none;
+  border: none;
   border-radius: 999px;
+  box-shadow: none;
   transition: background-color 140ms ease-out;
 }
 

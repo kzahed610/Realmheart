@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(Realmheart VERSION 0.5.0 LANGUAGES C CXX)
+project(Realmheart VERSION 0.7.7 LANGUAGES C CXX)
 
 # Refuse to reuse a build tree that was generated from a different source
 # directory. Compiled-in paths (asset/style directories, plugin locations, etc.)
@@ -799,6 +799,12 @@ if(BUILD_TESTING)
     )
     target_link_libraries(realmheart_fuzzel_emoji_script_tests PRIVATE GTest::gtest GTest::gtest_main PkgConfig::GIO)
     realmheart_register_test(realmheart_fuzzel_emoji_script_tests)
+
+    add_test(
+        NAME realmheart_hypr_config_installer_tests
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/HyprConfigInstallerTests.sh ${CMAKE_SOURCE_DIR}
+    )
+    set_tests_properties(realmheart_hypr_config_installer_tests PROPERTIES TIMEOUT 20)
 
     add_executable(realmheart_emoji_fallback_tests
         tests/EmojiDataFallbackTests.cpp

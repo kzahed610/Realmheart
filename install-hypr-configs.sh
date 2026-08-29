@@ -20,6 +20,7 @@ CONFIG_SRC="$SCRIPT_DIR/config"
 HYPRLAND_DIR="${HOME}/.config/hypr"
 REALMHEART_DIR="${HOME}/.config/realmheart"
 LOCAL_BIN_DIR="${HOME}/.local/bin"
+SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 
 # If invoked through sudo, resolve the real user's home from SUDO_USER so we
 # never write config files into /root. Refuse silently if the variable isn't
@@ -33,6 +34,7 @@ if [[ -n "${SUDO_USER:-}" ]]; then
     HYPRLAND_DIR="${REAL_HOME}/.config/hypr"
     REALMHEART_DIR="${REAL_HOME}/.config/realmheart"
     LOCAL_BIN_DIR="${REAL_HOME}/.local/bin"
+    SYSTEMD_USER_DIR="${REAL_HOME}/.config/systemd/user"
 fi
 
 # Determine whether we need sudo
@@ -79,16 +81,11 @@ copy_file() {
     echo "  installed: $dest"
 }
 
-echo "=== Realmheart Hyprland Config Installer ==="
-echo ""
+install_config_source() {
+    local src="$1"
+    local rel="${src#$CONFIG_SRC/}"
+    local dest_base=""
 
-# Walk all files in config/ and copy to the right location
-while IFS= read -r -d '' src; do
-    # Compute relative path from config/
-    rel="${src#$CONFIG_SRC/}"
-    dest_base=""
-
-    # Files under config/hypr/ go to ~/.config/hypr/
     if [[ "$rel" == hypr/* ]]; then
         dest_base="$HYPRLAND_DIR/${rel#hypr/}"
     elif [[ "$rel" == realmheart/* ]]; then
@@ -98,12 +95,93 @@ while IFS= read -r -d '' src; do
     elif [[ "$rel" == pam/* ]]; then
         dest_base="$HYPRLAND_DIR/${rel#pam/}"
     else
-        continue
+        return 0
     fi
 
     echo "[$(basename "$dest_base")]"
     copy_file "$src" "$dest_base"
-done < <(find "$CONFIG_SRC" -type f -print0)
+}
+
+install_realmheart_service() {
+    local binary="$SCRIPT_DIR/build-hybrid/realmheart"
+    local destination="$SYSTEMD_USER_DIR/realmheart.service"
+    local temporary
+    temporary="$(mktemp -t realmheart-service-XXXXXX)"
+
+    {
+        printf '%s\n' \
+            '[Unit]' \
+            'Description=Realmheart desktop shell' \
+            'After=graphical-session.target' \
+            'PartOf=graphical-session.target' \
+            '' \
+            '[Service]' \
+            'Type=simple' \
+            "ExecStart=$binary --shell --wallpaper-backend native" \
+            'Restart=on-failure' \
+            'RestartSec=2' \
+            '' \
+            '[Install]' \
+            'WantedBy=graphical-session.target'
+    } >"$temporary"
+    chmod 0644 "$temporary"
+
+    echo "[realmheart.service]"
+    if ! copy_file "$temporary" "$destination"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    rm -f "$temporary"
+
+    if [[ ! -x "$binary" ]]; then
+        echo "  warning: Realmheart binary is not built yet: $binary" >&2
+        echo "           Build it before the next Hyprland login." >&2
+    fi
+}
+
+reload_current_user_manager() {
+    local account_home
+    account_home="$(getent passwd "$(id -un)" | cut -d: -f6)"
+
+    # A test HOME or sudo-run installer may target another account. Never poke
+    # the wrong user manager; the unit is discovered automatically at login.
+    if [[ "$HOME" != "$account_home" ]] || ! command -v systemctl >/dev/null 2>&1; then
+        echo "  user manager reload deferred until the target user's next login"
+        return 0
+    fi
+
+    if systemctl --user show-environment >/dev/null 2>&1; then
+        systemctl --user daemon-reload
+        echo "  reloaded current user systemd manager"
+    else
+        echo "  user manager unavailable; unit will be discovered at next login"
+    fi
+}
+
+echo "=== Realmheart Hyprland Config Installer ==="
+echo ""
+
+# Install dependencies first. Hyprland watches its entrypoint and may reload as
+# soon as hyprland.lua appears; copying it before realmheart_fx.lua exists causes
+# a first-run-only `module 'realmheart_fx' not found` warning.
+while IFS= read -r -d '' src; do
+    rel="${src#$CONFIG_SRC/}"
+    case "$rel" in
+        hypr/hyprland.lua|hypr/hyprland.conf) continue ;;
+    esac
+    install_config_source "$src"
+done < <(find "$CONFIG_SRC" -type f -print0 | sort -z)
+
+# The shipped hyprland/execs.lua already starts realmheart.service on
+# hyprland.start. Install the missing portable unit before exposing the Lua
+# entrypoint, then refresh the current user manager when it is safe to do so.
+install_realmheart_service
+reload_current_user_manager
+
+for entrypoint in hypr/hyprland.conf hypr/hyprland.lua; do
+    install_config_source "$CONFIG_SRC/$entrypoint"
+done
 
 echo ""
-echo "Done. Reload Hyprland with: hyprctl reload"
+echo "Done. Realmheart will start through realmheart.service on the next Hyprland login."
+echo "Reload Hyprland config with: hyprctl reload"
