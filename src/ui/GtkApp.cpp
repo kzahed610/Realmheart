@@ -200,6 +200,8 @@ void activate_sidebar(GtkApplication* app, gpointer data) {
     }
 
     attach_escape_controller(controller->sidebar->get_window(), app);
+    controller->sidebar->refresh();
+    controller->sidebar->apply_geometry();
     gtk_window_present(GTK_WINDOW(controller->sidebar->get_window()));
 }
 

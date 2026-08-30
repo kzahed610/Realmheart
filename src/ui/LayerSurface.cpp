@@ -73,6 +73,25 @@ GdkMonitor* resolve_layer_surface_monitor(
     return GDK_MONITOR(g_list_model_get_item(monitors, index));
 }
 
+namespace {
+
+void apply_layer_surface_monitor(GtkWindow* window, int requested_index) {
+    if (window == nullptr) return;
+    if (GdkMonitor* monitor = resolve_layer_surface_monitor(
+            GTK_WIDGET(window),
+            requested_index
+        )) {
+        gtk_layer_set_monitor(window, monitor);
+        g_object_unref(monitor);
+    }
+}
+
+void apply_layer_surface_monitor_on_realize(GtkWidget* widget, gpointer data) {
+    apply_layer_surface_monitor(GTK_WINDOW(widget), GPOINTER_TO_INT(data));
+}
+
+} // namespace
+
 LayerSurfaceSpec make_bar_surface_spec(int width) {
     LayerSurfaceSpec spec;
     spec.surface_namespace = "realmheart-bar";
@@ -141,12 +160,19 @@ void set_layer_surface_level(GtkWindow* window, LayerSurfaceLevel layer) {
 void apply_layer_surface(GtkWindow* window, const LayerSurfaceSpec& spec) {
     gtk_layer_init_for_window(window);
     gtk_layer_set_namespace(window, spec.surface_namespace.c_str());
-    if (GdkMonitor* monitor = resolve_layer_surface_monitor(
+    if (gtk_widget_get_realized(GTK_WIDGET(window))) {
+        apply_layer_surface_monitor(window, spec.monitor_index);
+    } else {
+        // gtk_layer_init_for_window() must run before realization, but GDK's
+        // monitor list is not safe to query until the window is realized.
+        // Bind the requested monitor at that lifecycle boundary instead of
+        // silently letting the compositor choose the focused output.
+        g_signal_connect(
             GTK_WIDGET(window),
-            spec.monitor_index
-        )) {
-        gtk_layer_set_monitor(window, monitor);
-        g_object_unref(monitor);
+            "realize",
+            G_CALLBACK(apply_layer_surface_monitor_on_realize),
+            GINT_TO_POINTER(spec.monitor_index)
+        );
     }
     gtk_layer_set_layer(window, to_gtk_layer(spec.layer));
     gtk_layer_set_keyboard_mode(window, to_gtk_keyboard_mode(spec.keyboard_mode));

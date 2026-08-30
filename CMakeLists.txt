@@ -476,6 +476,14 @@ if(BUILD_TESTING)
     realmheart_register_test(realmheart_effect_frame_tests)
 
     add_executable(
+        realmheart_shell_effect_view_tests
+        tests/ShellEffectViewTests.cpp
+        src/effects/shell/ShellEffectView.cpp
+    )
+    target_link_libraries(realmheart_shell_effect_view_tests PRIVATE PkgConfig::GTK4)
+    realmheart_register_test(realmheart_shell_effect_view_tests)
+
+    add_executable(
         realmheart_effect_registry_tests
         tests/EffectRegistryTests.cpp
         src/effects/core/EffectRegistry.cpp

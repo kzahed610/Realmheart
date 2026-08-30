@@ -203,7 +203,12 @@ static void realmheart_shell_effect_view_class_init(
     widget_class->contains = effect_view_contains;
 }
 
-static void realmheart_shell_effect_view_init(RealmheartShellEffectView*) {}
+static void realmheart_shell_effect_view_init(RealmheartShellEffectView* self) {
+    self->child = nullptr;
+    self->frame = realmheart::effects::EffectFrame{};
+    self->origin_x = 0.5;
+    self->origin_y = 0.5;
+}
 
 GtkWidget* realmheart_shell_effect_view_new(GtkWidget* child) {
     g_return_val_if_fail(GTK_IS_WIDGET(child), nullptr);
