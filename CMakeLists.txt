@@ -150,6 +150,7 @@ target_include_directories(realmheart PRIVATE src third_party)
 target_compile_options(realmheart PRIVATE ${REALMHEART_WARNING_FLAGS})
 
 add_library(realmheart_ui STATIC
+    src/core/DisplayTier.cpp
     src/core/TaskExecutor.cpp
     src/effects/core/EffectFrame.cpp
     src/effects/core/EffectRegistry.cpp
@@ -457,6 +458,13 @@ if(BUILD_TESTING)
         endif()
         set_tests_properties(${target} PROPERTIES TIMEOUT 20)
     endfunction()
+
+    add_executable(
+        realmheart_display_tier_tests
+        tests/DisplayTierTests.cpp
+        src/core/DisplayTier.cpp
+    )
+    realmheart_register_test(realmheart_display_tier_tests)
 
     add_executable(realmheart_command_tests tests/CommandTests.cpp src/core/Command.cpp)
     realmheart_register_test(realmheart_command_tests)
