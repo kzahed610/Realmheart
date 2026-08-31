@@ -135,12 +135,6 @@ Optional extras:
 
 ## Install and run
 
-> [!IMPORTANT]
-> The current build is stable on the validated baseline: CachyOS/Arch Linux,
-> Hyprland 0.56.x, and a 1920x1080 display at scale 1, with the dependencies
-> above installed. Other distributions, resolutions, scale factors and mixed
-> monitor setups are still experimental; use a throwaway account for those.
-
 ```bash
 cd ~
 git clone https://github.com/kzahed610/Realmheart.git
@@ -224,6 +218,21 @@ Run the test suite with `ctest --test-dir build-hybrid --output-on-failure`.
 
 ---
 
+## Supported monitors
+
+Realmheart officially supports these display tiers:
+
+| Display tier | Resolution | Status |
+| --- | --- | --- |
+| 1080p | 1920×1080 | Stable |
+| 1440p | 2560×1440 | Supported |
+| 4K | 3840×2160 | Supported |
+
+1080p remains the stable baseline. 1440p and 4K are now part of the supported
+monitor matrix.
+
+---
+
 ## Versions and compatibility
 
 Realmheart moves with Hyprland. The shell needs the Lua config era, meaning
@@ -239,11 +248,7 @@ must be rebuilt after every Hyprland update. The current build targets the
 0.56 ABI.
 
 Stable, clean-account-tested baseline: CachyOS/Arch Linux, Hyprland 0.56.2,
-GTK 4.22, 1920x1080 at scale 1, and an 8 GB RAM laptop.
-
-If your combination looks different (other distro, odd resolution, older
-Hyprland) it may still work. Try it in a throwaway user account first, not
-your main one.
+GTK 4.22, with the 1080p, 1440p, and 4K display tiers supported.
 
 ---
 
@@ -251,7 +256,7 @@ your main one.
 
 Rough order, no dates:
 
-- More display support: ultrawide, 4K, mixed multi-monitor setups.
+- More display support: ultrawide and mixed multi-monitor setups.
 - A few selected distributions beyond Arch/CachyOS.
 - More widgets.
 - A settings overlay for customizing Realmheart itself plus some general
