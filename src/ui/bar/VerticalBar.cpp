@@ -25,14 +25,14 @@ void clear_box(GtkWidget* box) {
     }
 }
 
-GtkWidget* create_section_separator(const char* role_class) {
+GtkWidget* create_section_separator(const char* role_class, int width) {
     GtkWidget* separator = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_widget_add_css_class(separator, "realmheart-bar-separator");
     if (role_class != nullptr && *role_class != '\0') {
         gtk_widget_add_css_class(separator, role_class);
     }
     gtk_widget_set_halign(separator, GTK_ALIGN_CENTER);
-    gtk_widget_set_size_request(separator, 28, 1);
+    gtk_widget_set_size_request(separator, width, 1);
     return separator;
 }
 
@@ -70,9 +70,9 @@ VerticalBar::VerticalBar(
     gtk_widget_add_css_class(window_, "realmheart-vertical-bar-window");
     gtk_widget_remove_css_class(window_, "background");
 
-    // Windows begin at the straight 56 px rail. The curved caps deliberately
+    // Windows begin at the profile's straight rail. The curved caps deliberately
     // extend over their rounded top-left and bottom-left corner area.
-    apply_layer_surface(GTK_WINDOW(window_), make_bar_surface_spec(kRailWidth));
+    apply_layer_surface(GTK_WINDOW(window_), make_bar_surface_spec(geometry_.rail_width));
     g_signal_connect(
         window_,
         "realize",
@@ -179,7 +179,7 @@ VerticalBar::~VerticalBar() {
     battery_widget_.reset();
     clock_.reset();
     for (auto& rune : workspace_runes_) rune->begin_teardown();
-    clear_box(workspace_box_);
+    clear_box(workspace_runes_container_);
     workspace_runes_.clear();
     system_monitor_widget_.reset();
     media_widget_.reset();
@@ -229,6 +229,7 @@ void VerticalBar::apply_geometry() {
         monitor_geometry.height
     );
     geometry_ = next_geometry;
+    apply_layout_metrics();
 
     gtk_window_set_default_size(
         GTK_WINDOW(window_),
@@ -250,6 +251,115 @@ void VerticalBar::apply_geometry() {
     gtk_widget_queue_resize(window_);
 }
 
+void VerticalBar::apply_layout_metrics() {
+    if (backdrop_ != nullptr) {
+        backdrop_->set_geometry(
+            geometry_.rail_width,
+            geometry_.visual_width,
+            geometry_.curve_height
+        );
+    }
+
+    if (content_container_ != nullptr) {
+        gtk_widget_set_size_request(
+            content_container_, geometry_.rail_width, geometry_.surface_height
+        );
+
+        // GtkWidget has margin setters but no runtime padding setter. Margin is
+        // not equivalent here: it moves the entire rail child instead of
+        // preserving the released inner content box. Select one local CSS tier
+        // class so the authored 1080p padding stays byte-for-byte equivalent.
+        for (const char* css_class : {
+            "realmheart-bar-tier-1080p",
+            "realmheart-bar-tier-1440p",
+            "realmheart-bar-tier-4k",
+        }) {
+            gtk_widget_remove_css_class(content_container_, css_class);
+        }
+        switch (geometry_.display_tier) {
+        case core::DisplayTier::P1440:
+            gtk_widget_add_css_class(content_container_, "realmheart-bar-tier-1440p");
+            break;
+        case core::DisplayTier::P4K:
+            gtk_widget_add_css_class(content_container_, "realmheart-bar-tier-4k");
+            break;
+        case core::DisplayTier::P1080:
+        default:
+            gtk_widget_add_css_class(content_container_, "realmheart-bar-tier-1080p");
+            break;
+        }
+    }
+
+    if (top_cluster_ != nullptr) {
+        gtk_box_set_spacing(GTK_BOX(top_cluster_), geometry_.top_cluster_spacing);
+        gtk_widget_set_margin_top(top_cluster_, geometry_.top_cluster_margin_top);
+    }
+    if (bottom_cluster_ != nullptr) {
+        gtk_box_set_spacing(GTK_BOX(bottom_cluster_), geometry_.bottom_cluster_spacing);
+        gtk_widget_set_margin_bottom(
+            bottom_cluster_, geometry_.bottom_cluster_margin_bottom
+        );
+    }
+    if (workspace_region_ != nullptr) {
+        gtk_box_set_spacing(GTK_BOX(workspace_region_), geometry_.workspace_section_spacing);
+    }
+    if (workspace_box_ != nullptr) {
+        gtk_widget_set_size_request(workspace_box_, geometry_.workspace_stack_width, -1);
+    }
+    if (workspace_runes_container_ != nullptr) {
+        gtk_widget_set_margin_top(
+            workspace_runes_container_, geometry_.workspace_stack_padding
+        );
+        gtk_widget_set_margin_bottom(
+            workspace_runes_container_, geometry_.workspace_stack_padding
+        );
+        gtk_box_set_spacing(
+            GTK_BOX(workspace_runes_container_), geometry_.workspace_stack_spacing
+        );
+    }
+    for (GtkWidget* separator : {
+        workspace_top_separator_, workspace_bottom_separator_, status_separator_
+    }) {
+        if (separator != nullptr) {
+            gtk_widget_set_size_request(separator, geometry_.separator_width, 1);
+        }
+    }
+    if (status_separator_ != nullptr) {
+        gtk_widget_set_margin_bottom(
+            status_separator_, geometry_.status_separator_bottom_margin
+        );
+    }
+    if (notification_button_ != nullptr) {
+        gtk_widget_set_margin_bottom(
+            notification_button_->widget(), geometry_.notification_bottom_margin
+        );
+    }
+    if (bottom_action_button_ != nullptr) {
+        gtk_widget_set_margin_bottom(
+            bottom_action_button_->widget(), geometry_.bottom_action_bottom_margin
+        );
+    }
+
+    if (launcher_button_ != nullptr) {
+        launcher_button_->set_layout(
+            geometry_.icon_button_extent, geometry_.launcher_icon_size
+        );
+    }
+    if (media_widget_ != nullptr) media_widget_->set_layout(geometry_);
+    if (system_monitor_widget_ != nullptr) system_monitor_widget_->set_layout(geometry_);
+    if (battery_widget_ != nullptr) battery_widget_->set_layout(geometry_);
+    for (const auto& button : {
+        wifi_button_.get(), notification_button_.get(), bottom_action_button_.get()
+    }) {
+        if (button != nullptr) {
+            button->set_layout(geometry_.icon_button_extent, geometry_.icon_size);
+        }
+    }
+    for (const auto& rune : workspace_runes_) {
+        if (rune != nullptr) rune->set_layout(geometry_);
+    }
+}
+
 void VerticalBar::setup_layout() {
     root_overlay_ = gtk_overlay_new();
     gtk_widget_add_css_class(root_overlay_, "realmheart-bar-root");
@@ -258,9 +368,9 @@ void VerticalBar::setup_layout() {
 
     backdrop_ = std::make_unique<widgets::BarBackdrop>(
         GTK_WINDOW(window_),
-        kRailWidth,
-        kVisualWidth,
-        kCurveHeight
+        geometry_.rail_width,
+        geometry_.visual_width,
+        geometry_.curve_height
     );
     gtk_overlay_set_child(GTK_OVERLAY(root_overlay_), backdrop_->widget());
 
@@ -274,6 +384,7 @@ void VerticalBar::setup_layout() {
         GTK_ORIENTATION_VERTICAL
     );
     gtk_widget_add_css_class(content_container_, "realmheart-vertical-bar");
+    gtk_widget_add_css_class(content_container_, "realmheart-bar-tier-1080p");
     gtk_widget_set_size_request(
         content_container_,
         geometry_.rail_width,
@@ -288,6 +399,9 @@ void VerticalBar::setup_layout() {
     gtk_widget_add_css_class(workspace_box_, "realmheart-workspace-stack");
     gtk_widget_set_halign(workspace_box_, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(workspace_box_, GTK_ALIGN_CENTER);
+    workspace_runes_container_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_halign(workspace_runes_container_, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(workspace_box_), workspace_runes_container_);
 
     // The pill itself is the right-click target for the workspace overview,
     // not the individual runes. GTK delivers events over a widget's padding
@@ -307,24 +421,26 @@ void VerticalBar::setup_layout() {
     }), this);
     gtk_widget_add_controller(workspace_box_, GTK_EVENT_CONTROLLER(pill_right_click));
 
-    GtkWidget* workspace_section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_add_css_class(workspace_section, "realmheart-workspace-section");
-    gtk_widget_set_halign(workspace_section, GTK_ALIGN_CENTER);
-    gtk_box_append(
-        GTK_BOX(workspace_section),
-        create_section_separator("realmheart-workspace-separator")
+    workspace_region_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(workspace_region_, "realmheart-workspace-section");
+    gtk_widget_set_halign(workspace_region_, GTK_ALIGN_CENTER);
+    workspace_top_separator_ = create_section_separator(
+        "realmheart-workspace-separator", geometry_.separator_width
     );
-    gtk_box_append(GTK_BOX(workspace_section), workspace_box_);
+    workspace_bottom_separator_ = create_section_separator(
+        "realmheart-workspace-separator", geometry_.separator_width
+    );
     gtk_box_append(
-        GTK_BOX(workspace_section),
-        create_section_separator("realmheart-workspace-separator")
+        GTK_BOX(workspace_region_), workspace_top_separator_
+    );
+    gtk_box_append(GTK_BOX(workspace_region_), workspace_box_);
+    gtk_box_append(
+        GTK_BOX(workspace_region_), workspace_bottom_separator_
     );
 
     // Keep the workspace section in normal document flow. The previous
     // expanding GtkCenterBox consumed every spare pixel and created the huge
     // gaps above and below the runes.
-    workspace_region_ = workspace_section;
-
     gtk_window_set_child(GTK_WINDOW(window_), root_overlay_);
 }
 
@@ -376,7 +492,6 @@ void VerticalBar::populate_widgets() {
         launch_launcher_
     );
     launcher_button_->add_css_class("realmheart-launcher-button");
-    launcher_button_->set_icon_size(32);
 
     media_widget_ = std::make_unique<widgets::MediaWidget>(
         app_,
@@ -418,36 +533,36 @@ void VerticalBar::populate_widgets() {
     );
     bottom_action_button_->add_css_class("realmheart-bottom-action-button");
 
-    GtkWidget* top_cluster = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_add_css_class(top_cluster, "realmheart-bar-top-cluster");
-    gtk_widget_set_halign(top_cluster, GTK_ALIGN_CENTER);
-    gtk_box_append(GTK_BOX(top_cluster), launcher_button_->widget());
-    gtk_box_append(GTK_BOX(top_cluster), media_widget_->widget());
-    gtk_box_append(GTK_BOX(top_cluster), system_monitor_widget_->widget());
+    top_cluster_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(top_cluster_, "realmheart-bar-top-cluster");
+    gtk_widget_set_halign(top_cluster_, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(top_cluster_), launcher_button_->widget());
+    gtk_box_append(GTK_BOX(top_cluster_), media_widget_->widget());
+    gtk_box_append(GTK_BOX(top_cluster_), system_monitor_widget_->widget());
 
-    GtkWidget* bottom_cluster = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_add_css_class(bottom_cluster, "realmheart-bar-bottom-cluster");
-    gtk_widget_set_halign(bottom_cluster, GTK_ALIGN_CENTER);
-    gtk_box_append(GTK_BOX(bottom_cluster), clock_->widget());
-    gtk_box_append(
-        GTK_BOX(bottom_cluster),
-        create_section_separator("realmheart-status-separator")
+    bottom_cluster_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_add_css_class(bottom_cluster_, "realmheart-bar-bottom-cluster");
+    gtk_widget_set_halign(bottom_cluster_, GTK_ALIGN_CENTER);
+    gtk_box_append(GTK_BOX(bottom_cluster_), clock_->widget());
+    status_separator_ = create_section_separator(
+        "realmheart-status-separator", geometry_.separator_width
     );
-    gtk_box_append(GTK_BOX(bottom_cluster), battery_widget_->widget());
-    gtk_box_append(GTK_BOX(bottom_cluster), wifi_button_->widget());
-    gtk_box_append(GTK_BOX(bottom_cluster), notification_button_->widget());
+    gtk_box_append(GTK_BOX(bottom_cluster_), status_separator_);
+    gtk_box_append(GTK_BOX(bottom_cluster_), battery_widget_->widget());
+    gtk_box_append(GTK_BOX(bottom_cluster_), wifi_button_->widget());
+    gtk_box_append(GTK_BOX(bottom_cluster_), notification_button_->widget());
 
     // The final action belongs to the bottom module rather than living alone
     // in a distant corner. The whole module is pinned to the rail's bottom.
     gtk_widget_set_halign(bottom_action_button_->widget(), GTK_ALIGN_CENTER);
-    gtk_box_append(GTK_BOX(bottom_cluster), bottom_action_button_->widget());
+    gtk_box_append(GTK_BOX(bottom_cluster_), bottom_action_button_->widget());
 
-    gtk_center_box_set_start_widget(GTK_CENTER_BOX(content_container_), top_cluster);
+    gtk_center_box_set_start_widget(GTK_CENTER_BOX(content_container_), top_cluster_);
     gtk_center_box_set_center_widget(
         GTK_CENTER_BOX(content_container_),
         workspace_region_
     );
-    gtk_center_box_set_end_widget(GTK_CENTER_BOX(content_container_), bottom_cluster);
+    gtk_center_box_set_end_widget(GTK_CENTER_BOX(content_container_), bottom_cluster_);
 
     // The media outside-click catcher deliberately leaves the physical bar
     // pointer-transparent so bar controls keep their normal one-click actions.
@@ -488,6 +603,7 @@ void VerticalBar::populate_widgets() {
         GTK_EVENT_CONTROLLER(bar_media_dismiss)
     );
 
+    apply_layout_metrics();
     apply_notifications(notification_history_.snapshot());
 }
 
@@ -777,7 +893,7 @@ void VerticalBar::apply_workspaces(services::WorkspaceSnapshot snapshot) {
     // synthesized crossing events during unmap — those must hit live,
     // guarded objects, not freed ones), and only then destroy the runes.
     for (auto& rune : workspace_runes_) rune->begin_teardown();
-    clear_box(workspace_box_);
+    clear_box(workspace_runes_container_);
     workspace_runes_.clear();
     workspace_runes_.reserve(states.size());
     for (const auto& state : states) {
@@ -786,13 +902,14 @@ void VerticalBar::apply_workspaces(services::WorkspaceSnapshot snapshot) {
             [this](int workspace_id) { activate_workspace(workspace_id); },
             [this](GtkPopover* popover) { open_exclusive_popover(popover); }
         );
+        rune->set_layout(geometry_);
         rune->set_morph_suppressed(workspace_morph_active_);
         rune->set_morph_visual_opacity(
             workspace::animation::workspace_morph_rune_opacity(
                 workspace_morph_progress_
             )
         );
-        gtk_box_append(GTK_BOX(workspace_box_), rune->widget());
+        gtk_box_append(GTK_BOX(workspace_runes_container_), rune->widget());
         workspace_runes_.push_back(std::move(rune));
     }
 }

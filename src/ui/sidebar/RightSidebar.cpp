@@ -40,7 +40,6 @@
 namespace realmheart::ui::sidebar {
 namespace {
 
-constexpr double kSidebarHeightFraction = 0.90;
 constexpr int kSidebarRightMargin = 2;
 
 std::filesystem::path character_enabled_preference_path() {
@@ -299,14 +298,16 @@ public:
         button_ = gtk_button_new();
         gtk_widget_add_css_class(button_, "realmheart-quick-tile");
         gtk_widget_set_hexpand(button_, TRUE);
-        gtk_widget_set_size_request(button_, -1, 64);
 
-        GtkWidget* content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-        gtk_widget_set_halign(content, GTK_ALIGN_FILL);
-        gtk_widget_set_valign(content, GTK_ALIGN_CENTER);
-        gtk_box_append(GTK_BOX(content), themed_icon(
-            icon_path, 21, "realmheart-quick-tile-icon"
-        ));
+        content_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+        gtk_widget_set_halign(content_, GTK_ALIGN_FILL);
+        gtk_widget_set_valign(content_, GTK_ALIGN_CENTER);
+        icon_ = themed_icon(
+            icon_path,
+            SidebarContentLayout{}.quick_tile_icon_size,
+            "realmheart-quick-tile-icon"
+        );
+        gtk_box_append(GTK_BOX(content_), icon_);
 
         GtkWidget* copy = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
         gtk_widget_set_hexpand(copy, TRUE);
@@ -324,8 +325,9 @@ public:
         gtk_label_set_ellipsize(GTK_LABEL(status_), PANGO_ELLIPSIZE_END);
         gtk_label_set_max_width_chars(GTK_LABEL(status_), 18);
         gtk_box_append(GTK_BOX(copy), status_);
-        gtk_box_append(GTK_BOX(content), copy);
-        gtk_button_set_child(GTK_BUTTON(button_), content);
+        gtk_box_append(GTK_BOX(content_), copy);
+        gtk_button_set_child(GTK_BUTTON(button_), content_);
+        set_layout(SidebarContentLayout{});
 
         g_signal_connect(button_, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
             auto* self = static_cast<QuickControlTile*>(data);
@@ -370,6 +372,15 @@ public:
         gtk_widget_set_sensitive(button_, available);
     }
 
+    void set_layout(const SidebarContentLayout& layout) {
+        gtk_widget_set_size_request(button_, -1, layout.quick_tile_height);
+        gtk_box_set_spacing(GTK_BOX(content_), layout.quick_tile_content_spacing);
+        gtk_widget_set_size_request(
+            icon_, layout.quick_tile_icon_size, layout.quick_tile_icon_size
+        );
+        gtk_widget_queue_resize(button_);
+    }
+
 private:
     void show_click_feedback() {
         if (click_feedback_timeout_ != 0) {
@@ -398,6 +409,8 @@ private:
     }
 
     GtkWidget* button_ = nullptr;
+    GtkWidget* content_ = nullptr;
+    GtkWidget* icon_ = nullptr;
     GtkWidget* status_ = nullptr;
     std::function<void()> activated_;
     std::function<void()> settings_activated_;
@@ -474,12 +487,7 @@ SidebarPlacement sidebar_placement_for(GtkWidget* widget) {
         placement.display_tier
     );
 
-    placement.height = std::max(
-        static_cast<int>(std::lround(
-            static_cast<double>(monitor_height) * kSidebarHeightFraction
-        )),
-        1
-    );
+    placement.height = sidebar_height_for_logical_height(monitor_height);
     placement.top_margin = std::max((monitor_height - placement.height) / 2, 0);
     (void)monitor_width; // reserved for future horizontal centering
     return placement;
@@ -585,10 +593,21 @@ void RightSidebar::apply_geometry() {
 
     display_tier_ = placement.display_tier;
     frame_layout_ = placement.frame_layout;
+
+    if (container_ != nullptr) {
+        gtk_widget_remove_css_class(container_, "realmheart-tier-1440p");
+        gtk_widget_remove_css_class(container_, "realmheart-tier-4k");
+        if (display_tier_ == core::DisplayTier::P1440) {
+            gtk_widget_add_css_class(container_, "realmheart-tier-1440p");
+        } else if (display_tier_ == core::DisplayTier::P4K) {
+            gtk_widget_add_css_class(container_, "realmheart-tier-4k");
+        }
+    }
     sidebar_height_ = placement.height;
     geometry_initialized_ = true;
 
     if (frame_ != nullptr) frame_->set_layout(frame_layout_);
+    if (geometry_changed) apply_content_layout();
     gtk_window_set_default_size(
         GTK_WINDOW(window_),
         frame_layout_.surface_width(),
@@ -609,6 +628,74 @@ void RightSidebar::apply_geometry() {
         character_compositor_.reset();
     }
     if (character_enabled_) initialize_character_compositor();
+}
+
+void RightSidebar::apply_content_layout() {
+    const auto& layout = frame_layout_.content;
+
+    for (GtkWidget* section : sidebar_sections_) {
+        if (section == nullptr) continue;
+        gtk_box_set_spacing(GTK_BOX(section), layout.section_spacing);
+
+        int margin_bottom = layout.quick_section_margin_bottom;
+        if (gtk_widget_has_css_class(section, "realmheart-levels-section")) {
+            margin_bottom = layout.levels_section_margin_bottom;
+        } else if (gtk_widget_has_css_class(section, "realmheart-power-section")) {
+            margin_bottom = layout.power_section_margin_bottom;
+        }
+        gtk_widget_set_margin_bottom(section, margin_bottom);
+    }
+
+    if (quick_grid_ != nullptr) {
+        gtk_grid_set_column_spacing(GTK_GRID(quick_grid_), layout.quick_grid_spacing);
+        gtk_grid_set_row_spacing(GTK_GRID(quick_grid_), layout.quick_grid_spacing);
+        gtk_widget_set_margin_top(quick_grid_, layout.quick_grid_top_inset);
+    }
+    for (const auto& tile : {
+        wifi_tile_.get(),
+        bluetooth_tile_.get(),
+        night_light_tile_.get(),
+        keep_awake_tile_.get(),
+    }) {
+        if (tile != nullptr) tile->set_layout(layout);
+    }
+
+    if (slider_chamber_ != nullptr) {
+        gtk_box_set_spacing(GTK_BOX(slider_chamber_), layout.slider_stack_spacing);
+    }
+    const components::SliderLayout slider_layout{
+        .row_height = layout.slider_row_height,
+        .row_spacing = layout.slider_row_spacing,
+        .icon_size = layout.slider_icon_size,
+        .label_width = layout.slider_label_width,
+        .value_width = layout.slider_value_width,
+    };
+    if (brightness_slider_ != nullptr) brightness_slider_->set_layout(slider_layout);
+    if (volume_slider_ != nullptr) volume_slider_->set_layout(slider_layout);
+
+    for (GtkWidget* button : power_profile_buttons_) {
+        if (button != nullptr) {
+            gtk_widget_set_size_request(button, -1, layout.power_segment_height);
+        }
+    }
+
+    if (notification_widget_ != nullptr) {
+        gtk_widget_set_vexpand(
+            notification_widget_->get_widget(), layout.notification_expand_to_fill
+        );
+        notification_widget_->set_layout({
+            .expand_to_fill = layout.notification_expand_to_fill,
+            .viewport_height = layout.notification_viewport_height,
+            .bottom_margin = layout.notification_bottom_margin,
+            .empty_icon_size = layout.notification_empty_icon_size,
+            .header_spacing = layout.notification_header_spacing,
+            .list_spacing = layout.notification_list_spacing,
+            .row_spacing = layout.notification_row_spacing,
+            .copy_spacing = layout.notification_copy_spacing,
+            .meta_spacing = layout.notification_meta_spacing,
+            .unread_dot_size = layout.notification_unread_dot_size,
+        });
+    }
 }
 
 gboolean RightSidebar::retry_geometry(gpointer raw) {
@@ -929,11 +1016,13 @@ void RightSidebar::build_identity_header() {
 void RightSidebar::build_quick_controls() {
     GtkWidget* section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_widget_add_css_class(section, "realmheart-sidebar-section");
+    sidebar_sections_.push_back(section);
     GtkWidget* heading = left_label("QUICK CONTROLS", "realmheart-section-title");
     gtk_box_append(GTK_BOX(section), heading);
 
     GtkWidget* grid = gtk_grid_new();
     gtk_widget_add_css_class(grid, "realmheart-quick-grid");
+    quick_grid_ = grid;
     gtk_grid_set_column_spacing(GTK_GRID(grid), 7);
     gtk_grid_set_row_spacing(GTK_GRID(grid), 7);
     gtk_grid_set_column_homogeneous(GTK_GRID(grid), TRUE);
@@ -1017,6 +1106,7 @@ void RightSidebar::build_power_profiles() {
     GtkWidget* section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_widget_add_css_class(section, "realmheart-sidebar-section");
     gtk_widget_add_css_class(section, "realmheart-power-section");
+    sidebar_sections_.push_back(section);
     gtk_box_append(GTK_BOX(section), left_label(
         "POWER PROFILE", "realmheart-section-title"
     ));
@@ -1111,12 +1201,14 @@ void RightSidebar::populate_modules() {
     GtkWidget* slider_section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_widget_add_css_class(slider_section, "realmheart-sidebar-section");
     gtk_widget_add_css_class(slider_section, "realmheart-levels-section");
+    sidebar_sections_.push_back(slider_section);
     gtk_box_append(GTK_BOX(slider_section), left_label(
         "SYSTEM LEVELS", "realmheart-section-title"
     ));
 
     GtkWidget* sliders = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
     gtk_widget_add_css_class(sliders, "realmheart-slider-chamber");
+    slider_chamber_ = sliders;
 
     auto brightness_widget = std::make_unique<components::SliderWidget>(
         "Brightness",
@@ -1162,11 +1254,12 @@ void RightSidebar::populate_modules() {
     auto notifications = std::make_unique<components::NotificationWidget>(
         notification_history_
     );
+    notification_widget_ = notifications.get();
     GtkWidget* notification_widget = notifications->get_widget();
-    // Notifications absorb the spare vertical space below the power section.
     gtk_widget_set_vexpand(notification_widget, TRUE);
     gtk_box_append(GTK_BOX(container_), notification_widget);
     modules_.push_back(std::move(notifications));
+    apply_content_layout();
 }
 
 void RightSidebar::refresh() {

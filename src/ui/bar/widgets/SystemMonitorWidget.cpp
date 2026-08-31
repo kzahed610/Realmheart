@@ -67,7 +67,6 @@ std::string processor_text(double percent, const std::optional<double>& frequenc
 // Preserve the exact native-popover alignment: its right-side offset was five
 // pixels from the system pill, and its vertical centre followed the pill.
 constexpr int kSystemLayerExtraOffsetX = kExpandingPopoverOffsetX;
-constexpr int kSystemLayerFallbackLeft = 56;
 constexpr int kSystemLayerFallbackTop = 92;
 // Match the media layer surface: enough visible horizontal travel to read
 // as a slide, without changing the finalized resting position.
@@ -87,10 +86,10 @@ SystemMonitorWidget::SystemMonitorWidget(
     gtk_widget_set_valign(button_, GTK_ALIGN_CENTER);
     gtk_widget_set_tooltip_text(button_, "System usage: CPU, RAM, GPU");
 
-    GtkWidget* metrics = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
-    gtk_widget_add_css_class(metrics, "realmheart-system-monitor-metrics");
-    gtk_widget_set_halign(metrics, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(metrics, GTK_ALIGN_CENTER);
+    metrics_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+    gtk_widget_add_css_class(metrics_, "realmheart-system-monitor-metrics");
+    gtk_widget_set_halign(metrics_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(metrics_, GTK_ALIGN_CENTER);
 
     const std::array metric_specs{
         std::pair{"Realmheart-Icons/cpu.svg", "realmheart-system-monitor-cpu"},
@@ -102,10 +101,11 @@ SystemMonitorWidget::SystemMonitorWidget(
         auto icon = std::make_unique<ThemedSvgIcon>(path, 20);
         icon->add_css_class("realmheart-system-monitor-metric");
         icon->add_css_class(css_class);
-        gtk_box_append(GTK_BOX(metrics), icon->widget());
+        gtk_box_append(GTK_BOX(metrics_), icon->widget());
         metric_icons_.push_back(std::move(icon));
     }
-    gtk_button_set_child(GTK_BUTTON(button_), metrics);
+    gtk_button_set_child(GTK_BUTTON(button_), metrics_);
+    set_layout(bar_geometry_for_display_tier(core::DisplayTier::P1080));
 
     // Match the media panel's successful architecture: a transparent overlay
     // layer surface whose custom Cairo shell is the only painted background.
@@ -233,6 +233,25 @@ SystemMonitorWidget::~SystemMonitorWidget() {
     }
 }
 
+void SystemMonitorWidget::set_layout(const BarGeometry& geometry) {
+    bar_rail_width_ = geometry.rail_width;
+    if (geometry.system_pill_width > 0 && geometry.system_pill_height > 0) {
+        gtk_widget_set_size_request(
+            button_, geometry.system_pill_width, geometry.system_pill_height
+        );
+    } else {
+        // Preserve the released 1080p CSS minimum and padding verbatim.
+        gtk_widget_set_size_request(button_, -1, -1);
+    }
+    if (metrics_ != nullptr) {
+        gtk_box_set_spacing(GTK_BOX(metrics_), geometry.system_metrics_spacing);
+    }
+    for (const auto& icon : metric_icons_) {
+        if (icon != nullptr) icon->set_size(geometry.system_metric_icon_size);
+    }
+    gtk_widget_queue_resize(button_);
+}
+
 void SystemMonitorWidget::trigger_click_feedback() {
     if (button_ == nullptr) return;
     gtk_widget_add_css_class(button_, "realmheart-click-feedback");
@@ -272,11 +291,11 @@ int SystemMonitorWidget::layer_left_margin() const {
     GtkWidget* bar_window = button_ != nullptr
         ? gtk_widget_get_ancestor(button_, GTK_TYPE_WINDOW)
         : nullptr;
-    if (button_ == nullptr || bar_window == nullptr) return kSystemLayerFallbackLeft;
+    if (button_ == nullptr || bar_window == nullptr) return bar_rail_width_;
 
     graphene_rect_t bounds{};
     if (!gtk_widget_compute_bounds(button_, bar_window, &bounds)) {
-        return kSystemLayerFallbackLeft;
+        return bar_rail_width_;
     }
 
     return std::max(

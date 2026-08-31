@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ui/NotesGeometry.hpp"
+
 #include <gtk/gtk.h>
 #include "services/NotesService.hpp"
 
@@ -29,9 +31,15 @@ private:
     GtkTextBuffer* buffer_ = nullptr;
     services::NotesService* notes_service_ = nullptr;
     std::shared_ptr<LifetimeState> lifetime_ = std::make_shared<LifetimeState>();
+    NotesLayout layout_{};
+    guint geometry_retry_id_ = 0;
+    bool geometry_initialized_ = false;
 
     static void on_text_changed_callback(GtkTextBuffer* buf, gpointer data);
+    static gboolean retry_geometry(gpointer data);
     void apply_save_state(services::NotesSaveState state);
+    void apply_geometry();
+    void schedule_geometry_retry();
 };
 
 } // namespace realmheart::ui

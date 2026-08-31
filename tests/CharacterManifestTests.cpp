@@ -1,5 +1,6 @@
 #include "animation/character/CharacterManifest.hpp"
 #include "core/DisplayTier.hpp"
+#include "ui/sidebar/SidebarGeometry.hpp"
 
 #include <array>
 #include <chrono>
@@ -7,6 +8,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <utility>
 
@@ -16,6 +18,7 @@ using realmheart::animation::character::CharacterLayerPlacement;
 using realmheart::animation::character::CharacterLayerRenderer;
 using realmheart::animation::character::CharacterManifest;
 using realmheart::animation::character::CharacterPlane;
+using realmheart::animation::character::host_layer_offset_for_display_tier;
 using realmheart::core::DisplayTier;
 
 void require(bool condition, const std::string& message) {
@@ -206,6 +209,35 @@ void test_rig_planes_and_host_anchor_are_declarative() {
             "rear flow amplitude and timing must remain rig-controlled");
 }
 
+void test_host_anchored_layers_follow_layout_tier_without_mutating_rig() {
+    const auto manifest = load_manifest(DisplayTier::P1080);
+    const auto* top_hand = manifest.find_layer("top-hand");
+    require(top_hand != nullptr, "top hand layer must exist");
+
+    const auto p1080 = host_layer_offset_for_display_tier(
+        top_hand->host_offset, DisplayTier::P1080
+    );
+    const auto p1440 = host_layer_offset_for_display_tier(
+        top_hand->host_offset, DisplayTier::P1440
+    );
+    const auto p4k = host_layer_offset_for_display_tier(
+        top_hand->host_offset, DisplayTier::P4K
+    );
+
+    require(std::abs(p1080.x - 47.0) < 0.0001 &&
+                std::abs(p1080.y - 34.0) < 0.0001,
+            "1080p top-hand anchor must remain byte-for-byte visually canonical");
+    require(std::abs(p1440.x - (47.0 * 4.0 / 3.0)) < 0.0001 &&
+                std::abs(p1440.y - (34.0 * 4.0 / 3.0)) < 0.0001,
+            "1440p top-hand anchor must follow the four-thirds layout transform");
+    require(std::abs(p4k.x - 94.0) < 0.0001 &&
+                std::abs(p4k.y - 68.0) < 0.0001,
+            "4K top-hand anchor must follow the two-times layout transform");
+
+    require(top_hand->host_offset.x == 47.0 && top_hand->host_offset.y == 34.0,
+            "display-tier placement must not rewrite canonical rig tuning");
+}
+
 void test_expression_assets_are_declared_and_geometry_safe() {
     const auto manifest = load_manifest(DisplayTier::P1080);
     require(manifest.expression.enabled,
@@ -232,6 +264,73 @@ void test_side_hand_source_anchor_maps_to_host_occlusion_edge() {
             "shared character transform must anchor the side hand crop to the host edge");
 }
 
+void test_tiered_tessia_bounds_fit_the_sidebar_host() {
+    using realmheart::core::display_tier_name;
+    using realmheart::core::display_tier_spec;
+    using realmheart::ui::sidebar::SidebarFrameLayout;
+    using realmheart::ui::sidebar::sidebar_height_for_logical_height;
+
+    for (const auto tier : {
+        DisplayTier::P1080,
+        DisplayTier::P1440,
+        DisplayTier::P4K,
+    }) {
+        const auto manifest = load_manifest(tier);
+        const auto sidebar = SidebarFrameLayout::for_display_tier(tier);
+        const auto tier_spec = display_tier_spec(tier);
+        const int host_height = sidebar_height_for_logical_height(
+            tier_spec.logical_height
+        );
+        const double scale =
+            static_cast<double>(host_height) * manifest.placement.height_fraction /
+            static_cast<double>(manifest.source_canvas.height);
+        const double source_anchor_x = manifest.placement.source_anchor.x *
+            static_cast<double>(manifest.source_canvas.width);
+        const double source_anchor_y = manifest.placement.source_anchor.y *
+            static_cast<double>(manifest.source_canvas.height);
+        const double source_origin_x = sidebar.frame_origin_x() +
+            manifest.placement.host_offset.x - source_anchor_x * scale;
+        const double source_origin_y = manifest.placement.host_offset.y -
+            source_anchor_y * scale;
+
+        double left = std::numeric_limits<double>::infinity();
+        double top = std::numeric_limits<double>::infinity();
+        double right = -std::numeric_limits<double>::infinity();
+        double bottom = -std::numeric_limits<double>::infinity();
+        for (const auto& layer : manifest.layers) {
+            if (!layer.visible) continue;
+            const auto* asset = manifest.find_asset(layer.asset_id);
+            require(asset != nullptr, "visible Tessia layer must have an asset");
+
+            const bool source_anchored =
+                layer.placement == CharacterLayerPlacement::SourceCanvas;
+            const auto host_offset = host_layer_offset_for_display_tier(
+                layer.host_offset, tier
+            );
+            const double x = source_anchored
+                ? source_origin_x + asset->offset.x * scale
+                : static_cast<double>(sidebar.frame_origin_x()) + host_offset.x;
+            const double y = source_anchored
+                ? source_origin_y + asset->offset.y * scale
+                : host_offset.y;
+            left = std::min(left, x);
+            top = std::min(top, y);
+            right = std::max(right, x + asset->size.width * scale);
+            bottom = std::max(bottom, y + asset->size.height * scale);
+        }
+
+        const std::string tier_name(display_tier_name(tier));
+        require(left >= 0.0,
+                tier_name + " Tessia crop must not escape the sidebar's left host edge");
+        require(top >= 0.0,
+                tier_name + " Tessia crop must not escape the sidebar's top host edge");
+        require(right <= static_cast<double>(sidebar.surface_width()),
+                tier_name + " Tessia crop must not escape the sidebar's right host edge");
+        require(bottom <= static_cast<double>(host_height),
+                tier_name + " Tessia crop must not escape the sidebar's bottom host edge");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -241,8 +340,10 @@ int main() {
     test_all_tier_packages_contain_complete_character_families();
     test_missing_higher_tier_falls_back_to_canonical_1080p();
     test_rig_planes_and_host_anchor_are_declarative();
+    test_host_anchored_layers_follow_layout_tier_without_mutating_rig();
     test_expression_assets_are_declared_and_geometry_safe();
     test_side_hand_source_anchor_maps_to_host_occlusion_edge();
+    test_tiered_tessia_bounds_fit_the_sidebar_host();
     std::cout << "Character manifest tests passed\n";
     return 0;
 }

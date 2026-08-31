@@ -4,7 +4,7 @@
   min-width: 36px;
   min-height: 36px;
   padding: 2px;
-  margin: 0 0 46px 0;
+  margin: 0;
   color: @rh_text;
   background-color: transparent;
   border: none;
@@ -79,13 +79,13 @@
   color: @rh_primary;
 }
 
-.realmheart-bar-icon-button.realmheart-media-button { margin-top: 0; }
+.realmheart-bar-icon-button.realmheart-media-button { margin: 0; }
 
 .realmheart-system-monitor-pill {
   min-width: 36px;
   min-height: 104px;
   padding: 7px 3px;
-  margin-top: 0;
+  margin: 0;
   color: @rh_text;
   background-color: alpha(@rh_surface, 0.14);
   background-image: none;
@@ -114,7 +114,7 @@
 }
 
 .realmheart-system-monitor-metrics {
-  border-spacing: 8px;
+  border-spacing: 0;
 }
 
 .realmheart-system-monitor-metric {
@@ -141,15 +141,15 @@
 }
 
 .realmheart-bar-icon-button.realmheart-wifi-button {
-  margin-bottom: 0;
+  margin: 0;
 }
 
 .realmheart-bar-icon-button.realmheart-notification-button {
-  margin: 0 0 80px 0;
+  margin: 0;
 }
 
 .realmheart-bar-icon-button.realmheart-bottom-action-button {
-  margin-bottom: 6px;
+  margin: 0;
 }
 
 /* The SVG family now carries most state through geometry. Only states that

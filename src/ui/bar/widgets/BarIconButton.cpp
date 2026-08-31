@@ -1,5 +1,6 @@
 #include "ui/bar/widgets/BarIconButton.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace realmheart::ui::bar::widgets {
@@ -123,6 +124,16 @@ void BarIconButton::remove_css_class(const char* css_class) {
 
 void BarIconButton::set_icon_size(int pixels) {
     icon_->set_size(pixels);
+}
+
+void BarIconButton::set_layout(int button_extent, int icon_size) {
+    if (button_extent > 0) {
+        gtk_widget_set_size_request(button_, button_extent, button_extent);
+    } else {
+        // The 1080p reference keeps the released CSS minimum/padding exactly.
+        gtk_widget_set_size_request(button_, -1, -1);
+    }
+    set_icon_size(std::max(icon_size, 1));
 }
 
 } // namespace realmheart::ui::bar::widgets

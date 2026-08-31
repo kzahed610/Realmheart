@@ -84,7 +84,6 @@ std::filesystem::path user_media_directory(GUserDirectory directory, const char*
     return std::filesystem::temp_directory_path() / "realmheart" / fallback_name;
 }
 
-constexpr int kHotspotHitWidth = 16;
 // Boot-idle delay before the workspace overview prewarm fires. Long enough
 // to stay out of the startup critical path, short enough to be warm before
 // a user realistically presses the overview keybind.
@@ -130,6 +129,7 @@ struct BackdropInputSetup {
     int sidebar_height = 1;
     int sidebar_width = sidebar::kDefaultSidebarFrameLayout.surface_width();
     int sidebar_right_margin = sidebar::kDefaultSidebarFrameLayout.right_margin;
+    int hotspot_hit_width = sidebar::kDefaultSidebarFrameLayout.hotspot_hit_width;
 };
 
 void draw_hotspot_commit_pixel(
@@ -272,7 +272,7 @@ bool apply_sidebar_backdrop_input_region(
 
         // The same invisible edge remains a close target while the sidebar is
         // open, even though most of the sidebar rectangle is click-through.
-        const int edge_x = std::max(width - kHotspotHitWidth, 0);
+        const int edge_x = std::max(width - setup.hotspot_hit_width, 0);
         const cairo_rectangle_int_t edge_rectangle{
             edge_x,
             sidebar_y,
@@ -286,7 +286,7 @@ bool apply_sidebar_backdrop_input_region(
         "backdrop region: surface=", width, "x", height,
         " sidebar=", sidebar_x, ",", sidebar_y, " ",
         sidebar_region_width, "x", sidebar_region_height,
-        " edge_width=", kHotspotHitWidth
+        " edge_width=", setup.hotspot_hit_width
     );
 
     gdk_surface_set_input_region(surface, region);
@@ -324,6 +324,7 @@ void enforce_sidebar_backdrop_input_region(
     setup->sidebar_height = placement.height;
     setup->sidebar_width = placement.frame_layout.surface_width();
     setup->sidebar_right_margin = placement.frame_layout.right_margin;
+    setup->hotspot_hit_width = placement.frame_layout.hotspot_hit_width;
 
     gtk_widget_add_tick_callback(
         GTK_WIDGET(window),
@@ -1676,7 +1677,7 @@ private:
 
         gtk_window_set_default_size(
             hotspot_,
-            kHotspotHitWidth,
+            placement.frame_layout.hotspot_hit_width,
             placement.height
         );
         gtk_layer_set_margin(
@@ -1687,7 +1688,7 @@ private:
         if (hotspot_button_ != nullptr) {
             gtk_widget_set_size_request(
                 hotspot_button_,
-                kHotspotHitWidth,
+                placement.frame_layout.hotspot_hit_width,
                 placement.height
             );
         }
@@ -1755,7 +1756,7 @@ private:
             );
             gtk_window_set_default_size(
                 hotspot_,
-                kHotspotHitWidth,
+                placement.frame_layout.hotspot_hit_width,
                 placement.height
             );
 
@@ -1783,7 +1784,7 @@ private:
             gtk_widget_set_vexpand(button, TRUE);
             gtk_widget_set_size_request(
                 button,
-                kHotspotHitWidth,
+                placement.frame_layout.hotspot_hit_width,
                 placement.height
             );
             hotspot_button_ = button;

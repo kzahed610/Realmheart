@@ -19,6 +19,7 @@ public:
     // layer-surface panel covers it. Passing 0 restores the complete contour.
     // The rail fill and input region are deliberately unaffected.
     void set_top_contour_occlusion(int bottom_y);
+    void set_geometry(int rail_width, int visual_width, int curve_height);
 
 private:
     GtkWidget* widget_ = nullptr;

@@ -506,3 +506,68 @@ popover.realmheart-launcher-constellation-menu > contents {
     0 2px 10px alpha(#000000, 0.38),
     inset 0 1px 0 alpha(#ffffff, 0.05);
 }
+
+/* Display-tier visual density -------------------------------------------------
+ * The fullscreen launcher is still a logical-pixel surface at scale 1. These
+ * classes are applied from the assigned monitor tier, so typography and the
+ * CSS-owned ornament/padding scale with the code-owned geometry. 1080p gets no
+ * class and therefore remains byte-for-byte on the released styling path. */
+.realmheart-launcher-root.realmheart-tier-1440p { font-size: 1.333333em; }
+.realmheart-launcher-root.realmheart-tier-4k { font-size: 2em; }
+
+.realmheart-launcher-root.realmheart-tier-1440p .realmheart-launcher-centre-shell,
+.realmheart-launcher-root.realmheart-tier-1440p .realmheart-launcher-centre-shadow {
+  border-radius: 33px;
+}
+.realmheart-launcher-root.realmheart-tier-4k .realmheart-launcher-centre-shell,
+.realmheart-launcher-root.realmheart-tier-4k .realmheart-launcher-centre-shadow {
+  border-radius: 50px;
+}
+.realmheart-launcher-root.realmheart-tier-1440p .realmheart-launcher-wallpaper-frame {
+  border-radius: 25px;
+}
+.realmheart-launcher-root.realmheart-tier-4k .realmheart-launcher-wallpaper-frame {
+  border-radius: 38px;
+}
+.realmheart-launcher-root.realmheart-tier-1440p .realmheart-launcher-wallpaper,
+.realmheart-launcher-root.realmheart-tier-1440p .realmheart-launcher-wallpaper-shade {
+  border-radius: 0 0 24px 24px;
+}
+.realmheart-launcher-root.realmheart-tier-4k .realmheart-launcher-wallpaper,
+.realmheart-launcher-root.realmheart-tier-4k .realmheart-launcher-wallpaper-shade {
+  border-radius: 0 0 36px 36px;
+}
+.realmheart-launcher-root.realmheart-tier-1440p entry.realmheart-launcher-search {
+  min-height: 67px;
+  padding: 0 25px;
+  border-radius: 33px;
+}
+.realmheart-launcher-root.realmheart-tier-4k entry.realmheart-launcher-search {
+  min-height: 100px;
+  padding: 0 38px;
+  border-radius: 50px;
+}
+.realmheart-launcher-root.realmheart-tier-1440p .realmheart-launcher-constellation-node {
+  padding: 5px 8px;
+  border-radius: 21px;
+}
+.realmheart-launcher-root.realmheart-tier-4k .realmheart-launcher-constellation-node {
+  padding: 8px 12px;
+  border-radius: 32px;
+}
+.realmheart-launcher-root.realmheart-tier-1440p .realmheart-launcher-results-shell {
+  border-radius: 28px;
+  padding: 13px;
+}
+.realmheart-launcher-root.realmheart-tier-4k .realmheart-launcher-results-shell {
+  border-radius: 42px;
+  padding: 20px;
+}
+.realmheart-launcher-root.realmheart-tier-1440p .realmheart-launcher-result-row,
+.realmheart-launcher-root.realmheart-tier-1440p .realmheart-launcher-result-selection {
+  border-radius: 19px;
+}
+.realmheart-launcher-root.realmheart-tier-4k .realmheart-launcher-result-row,
+.realmheart-launcher-root.realmheart-tier-4k .realmheart-launcher-result-selection {
+  border-radius: 28px;
+}

@@ -2395,6 +2395,22 @@ bool WorkspaceOverviewOverlay::morph_interactive() const noexcept {
     return morph_timeline_.state() == effects::TransitionState::Visible;
 }
 
+int WorkspaceOverviewOverlay::taskbar_rail_width() const noexcept {
+    if (canvas_ == nullptr) return bar::kRailWidth;
+    const int width = gtk_widget_get_width(canvas_);
+    const int height = gtk_widget_get_height(canvas_);
+    if (width <= 0 || height <= 0) return bar::kRailWidth;
+    return bar::bar_geometry_for_logical_geometry(width, height).rail_width;
+}
+
+int WorkspaceOverviewOverlay::taskbar_visual_width() const noexcept {
+    if (canvas_ == nullptr) return bar::kVisualWidth;
+    const int width = gtk_widget_get_width(canvas_);
+    const int height = gtk_widget_get_height(canvas_);
+    if (width <= 0 || height <= 0) return bar::kVisualWidth;
+    return bar::bar_geometry_for_logical_geometry(width, height).visual_width;
+}
+
 animation::WorkspaceMorphLayout WorkspaceOverviewOverlay::morph_layout(
     double scale_x,
     double scale_y
@@ -3814,12 +3830,12 @@ void WorkspaceOverviewOverlay::snapshot(
     const bool morph_transition = !morph_terminal_visible;
     // The overview intentionally spans the full output so the elemental seed
     // can share coordinates with the taskbar runes. The Aether Spine is
-    // translucent, though, so normal realm content must stop at the actual
-    // 56 px rail edge while the morph is moving. The extra 20 px cap extension
-    // is curved artwork, not a permanent opaque column; clipping to it creates
-    // a visible dead strip beside the bar.
+    // translucent, though, so normal realm content must stop at the assigned
+    // monitor's rail edge while the morph is moving. The cap extension is
+    // curved artwork, not a permanent opaque column; clipping to it creates a
+    // visible dead strip beside the bar.
     const double morph_content_safe_left = std::clamp(
-        static_cast<double>(bar::kRailWidth) / std::max(scale_x, 0.000001),
+        static_cast<double>(taskbar_rail_width()) / std::max(scale_x, 0.000001),
         0.0,
         kReferenceWidth
     );
@@ -4474,7 +4490,7 @@ void WorkspaceOverviewOverlay::snapshot(
 
 void WorkspaceOverviewOverlay::handle_drag_begin(double x, double y) {
     reset_drag();
-    if (!morph_interactive() || x < static_cast<double>(bar::kVisualWidth)) return;
+    if (!morph_interactive() || x < static_cast<double>(taskbar_visual_width())) return;
     drag_card_.gesture_active = true;
     if (canvas_ == nullptr) return;
 
@@ -4613,7 +4629,7 @@ void WorkspaceOverviewOverlay::handle_drag_update(
     drag_card_.current_y = drag_card_.start_y + offset_y / scale_y;
 
     const bool over_taskbar =
-        drag_card_.current_x * scale_x < static_cast<double>(bar::kVisualWidth);
+        drag_card_.current_x * scale_x < static_cast<double>(taskbar_visual_width());
     const auto target = over_taskbar
         ? std::optional<int>{}
         : realm_index_at_point(
@@ -4681,7 +4697,7 @@ void WorkspaceOverviewOverlay::handle_drag_end(
 
 void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
     if (canvas_ == nullptr || !morph_interactive() ||
-        x < static_cast<double>(bar::kVisualWidth)) return;
+        x < static_cast<double>(taskbar_visual_width())) return;
     const int width = gtk_widget_get_width(canvas_);
     const int height = gtk_widget_get_height(canvas_);
     if (width <= 0 || height <= 0) return;
@@ -4765,10 +4781,10 @@ void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
 void WorkspaceOverviewOverlay::handle_hover(double x, double y) {
     // The overview deliberately spans the full output so its morph geometry can
     // share coordinates with the Aether Spine. The visible bar still owns its
-    // entire 76 px strip; never let the surface underneath interpret pointer
+    // assigned visual strip; never let the surface underneath interpret pointer
     // motion there as a realm hover.
     if (canvas_ == nullptr || drag_card_.active || !morph_interactive() ||
-        x < static_cast<double>(bar::kVisualWidth)) return;
+        x < static_cast<double>(taskbar_visual_width())) return;
     const int width = gtk_widget_get_width(canvas_);
     const int height = gtk_widget_get_height(canvas_);
     if (width <= 0 || height <= 0) return;

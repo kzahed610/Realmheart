@@ -8,6 +8,19 @@
 
 namespace realmheart::ui::components {
 
+struct NotificationLayout {
+    bool expand_to_fill = true;
+    int viewport_height = 0;
+    int bottom_margin = 30;
+    int empty_icon_size = 31;
+    int header_spacing = 7;
+    int list_spacing = 6;
+    int row_spacing = 8;
+    int copy_spacing = 4;
+    int meta_spacing = 6;
+    int unread_dot_size = 5;
+};
+
 class NotificationWidget : public BaseWidget {
 public:
     explicit NotificationWidget(services::NotificationHistory& history);
@@ -15,6 +28,7 @@ public:
 
     GtkWidget* get_widget() override;
     void refresh() override;
+    void set_layout(NotificationLayout layout);
 
 private:
     struct LifetimeState {
@@ -41,6 +55,8 @@ private:
     void cancel_swipe_animation();
 
     GtkWidget* box_ = nullptr;
+    GtkWidget* controls_ = nullptr;
+    GtkWidget* title_group_ = nullptr;
     GtkWidget* scroller_ = nullptr;
     GtkWidget* list_ = nullptr;
     GtkWidget* count_label_ = nullptr;
@@ -62,6 +78,7 @@ private:
     gint64 swipe_anim_start_us_ = 0;
     bool swipe_anim_dismiss_ = false;
     guint swipe_tick_id_ = 0;
+    NotificationLayout layout_{};
     services::NotificationHistory& history_;
     std::shared_ptr<LifetimeState> state_ = std::make_shared<LifetimeState>();
     services::NotificationHistory::Subscription subscription_;

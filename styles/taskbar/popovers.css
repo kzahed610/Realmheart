@@ -277,6 +277,13 @@ window.realmheart-system-monitor-layer-window .realmheart-attached-popover-conte
   padding: 1px 10px 3px 16px;
 }
 
+
+/* Resolution-tier typography follows the same logical scale as the sidebar
+ * geometry. Child sizes are expressed in em where possible, so scaling the
+ * root preserves the released 1080p visual density without global CSS hacks. */
+.realmheart-right-sidebar.realmheart-tier-1440p { font-size: 1.333333em; }
+.realmheart-right-sidebar.realmheart-tier-4k { font-size: 2em; }
+
 .realmheart-identity-header {
   margin-bottom: 18px;
   padding: 4px 5px 11px 5px;
@@ -316,7 +323,7 @@ window.realmheart-system-monitor-layer-window .realmheart-attached-popover-conte
   font-size: 0.64em;
 }
 
-.realmheart-sidebar-section { margin-bottom: 21px; }
+.realmheart-sidebar-section { margin-bottom: 0; }
 
 .realmheart-section-title,
 .realmheart-notifications-title {
@@ -330,7 +337,7 @@ window.realmheart-system-monitor-layer-window .realmheart-attached-popover-conte
 .realmheart-section-title { margin-left: 4px; }
 
 .realmheart-quick-grid {
-  padding: 3px 0 0 0;
+  padding: 0;
   background-color: transparent;
   border: 0;
   border-radius: 0;
@@ -426,7 +433,7 @@ menubutton.realmheart-quick-tile:not(.active) .realmheart-quick-tile-status {
   color: alpha(@rh_text_muted, 0.82);
 }
 
-.realmheart-levels-section { margin-bottom: 26px; }
+.realmheart-levels-section { margin-bottom: 0; }
 .realmheart-slider-chamber {
   margin: 1px 0 0 0;
   padding: 7px 9px;
@@ -499,7 +506,7 @@ scale.realmheart-rune-scale slider {
   opacity: 0;
 }
 
-.realmheart-power-section { margin-bottom: 20px; }
+.realmheart-power-section { margin-bottom: 0; }
 .realmheart-power-segments {
   margin-top: 3px;
   padding: 3px;
@@ -606,7 +613,7 @@ button.realmheart-notifications-clear:active {
 }
 button.realmheart-notifications-clear:disabled { opacity: 0.38; }
 .realmheart-notifications-scroller {
-  margin-bottom: 30px;
+  margin-bottom: 0;
   background-image: linear-gradient(to bottom, alpha(#0a1012, 0.74), alpha(#060a0c, 0.64));
   background-color: alpha(#070c0e, 0.68);
   border: 1px solid alpha(#9d7138, 0.20);
@@ -1190,4 +1197,40 @@ window.realmheart-now-playing-window > * {
   font-size: 0.65em;
   font-weight: 620;
   letter-spacing: 0.10px;
+}
+
+/* High-resolution sidebar ornament spacing. Geometry and typography already
+ * scale in C++; these overrides keep CSS-owned padding/radii at the same visual
+ * density while leaving the released 1080p selectors untouched. */
+.realmheart-right-sidebar.realmheart-tier-1440p {
+  padding: 1px 13px 4px 21px;
+}
+.realmheart-right-sidebar.realmheart-tier-4k {
+  padding: 2px 20px 6px 32px;
+}
+.realmheart-right-sidebar.realmheart-tier-1440p .realmheart-identity-header {
+  margin-bottom: 24px;
+  padding: 5px 7px 15px 7px;
+}
+.realmheart-right-sidebar.realmheart-tier-4k .realmheart-identity-header {
+  margin-bottom: 36px;
+  padding: 8px 10px 22px 10px;
+}
+.realmheart-right-sidebar.realmheart-tier-1440p button.realmheart-quick-tile,
+.realmheart-right-sidebar.realmheart-tier-1440p menubutton.realmheart-quick-tile > button {
+  padding: 11px 15px;
+  border-radius: 24px;
+}
+.realmheart-right-sidebar.realmheart-tier-4k button.realmheart-quick-tile,
+.realmheart-right-sidebar.realmheart-tier-4k menubutton.realmheart-quick-tile > button {
+  padding: 16px 22px;
+  border-radius: 36px;
+}
+.realmheart-right-sidebar.realmheart-tier-1440p .realmheart-slider-chamber {
+  padding: 9px 12px;
+  border-radius: 19px;
+}
+.realmheart-right-sidebar.realmheart-tier-4k .realmheart-slider-chamber {
+  padding: 14px 18px;
+  border-radius: 28px;
 }

@@ -326,6 +326,7 @@ std::unique_ptr<CharacterCompositor> CharacterCompositor::create(
             back_host,
             front_host,
             std::move(*manifest),
+            display_tier,
             host_geometry
         )
     );
@@ -341,10 +342,12 @@ CharacterCompositor::CharacterCompositor(
     GtkWidget* back_host,
     GtkWidget* front_host,
     CharacterManifest manifest,
+    core::DisplayTier layout_tier,
     CharacterHostGeometry host_geometry
 ) : back_host_(back_host),
     front_host_(front_host),
     manifest_(std::move(manifest)),
+    layout_tier_(layout_tier),
     host_geometry_(host_geometry) {}
 
 CharacterCompositor::~CharacterCompositor() {
@@ -483,8 +486,11 @@ bool CharacterCompositor::create_draw_groups(std::string* error_message) {
                     x = character_origin_x + (asset->offset.x * scale);
                     y = character_origin_y + (asset->offset.y * scale);
                 } else {
-                    x = host_geometry_.occlusion_left + layer.host_offset.x;
-                    y = host_geometry_.occlusion_top + layer.host_offset.y;
+                    const auto host_offset = host_layer_offset_for_display_tier(
+                        layer.host_offset, layout_tier_
+                    );
+                    x = host_geometry_.occlusion_left + host_offset.x;
+                    y = host_geometry_.occlusion_top + host_offset.y;
                 }
 
                 left = std::min(left, x);
@@ -565,8 +571,11 @@ bool CharacterCompositor::create_draw_groups(std::string* error_message) {
                     x = character_origin_x + (asset->offset.x * scale);
                     y = character_origin_y + (asset->offset.y * scale);
                 } else {
-                    x = host_geometry_.occlusion_left + layer.host_offset.x;
-                    y = host_geometry_.occlusion_top + layer.host_offset.y;
+                    const auto host_offset = host_layer_offset_for_display_tier(
+                        layer.host_offset, layout_tier_
+                    );
+                    x = host_geometry_.occlusion_left + host_offset.x;
+                    y = host_geometry_.occlusion_top + host_offset.y;
                 }
 
                 left = std::min(left, x);
@@ -2124,8 +2133,11 @@ void CharacterCompositor::draw_group(
             x = origin_x + (asset->offset.x * scale);
             y = origin_y + (asset->offset.y * scale);
         } else {
-            x = host_geometry_.occlusion_left + layer.host_offset.x;
-            y = host_geometry_.occlusion_top + layer.host_offset.y;
+            const auto host_offset = host_layer_offset_for_display_tier(
+                layer.host_offset, layout_tier_
+            );
+            x = host_geometry_.occlusion_left + host_offset.x;
+            y = host_geometry_.occlusion_top + host_offset.y;
         }
         x -= group.host_x;
         y -= group.host_y;
@@ -2221,8 +2233,11 @@ void CharacterCompositor::snapshot_hair_group(
             x = origin_x + (asset->offset.x * scale);
             y = origin_y + (asset->offset.y * scale);
         } else {
-            x = host_geometry_.occlusion_left + layer.host_offset.x;
-            y = host_geometry_.occlusion_top + layer.host_offset.y;
+            const auto host_offset = host_layer_offset_for_display_tier(
+                layer.host_offset, layout_tier_
+            );
+            x = host_geometry_.occlusion_left + host_offset.x;
+            y = host_geometry_.occlusion_top + host_offset.y;
         }
         x -= group.host_x;
         y -= group.host_y;

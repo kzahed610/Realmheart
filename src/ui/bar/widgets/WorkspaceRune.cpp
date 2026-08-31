@@ -42,6 +42,14 @@ void clear_box(GtkWidget* box) {
 constexpr int kPreviewOffsetX = 8;
 constexpr int kPreviewOffsetY = -5;
 
+// The rune artwork was authored on a 25x31 canvas. Higher display tiers enlarge
+// that canvas, but the Cairo path itself is still expressed in authored pixels.
+// Render through one uniform transform so the 1440p/4K rune is a true scaled
+// copy of the approved 1080p silhouette instead of an elongated path with
+// unscaled control-point offsets.
+constexpr double kAuthoredRuneWidth = 25.0;
+constexpr double kAuthoredRuneHeight = 31.0;
+
 } // namespace
 
 WorkspaceRune::WorkspaceRune(
@@ -55,17 +63,16 @@ WorkspaceRune::WorkspaceRune(
     gtk_widget_add_css_class(button_, "realmheart-workspace-rune");
     gtk_widget_set_halign(button_, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(button_, GTK_ALIGN_CENTER);
-    gtk_widget_set_size_request(button_, 34, 38);
     gtk_widget_set_focusable(button_, FALSE);
 
     drawing_area_ = gtk_drawing_area_new();
     gtk_widget_add_css_class(drawing_area_, "realmheart-workspace-rune-art");
     gtk_widget_set_halign(drawing_area_, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(drawing_area_, GTK_ALIGN_CENTER);
-    gtk_widget_set_size_request(drawing_area_, 25, 31);
     gtk_widget_set_can_target(drawing_area_, FALSE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(drawing_area_), &WorkspaceRune::draw, this, nullptr);
     gtk_button_set_child(GTK_BUTTON(button_), drawing_area_);
+    set_layout(bar_geometry_for_display_tier(core::DisplayTier::P1080));
 
     g_signal_connect(button_, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
         auto* self = static_cast<WorkspaceRune*>(data);
@@ -156,6 +163,16 @@ void WorkspaceRune::update(const services::WorkspaceState& state) {
     rebuild_preview();
 }
 
+void WorkspaceRune::set_layout(const BarGeometry& geometry) {
+    gtk_widget_set_size_request(
+        button_, geometry.workspace_rune_width, geometry.workspace_rune_height
+    );
+    gtk_widget_set_size_request(
+        drawing_area_, geometry.workspace_art_width, geometry.workspace_art_height
+    );
+    gtk_widget_queue_draw(drawing_area_);
+}
+
 void WorkspaceRune::begin_teardown() {
     if (tearing_down_) return;
     tearing_down_ = true;
@@ -218,15 +235,37 @@ void WorkspaceRune::draw(GtkDrawingArea* area, cairo_t* cr, int width, int heigh
         GTK_WIDGET(area), GdkRGBA{0.72, 0.42, 0.95, 1.0}
     );
 
+    // Preserve the exact authored 25x31 proportions at every tier. The old
+    // implementation enlarged the drawing area while leaving these path
+    // offsets in raw pixels, which made the 1440p/4K runes look tall, pinched,
+    // and increasingly unlike the 1080p workspace glyphs.
+    const double scale = std::max(
+        0.001,
+        std::min(
+            static_cast<double>(width) / kAuthoredRuneWidth,
+            static_cast<double>(height) / kAuthoredRuneHeight
+        )
+    );
+    const double rendered_width = kAuthoredRuneWidth * scale;
+    const double rendered_height = kAuthoredRuneHeight * scale;
+
+    cairo_save(cr);
+    cairo_translate(
+        cr,
+        (static_cast<double>(width) - rendered_width) / 2.0,
+        (static_cast<double>(height) - rendered_height) / 2.0
+    );
+    cairo_scale(cr, scale, scale);
+
     if (active || hover > 0.001) {
         GdkRGBA glow = accent;
         glow.alpha = (active ? 0.22 : 0.0) + (0.10 * hover);
-        rune_path(cr, width, height);
+        rune_path(cr, kAuthoredRuneWidth, kAuthoredRuneHeight);
         gdk_cairo_set_source_rgba(cr, &glow);
         cairo_fill(cr);
     }
 
-    rune_path(cr, width, height);
+    rune_path(cr, kAuthoredRuneWidth, kAuthoredRuneHeight);
     GdkRGBA outline = accent;
     outline.alpha = std::min(
         1.0,
@@ -236,8 +275,8 @@ void WorkspaceRune::draw(GtkDrawingArea* area, cairo_t* cr, int width, int heigh
     cairo_set_line_width(cr, (active ? 1.6 : 1.15) + (0.22 * hover));
     cairo_stroke(cr);
 
-    const double cx = width / 2.0;
-    const double cy = height / 2.0;
+    const double cx = kAuthoredRuneWidth / 2.0;
+    const double cy = kAuthoredRuneHeight / 2.0;
     if (occupied) {
         GdkRGBA mark = accent;
         mark.alpha = std::min(1.0, (active ? 1.0 : 0.78) + (0.12 * hover));
@@ -269,6 +308,8 @@ void WorkspaceRune::draw(GtkDrawingArea* area, cairo_t* cr, int width, int heigh
         cairo_fill(cr);
         cairo_restore(cr);
     }
+
+    cairo_restore(cr);
 }
 
 void WorkspaceRune::set_hovered(bool hovered) {

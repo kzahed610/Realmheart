@@ -3,6 +3,7 @@
 #include "effects/core/TransitionTimeline.hpp"
 #include "services/LauncherService.hpp"
 #include "services/WallpaperService.hpp"
+#include "ui/launcher/LauncherGeometry.hpp"
 
 #include <gtk/gtk.h>
 
@@ -123,6 +124,9 @@ private:
 
     void setup_window();
     void setup_ui();
+    void apply_display_geometry();
+    void schedule_geometry_retry();
+    [[nodiscard]] int scale_px(int baseline) const noexcept;
     void sync_mode_chip();
     void set_entry_text_quiet(const std::string& text);
     void refresh_wallpaper();
@@ -256,6 +260,7 @@ private:
     GtkWidget* search_slot_ = nullptr;
     GtkWidget* mode_chip_ = nullptr;
     GtkWidget* wallpaper_picture_ = nullptr;
+    GtkWidget* wallpaper_shade_ = nullptr;
     GtkWidget* centre_column_ = nullptr;
     GtkWidget* centre_shader_host_ = nullptr;
     GtkWidget* centre_shadow_ = nullptr;
@@ -266,10 +271,16 @@ private:
     GtkWidget* constellation_canvas_ = nullptr;
     GtkWidget* selection_indicator_ = nullptr;
     GtkWidget* results_revealer_ = nullptr;
+    GtkWidget* results_shell_ = nullptr;
     GtkWidget* results_overlay_ = nullptr;
     GtkWidget* results_scroller_ = nullptr;
     GtkWidget* results_list_ = nullptr;
     GtkWidget* result_selection_indicator_ = nullptr;
+
+    launcher::LauncherGeometry launcher_geometry_{};
+    core::DisplayTier display_tier_ = core::DisplayTier::P1080;
+    bool geometry_initialized_ = false;
+    guint geometry_retry_id_ = 0;
 
     SearchMode search_mode_ = SearchMode::Normal;
     bool entry_text_programmatic_ = false;

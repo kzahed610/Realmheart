@@ -176,6 +176,17 @@ bool validate_family_geometry(
 
 } // namespace
 
+CharacterPoint host_layer_offset_for_display_tier(
+    CharacterPoint canonical_offset,
+    core::DisplayTier display_tier
+) noexcept {
+    const double layout_scale = core::display_tier_spec(display_tier).scale;
+    return {
+        .x = canonical_offset.x * layout_scale,
+        .y = canonical_offset.y * layout_scale,
+    };
+}
+
 std::optional<CharacterManifest> CharacterManifest::load(
     const std::filesystem::path& character_root,
     core::DisplayTier display_tier,

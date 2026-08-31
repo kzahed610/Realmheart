@@ -154,6 +154,7 @@ private:
         GtkWidget* back_host,
         GtkWidget* front_host,
         CharacterManifest manifest,
+        core::DisplayTier layout_tier,
         CharacterHostGeometry host_geometry
     );
 
@@ -273,6 +274,7 @@ private:
     GtkWidget* front_host_ = nullptr;
     GtkWidget* tick_widget_ = nullptr;
     CharacterManifest manifest_;
+    core::DisplayTier layout_tier_ = core::DisplayTier::P1080;
     CharacterAnimator animator_;
     CharacterExpressionAnimator expression_animator_;
     CharacterHostGeometry host_geometry_;

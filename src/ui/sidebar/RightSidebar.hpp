@@ -26,6 +26,7 @@ class CharacterCompositor;
 }
 
 namespace realmheart::ui::components {
+class NotificationWidget;
 class SliderWidget;
 }
 
@@ -113,6 +114,7 @@ private:
     };
 
     void setup_layout();
+    void apply_content_layout();
     void initialize_character_compositor();
     void cancel_character_hide_timeout();
     static gboolean finish_character_hide(gpointer raw);
@@ -161,6 +163,9 @@ private:
     std::function<void(double)> show_brightness_osd_;
     GtkWidget* online_label_ = nullptr;
     GtkWidget* uptime_label_ = nullptr;
+    std::vector<GtkWidget*> sidebar_sections_;
+    GtkWidget* quick_grid_ = nullptr;
+    GtkWidget* slider_chamber_ = nullptr;
     std::array<GtkWidget*, 3> power_profile_buttons_{};
     std::string pending_power_profile_;
     guint power_feedback_timeout_ = 0;
@@ -170,6 +175,7 @@ private:
     std::unique_ptr<QuickControlTile> keep_awake_tile_;
     components::SliderWidget* brightness_slider_ = nullptr;
     components::SliderWidget* volume_slider_ = nullptr;
+    components::NotificationWidget* notification_widget_ = nullptr;
     std::unique_ptr<WifiManagerPopover> wifi_panel_;
     std::unique_ptr<BluetoothManagerPopover> bluetooth_panel_;
     std::unique_ptr<NightLightPanel> night_light_panel_;

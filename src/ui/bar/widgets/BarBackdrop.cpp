@@ -282,6 +282,23 @@ BarBackdrop::BarBackdrop(
     g_signal_connect(fill, "resize", G_CALLBACK(on_resize), state);
 }
 
+void BarBackdrop::set_geometry(int rail_width, int visual_width, int curve_height) {
+    if (widget_ == nullptr) return;
+
+    auto* state = static_cast<BackdropState*>(g_object_get_data(
+        G_OBJECT(widget_),
+        "realmheart-bar-backdrop-state"
+    ));
+    if (state == nullptr) return;
+
+    state->rail_width = std::max(rail_width, 0);
+    state->visual_width = std::max(visual_width, state->rail_width);
+    state->curve_height = std::max(curve_height, 0);
+    gtk_widget_set_size_request(widget_, state->visual_width, -1);
+    gtk_widget_queue_resize(widget_);
+    gtk_widget_queue_draw(widget_);
+}
+
 void BarBackdrop::set_top_contour_occlusion(int bottom_y) {
     if (widget_ == nullptr || contour_ == nullptr) return;
 

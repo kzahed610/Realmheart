@@ -1,6 +1,7 @@
 #pragma once
 
 #include "services/SystemMonitorService.hpp"
+#include "ui/bar/BarGeometry.hpp"
 #include "ui/bar/widgets/ThemedSvgIcon.hpp"
 
 #include <atomic>
@@ -24,6 +25,7 @@ public:
 
     GtkWidget* widget() const { return button_; }
     void close();
+    void set_layout(const BarGeometry& geometry);
 
 private:
     struct AsyncState {
@@ -50,6 +52,7 @@ private:
 
     std::function<void()> request_exclusive_open_;
     GtkWidget* button_ = nullptr;
+    GtkWidget* metrics_ = nullptr;
     GtkWidget* layer_window_ = nullptr;
     GtkWidget* layer_clip_ = nullptr;
     GtkWidget* layer_shell_ = nullptr;
@@ -64,6 +67,7 @@ private:
     guint click_feedback_timer_id_ = 0;
     guint reveal_start_tick_id_ = 0;
     bool open_ = false;
+    int bar_rail_width_ = kRailWidth;
 };
 
 } // namespace realmheart::ui::bar::widgets

@@ -33,11 +33,9 @@ GtkWidget* image_button(GtkWidget* icon, const char* fallback) {
 // Preserve the final two-pixel horizontal tune from the popover version. The
 // layer surface computes its base position from the media button's real bounds.
 constexpr int kMediaLayerExtraOffsetX = kExpandingPopoverOffsetX + 2;
-constexpr int kMediaLayerFallbackLeft = 56;
 // The media surface itself becomes the outside-click catcher. Its Wayland
 // input region excludes the physical taskbar rail except where the attached
 // media shell overlaps it, so bar controls still receive their normal clicks.
-constexpr int kTaskbarInputPassThroughWidth = 56;
 // The media surface now owns the physical top edge, so the complete screen-hug
 // shoulder can use the same depth as the lower taskbar shoulder.
 constexpr int kMediaTopCurveHeight = 22;
@@ -513,6 +511,12 @@ MediaWidget::~MediaWidget() {
     }
 }
 
+void MediaWidget::set_layout(const BarGeometry& geometry) {
+    button_.set_layout(geometry.icon_button_extent, geometry.icon_size);
+    taskbar_input_pass_through_width_ = geometry.rail_width;
+    if (layer_open_) update_layer_input_region();
+}
+
 void MediaWidget::cancel_bar_contour_restore() {
     if (contour_restore_tick_id_ == 0) return;
 
@@ -560,11 +564,11 @@ int MediaWidget::layer_left_margin() const {
     GtkWidget* bar_window = button != nullptr
         ? gtk_widget_get_ancestor(button, GTK_TYPE_WINDOW)
         : nullptr;
-    if (button == nullptr || bar_window == nullptr) return kMediaLayerFallbackLeft;
+    if (button == nullptr || bar_window == nullptr) return taskbar_input_pass_through_width_;
 
     graphene_rect_t bounds{};
     if (!gtk_widget_compute_bounds(button, bar_window, &bounds)) {
-        return kMediaLayerFallbackLeft;
+        return taskbar_input_pass_through_width_;
     }
 
     return std::max(
@@ -587,11 +591,11 @@ void MediaWidget::update_layer_input_region() {
     cairo_region_t* input_region = cairo_region_create();
 
     // Everything to the right of the taskbar is an outside-click target.
-    if (width > kTaskbarInputPassThroughWidth) {
+    if (width > taskbar_input_pass_through_width_) {
         const cairo_rectangle_int_t outside_region{
-            kTaskbarInputPassThroughWidth,
+            taskbar_input_pass_through_width_,
             0,
-            width - kTaskbarInputPassThroughWidth,
+            width - taskbar_input_pass_through_width_,
             height
         };
         cairo_region_union_rectangle(input_region, &outside_region);

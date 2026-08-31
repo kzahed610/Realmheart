@@ -1,6 +1,7 @@
 #pragma once
 
 #include "services/MediaService.hpp"
+#include "ui/bar/BarGeometry.hpp"
 #include "ui/bar/widgets/BarIconButton.hpp"
 #include "ui/bar/widgets/ThemedSvgIcon.hpp"
 
@@ -33,6 +34,7 @@ public:
     GtkWidget* widget() const { return button_.widget(); }
     void update(const std::optional<services::MediaInfo>& info);
     void close();
+    void set_layout(const BarGeometry& geometry);
 
 private:
     struct AsyncState {
@@ -94,6 +96,7 @@ private:
     std::int64_t position_anchor_us_ = 0;
     gint64 position_anchor_monotonic_us_ = 0;
     std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
+    int taskbar_input_pass_through_width_ = kRailWidth;
 };
 
 } // namespace realmheart::ui::bar::widgets

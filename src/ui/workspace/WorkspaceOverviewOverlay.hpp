@@ -143,6 +143,8 @@ private:
     void update_morph_shader() noexcept;
     void finish_morph_endpoint() noexcept;
     [[nodiscard]] bool morph_interactive() const noexcept;
+    [[nodiscard]] int taskbar_rail_width() const noexcept;
+    [[nodiscard]] int taskbar_visual_width() const noexcept;
     [[nodiscard]] animation::WorkspaceMorphLayout morph_layout(
         double scale_x,
         double scale_y

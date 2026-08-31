@@ -1,6 +1,7 @@
 #pragma once
 
 #include "services/BatteryService.hpp"
+#include "ui/bar/BarGeometry.hpp"
 #include "ui/bar/widgets/BarIconButton.hpp"
 
 #include <functional>
@@ -20,6 +21,7 @@ public:
     GtkWidget* widget() const { return button_.widget(); }
     void update(const std::optional<services::BatteryStatus>& status);
     void close();
+    void set_layout(const BarGeometry& geometry);
 
 private:
     void show_held();

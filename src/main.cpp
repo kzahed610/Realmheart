@@ -8,6 +8,7 @@
 #include "services/ScopeModules.hpp"
 #include "services/RightSidebarServices.hpp"
 #include "ui/GtkApp.hpp"
+#include "ui/ResolutionDiagnostics.hpp"
 #include "ui/ShellApp.hpp"
 #include "ui/wallpaper/WallpaperBackend.hpp"
 
@@ -36,6 +37,7 @@ void print_usage() {
               << "Usage:\n"
               << "  realmheart --doctor              Probe host dependencies and live service state\n"
               << "  realmheart --list-modules        Print confirmed module registry\n"
+              << "  realmheart --resolution-status   Print display-tier geometry and asset provenance\n"
               << "  realmheart --cycle-power-profile Cycle battery-saver/balanced/performance\n"
               << "  realmheart --workspace-status   Print Hyprland workspace snapshot\n"
               << "  realmheart --right-sidebar-status Print right sidebar service report\n"
@@ -183,6 +185,11 @@ int main(int argc, char** argv) {
     }
 
     if (command == "--doctor") return doctor();
+
+    if (command == "--resolution-status") {
+        std::cout << realmheart::ui::resolution_compatibility_report();
+        return 0;
+    }
 
     if (command == "--shell") {
         auto wallpaper_backend =

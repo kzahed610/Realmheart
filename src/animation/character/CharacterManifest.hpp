@@ -85,6 +85,15 @@ struct CharacterPlacement {
     CharacterPoint host_offset;
 };
 
+// Host-relative layer offsets in rig.json are authored in the canonical
+// 1080p layout coordinate system. Keep the manifest itself canonical, then
+// derive the logical offset for the surface's assigned display tier at use
+// time. This is intentionally separate from raster/source-canvas scaling.
+[[nodiscard]] CharacterPoint host_layer_offset_for_display_tier(
+    CharacterPoint canonical_offset,
+    core::DisplayTier display_tier
+) noexcept;
+
 class CharacterManifest {
 public:
     static std::optional<CharacterManifest> load(

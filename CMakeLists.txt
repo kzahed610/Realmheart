@@ -174,6 +174,7 @@ add_library(realmheart_ui STATIC
     src/services/HyprlandApplicationMonitor.cpp
     src/services/HyprlandSession.cpp
     src/ui/AssetResolver.cpp
+    src/ui/ResolutionDiagnostics.cpp
     src/ui/ImageFileFilters.cpp
     src/ui/GtkApp.cpp
     src/ui/ThemeStyles.cpp
@@ -235,10 +236,12 @@ add_library(realmheart_ui STATIC
     src/ui/workspace/animation/WorkspaceMorphRendererState.cpp
     src/ui/workspace/animation/WorkspaceMorphShaderData.cpp
     src/ui/workspace/animation/WorkspaceOverviewMorphRenderer.cpp
+    src/ui/launcher/LauncherGeometry.cpp
     src/ui/launcher/LauncherOverlay.cpp
     src/ui/launcher/CommandReceiptOverlay.cpp
     src/services/LauncherService.cpp
     src/services/NotesService.cpp
+    src/ui/NotesGeometry.cpp
     src/ui/NotesOverlay.cpp
     src/ui/components/LabelWidget.cpp
     src/ui/components/ToggleWidget.cpp
@@ -668,6 +671,7 @@ if(BUILD_TESTING)
         realmheart_character_manifest_tests
         tests/CharacterManifestTests.cpp
         src/core/DisplayTier.cpp
+        src/ui/sidebar/SidebarGeometry.cpp
         src/animation/character/CharacterManifest.cpp
     )
     target_compile_definitions(realmheart_character_manifest_tests PRIVATE
@@ -699,6 +703,22 @@ if(BUILD_TESTING)
     realmheart_register_test(realmheart_bar_geometry_tests)
 
     add_executable(
+        realmheart_notes_geometry_tests
+        tests/NotesGeometryTests.cpp
+        src/core/DisplayTier.cpp
+        src/ui/NotesGeometry.cpp
+    )
+    realmheart_register_test(realmheart_notes_geometry_tests)
+
+    add_executable(
+        realmheart_launcher_geometry_tests
+        tests/LauncherGeometryTests.cpp
+        src/core/DisplayTier.cpp
+        src/ui/launcher/LauncherGeometry.cpp
+    )
+    realmheart_register_test(realmheart_launcher_geometry_tests)
+
+    add_executable(
         realmheart_resolution_asset_package_tests
         tests/ResolutionAssetPackageTests.cpp
         src/core/DisplayTier.cpp
@@ -708,6 +728,48 @@ if(BUILD_TESTING)
         REALMHEART_TEST_ASSET_ROOT="${CMAKE_SOURCE_DIR}/assets"
     )
     realmheart_register_test(realmheart_resolution_asset_package_tests)
+
+    add_executable(
+        realmheart_resolution_diagnostics_tests
+        tests/ResolutionDiagnosticsTests.cpp
+        src/core/DisplayTier.cpp
+        src/ui/AssetResolver.cpp
+        src/ui/ResolutionDiagnostics.cpp
+        src/ui/NotesGeometry.cpp
+        src/ui/launcher/LauncherGeometry.cpp
+        src/ui/sidebar/SidebarGeometry.cpp
+        src/ui/workspace/WorkspaceOverviewAssets.cpp
+    )
+    target_compile_definitions(realmheart_resolution_diagnostics_tests PRIVATE
+        REALMHEART_INSTALL_ASSET_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/assets"
+        REALMHEART_SOURCE_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
+    )
+    realmheart_register_test(realmheart_resolution_diagnostics_tests)
+
+    add_executable(
+        realmheart_installed_asset_root_probe
+        tests/InstalledAssetRootTests.cpp
+        src/core/DisplayTier.cpp
+        src/ui/AssetResolver.cpp
+        src/ui/workspace/WorkspaceOverviewAssets.cpp
+        src/animation/character/CharacterManifest.cpp
+    )
+    target_compile_definitions(realmheart_installed_asset_root_probe PRIVATE
+        REALMHEART_INSTALL_ASSET_DIR="${CMAKE_BINARY_DIR}/realmheart-installed-root-test${CMAKE_INSTALL_FULL_DATADIR}/realmheart/assets"
+        REALMHEART_SOURCE_ASSET_DIR="${CMAKE_BINARY_DIR}/realmheart-installed-root-test/no-source-assets"
+    )
+    realmheart_configure_test(realmheart_installed_asset_root_probe)
+
+    add_test(
+        NAME realmheart_installed_asset_root_tests
+        COMMAND "${CMAKE_COMMAND}"
+            -DREALMHEART_BUILD_DIR=${CMAKE_BINARY_DIR}
+            -DREALMHEART_STAGE_DIR=${CMAKE_BINARY_DIR}/realmheart-installed-root-test
+            -DREALMHEART_TEST_EXECUTABLE=$<TARGET_FILE:realmheart_installed_asset_root_probe>
+            -DREALMHEART_INSTALL_FULL_DATADIR=${CMAKE_INSTALL_FULL_DATADIR}
+            -P ${CMAKE_SOURCE_DIR}/tests/InstalledAssetRootTest.cmake
+    )
+    set_tests_properties(realmheart_installed_asset_root_tests PROPERTIES TIMEOUT 60)
 
     add_executable(realmheart_audio_tests tests/AudioTests.cpp src/core/Command.cpp src/services/Audio.cpp)
     realmheart_register_test(realmheart_audio_tests)

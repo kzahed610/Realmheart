@@ -11,7 +11,9 @@ NotesOverlay::NotesOverlay(GtkApplication* app, services::NotesService* notes_se
 
     window_ = GTK_WIDGET(gtk_application_window_new(app));
     gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Notes");
-    gtk_window_set_default_size(GTK_WINDOW(window_), 600, 800);
+    gtk_window_set_default_size(
+        GTK_WINDOW(window_), layout_.window_width, layout_.window_height
+    );
     gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
 
     LayerSurfaceSpec spec;
@@ -19,6 +21,9 @@ NotesOverlay::NotesOverlay(GtkApplication* app, services::NotesService* notes_se
     spec.layer = LayerSurfaceLevel::Overlay;
     spec.keyboard_mode = LayerKeyboardMode::Exclusive;
     apply_layer_surface(GTK_WINDOW(window_), spec);
+    g_signal_connect(window_, "realize", G_CALLBACK(+[](GtkWidget*, gpointer data) {
+        static_cast<NotesOverlay*>(data)->apply_geometry();
+    }), this);
 
     gtk_widget_add_css_class(window_, "realmheart-notes");
 
@@ -28,10 +33,16 @@ NotesOverlay::NotesOverlay(GtkApplication* app, services::NotesService* notes_se
     gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(text_view_), GTK_WRAP_WORD);
     // Keep the text off the frame edges; CSS padding is unreliable on
     // GtkTextView, margins are the supported route.
-    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(text_view_), 18);
-    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(text_view_), 18);
-    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(text_view_), 14);
-    gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(text_view_), 16);
+    gtk_text_view_set_left_margin(
+        GTK_TEXT_VIEW(text_view_), layout_.text_margin_horizontal
+    );
+    gtk_text_view_set_right_margin(
+        GTK_TEXT_VIEW(text_view_), layout_.text_margin_horizontal
+    );
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(text_view_), layout_.text_margin_top);
+    gtk_text_view_set_bottom_margin(
+        GTK_TEXT_VIEW(text_view_), layout_.text_margin_bottom
+    );
 
     gtk_text_buffer_set_text(buffer_, notes_service_->get_content().c_str(), -1);
 
@@ -84,6 +95,10 @@ NotesOverlay::NotesOverlay(GtkApplication* app, services::NotesService* notes_se
 }
 
 NotesOverlay::~NotesOverlay() {
+    if (geometry_retry_id_ != 0) {
+        g_source_remove(geometry_retry_id_);
+        geometry_retry_id_ = 0;
+    }
     notes_service_->set_save_state_callback({});
     lifetime_->alive = false;
     lifetime_->owner = nullptr;
@@ -94,6 +109,56 @@ NotesOverlay::~NotesOverlay() {
         gtk_window_destroy(GTK_WINDOW(window_));
         window_ = nullptr;
     }
+}
+
+gboolean NotesOverlay::retry_geometry(gpointer data) {
+    auto* self = static_cast<NotesOverlay*>(data);
+    self->geometry_retry_id_ = 0;
+    self->apply_geometry();
+    return G_SOURCE_REMOVE;
+}
+
+void NotesOverlay::schedule_geometry_retry() {
+    if (window_ == nullptr || geometry_retry_id_ != 0) return;
+    geometry_retry_id_ = g_timeout_add(50, &NotesOverlay::retry_geometry, this);
+}
+
+void NotesOverlay::apply_geometry() {
+    if (window_ == nullptr) return;
+
+    GdkMonitor* monitor = resolve_layer_surface_monitor(window_);
+    if (monitor == nullptr) {
+        if (gtk_widget_get_visible(window_)) schedule_geometry_retry();
+        return;
+    }
+
+    GdkRectangle monitor_geometry{};
+    gdk_monitor_get_geometry(monitor, &monitor_geometry);
+    g_object_unref(monitor);
+    if (monitor_geometry.width <= 0 || monitor_geometry.height <= 0) {
+        if (gtk_widget_get_visible(window_)) schedule_geometry_retry();
+        return;
+    }
+
+    layout_ = notes_layout_for_logical_geometry(
+        monitor_geometry.width, monitor_geometry.height
+    );
+    gtk_window_set_default_size(
+        GTK_WINDOW(window_), layout_.window_width, layout_.window_height
+    );
+    gtk_text_view_set_left_margin(
+        GTK_TEXT_VIEW(text_view_), layout_.text_margin_horizontal
+    );
+    gtk_text_view_set_right_margin(
+        GTK_TEXT_VIEW(text_view_), layout_.text_margin_horizontal
+    );
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(text_view_), layout_.text_margin_top);
+    gtk_text_view_set_bottom_margin(
+        GTK_TEXT_VIEW(text_view_), layout_.text_margin_bottom
+    );
+    geometry_initialized_ = true;
+    gtk_widget_queue_resize(window_);
+    if (gtk_widget_get_visible(window_)) gtk_widget_set_opacity(window_, 1.0);
 }
 
 void NotesOverlay::apply_save_state(services::NotesSaveState state) {
@@ -125,8 +190,10 @@ void NotesOverlay::on_text_changed_callback(GtkTextBuffer* buf, gpointer data) {
 }
 
 void NotesOverlay::show() {
+    if (!geometry_initialized_) gtk_widget_set_opacity(window_, 0.0);
     gtk_widget_set_visible(window_, TRUE);
     gtk_window_present(GTK_WINDOW(window_));
+    apply_geometry();
 }
 
 void NotesOverlay::hide() {
@@ -134,10 +201,8 @@ void NotesOverlay::hide() {
 }
 
 void NotesOverlay::toggle() {
-    gtk_widget_set_visible(window_, !gtk_widget_get_visible(window_));
-    if (gtk_widget_get_visible(window_)) {
-        gtk_window_present(GTK_WINDOW(window_));
-    }
+    if (gtk_widget_get_visible(window_)) hide();
+    else show();
 }
 
 } // namespace realmheart::ui

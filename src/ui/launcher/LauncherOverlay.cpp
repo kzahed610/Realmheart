@@ -76,19 +76,8 @@ constexpr std::size_t kClipboardResultBatchCount = 14;
 constexpr std::size_t kEmojiBrowseResultCount = 2048;
 constexpr std::size_t kEmojiInitialResultCount = 18;
 constexpr std::size_t kEmojiResultBatchCount = 24;
-constexpr int kNormalResultsMaximumHeight = 336;
-constexpr int kClipboardResultsMaximumHeight = 540;
-constexpr int kEmojiResultsMaximumHeight = 540;
 constexpr int kMaximumConstellationApplications = 12;
-constexpr int kConstellationNodeWidth = 88;
-constexpr int kConstellationNodeHeight = 74;
 constexpr double kDragThreshold = 7.0;
-constexpr double kConstellationLeftInset = 84.0;
-constexpr double kConstellationRightInset = 56.0;
-constexpr double kConstellationTopInset = 380.0;
-constexpr double kConstellationBottomInset = 58.0;
-constexpr double kCentreKeepoutSide = 14.0;
-constexpr double kCentreKeepoutBottom = 44.0;
 constexpr double kDragLift = 9.0;
 constexpr double kDragSpring = 720.0;
 constexpr double kDragDamping = 42.0;
@@ -107,8 +96,6 @@ constexpr double kSelectionIndicatorSpring = 520.0;
 constexpr double kSelectionIndicatorDamping = 31.0;
 constexpr double kSelectionIndicatorOpacityResponse = 20.0;
 constexpr double kSelectionTravelImpulse = 1.35;
-constexpr int kSelectionIndicatorWidth = 102;
-constexpr int kSelectionIndicatorHeight = 88;
 constexpr double kResultSelectionSpring = 620.0;
 constexpr double kResultSelectionDamping = 36.0;
 constexpr double kResultSelectionHeightSpring = 700.0;
@@ -122,25 +109,11 @@ constexpr double kResultRowLiftSpring = 520.0;
 constexpr double kResultRowLiftDamping = 25.0;
 constexpr double kResultRowLiftImpulse = 74.0;
 constexpr double kEmergenceHorizontalCompression = 0.72;
-constexpr double kEmergenceEdgeInset = 58.0;
-constexpr double kEmergencePeek = 8.0;
-constexpr double kEmergenceArc = 18.0;
 constexpr double kPositionEpsilon = 0.08;
 constexpr double kVelocityEpsilon = 2.0;
 constexpr double kConstellationRevealThreshold = 0.68;
-constexpr int kCentreFinalTopMargin = 166;
 // Drop-in distance for the slide-down entrance: the centre column starts
 // 34px higher and settles at the final margin while fading in.
-constexpr int kCentreStartTopMargin = 132;
-constexpr int kCentreFinalWidth = 648;
-constexpr int kCentreStartWidth = 600;
-constexpr int kCentreHeight = 200;
-constexpr int kApertureFinalWidth = 610;
-constexpr int kApertureStartWidth = 548;
-constexpr int kApertureFinalHeight = 162;
-constexpr int kApertureStartHeight = 58;
-constexpr int kSearchFinalWidth = 360;
-constexpr int kSearchStartWidth = 326;
 constexpr std::size_t kLauncherIconCacheLimit = 64;
 constexpr int kClipboardThumbnailWidth = 104;
 constexpr int kClipboardThumbnailHeight = 66;
@@ -843,10 +816,17 @@ LauncherOverlay::LauncherOverlay(
 
     setup_window();
     setup_ui();
+    g_signal_connect(window_, "realize", G_CALLBACK(+[](GtkWidget*, gpointer data) {
+        static_cast<LauncherOverlay*>(data)->apply_display_geometry();
+    }), this);
     gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
 }
 
 LauncherOverlay::~LauncherOverlay() {
+    if (geometry_retry_id_ != 0) {
+        g_source_remove(geometry_retry_id_);
+        geometry_retry_id_ = 0;
+    }
     if (clipboard_async_state_) {
         clipboard_async_state_->owner.store(nullptr, std::memory_order_release);
         clipboard_async_state_->generation.fetch_add(1, std::memory_order_acq_rel);
@@ -923,6 +903,171 @@ void LauncherOverlay::setup_window() {
     gtk_layer_set_keyboard_mode(window_, GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE);
 }
 
+int LauncherOverlay::scale_px(int baseline) const noexcept {
+    return launcher_geometry_.scale_px(baseline);
+}
+
+void LauncherOverlay::schedule_geometry_retry() {
+    if (geometry_retry_id_ != 0 || window_ == nullptr) return;
+    geometry_retry_id_ = g_timeout_add_full(
+        G_PRIORITY_DEFAULT,
+        50,
+        +[](gpointer data) -> gboolean {
+            auto* self = static_cast<LauncherOverlay*>(data);
+            self->geometry_retry_id_ = 0;
+            self->apply_display_geometry();
+            return G_SOURCE_REMOVE;
+        },
+        this,
+        nullptr
+    );
+}
+
+void LauncherOverlay::apply_display_geometry() {
+    if (window_ == nullptr || !gtk_widget_get_realized(GTK_WIDGET(window_))) return;
+
+    GdkMonitor* monitor = resolve_layer_surface_monitor(GTK_WIDGET(window_));
+    if (monitor == nullptr) {
+        schedule_geometry_retry();
+        return;
+    }
+
+    GdkRectangle monitor_geometry{};
+    gdk_monitor_get_geometry(monitor, &monitor_geometry);
+    g_object_unref(monitor);
+    if (monitor_geometry.width <= 0 || monitor_geometry.height <= 0) {
+        schedule_geometry_retry();
+        return;
+    }
+
+    const auto tier = core::display_tier_for_logical_geometry(
+        monitor_geometry.width,
+        monitor_geometry.height
+    );
+    const auto geometry = launcher::launcher_geometry_for_display_tier(tier);
+    const bool changed = !geometry_initialized_ || display_tier_ != tier ||
+        launcher_geometry_ != geometry;
+
+    display_tier_ = tier;
+    launcher_geometry_ = geometry;
+    geometry_initialized_ = true;
+
+    if (root_ != nullptr) {
+        gtk_widget_remove_css_class(root_, "realmheart-tier-1440p");
+        gtk_widget_remove_css_class(root_, "realmheart-tier-4k");
+        if (tier == core::DisplayTier::P1440) {
+            gtk_widget_add_css_class(root_, "realmheart-tier-1440p");
+        } else if (tier == core::DisplayTier::P4K) {
+            gtk_widget_add_css_class(root_, "realmheart-tier-4k");
+        }
+    }
+
+    if (centre_column_ != nullptr) {
+        gtk_box_set_spacing(GTK_BOX(centre_column_), scale_px(16));
+        gtk_widget_set_size_request(
+            centre_column_, launcher_geometry_.centre_final_width, -1
+        );
+    }
+    if (centre_shader_host_ != nullptr) {
+        gtk_widget_set_size_request(
+            centre_shader_host_, launcher_geometry_.centre_final_width, -1
+        );
+        gtk_widget_set_margin_top(
+            centre_shader_host_, launcher_geometry_.centre_final_top_margin
+        );
+    }
+    if (centre_shadow_ != nullptr) {
+        gtk_widget_set_size_request(
+            centre_shadow_,
+            launcher_geometry_.centre_final_width,
+            launcher_geometry_.centre_height
+        );
+    }
+    if (centre_shell_ != nullptr) {
+        gtk_widget_set_size_request(
+            centre_shell_,
+            launcher_geometry_.centre_final_width,
+            launcher_geometry_.centre_height
+        );
+    }
+    if (wallpaper_frame_ != nullptr) {
+        gtk_widget_set_size_request(
+            wallpaper_frame_,
+            launcher_geometry_.aperture_final_width,
+            launcher_geometry_.aperture_final_height
+        );
+    }
+    if (wallpaper_shade_ != nullptr) {
+        gtk_widget_set_size_request(
+            wallpaper_shade_, -1, launcher_geometry_.wallpaper_shade_height
+        );
+    }
+    if (search_slot_ != nullptr) {
+        gtk_box_set_spacing(GTK_BOX(search_slot_), scale_px(8));
+        gtk_widget_set_size_request(
+            search_slot_,
+            launcher_geometry_.search_final_width,
+            launcher_geometry_.search_height
+        );
+    }
+    if (search_entry_ != nullptr) {
+        gtk_widget_set_size_request(
+            search_entry_,
+            launcher_geometry_.search_final_width,
+            launcher_geometry_.search_height
+        );
+    }
+    if (activation_sweep_ != nullptr) {
+        gtk_widget_set_size_request(
+            activation_sweep_,
+            launcher_geometry_.activation_sweep_width,
+            launcher_geometry_.activation_sweep_height
+        );
+    }
+    if (results_shell_ != nullptr) {
+        gtk_widget_set_size_request(
+            results_shell_, launcher_geometry_.results_shell_width, -1
+        );
+    }
+    if (results_revealer_ != nullptr) {
+        gtk_widget_set_margin_top(results_revealer_, scale_px(2));
+    }
+    if (results_scroller_ != nullptr) {
+        int maximum_height = launcher_geometry_.normal_results_max_height;
+        if (search_mode_ == SearchMode::Clipboard ||
+            search_mode_ == SearchMode::ClipboardClear) {
+            maximum_height = launcher_geometry_.clipboard_results_max_height;
+        } else if (search_mode_ == SearchMode::Emoji) {
+            maximum_height = launcher_geometry_.emoji_results_max_height;
+        }
+        gtk_scrolled_window_set_max_content_height(
+            GTK_SCROLLED_WINDOW(results_scroller_), maximum_height
+        );
+    }
+
+    if (!changed) {
+        layout_constellation();
+        return;
+    }
+
+    // The wallpaper cache key used to depend only on path and GDK scale. At
+    // scale-1 1440p/4K the aperture itself changes, so force one appropriately
+    // sized decode whenever the logical tier changes.
+    wallpaper_texture_path_.clear();
+    wallpaper_texture_scale_factor_ = 0;
+    refresh_wallpaper();
+
+    if (constellation_canvas_ != nullptr) rebuild_constellation();
+    if (results_list_ != nullptr && !current_results_.empty()) rebuild_results();
+
+    apply_central_motion();
+    layout_constellation();
+    if (root_ != nullptr) {
+        gtk_widget_queue_allocate(root_);
+        gtk_widget_queue_draw(root_);
+    }
+}
+
 void LauncherOverlay::setup_ui() {
     root_ = gtk_overlay_new();
     gtk_widget_set_hexpand(root_, TRUE);
@@ -979,8 +1124,8 @@ void LauncherOverlay::setup_ui() {
 
     // Centre: only the wallpaper aperture and search instrument remain in the
     // idle shell. Search results still unfold in their narrower lower surface.
-    centre_column_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 16);
-    gtk_widget_set_size_request(centre_column_, kCentreFinalWidth, -1);
+    centre_column_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, scale_px(16));
+    gtk_widget_set_size_request(centre_column_, launcher_geometry_.centre_final_width, -1);
     gtk_widget_set_halign(centre_column_, GTK_ALIGN_FILL);
     gtk_widget_set_valign(centre_column_, GTK_ALIGN_FILL);
     gtk_widget_set_hexpand(centre_column_, TRUE);
@@ -991,7 +1136,7 @@ void LauncherOverlay::setup_ui() {
     // opens from a centred slit. This makes the motion read as an aperture,
     // rather than as another panel unfurling from an edge.
     centre_shell_ = gtk_overlay_new();
-    gtk_widget_set_size_request(centre_shell_, kCentreFinalWidth, kCentreHeight);
+    gtk_widget_set_size_request(centre_shell_, launcher_geometry_.centre_final_width, launcher_geometry_.centre_height);
     gtk_widget_set_halign(centre_shell_, GTK_ALIGN_CENTER);
     gtk_widget_set_hexpand(centre_shell_, FALSE);
     gtk_widget_add_css_class(centre_shell_, "realmheart-launcher-centre-shell");
@@ -999,8 +1144,8 @@ void LauncherOverlay::setup_ui() {
     wallpaper_frame_ = gtk_overlay_new();
     gtk_widget_set_size_request(
         wallpaper_frame_,
-        kApertureFinalWidth,
-        kApertureFinalHeight
+        launcher_geometry_.aperture_final_width,
+        launcher_geometry_.aperture_final_height
     );
     gtk_widget_set_halign(wallpaper_frame_, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(wallpaper_frame_, GTK_ALIGN_CENTER);
@@ -1041,20 +1186,20 @@ void LauncherOverlay::setup_ui() {
     );
     gtk_overlay_set_child(GTK_OVERLAY(wallpaper_frame_), wallpaper_viewport);
 
-    GtkWidget* wallpaper_shade = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_halign(wallpaper_shade, GTK_ALIGN_FILL);
-    gtk_widget_set_valign(wallpaper_shade, GTK_ALIGN_END);
-    gtk_widget_set_size_request(wallpaper_shade, -1, 110);
-    gtk_widget_set_can_target(wallpaper_shade, FALSE);
-    gtk_widget_add_css_class(wallpaper_shade, "realmheart-launcher-wallpaper-shade");
-    gtk_overlay_add_overlay(GTK_OVERLAY(wallpaper_frame_), wallpaper_shade);
+    wallpaper_shade_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_halign(wallpaper_shade_, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(wallpaper_shade_, GTK_ALIGN_END);
+    gtk_widget_set_size_request(wallpaper_shade_, -1, launcher_geometry_.wallpaper_shade_height);
+    gtk_widget_set_can_target(wallpaper_shade_, FALSE);
+    gtk_widget_add_css_class(wallpaper_shade_, "realmheart-launcher-wallpaper-shade");
+    gtk_overlay_add_overlay(GTK_OVERLAY(wallpaper_frame_), wallpaper_shade_);
 
     search_entry_ = gtk_entry_new();
     gtk_entry_set_placeholder_text(
         GTK_ENTRY(search_entry_),
         "Search apps, calculate, or run a command"
     );
-    gtk_widget_set_size_request(search_entry_, 360, 50);
+    gtk_widget_set_size_request(search_entry_, launcher_geometry_.search_final_width, launcher_geometry_.search_height);
     gtk_widget_set_hexpand(search_entry_, TRUE);
     gtk_widget_set_halign(search_entry_, GTK_ALIGN_FILL);
     gtk_widget_set_valign(search_entry_, GTK_ALIGN_CENTER);
@@ -1076,7 +1221,7 @@ void LauncherOverlay::setup_ui() {
     gtk_widget_set_can_target(mode_chip_, FALSE);
     gtk_widget_set_visible(mode_chip_, FALSE);
 
-    search_slot_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    search_slot_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, scale_px(8));
     gtk_widget_add_css_class(search_slot_, "realmheart-launcher-search-slot");
     gtk_box_append(GTK_BOX(search_slot_), mode_chip_);
     gtk_box_append(GTK_BOX(search_slot_), search_entry_);
@@ -1097,7 +1242,7 @@ void LauncherOverlay::setup_ui() {
     );
 
     activation_sweep_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_widget_set_size_request(activation_sweep_, 92, 2);
+    gtk_widget_set_size_request(activation_sweep_, launcher_geometry_.activation_sweep_width, launcher_geometry_.activation_sweep_height);
     gtk_widget_set_halign(activation_sweep_, GTK_ALIGN_START);
     gtk_widget_set_valign(activation_sweep_, GTK_ALIGN_END);
     gtk_widget_set_can_target(activation_sweep_, FALSE);
@@ -1116,12 +1261,12 @@ void LauncherOverlay::setup_ui() {
         GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN
     );
     gtk_revealer_set_transition_duration(GTK_REVEALER(results_revealer_), 170);
-    gtk_widget_set_margin_top(results_revealer_, 2);
+    gtk_widget_set_margin_top(results_revealer_, scale_px(2));
 
-    GtkWidget* results_shell = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_size_request(results_shell, 520, -1);
-    gtk_widget_set_halign(results_shell, GTK_ALIGN_CENTER);
-    gtk_widget_add_css_class(results_shell, "realmheart-launcher-results-shell");
+    results_shell_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_size_request(results_shell_, launcher_geometry_.results_shell_width, -1);
+    gtk_widget_set_halign(results_shell_, GTK_ALIGN_CENTER);
+    gtk_widget_add_css_class(results_shell_, "realmheart-launcher-results-shell");
 
     results_list_ = gtk_list_box_new();
     gtk_list_box_set_selection_mode(GTK_LIST_BOX(results_list_), GTK_SELECTION_SINGLE);
@@ -1155,7 +1300,7 @@ void LauncherOverlay::setup_ui() {
     );
     gtk_scrolled_window_set_max_content_height(
         GTK_SCROLLED_WINDOW(results_scroller_),
-        kNormalResultsMaximumHeight
+        launcher_geometry_.normal_results_max_height
     );
     gtk_scrolled_window_set_child(
         GTK_SCROLLED_WINDOW(results_scroller_),
@@ -1210,8 +1355,8 @@ void LauncherOverlay::setup_ui() {
         TRUE
     );
 
-    gtk_box_append(GTK_BOX(results_shell), results_overlay_);
-    gtk_revealer_set_child(GTK_REVEALER(results_revealer_), results_shell);
+    gtk_box_append(GTK_BOX(results_shell_), results_overlay_);
+    gtk_revealer_set_child(GTK_REVEALER(results_revealer_), results_shell_);
     gtk_box_append(GTK_BOX(centre_column_), results_revealer_);
 
     // The live GTK centre and the pre-created GtkGLArea share a normal
@@ -1231,14 +1376,14 @@ void LauncherOverlay::setup_ui() {
     centre_shader_renderer_ =
         std::make_unique<effects::shell::ShellShaderRenderer>();
     centre_shader_host_ = gtk_overlay_new();
-    gtk_widget_set_size_request(centre_shader_host_, kCentreFinalWidth, -1);
+    gtk_widget_set_size_request(centre_shader_host_, launcher_geometry_.centre_final_width, -1);
     gtk_widget_set_halign(centre_shader_host_, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(centre_shader_host_, GTK_ALIGN_START);
     gtk_widget_set_hexpand(centre_shader_host_, FALSE);
     gtk_widget_set_vexpand(centre_shader_host_, FALSE);
     gtk_widget_set_margin_top(
         centre_shader_host_,
-        kCentreFinalTopMargin
+        launcher_geometry_.centre_final_top_margin
     );
     gtk_overlay_set_child(
         GTK_OVERLAY(centre_shader_host_),
@@ -1254,8 +1399,8 @@ void LauncherOverlay::setup_ui() {
     centre_shadow_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_set_size_request(
         centre_shadow_,
-        kCentreFinalWidth,
-        kCentreHeight
+        launcher_geometry_.centre_final_width,
+        launcher_geometry_.centre_height
     );
     gtk_widget_set_halign(centre_shadow_, GTK_ALIGN_CENTER);
     gtk_widget_set_valign(centre_shadow_, GTK_ALIGN_START);
@@ -1334,8 +1479,8 @@ void LauncherOverlay::refresh_wallpaper() {
 
     GdkTexture* texture = load_aperture_texture(
         *path,
-        kApertureFinalWidth,
-        kApertureFinalHeight,
+        launcher_geometry_.aperture_final_width,
+        launcher_geometry_.aperture_final_height,
         scale_factor
     );
     if (texture == nullptr) {
@@ -1632,8 +1777,8 @@ void LauncherOverlay::rebuild_constellation() {
     selection_indicator_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_widget_set_size_request(
         selection_indicator_,
-        kSelectionIndicatorWidth,
-        kSelectionIndicatorHeight
+        launcher_geometry_.selection_indicator_width,
+        launcher_geometry_.selection_indicator_height
     );
     gtk_widget_set_can_target(selection_indicator_, FALSE);
     gtk_widget_set_focusable(selection_indicator_, FALSE);
@@ -1671,9 +1816,9 @@ void LauncherOverlay::rebuild_constellation() {
 
         // Use a plain event surface instead of GtkButton. GtkButton installs
         // its own click gesture, which competes with a freeform drag gesture.
-        GtkWidget* button = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+        GtkWidget* button = gtk_box_new(GTK_ORIENTATION_VERTICAL, scale_px(5));
         node->widget = button;
-        gtk_widget_set_size_request(button, kConstellationNodeWidth, kConstellationNodeHeight);
+        gtk_widget_set_size_request(button, launcher_geometry_.constellation_node_width, launcher_geometry_.constellation_node_height);
         gtk_widget_set_focusable(button, TRUE);
         gtk_widget_set_halign(button, GTK_ALIGN_CENTER);
         gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
@@ -1684,7 +1829,7 @@ void LauncherOverlay::rebuild_constellation() {
         gtk_widget_set_tooltip_text(button, "Click to launch · Drag to move · Right-click to manage");
         g_object_set_data(G_OBJECT(button), "realmheart-constellation-node", node.get());
 
-        GtkWidget* icon = make_launcher_icon(node->result.icon_name, 34);
+        GtkWidget* icon = make_launcher_icon(node->result.icon_name, launcher_geometry_.constellation_icon_size);
 
         GtkWidget* label = gtk_label_new(node->result.title.c_str());
         gtk_label_set_ellipsize(GTK_LABEL(label), PANGO_ELLIPSIZE_END);
@@ -1818,20 +1963,20 @@ std::pair<double, double> LauncherOverlay::constrain_constellation_position(
     const double width = std::max(1, gtk_widget_get_width(root_));
     const double height = std::max(1, gtk_widget_get_height(root_));
     const double maximum_x = std::max(
-        kConstellationLeftInset,
-        width - kConstellationRightInset - kConstellationNodeWidth
+        launcher_geometry_.constellation_left_inset,
+        width - launcher_geometry_.constellation_right_inset - launcher_geometry_.constellation_node_width
     );
     const double maximum_y = std::max(
-        kConstellationTopInset,
-        height - kConstellationBottomInset - kConstellationNodeHeight
+        launcher_geometry_.constellation_top_inset,
+        height - launcher_geometry_.constellation_bottom_inset - launcher_geometry_.constellation_node_height
     );
 
     const double x = std::clamp(
         requested_x,
-        kConstellationLeftInset,
+        launcher_geometry_.constellation_left_inset,
         maximum_x
     );
-    double minimum_y = kConstellationTopInset;
+    double minimum_y = launcher_geometry_.constellation_top_inset;
 
     // The centre shell casts a broad lower shadow. Allowing a node to enter
     // that painted area makes the two surfaces visually splice together and
@@ -1845,16 +1990,16 @@ std::pair<double, double> LauncherOverlay::constrain_constellation_position(
                 constellation_canvas_,
                 &centre_bounds
             )) {
-            const double keepout_left = centre_bounds.origin.x - kCentreKeepoutSide;
+            const double keepout_left = centre_bounds.origin.x - launcher_geometry_.centre_keepout_side;
             const double keepout_right = centre_bounds.origin.x +
-                centre_bounds.size.width + kCentreKeepoutSide;
+                centre_bounds.size.width + launcher_geometry_.centre_keepout_side;
             const bool horizontally_overlaps =
-                x + kConstellationNodeWidth > keepout_left && x < keepout_right;
+                x + launcher_geometry_.constellation_node_width > keepout_left && x < keepout_right;
             if (horizontally_overlaps) {
                 minimum_y = std::max(
                     minimum_y,
                     static_cast<double>(centre_bounds.origin.y + centre_bounds.size.height) +
-                        kCentreKeepoutBottom
+                        launcher_geometry_.centre_keepout_bottom
                 );
             }
         }
@@ -1872,21 +2017,21 @@ void LauncherOverlay::layout_constellation() {
     const double height = std::max(1, gtk_widget_get_height(root_));
     const double usable_width = std::max(
         1.0,
-        width - kConstellationLeftInset - kConstellationRightInset -
-            kConstellationNodeWidth
+        width - launcher_geometry_.constellation_left_inset - launcher_geometry_.constellation_right_inset -
+            launcher_geometry_.constellation_node_width
     );
     const double usable_height = std::max(
         1.0,
-        height - kConstellationTopInset - kConstellationBottomInset -
-            kConstellationNodeHeight
+        height - launcher_geometry_.constellation_top_inset - launcher_geometry_.constellation_bottom_inset -
+            launcher_geometry_.constellation_node_height
     );
 
     bool needs_animation = false;
     for (const auto& node : constellation_nodes_) {
         const double requested_x =
-            kConstellationLeftInset + node->normalized_x * usable_width;
+            launcher_geometry_.constellation_left_inset + node->normalized_x * usable_width;
         const double requested_y =
-            kConstellationTopInset + node->normalized_y * usable_height;
+            launcher_geometry_.constellation_top_inset + node->normalized_y * usable_height;
         const auto [x, y] = constrain_constellation_position(requested_x, requested_y);
         node->current_x = x;
         node->current_y = y;
@@ -1932,9 +2077,9 @@ void LauncherOverlay::set_constellation_visible(bool visible) {
     double maximum_distance = 1.0;
     for (const auto& node : constellation_nodes_) {
         const double node_x = node->current_x +
-            static_cast<double>(kConstellationNodeWidth) / 2.0;
+            static_cast<double>(launcher_geometry_.constellation_node_width) / 2.0;
         const double node_y = node->current_y +
-            static_cast<double>(kConstellationNodeHeight) / 2.0;
+            static_cast<double>(launcher_geometry_.constellation_node_height) / 2.0;
         maximum_distance = std::max(
             maximum_distance,
             std::hypot(node_x - search_x, node_y - search_y)
@@ -1943,9 +2088,9 @@ void LauncherOverlay::set_constellation_visible(bool visible) {
 
     for (const auto& node : constellation_nodes_) {
         const double node_x = node->current_x +
-            static_cast<double>(kConstellationNodeWidth) / 2.0;
+            static_cast<double>(launcher_geometry_.constellation_node_width) / 2.0;
         const double node_y = node->current_y +
-            static_cast<double>(kConstellationNodeHeight) / 2.0;
+            static_cast<double>(launcher_geometry_.constellation_node_height) / 2.0;
         const double distance_ratio = std::clamp(
             std::hypot(node_x - search_x, node_y - search_y) / maximum_distance,
             0.0,
@@ -1994,16 +2139,16 @@ void LauncherOverlay::retarget_constellation_indicator(bool start_from_search) {
     }
 
     const double target_x = target->render_x -
-        static_cast<double>(kSelectionIndicatorWidth - kConstellationNodeWidth) / 2.0;
+        static_cast<double>(launcher_geometry_.selection_indicator_width - launcher_geometry_.constellation_node_width) / 2.0;
     const double target_y = target->render_y -
-        static_cast<double>(kSelectionIndicatorHeight - kConstellationNodeHeight) / 2.0;
+        static_cast<double>(launcher_geometry_.selection_indicator_height - launcher_geometry_.constellation_node_height) / 2.0;
     if (!selection_indicator_initialized_) {
         if (start_from_search) {
             const auto [search_x, search_y] = search_centre_in_constellation();
             selection_indicator_x_ = search_x -
-                static_cast<double>(kSelectionIndicatorWidth) / 2.0;
+                static_cast<double>(launcher_geometry_.selection_indicator_width) / 2.0;
             selection_indicator_y_ = search_y -
-                static_cast<double>(kSelectionIndicatorHeight) / 2.0;
+                static_cast<double>(launcher_geometry_.selection_indicator_height) / 2.0;
         } else {
             // Mouse hover has an obvious physical origin, so the first reticle
             // fades in around the hovered app instead of flying in from the
@@ -2117,9 +2262,9 @@ bool LauncherOverlay::navigate_constellation(SpatialDirection direction) {
     double origin_y = 0.0;
     if (selected_constellation_node_ != nullptr) {
         origin_x = selected_constellation_node_->current_x +
-            static_cast<double>(kConstellationNodeWidth) / 2.0;
+            static_cast<double>(launcher_geometry_.constellation_node_width) / 2.0;
         origin_y = selected_constellation_node_->current_y +
-            static_cast<double>(kConstellationNodeHeight) / 2.0;
+            static_cast<double>(launcher_geometry_.constellation_node_height) / 2.0;
     } else {
         const graphene_point_t search_centre{
             static_cast<float>(gtk_widget_get_width(search_entry_)) / 2.0F,
@@ -2143,7 +2288,7 @@ bool LauncherOverlay::navigate_constellation(SpatialDirection direction) {
             origin_y = canvas_centre.y;
         } else {
             origin_x = static_cast<double>(gtk_widget_get_width(root_)) / 2.0;
-            origin_y = static_cast<double>(kConstellationTopInset);
+            origin_y = static_cast<double>(launcher_geometry_.constellation_top_inset);
         }
     }
 
@@ -2171,9 +2316,9 @@ bool LauncherOverlay::navigate_constellation(SpatialDirection direction) {
         if (candidate == selected_constellation_node_) continue;
 
         const double candidate_x = candidate->current_x +
-            static_cast<double>(kConstellationNodeWidth) / 2.0;
+            static_cast<double>(launcher_geometry_.constellation_node_width) / 2.0;
         const double candidate_y = candidate->current_y +
-            static_cast<double>(kConstellationNodeHeight) / 2.0;
+            static_cast<double>(launcher_geometry_.constellation_node_height) / 2.0;
         const double delta_x = candidate_x - origin_x;
         const double delta_y = candidate_y - origin_y;
         const double forward = delta_x * direction_x + delta_y * direction_y;
@@ -2259,7 +2404,7 @@ std::pair<double, double> LauncherOverlay::search_centre_in_constellation() cons
 
     return {
         static_cast<double>(gtk_widget_get_width(root_)) / 2.0,
-        static_cast<double>(kConstellationTopInset),
+        static_cast<double>(launcher_geometry_.constellation_top_inset),
     };
 }
 
@@ -2281,27 +2426,27 @@ std::pair<double, double> LauncherOverlay::constellation_emergence_position(
         0.72
     ));
     const double centre_width = interpolate(
-        static_cast<double>(kCentreStartWidth),
-        static_cast<double>(kCentreFinalWidth),
+        static_cast<double>(launcher_geometry_.centre_start_width),
+        static_cast<double>(launcher_geometry_.centre_final_width),
         frame
     );
     const double centre_top = interpolate(
-        static_cast<double>(kCentreStartTopMargin),
-        static_cast<double>(kCentreFinalTopMargin),
+        static_cast<double>(launcher_geometry_.centre_start_top_margin),
+        static_cast<double>(launcher_geometry_.centre_final_top_margin),
         frame
     );
     const double centre_left = (std::max(root_width, centre_width) - centre_width) /
         2.0;
     const double centre_midpoint = centre_left + centre_width / 2.0;
     const double final_node_centre = node.current_x +
-        static_cast<double>(kConstellationNodeWidth) / 2.0;
+        static_cast<double>(launcher_geometry_.constellation_node_width) / 2.0;
     const double compressed_centre = centre_midpoint +
         (final_node_centre - centre_midpoint) * kEmergenceHorizontalCompression;
 
     // Keep the legal range valid even if the centre is ever made narrower in
     // a future animation pass. std::clamp requires lower <= upper.
     const double maximum_inset = std::max(0.0, centre_width / 2.0 - 1.0);
-    const double safe_inset = std::min(kEmergenceEdgeInset, maximum_inset);
+    const double safe_inset = std::min(launcher_geometry_.emergence_edge_inset, maximum_inset);
     const double lower_bound = centre_left + safe_inset;
     const double upper_bound = centre_left + centre_width - safe_inset;
     const double emergence_centre = lower_bound <= upper_bound
@@ -2309,9 +2454,9 @@ std::pair<double, double> LauncherOverlay::constellation_emergence_position(
         : centre_midpoint;
 
     return {
-        emergence_centre - static_cast<double>(kConstellationNodeWidth) / 2.0,
-        centre_top + static_cast<double>(kCentreHeight) -
-            static_cast<double>(kConstellationNodeHeight) + kEmergencePeek,
+        emergence_centre - static_cast<double>(launcher_geometry_.constellation_node_width) / 2.0,
+        centre_top + static_cast<double>(launcher_geometry_.centre_height) -
+            static_cast<double>(launcher_geometry_.constellation_node_height) + launcher_geometry_.emergence_peek,
     };
 }
 
@@ -2421,7 +2566,7 @@ bool LauncherOverlay::advance_constellation_frame(GdkFrameClock* frame_clock) {
         const double visible_amount = smooth_step(node->opacity);
         const double trajectory_arc = std::sin(
             visible_amount * std::numbers::pi
-        ) * kEmergenceArc;
+        ) * launcher_geometry_.emergence_arc;
         const double target_x = interpolate(
             emergence_x,
             node->current_x,
@@ -2529,11 +2674,11 @@ bool LauncherOverlay::advance_constellation_frame(GdkFrameClock* frame_clock) {
         if (indicator_visible) {
             const double target_x = highlight_node->render_x -
                 static_cast<double>(
-                    kSelectionIndicatorWidth - kConstellationNodeWidth
+                    launcher_geometry_.selection_indicator_width - launcher_geometry_.constellation_node_width
                 ) / 2.0;
             const double target_y = highlight_node->render_y -
                 static_cast<double>(
-                    kSelectionIndicatorHeight - kConstellationNodeHeight
+                    launcher_geometry_.selection_indicator_height - launcher_geometry_.constellation_node_height
                 ) / 2.0;
             if (!selection_indicator_initialized_) {
                 selection_indicator_x_ = target_x;
@@ -2626,12 +2771,12 @@ bool LauncherOverlay::point_hits_constellation_node(double x, double y) const {
     return std::any_of(
         constellation_nodes_.begin(),
         constellation_nodes_.end(),
-        [x, y](const std::unique_ptr<ConstellationNode>& node) {
+        [this, x, y](const std::unique_ptr<ConstellationNode>& node) {
             return node->opacity > 0.20 &&
                    x >= node->render_x &&
-                   x <= node->render_x + kConstellationNodeWidth &&
+                   x <= node->render_x + launcher_geometry_.constellation_node_width &&
                    y >= node->render_y &&
-                   y <= node->render_y + kConstellationNodeHeight;
+                   y <= node->render_y + launcher_geometry_.constellation_node_height;
         }
     );
 }
@@ -2755,12 +2900,12 @@ void LauncherOverlay::update_constellation_drag(
     const double width = std::max(1, gtk_widget_get_width(root_));
     const double height = std::max(1, gtk_widget_get_height(root_));
     const double maximum_x = std::max(
-        kConstellationLeftInset,
-        width - kConstellationRightInset - kConstellationNodeWidth
+        launcher_geometry_.constellation_left_inset,
+        width - launcher_geometry_.constellation_right_inset - launcher_geometry_.constellation_node_width
     );
     const double maximum_y = std::max(
-        kConstellationTopInset,
-        height - kConstellationBottomInset - kConstellationNodeHeight
+        launcher_geometry_.constellation_top_inset,
+        height - launcher_geometry_.constellation_bottom_inset - launcher_geometry_.constellation_node_height
     );
 
     const auto [x, y] = constrain_constellation_position(
@@ -2771,10 +2916,10 @@ void LauncherOverlay::update_constellation_drag(
     node.current_y = y;
     schedule_constellation_frame();
 
-    const double usable_width = std::max(1.0, maximum_x - kConstellationLeftInset);
-    const double usable_height = std::max(1.0, maximum_y - kConstellationTopInset);
-    node.normalized_x = std::clamp((x - kConstellationLeftInset) / usable_width, 0.0, 1.0);
-    node.normalized_y = std::clamp((y - kConstellationTopInset) / usable_height, 0.0, 1.0);
+    const double usable_width = std::max(1.0, maximum_x - launcher_geometry_.constellation_left_inset);
+    const double usable_height = std::max(1.0, maximum_y - launcher_geometry_.constellation_top_inset);
+    node.normalized_x = std::clamp((x - launcher_geometry_.constellation_left_inset) / usable_width, 0.0, 1.0);
+    node.normalized_y = std::clamp((y - launcher_geometry_.constellation_top_inset) / usable_height, 0.0, 1.0);
 }
 
 void LauncherOverlay::end_constellation_drag(ConstellationNode& node) {
@@ -2790,7 +2935,7 @@ void LauncherOverlay::end_constellation_drag(ConstellationNode& node) {
     // turns the spring return into a short landing wobble instead of a sterile
     // snap, while preserving the exact persisted drop coordinate.
     const double grip_bias = node.drag_grab_x <
-        static_cast<double>(kConstellationNodeWidth) / 2.0 ? 1.0 : -1.0;
+        static_cast<double>(launcher_geometry_.constellation_node_width) / 2.0 ? 1.0 : -1.0;
     node.velocity_x = node.velocity_x * 1.04 + grip_bias * 42.0;
     node.velocity_y += 82.0;
     schedule_constellation_frame();
@@ -2816,11 +2961,11 @@ void LauncherOverlay::show_constellation_menu(ConstellationNode& node, double x,
         gtk_widget_add_css_class(node.menu, "realmheart-launcher-constellation-menu");
         gtk_widget_set_parent(node.menu, node.widget);
 
-        GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-        gtk_widget_set_margin_start(box, 6);
-        gtk_widget_set_margin_end(box, 6);
-        gtk_widget_set_margin_top(box, 6);
-        gtk_widget_set_margin_bottom(box, 6);
+        GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, scale_px(4));
+        gtk_widget_set_margin_start(box, scale_px(6));
+        gtk_widget_set_margin_end(box, scale_px(6));
+        gtk_widget_set_margin_top(box, scale_px(6));
+        gtk_widget_set_margin_bottom(box, scale_px(6));
 
         GtkWidget* unpin = gtk_button_new_with_label("Unpin from launcher");
         gtk_button_set_has_frame(GTK_BUTTON(unpin), FALSE);
@@ -2972,7 +3117,7 @@ void LauncherOverlay::leave_clipboard_mode() {
     gtk_revealer_set_transition_duration(GTK_REVEALER(results_revealer_), 170);
     gtk_scrolled_window_set_max_content_height(
         GTK_SCROLLED_WINDOW(results_scroller_),
-        kNormalResultsMaximumHeight
+        launcher_geometry_.normal_results_max_height
     );
     gtk_entry_set_placeholder_text(
         GTK_ENTRY(search_entry_),
@@ -2993,7 +3138,7 @@ void LauncherOverlay::enter_clipboard_mode(std::string filter) {
     gtk_revealer_set_transition_duration(GTK_REVEALER(results_revealer_), 220);
     gtk_scrolled_window_set_max_content_height(
         GTK_SCROLLED_WINDOW(results_scroller_),
-        kClipboardResultsMaximumHeight
+        launcher_geometry_.clipboard_results_max_height
     );
     gtk_entry_set_placeholder_text(
         GTK_ENTRY(search_entry_),
@@ -3029,7 +3174,7 @@ void LauncherOverlay::enter_clipboard_clear_mode() {
     if (mode_changed) clipboard_clear_armed_ = false;
     gtk_scrolled_window_set_max_content_height(
         GTK_SCROLLED_WINDOW(results_scroller_),
-        kNormalResultsMaximumHeight
+        launcher_geometry_.normal_results_max_height
     );
     current_results_ = {
         services::launcher_clipboard_clear_result(clipboard_clear_armed_)
@@ -3054,7 +3199,7 @@ void LauncherOverlay::leave_emoji_mode() {
     gtk_revealer_set_transition_duration(GTK_REVEALER(results_revealer_), 170);
     gtk_scrolled_window_set_max_content_height(
         GTK_SCROLLED_WINDOW(results_scroller_),
-        kNormalResultsMaximumHeight
+        launcher_geometry_.normal_results_max_height
     );
     gtk_entry_set_placeholder_text(
         GTK_ENTRY(search_entry_),
@@ -3073,7 +3218,7 @@ void LauncherOverlay::enter_emoji_mode(std::string filter) {
     gtk_revealer_set_transition_duration(GTK_REVEALER(results_revealer_), 220);
     gtk_scrolled_window_set_max_content_height(
         GTK_SCROLLED_WINDOW(results_scroller_),
-        kEmojiResultsMaximumHeight
+        launcher_geometry_.emoji_results_max_height
     );
     gtk_entry_set_placeholder_text(
         GTK_ENTRY(search_entry_),
@@ -3618,7 +3763,7 @@ void LauncherOverlay::request_visible_clipboard_thumbnails() {
         gtk_overlay_set_child(GTK_OVERLAY(widgets.icon_slot), nullptr);
         GtkWidget* placeholder = make_launcher_icon(
             "Realmheart-Icons/clip-history.svg",
-            30
+            launcher_geometry_.result_placeholder_icon_size
         );
         gtk_widget_set_halign(placeholder, GTK_ALIGN_CENTER);
         gtk_widget_set_valign(placeholder, GTK_ALIGN_CENTER);
@@ -4040,17 +4185,17 @@ GtkListBoxRow* LauncherOverlay::append_result_row(
     GtkWidget* row = gtk_list_box_row_new();
     gtk_widget_add_css_class(row, "realmheart-launcher-result-row");
 
-    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
-    gtk_widget_set_margin_start(box, 16);
-    gtk_widget_set_margin_end(box, 12);
-    gtk_widget_set_margin_top(box, 10);
-    gtk_widget_set_margin_bottom(box, 10);
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, scale_px(14));
+    gtk_widget_set_margin_start(box, scale_px(16));
+    gtk_widget_set_margin_end(box, scale_px(12));
+    gtk_widget_set_margin_top(box, scale_px(10));
+    gtk_widget_set_margin_bottom(box, scale_px(10));
 
     GtkWidget* icon = nullptr;
     GtkWidget* clipboard_icon_slot = nullptr;
     if (result.kind == services::LauncherResultKind::Emoji) {
         icon = gtk_label_new(result.id.c_str());
-        gtk_widget_set_size_request(icon, 42, 42);
+        gtk_widget_set_size_request(icon, launcher_geometry_.emoji_glyph_extent, launcher_geometry_.emoji_glyph_extent);
         gtk_widget_set_halign(icon, GTK_ALIGN_CENTER);
         gtk_widget_set_valign(icon, GTK_ALIGN_CENTER);
         gtk_widget_add_css_class(icon, "realmheart-launcher-emoji-glyph");
@@ -4059,8 +4204,8 @@ GtkListBoxRow* LauncherOverlay::append_result_row(
         clipboard_icon_slot = gtk_overlay_new();
         gtk_widget_set_size_request(
             clipboard_icon_slot,
-            kClipboardThumbnailWidth,
-            kClipboardThumbnailHeight
+            launcher_geometry_.clipboard_thumbnail_width,
+            launcher_geometry_.clipboard_thumbnail_height
         );
         gtk_widget_set_halign(clipboard_icon_slot, GTK_ALIGN_CENTER);
         gtk_widget_set_valign(clipboard_icon_slot, GTK_ALIGN_CENTER);
@@ -4069,16 +4214,16 @@ GtkListBoxRow* LauncherOverlay::append_result_row(
             clipboard_icon_slot,
             "realmheart-launcher-clipboard-thumbnail"
         );
-        GtkWidget* placeholder = make_launcher_icon(result.icon_name, 30);
+        GtkWidget* placeholder = make_launcher_icon(result.icon_name, launcher_geometry_.result_placeholder_icon_size);
         gtk_widget_set_halign(placeholder, GTK_ALIGN_CENTER);
         gtk_widget_set_valign(placeholder, GTK_ALIGN_CENTER);
         gtk_overlay_set_child(GTK_OVERLAY(clipboard_icon_slot), placeholder);
         icon = clipboard_icon_slot;
     } else {
-        icon = make_launcher_icon(result.icon_name, 36);
+        icon = make_launcher_icon(result.icon_name, launcher_geometry_.result_icon_size);
     }
 
-    GtkWidget* labels = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
+    GtkWidget* labels = gtk_box_new(GTK_ORIENTATION_VERTICAL, scale_px(1));
     gtk_widget_set_hexpand(labels, TRUE);
 
     GtkWidget* title = gtk_label_new(result.title.c_str());
@@ -4103,7 +4248,7 @@ GtkListBoxRow* LauncherOverlay::append_result_row(
 
         auto* remove_icon = new bar::widgets::ThemedSvgIcon(
             "Realmheart-Icons/trash.svg",
-            18
+            scale_px(18)
         );
         gtk_button_set_child(GTK_BUTTON(remove), remove_icon->widget());
         g_object_set_data_full(
@@ -4157,7 +4302,7 @@ GtkListBoxRow* LauncherOverlay::append_result_row(
             pinned
                 ? "Realmheart-Icons/subtract.svg"
                 : "Realmheart-Icons/add.svg",
-            18
+            scale_px(18)
         );
         gtk_button_set_child(GTK_BUTTON(pin), pin_icon->widget());
         g_object_set_data_full(
@@ -4302,22 +4447,22 @@ void LauncherOverlay::rebuild_results() {
                     : "realmheart-launcher-clipboard-loading-row"
             );
 
-            GtkWidget* loading_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
-            gtk_widget_set_margin_start(loading_box, 18);
-            gtk_widget_set_margin_end(loading_box, 18);
-            gtk_widget_set_margin_top(loading_box, 18);
-            gtk_widget_set_margin_bottom(loading_box, 18);
+            GtkWidget* loading_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, scale_px(14));
+            gtk_widget_set_margin_start(loading_box, scale_px(18));
+            gtk_widget_set_margin_end(loading_box, scale_px(18));
+            gtk_widget_set_margin_top(loading_box, scale_px(18));
+            gtk_widget_set_margin_bottom(loading_box, scale_px(18));
 
             GtkWidget* spinner = gtk_spinner_new();
             gtk_spinner_set_spinning(GTK_SPINNER(spinner), TRUE);
-            gtk_widget_set_size_request(spinner, 28, 28);
+            gtk_widget_set_size_request(spinner, scale_px(28), scale_px(28));
             gtk_widget_set_valign(spinner, GTK_ALIGN_CENTER);
             gtk_widget_add_css_class(
                 spinner,
                 "realmheart-launcher-clipboard-loading-spinner"
             );
 
-            GtkWidget* labels = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+            GtkWidget* labels = gtk_box_new(GTK_ORIENTATION_VERTICAL, scale_px(5));
             gtk_widget_set_hexpand(labels, TRUE);
             GtkWidget* title = gtk_label_new(
                 loading_emoji
@@ -4352,28 +4497,28 @@ void LauncherOverlay::rebuild_results() {
                         ? "realmheart-launcher-emoji-skeleton-row"
                         : "realmheart-launcher-clipboard-skeleton-row"
                 );
-                GtkWidget* skeleton = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
-                gtk_widget_set_margin_start(skeleton, 18);
-                gtk_widget_set_margin_end(skeleton, 18);
-                gtk_widget_set_margin_top(skeleton, 10);
-                gtk_widget_set_margin_bottom(skeleton, 10);
+                GtkWidget* skeleton = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, scale_px(14));
+                gtk_widget_set_margin_start(skeleton, scale_px(18));
+                gtk_widget_set_margin_end(skeleton, scale_px(18));
+                gtk_widget_set_margin_top(skeleton, scale_px(10));
+                gtk_widget_set_margin_bottom(skeleton, scale_px(10));
                 GtkWidget* icon = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-                gtk_widget_set_size_request(icon, 36, 36);
+                gtk_widget_set_size_request(icon, scale_px(36), scale_px(36));
                 gtk_widget_add_css_class(
                     icon,
                     "realmheart-launcher-clipboard-skeleton-icon"
                 );
-                GtkWidget* bars = gtk_box_new(GTK_ORIENTATION_VERTICAL, 7);
+                GtkWidget* bars = gtk_box_new(GTK_ORIENTATION_VERTICAL, scale_px(7));
                 gtk_widget_set_hexpand(bars, TRUE);
                 GtkWidget* primary = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-                gtk_widget_set_size_request(primary, 230 - index * 24, 9);
+                gtk_widget_set_size_request(primary, scale_px(230 - index * 24), scale_px(9));
                 gtk_widget_set_halign(primary, GTK_ALIGN_START);
                 gtk_widget_add_css_class(
                     primary,
                     "realmheart-launcher-clipboard-skeleton-bar"
                 );
                 GtkWidget* secondary = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-                gtk_widget_set_size_request(secondary, 150 + index * 18, 7);
+                gtk_widget_set_size_request(secondary, scale_px(150 + index * 18), scale_px(7));
                 gtk_widget_set_halign(secondary, GTK_ALIGN_START);
                 gtk_widget_add_css_class(
                     secondary,
@@ -4398,8 +4543,8 @@ void LauncherOverlay::rebuild_results() {
             gtk_widget_set_sensitive(row, FALSE);
             const std::string message = empty_results_message();
             GtkWidget* empty = gtk_label_new(message.c_str());
-            gtk_widget_set_margin_top(empty, 28);
-            gtk_widget_set_margin_bottom(empty, 28);
+            gtk_widget_set_margin_top(empty, scale_px(28));
+            gtk_widget_set_margin_bottom(empty, scale_px(28));
             gtk_widget_add_css_class(empty, "realmheart-launcher-empty");
             gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), empty);
             gtk_list_box_append(GTK_LIST_BOX(results_list_), row);
@@ -4759,7 +4904,7 @@ bool LauncherOverlay::advance_result_selection_frame(GdkFrameClock* frame_clock)
     for (const auto& motion : result_row_motions_) {
         const double target_lift =
             result_selection_target_visible_ && motion->row == selected_result_row_
-            ? kResultRowLift
+            ? static_cast<double>(scale_px(static_cast<int>(kResultRowLift)))
             : 0.0;
 
         for (int index = 0; index < row_step_count; ++index) {
@@ -4785,10 +4930,12 @@ bool LauncherOverlay::advance_result_selection_frame(GdkFrameClock* frame_clock)
         const int painted_lift = static_cast<int>(std::lround(std::clamp(
             motion->lift,
             -1.0,
-            kResultRowLift + 1.5
+            static_cast<double>(scale_px(static_cast<int>(kResultRowLift))) +
+                (1.5 * launcher_geometry_.design_scale)
         )));
-        gtk_widget_set_margin_top(motion->content, 10 - painted_lift);
-        gtk_widget_set_margin_bottom(motion->content, 10 + painted_lift);
+        const int base_margin = scale_px(10);
+        gtk_widget_set_margin_top(motion->content, base_margin - painted_lift);
+        gtk_widget_set_margin_bottom(motion->content, base_margin + painted_lift);
     }
 
     const double opacity_target = result_selection_target_visible_ ? 1.0 : 0.0;
@@ -5046,30 +5193,30 @@ void LauncherOverlay::apply_central_final_geometry() {
     );
     gtk_widget_set_margin_top(
         centre_shader_host_,
-        kCentreFinalTopMargin
+        launcher_geometry_.centre_final_top_margin
     );
     gtk_widget_set_size_request(
         centre_shader_host_,
-        kCentreFinalWidth,
+        launcher_geometry_.centre_final_width,
         -1
     );
     gtk_widget_set_size_request(
         centre_shadow_,
-        kCentreFinalWidth,
-        kCentreHeight
+        launcher_geometry_.centre_final_width,
+        launcher_geometry_.centre_height
     );
     gtk_widget_set_size_request(
         centre_shell_,
-        kCentreFinalWidth,
-        kCentreHeight
+        launcher_geometry_.centre_final_width,
+        launcher_geometry_.centre_height
     );
     gtk_widget_set_size_request(
         wallpaper_frame_,
-        kApertureFinalWidth,
-        kApertureFinalHeight
+        launcher_geometry_.aperture_final_width,
+        launcher_geometry_.aperture_final_height
     );
     gtk_widget_set_opacity(wallpaper_picture_, 1.0);
-    gtk_widget_set_size_request(search_slot_, kSearchFinalWidth, 50);
+    gtk_widget_set_size_request(search_slot_, launcher_geometry_.search_final_width, launcher_geometry_.search_height);
     gtk_widget_set_opacity(search_slot_, 1.0);
     gtk_widget_set_margin_bottom(search_slot_, 0);
 
@@ -5129,36 +5276,36 @@ void LauncherOverlay::apply_central_motion() {
     gtk_widget_set_margin_top(
         centre_shader_host_,
         static_cast<int>(std::lround(interpolate(
-            kCentreStartTopMargin,
-            kCentreFinalTopMargin,
+            launcher_geometry_.centre_start_top_margin,
+            launcher_geometry_.centre_final_top_margin,
             frame
         )))
     );
     const int centre_width = static_cast<int>(std::lround(interpolate(
-        kCentreStartWidth,
-        kCentreFinalWidth,
+        launcher_geometry_.centre_start_width,
+        launcher_geometry_.centre_final_width,
         frame
     )));
     gtk_widget_set_size_request(
         centre_shadow_,
         centre_width,
-        kCentreHeight
+        launcher_geometry_.centre_height
     );
     gtk_widget_set_size_request(
         centre_shell_,
         centre_width,
-        kCentreHeight
+        launcher_geometry_.centre_height
     );
     gtk_widget_set_size_request(
         wallpaper_frame_,
         static_cast<int>(std::lround(interpolate(
-            kApertureStartWidth,
-            kApertureFinalWidth,
+            launcher_geometry_.aperture_start_width,
+            launcher_geometry_.aperture_final_width,
             aperture
         ))),
         static_cast<int>(std::lround(interpolate(
-            kApertureStartHeight,
-            kApertureFinalHeight,
+            launcher_geometry_.aperture_start_height,
+            launcher_geometry_.aperture_final_height,
             aperture
         )))
     );
@@ -5169,16 +5316,16 @@ void LauncherOverlay::apply_central_motion() {
     gtk_widget_set_size_request(
         search_slot_,
         static_cast<int>(std::lround(interpolate(
-            kSearchStartWidth,
-            kSearchFinalWidth,
+            launcher_geometry_.search_start_width,
+            launcher_geometry_.search_final_width,
             search
         ))),
-        50
+        launcher_geometry_.search_height
     );
     gtk_widget_set_opacity(search_slot_, interpolate(0.10, 1.0, search));
     gtk_widget_set_margin_bottom(
         search_slot_,
-        static_cast<int>(std::lround(interpolate(10.0, 0.0, search)))
+        static_cast<int>(std::lround(interpolate(static_cast<double>(scale_px(10)), 0.0, search)))
     );
 
     if (activation_sweep_ != nullptr) {
@@ -5190,9 +5337,9 @@ void LauncherOverlay::apply_central_motion() {
         gtk_widget_set_opacity(activation_sweep_, clamp_unit(sweep_opacity));
         gtk_widget_set_margin_start(
             activation_sweep_,
-            static_cast<int>(std::lround(interpolate(38.0, 518.0, sweep)))
+            static_cast<int>(std::lround(interpolate(static_cast<double>(scale_px(38)), static_cast<double>(scale_px(518)), sweep)))
         );
-        gtk_widget_set_margin_bottom(activation_sweep_, 1);
+        gtk_widget_set_margin_bottom(activation_sweep_, scale_px(1));
     }
 }
 
@@ -5424,6 +5571,7 @@ void LauncherOverlay::toggle() {
 }
 
 void LauncherOverlay::show() {
+    if (gtk_widget_get_realized(GTK_WIDGET(window_))) apply_display_geometry();
     const bool already_presented = gtk_widget_get_visible(GTK_WIDGET(window_));
     gtk_widget_set_sensitive(root_, TRUE);
 

@@ -12,6 +12,14 @@
 
 namespace realmheart::ui::components {
 
+struct SliderLayout {
+    int row_height = 36;
+    int row_spacing = 7;
+    int icon_size = 17;
+    int label_width = 69;
+    int value_width = 34;
+};
+
 class SliderWidget : public BaseWidget {
 public:
     using Mutator = std::function<std::optional<double>(double)>;
@@ -30,6 +38,7 @@ public:
     GtkWidget* get_widget() override;
     void set_value(double value);
     void set_available(bool available);
+    void set_layout(SliderLayout layout);
     [[nodiscard]] std::uint64_t refresh_generation() const noexcept;
     void apply_refresh(std::optional<double> value, std::uint64_t generation);
 
@@ -50,6 +59,8 @@ private:
     };
 
     GtkWidget* box_ = nullptr;
+    GtkWidget* icon_ = nullptr;
+    GtkWidget* name_label_ = nullptr;
     GtkWidget* scale_ = nullptr;
     GtkWidget* value_label_ = nullptr;
     bool updating_ = false;

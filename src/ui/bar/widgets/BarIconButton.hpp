@@ -32,6 +32,7 @@ public:
     void add_css_class(const char* css_class);
     void remove_css_class(const char* css_class);
     void set_icon_size(int pixels);
+    void set_layout(int button_extent, int icon_size);
 
 private:
     void trigger_click_feedback();

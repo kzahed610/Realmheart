@@ -13,6 +13,19 @@ constexpr double kInnerFillInset = 16.0;
 constexpr double kInnerContourInset = 19.0;
 constexpr double kHighlightContourInset = 22.0;
 
+constexpr double kReleasedFrameWidth = 486.0;
+
+[[nodiscard]] double frame_design_scale(const SidebarFrameLayout& layout) noexcept {
+    return std::max(static_cast<double>(layout.frame_width) / kReleasedFrameWidth, 0.01);
+}
+
+[[nodiscard]] double scaled_px(
+    const SidebarFrameLayout& layout,
+    double baseline
+) noexcept {
+    return baseline * frame_design_scale(layout);
+}
+
 struct Point {
     double x = 0.0;
     double y = 0.0;
@@ -61,21 +74,21 @@ FrameGeometry frame_geometry(
     const double frame_origin = std::max(surface_width - frame_width, 0.0);
 
     FrameGeometry geometry;
-    geometry.left = frame_origin + inset;
+    const double scale = frame_design_scale(layout);
+    const double scaled_inset = inset * scale;
+    geometry.left = frame_origin + scaled_inset;
     geometry.right = std::max(
         geometry.left + 1.0,
-        surface_width - inset
+        surface_width - scaled_inset
     );
 
-    // Leave explicit crown/finial breathing room inside the allocation. This
-    // means detail can protrude above and below the main body without clipping.
-    geometry.top = inset + 12.0;
+    // Fixed ornament offsets are authored in the released 486px frame space.
+    // Scale them with the visible frame so 1440p/4K preserve the same forged
+    // silhouette instead of stretching only the percentage-based segments.
+    geometry.top = scaled_inset + (12.0 * scale);
     geometry.bottom = std::max(
         geometry.top + 1.0,
-        // Keep enough room below the finial for the soft, downward-cast shadow
-        // to fade inside the transparent layer-shell surface instead of being
-        // clipped into a hard horizontal edge.
-        static_cast<double>(height) - inset - 30.0
+        static_cast<double>(height) - scaled_inset - (30.0 * scale)
     );
 
     const double usable_width = geometry.right - geometry.left;
@@ -85,17 +98,17 @@ FrameGeometry frame_geometry(
     // upper-left shoulder and transparent gutter are the future Tessia entry
     // zone, so ornaments frame that region rather than occupying it.
     geometry.header_left = geometry.left +
-        std::clamp(usable_width * 0.185, 68.0, 82.0);
+        std::clamp(usable_width * 0.185, 68.0 * scale, 82.0 * scale);
     geometry.body_left = geometry.left +
-        std::clamp(usable_width * 0.095, 34.0, 43.0);
+        std::clamp(usable_width * 0.095, 34.0 * scale, 43.0 * scale);
     geometry.lower_left = geometry.left +
-        std::clamp(usable_width * 0.040, 14.0, 19.0);
+        std::clamp(usable_width * 0.040, 14.0 * scale, 19.0 * scale);
     geometry.header_end = geometry.top + (usable_height * 0.220);
     geometry.first_spine_end = geometry.top + (usable_height * 0.350);
     geometry.second_spine_start = geometry.top + (usable_height * 0.590);
     geometry.second_spine_end = geometry.top + (usable_height * 0.715);
     geometry.lower_step_start = geometry.bottom -
-        std::clamp(usable_height * 0.135, 82.0, 108.0);
+        std::clamp(usable_height * 0.135, 82.0 * scale, 108.0 * scale);
 
     geometry.bottom_center = geometry.left + (usable_width * 0.565);
     return geometry;
@@ -108,6 +121,7 @@ std::vector<Point> silhouette_points(
     const SidebarFrameLayout& layout
 ) {
     const auto g = frame_geometry(width, height, inset, layout);
+    const double scale = frame_design_scale(layout);
 
     // The reference treats the right border as a narrow structural spine rather
     // than the same-width bevel used on every side. Pull only the inner layers
@@ -115,74 +129,74 @@ std::vector<Point> silhouette_points(
     // frame band gains depth. The outer silhouette and input region stay at
     // their original width because kOuterPathInset produces zero recess.
     const double right_spine_recess = std::clamp(
-        (inset - kMiddleFillInset) * 1.35,
+        (inset - kMiddleFillInset) * scale * 1.35,
         0.0,
-        9.0
+        9.0 * scale
     );
     const double right_edge = g.right - right_spine_recess;
 
     // One authoritative x-coordinate for the entire wall that Tessia grips.
     // Keeping this separate from body_left preserves the lower ornament and
     // upper shoulder while removing the visible mid-wall width change.
-    const double character_edge_x = g.body_left - 14.0;
+    const double character_edge_x = g.body_left - (14.0 * scale);
 
     const double lower_transition_y = std::min(
-        g.second_spine_end + 23.0,
-        g.lower_step_start - 18.0
+        g.second_spine_end + (23.0 * scale),
+        g.lower_step_start - (18.0 * scale)
     );
     const double lower_transition_inner_y = std::min(
-        g.second_spine_end + 8.0,
-        lower_transition_y - 15.0
+        g.second_spine_end + (8.0 * scale),
+        lower_transition_y - (15.0 * scale)
     );
     const double second_spine_bulge_y = std::min(
-        g.second_spine_start + 27.0,
-        lower_transition_inner_y - 1.0
+        g.second_spine_start + (27.0 * scale),
+        lower_transition_inner_y - (1.0 * scale)
     );
 
     // Clockwise, beginning on the stepped top-left shoulder. The extra breaks
     // are structural rather than ornamental: even with every inner decoration
     // removed, the surface still reads as the reference's forged artefact.
     return {
-        {g.header_left + 34.0, g.top},
-        {g.header_left + 46.0, g.top - 6.0},
+        {g.header_left + (34.0 * scale), g.top},
+        {g.header_left + (46.0 * scale), g.top - (6.0 * scale)},
 
         // Reinforced top-right cap. The reference lets the crown project a few
         // pixels farther than the long side wall, then settles into a quiet,
         // nearly vertical spine. This keeps the right edge architectural
         // without reintroducing a rune rail or detached decorative strokes.
-        {right_edge - 112.0, g.top - 6.0},
-        {right_edge - 96.0, g.top - 17.0},
-        {right_edge - 52.0, g.top - 17.0},
-        {right_edge - 39.0, g.top - 8.0},
-        {right_edge - 14.0, g.top - 8.0},
-        {right_edge, g.top + 7.0},
-        {right_edge, g.top + 25.0},
-        {right_edge - 7.0, g.top + 33.0},
+        {right_edge - (112.0 * scale), g.top - (6.0 * scale)},
+        {right_edge - (96.0 * scale), g.top - (17.0 * scale)},
+        {right_edge - (52.0 * scale), g.top - (17.0 * scale)},
+        {right_edge - (39.0 * scale), g.top - (8.0 * scale)},
+        {right_edge - (14.0 * scale), g.top - (8.0 * scale)},
+        {right_edge, g.top + (7.0 * scale)},
+        {right_edge, g.top + (25.0 * scale)},
+        {right_edge - (7.0 * scale), g.top + (33.0 * scale)},
 
         // The central right run stays deliberately flat. Near the foundation,
         // a shallow two-stage foot projects outward again, echoing the
         // reference's lower power-section transition without tying the shell
         // to any particular future inner layout.
-        {right_edge - 7.0, g.lower_step_start - 28.0},
-        {right_edge - 2.0, g.lower_step_start - 18.0},
-        {right_edge - 2.0, g.bottom - 43.0},
-        {right_edge - 19.0, g.bottom - 20.0},
-        {right_edge - 37.0, g.bottom},
+        {right_edge - (7.0 * scale), g.lower_step_start - (28.0 * scale)},
+        {right_edge - (2.0 * scale), g.lower_step_start - (18.0 * scale)},
+        {right_edge - (2.0 * scale), g.bottom - (43.0 * scale)},
+        {right_edge - (19.0 * scale), g.bottom - (20.0 * scale)},
+        {right_edge - (37.0 * scale), g.bottom},
 
-        {g.bottom_center + 42.0, g.bottom},
-        {g.bottom_center + 29.0, g.bottom + 5.0},
-        {g.bottom_center + 16.0, g.bottom + 5.0},
-        {g.bottom_center + 8.0, g.bottom + 14.0},
-        {g.bottom_center, g.bottom + 21.0},
-        {g.bottom_center - 8.0, g.bottom + 14.0},
-        {g.bottom_center - 16.0, g.bottom + 5.0},
-        {g.bottom_center - 29.0, g.bottom + 5.0},
-        {g.header_left - 9.0, g.bottom + 5.0},
-        {g.body_left + 15.0, g.bottom - 6.0},
-        {g.lower_left, g.bottom - 27.0},
-        {g.lower_left, g.bottom - 71.0},
-        {character_edge_x, g.bottom - 84.0},
-        {character_edge_x, g.lower_step_start - 4.0},
+        {g.bottom_center + (42.0 * scale), g.bottom},
+        {g.bottom_center + (29.0 * scale), g.bottom + (5.0 * scale)},
+        {g.bottom_center + (16.0 * scale), g.bottom + (5.0 * scale)},
+        {g.bottom_center + (8.0 * scale), g.bottom + (14.0 * scale)},
+        {g.bottom_center, g.bottom + (21.0 * scale)},
+        {g.bottom_center - (8.0 * scale), g.bottom + (14.0 * scale)},
+        {g.bottom_center - (16.0 * scale), g.bottom + (5.0 * scale)},
+        {g.bottom_center - (29.0 * scale), g.bottom + (5.0 * scale)},
+        {g.header_left - (9.0 * scale), g.bottom + (5.0 * scale)},
+        {g.body_left + (15.0 * scale), g.bottom - (6.0 * scale)},
+        {g.lower_left, g.bottom - (27.0 * scale)},
+        {g.lower_left, g.bottom - (71.0 * scale)},
+        {character_edge_x, g.bottom - (84.0 * scale)},
+        {character_edge_x, g.lower_step_start - (4.0 * scale)},
         {character_edge_x, lower_transition_y},
 
         // Keep the character-facing wall perfectly vertical through the hand
@@ -192,18 +206,18 @@ std::vector<Point> silhouette_points(
         // hand while preserving the original lower foundation silhouette.
         {character_edge_x, lower_transition_inner_y},
         {character_edge_x, second_spine_bulge_y},
-        {character_edge_x, g.second_spine_start + 8.0},
-        {character_edge_x, g.first_spine_end + 68.0},
+        {character_edge_x, g.second_spine_start + (8.0 * scale)},
+        {character_edge_x, g.first_spine_end + (68.0 * scale)},
 
         // The upper wall remains flat beneath the stepped shoulder so Tessia's
         // face and hair continue to meet a clean occluding edge.
-        {character_edge_x, g.first_spine_end + 50.0},
-        {character_edge_x, g.top + 96.0},
-        {g.body_left - 2.0, g.top + 72.0},
-        {g.header_left - 15.0, g.top + 55.0},
-        {g.header_left + 4.0, g.top + 45.0},
-        {g.header_left + 14.0, g.top + 28.0},
-        {g.header_left + 27.0, g.top + 20.0},
+        {character_edge_x, g.first_spine_end + (50.0 * scale)},
+        {character_edge_x, g.top + (96.0 * scale)},
+        {g.body_left - (2.0 * scale), g.top + (72.0 * scale)},
+        {g.header_left - (15.0 * scale), g.top + (55.0 * scale)},
+        {g.header_left + (4.0 * scale), g.top + (45.0 * scale)},
+        {g.header_left + (14.0 * scale), g.top + (28.0 * scale)},
+        {g.header_left + (27.0 * scale), g.top + (20.0 * scale)},
     };
 }
 
@@ -296,19 +310,20 @@ void draw_outer_shadow(
     // as a thick black border rather than depth. Cast the shadow slightly left
     // and down instead: a low-alpha contact silhouette provides separation,
     // while two broad outlines provide a restrained falloff over the wallpaper.
+    const double scale = frame_design_scale(state.layout);
     cairo_save(cr);
-    cairo_translate(cr, -4.0, 5.0);
+    cairo_translate(cr, -4.0 * scale, 5.0 * scale);
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
     cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
 
     append_polygon(cr, points);
     set_source_from_widget(GTK_WIDGET(area), cr, 0.045);
-    cairo_set_line_width(cr, 28.0);
+    cairo_set_line_width(cr, 28.0 * scale);
     cairo_stroke(cr);
 
     append_polygon(cr, points);
     set_source_from_widget(GTK_WIDGET(area), cr, 0.085);
-    cairo_set_line_width(cr, 15.0);
+    cairo_set_line_width(cr, 15.0 * scale);
     cairo_stroke(cr);
 
     append_polygon(cr, points);
@@ -333,8 +348,8 @@ void draw_fill_at(
     fill_vertical_gradient(
         GTK_WIDGET(area),
         cr,
-        g.top - 12.0,
-        g.bottom + 22.0,
+        g.top - scaled_px(state.layout, 12.0),
+        g.bottom + scaled_px(state.layout, 22.0),
         top_alpha,
         middle_alpha,
         bottom_alpha
@@ -414,7 +429,7 @@ void stroke_silhouette(
 ) {
     append_polygon(cr, silhouette_points(width, height, inset, state.layout));
     set_source_from_widget(GTK_WIDGET(area), cr, alpha);
-    cairo_set_line_width(cr, line_width);
+    cairo_set_line_width(cr, line_width * frame_design_scale(state.layout));
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_MITER);
     cairo_set_line_cap(cr, CAIRO_LINE_CAP_SQUARE);
     cairo_stroke(cr);
@@ -493,26 +508,27 @@ void draw_gold_details(
         state.layout
     );
 
+    const double scale = frame_design_scale(state.layout);
     set_source_from_widget(GTK_WIDGET(area), cr);
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_MITER);
     cairo_set_line_cap(cr, CAIRO_LINE_CAP_SQUARE);
-    cairo_set_line_width(cr, 0.85);
+    cairo_set_line_width(cr, 0.85 * scale);
 
     // Keep the upper frame intentionally clean. Its silhouette and nested
     // contours already define the crown; extra short strokes read as detached
     // decoration and compete with both the title and Tessia's future peek zone.
     // The bottom finial remains the frame's only standalone gold ornament.
-    cairo_move_to(cr, g.bottom_center, g.bottom - 8.0);
-    cairo_line_to(cr, g.bottom_center + 12.0, g.bottom + 7.0);
-    cairo_line_to(cr, g.bottom_center, g.bottom + 19.0);
-    cairo_line_to(cr, g.bottom_center - 12.0, g.bottom + 7.0);
+    cairo_move_to(cr, g.bottom_center, g.bottom - (8.0 * scale));
+    cairo_line_to(cr, g.bottom_center + (12.0 * scale), g.bottom + (7.0 * scale));
+    cairo_line_to(cr, g.bottom_center, g.bottom + (19.0 * scale));
+    cairo_line_to(cr, g.bottom_center - (12.0 * scale), g.bottom + (7.0 * scale));
     cairo_close_path(cr);
     cairo_stroke(cr);
 
-    cairo_move_to(cr, g.bottom_center, g.bottom - 2.0);
-    cairo_line_to(cr, g.bottom_center + 6.0, g.bottom + 7.0);
-    cairo_line_to(cr, g.bottom_center, g.bottom + 14.0);
-    cairo_line_to(cr, g.bottom_center - 6.0, g.bottom + 7.0);
+    cairo_move_to(cr, g.bottom_center, g.bottom - (2.0 * scale));
+    cairo_line_to(cr, g.bottom_center + (6.0 * scale), g.bottom + (7.0 * scale));
+    cairo_line_to(cr, g.bottom_center, g.bottom + (14.0 * scale));
+    cairo_line_to(cr, g.bottom_center - (6.0 * scale), g.bottom + (7.0 * scale));
     cairo_close_path(cr);
     cairo_stroke(cr);
 }
@@ -531,15 +547,16 @@ void draw_violet_details(
         kHighlightContourInset,
         state.layout
     );
+    const double scale = frame_design_scale(state.layout);
 
     // Keep violet as a tiny material accent in the bottom finial only. The
     // right edge deliberately has no rune rail or glyphs; its visual weight
     // now comes from the uninterrupted layered contours.
     set_source_from_widget(GTK_WIDGET(area), cr, 0.94);
-    cairo_move_to(cr, g.bottom_center, g.bottom + 1.0);
-    cairo_line_to(cr, g.bottom_center + 4.0, g.bottom + 7.0);
-    cairo_line_to(cr, g.bottom_center, g.bottom + 12.0);
-    cairo_line_to(cr, g.bottom_center - 4.0, g.bottom + 7.0);
+    cairo_move_to(cr, g.bottom_center, g.bottom + (1.0 * scale));
+    cairo_line_to(cr, g.bottom_center + (4.0 * scale), g.bottom + (7.0 * scale));
+    cairo_line_to(cr, g.bottom_center, g.bottom + (12.0 * scale));
+    cairo_line_to(cr, g.bottom_center - (4.0 * scale), g.bottom + (7.0 * scale));
     cairo_close_path(cr);
     cairo_fill(cr);
 }

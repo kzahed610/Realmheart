@@ -1,6 +1,7 @@
 #pragma once
 
 #include "services/HyprlandWorkspaces.hpp"
+#include "ui/bar/BarGeometry.hpp"
 
 #include <functional>
 #include <gtk/gtk.h>
@@ -24,6 +25,7 @@ public:
     bool active() const noexcept { return state_.active; }
     bool occupied() const noexcept { return state_.windows > 0; }
     void update(const services::WorkspaceState& state);
+    void set_layout(const BarGeometry& geometry);
     // Called while the rune is still fully alive, immediately before its
     // button is unparented/destroyed. Stops timers and tick callbacks now
     // and makes stale enter/leave crossing events (which GTK synthesizes

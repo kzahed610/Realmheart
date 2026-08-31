@@ -72,6 +72,7 @@ private:
     void request_battery_refresh();
     void request_wifi_refresh();
     void apply_geometry();
+    void apply_layout_metrics();
     void schedule_geometry_retry();
     void apply_workspaces(services::WorkspaceSnapshot snapshot);
     void apply_media(const std::optional<services::MediaInfo>& info);
@@ -90,7 +91,13 @@ private:
     GtkWidget* root_overlay_ = nullptr;
     GtkWidget* content_container_ = nullptr;
     GtkWidget* workspace_box_ = nullptr;
+    GtkWidget* workspace_runes_container_ = nullptr;
     GtkWidget* workspace_region_ = nullptr;
+    GtkWidget* workspace_top_separator_ = nullptr;
+    GtkWidget* workspace_bottom_separator_ = nullptr;
+    GtkWidget* top_cluster_ = nullptr;
+    GtkWidget* bottom_cluster_ = nullptr;
+    GtkWidget* status_separator_ = nullptr;
 
     std::unique_ptr<widgets::BarBackdrop> backdrop_;
     std::unique_ptr<widgets::BarIconButton> launcher_button_;

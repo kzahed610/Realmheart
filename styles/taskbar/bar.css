@@ -25,22 +25,27 @@ window.realmheart-vertical-bar-window,
 .realmheart-vertical-bar {
   background-color: transparent;
   color: @rh_text;
-  padding: 13px 9px 13px 5px;
 }
+
+/* GTK has no widget API for padding. Keep padding local to a per-surface tier
+   class so 1080p remains exactly the released composition while larger logical
+   outputs receive the same intentional inset scale. */
+.realmheart-vertical-bar.realmheart-bar-tier-1080p { padding: 13px 9px 13px 5px; }
+.realmheart-vertical-bar.realmheart-bar-tier-1440p { padding: 17px 12px 17px 7px; }
+.realmheart-vertical-bar.realmheart-bar-tier-4k { padding: 26px 18px 26px 10px; }
 
 /* Top zone: compact, centered icon rhythm instead of giant hand-spaced gaps. */
 .realmheart-bar-top-cluster {
-  border-spacing: 12px;
-  margin-top: 7px;
+  border-spacing: 0;
+  margin: 0;
 }
 
 /* Workspace zone remains the visual centre of the rail. */
 .realmheart-workspace-section {
-  border-spacing: 18px;
+  border-spacing: 0;
 }
 
 .realmheart-bar-separator {
-  min-width: 28px;
   min-height: 1px;
   color: alpha(@rh_outline, 0.58);
   background-color: alpha(@rh_outline, 0.58);
@@ -52,8 +57,8 @@ window.realmheart-vertical-bar-window,
 
 /* Bottom zone mirrors the compact top rhythm while staying bottom-pinned. */
 .realmheart-bar-bottom-cluster {
-  border-spacing: 14px;
-  margin-bottom: 10px;
+  border-spacing: 0;
+  margin: 0;
 }
 
 .realmheart-bar-clock {
@@ -64,5 +69,5 @@ window.realmheart-vertical-bar-window,
 }
 
 .realmheart-status-separator {
-  margin: 0 0 40px 0;
+  margin: 0;
 }

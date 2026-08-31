@@ -95,6 +95,10 @@ BatteryWidget::~BatteryWidget() {
     }
 }
 
+void BatteryWidget::set_layout(const BarGeometry& geometry) {
+    button_.set_layout(geometry.icon_button_extent, geometry.icon_size);
+}
+
 void BatteryWidget::update(const std::optional<services::BatteryStatus>& status) {
     status_ = status;
     for (const char* css_class : {

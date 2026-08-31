@@ -15,11 +15,11 @@ std::string value_text(double value) {
     return std::to_string(static_cast<int>(std::lround(value))) + "%";
 }
 
-GtkWidget* slider_icon(const std::string& label) {
+GtkWidget* slider_icon(const std::string& label, int pixels) {
     const char* path = label == "Brightness"
         ? "Realmheart-Icons/brightness.svg"
         : "Realmheart-Icons/speaker-2.svg";
-    realmheart::ui::bar::widgets::ThemedSvgIcon icon(path, 17);
+    realmheart::ui::bar::widgets::ThemedSvgIcon icon(path, pixels);
     icon.add_css_class("realmheart-slider-icon");
     return icon.widget();
 }
@@ -40,13 +40,13 @@ SliderWidget::SliderWidget(
 
     box_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 7);
     gtk_widget_add_css_class(box_, "realmheart-module-slider");
-    gtk_box_append(GTK_BOX(box_), slider_icon(label));
+    icon_ = slider_icon(label, SliderLayout{}.icon_size);
+    gtk_box_append(GTK_BOX(box_), icon_);
 
-    GtkWidget* name = gtk_label_new(label.c_str());
-    gtk_widget_add_css_class(name, "realmheart-slider-label");
-    gtk_label_set_xalign(GTK_LABEL(name), 0.0F);
-    gtk_widget_set_size_request(name, 69, -1);
-    gtk_box_append(GTK_BOX(box_), name);
+    name_label_ = gtk_label_new(label.c_str());
+    gtk_widget_add_css_class(name_label_, "realmheart-slider-label");
+    gtk_label_set_xalign(GTK_LABEL(name_label_), 0.0F);
+    gtk_box_append(GTK_BOX(box_), name_label_);
 
     scale_ = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, min, max, 1.0);
     gtk_widget_add_css_class(scale_, "realmheart-rune-scale");
@@ -57,7 +57,6 @@ SliderWidget::SliderWidget(
     value_label_ = gtk_label_new(value_text(initial).c_str());
     gtk_widget_add_css_class(value_label_, "realmheart-slider-value");
     gtk_label_set_xalign(GTK_LABEL(value_label_), 1.0F);
-    gtk_widget_set_size_request(value_label_, 34, -1);
     state_->value_label = value_label_;
     state_->value_changed_handler = g_signal_connect(
         scale_,
@@ -177,6 +176,7 @@ SliderWidget::SliderWidget(
     );
     gtk_box_append(GTK_BOX(box_), scale_);
     gtk_box_append(GTK_BOX(box_), value_label_);
+    set_layout(SliderLayout{});
 }
 
 SliderWidget::~SliderWidget() {
@@ -224,6 +224,21 @@ void SliderWidget::show_interaction_feedback() {
 
 GtkWidget* SliderWidget::get_widget() {
     return box_;
+}
+
+void SliderWidget::set_layout(SliderLayout layout) {
+    gtk_box_set_spacing(GTK_BOX(box_), layout.row_spacing);
+    gtk_widget_set_size_request(box_, -1, layout.row_height);
+    if (icon_ != nullptr) {
+        gtk_widget_set_size_request(icon_, layout.icon_size, layout.icon_size);
+    }
+    if (name_label_ != nullptr) {
+        gtk_widget_set_size_request(name_label_, layout.label_width, -1);
+    }
+    if (value_label_ != nullptr) {
+        gtk_widget_set_size_request(value_label_, layout.value_width, -1);
+    }
+    gtk_widget_queue_resize(box_);
 }
 
 void SliderWidget::set_value(double value) {
