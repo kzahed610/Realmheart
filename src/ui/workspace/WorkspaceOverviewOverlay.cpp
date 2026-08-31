@@ -2,6 +2,7 @@
 #include "ui/AssetResolver.hpp"
 #include "ui/LayerSurface.hpp"
 #include "ui/bar/BarGeometry.hpp"
+#include "ui/workspace/WorkspaceOverviewAssets.hpp"
 #include "ui/workspace/animation/WorkspaceMorphFrontier.hpp"
 #include "ui/workspace/animation/WorkspaceMorphPresentation.hpp"
 
@@ -143,6 +144,25 @@ constexpr GdkMemoryFormat kCairoArgb32MemoryFormat =
     GDK_MEMORY_A8R8G8B8_PREMULTIPLIED;
 #endif
 
+std::optional<realmheart::core::DisplayTier> assigned_display_tier(
+    GtkWidget* widget
+) {
+    if (widget == nullptr || !gtk_widget_get_realized(widget)) return std::nullopt;
+
+    GdkMonitor* monitor = resolve_layer_surface_monitor(widget);
+    if (monitor == nullptr) return std::nullopt;
+
+    GdkRectangle geometry{};
+    gdk_monitor_get_geometry(monitor, &geometry);
+    g_object_unref(monitor);
+    if (geometry.width <= 0 || geometry.height <= 0) return std::nullopt;
+
+    return realmheart::core::display_tier_for_logical_geometry(
+        geometry.width,
+        geometry.height
+    );
+}
+
 struct Point {
     double x = 0.0;
     double y = 0.0;
@@ -172,8 +192,8 @@ struct RealmStyle {
     std::string_view element;
     std::string_view place;
     std::string_view character;
-    std::string_view background_asset;
-    std::string_view character_asset;
+    std::string_view background_stem;
+    std::string_view character_stem;
     Color accent;
     Color accent_soft;
     double active_height = 760.0;
@@ -186,32 +206,32 @@ struct RealmStyle {
 constexpr std::array<RealmStyle, 4> kRealms{{
     {
         "I", "FIRE", "The Hearth", "Bairon Wykes",
-        "workspace-overview/backgrounds/1080p/fire-the-hearth.png",
-        "workspace-overview/characters/1080p/bairon-wykes.png",
+        "fire-the-hearth.png",
+        "bairon-wykes.png",
         {1.0, 0.525, 0.271, 1.0},
         {1.0, 0.816, 0.604, 1.0},
         760.0, -28.0, 430.0, -5.0, -35.0,
     },
     {
         "II", "WATER", "Etistin Bay", "Varay Aurae",
-        "workspace-overview/backgrounds/1080p/water-etistin-bay.png",
-        "workspace-overview/characters/1080p/varay-aurae.png",
+        "water-etistin-bay.png",
+        "varay-aurae.png",
         {0.325, 0.784, 1.0, 1.0},
         {0.682, 0.914, 1.0, 1.0},
         780.0, -58.0, 430.0, -8.0, -36.0,
     },
     {
         "III", "WIND", "Elshire Forest", "Aya Grephin",
-        "workspace-overview/backgrounds/1080p/wind-elshire-forest.png",
-        "workspace-overview/characters/1080p/aya-grephin.png",
+        "wind-elshire-forest.png",
+        "aya-grephin.png",
         {0.471, 0.843, 0.741, 1.0},
         {0.773, 0.957, 0.910, 1.0},
         760.0, 4.0, 420.0, 15.0, -33.0,
     },
     {
         "IV", "EARTH", "Vildorial", "Mica Earthborn",
-        "workspace-overview/backgrounds/1080p/earth-vildorial.png",
-        "workspace-overview/characters/1080p/mica-earthborn.png",
+        "earth-vildorial.png",
+        "mica-earthborn.png",
         {0.820, 0.639, 0.373, 1.0},
         {0.941, 0.831, 0.643, 1.0},
         760.0, -18.0, 430.0, -2.0, -35.0,
@@ -2218,6 +2238,10 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(
 }
 
 WorkspaceOverviewOverlay::~WorkspaceOverviewOverlay() {
+    if (asset_retry_id_ != 0) {
+        g_source_remove(asset_retry_id_);
+        asset_retry_id_ = 0;
+    }
     if (set_taskbar_morph_progress_) set_taskbar_morph_progress_(0.0);
     if (taskbar_morph_active_ && set_taskbar_morph_active_) {
         set_taskbar_morph_active_(false);
@@ -3023,6 +3047,11 @@ void WorkspaceOverviewOverlay::show() {
         }
         synchronize_active_workspace();
         normalize_selection();
+        const bool was_realized = gtk_widget_get_realized(GTK_WIDGET(window_));
+        if (!was_realized) {
+            gtk_widget_set_opacity(GTK_WIDGET(window_), 0.0);
+            gtk_window_present(window_);
+        }
         static_cast<void>(ensure_assets());
         static_cast<void>(rebuild_dirty_overlays());
         stop_content_animations(true);
@@ -3034,6 +3063,7 @@ void WorkspaceOverviewOverlay::show() {
         if (set_taskbar_morph_progress_) {
             set_taskbar_morph_progress_(morph_timeline_.progress());
         }
+        if (!was_realized) gtk_widget_set_opacity(GTK_WIDGET(window_), 1.0);
         gtk_window_present(window_);
         schedule_morph_shader_capture();
     }
@@ -3091,6 +3121,12 @@ void WorkspaceOverviewOverlay::prewarm() {
     }
     prewarmed_ = true;
 
+    // Realize at opacity 0 before selecting the assigned monitor. GDK does not
+    // expose a safe monitor binding before realization, so decoding first can
+    // permanently select the 1080p fallback on a higher-tier output.
+    gtk_widget_set_opacity(GTK_WIDGET(window_), 0.0);
+    gtk_window_present(window_);
+
     // CPU-side first-open work: asset decode + overlay rasterization.
     synchronize_active_workspace();
     normalize_selection();
@@ -3101,8 +3137,6 @@ void WorkspaceOverviewOverlay::prewarm() {
     // frame clock tick produce a real frame through the full GSK/EGL
     // pipeline. The window stays invisible the whole time, so there is no
     // perceptible flash even on a fast display.
-    gtk_widget_set_opacity(GTK_WIDGET(window_), 0.0);
-    gtk_window_present(window_);
     gtk_widget_queue_draw(canvas_);
 
     struct PrewarmFrameState {
@@ -4768,15 +4802,40 @@ void WorkspaceOverviewOverlay::handle_hover(double x, double y) {
 }
 
 bool WorkspaceOverviewOverlay::ensure_assets() {
-    if (assets_attempted_) return asset_error_.empty();
+    const auto selected_tier = assigned_display_tier(
+        window_ != nullptr ? GTK_WIDGET(window_) : nullptr
+    );
+    if (!selected_tier) {
+        asset_error_ = "Workspace overview assigned monitor is unavailable";
+        schedule_asset_retry();
+        return false;
+    }
+
+    if (assets_attempted_ && asset_tier_selected_ &&
+        asset_tier_ == *selected_tier) {
+        return asset_error_.empty();
+    }
+
+    if (assets_attempted_) release_assets();
+    asset_tier_ = *selected_tier;
+    asset_tier_selected_ = true;
+    asset_error_.clear();
     assets_attempted_ = true;
 
     for (std::size_t index = 0; index < kRealms.size(); ++index) {
         const auto background_path = resolve_project_asset(
-            kRealms[index].background_asset
+            workspace_overview_asset_path(
+                "backgrounds",
+                kRealms[index].background_stem,
+                asset_tier_
+            )
         );
         const auto character_path = resolve_project_asset(
-            kRealms[index].character_asset
+            workspace_overview_asset_path(
+                "characters",
+                kRealms[index].character_stem,
+                asset_tier_
+            )
         );
         if (!background_path || !character_path) {
             asset_error_ = "Unable to resolve workspace overview assets";
@@ -4864,6 +4923,21 @@ bool WorkspaceOverviewOverlay::ensure_assets() {
     return true;
 }
 
+void WorkspaceOverviewOverlay::schedule_asset_retry() {
+    if (asset_retry_id_ != 0 || canvas_ == nullptr) return;
+
+    asset_retry_id_ = g_timeout_add(
+        50,
+        +[](gpointer data) -> gboolean {
+            auto* self = static_cast<WorkspaceOverviewOverlay*>(data);
+            self->asset_retry_id_ = 0;
+            if (self->canvas_ != nullptr) gtk_widget_queue_draw(self->canvas_);
+            return G_SOURCE_REMOVE;
+        },
+        this
+    );
+}
+
 void WorkspaceOverviewOverlay::release_assets() noexcept {
     finish_card_transition();
     overlay_dirty_.fill(true);
@@ -4883,6 +4957,8 @@ void WorkspaceOverviewOverlay::release_assets() noexcept {
         for (auto*& card : realm.spread_cards) g_clear_object(&card);
         realm.spread_cards.clear();
     }
+    assets_attempted_ = false;
+    asset_tier_selected_ = false;
 }
 
 } // namespace realmheart::ui::workspace

@@ -93,20 +93,38 @@ std::optional<CharacterLayerRenderer> read_layer_renderer(
     return std::nullopt;
 }
 
-std::optional<std::filesystem::path> scale_manifest_path(
+struct SelectedManifestPath {
+    std::filesystem::path path;
+    core::DisplayTier tier = core::DisplayTier::P1080;
+};
+
+std::optional<SelectedManifestPath> display_manifest_path(
     const std::filesystem::path& root,
-    int preferred_scale
+    core::DisplayTier requested_tier
 ) {
-    const std::string preferred = preferred_scale >= 2 ? "2x" : "1x";
-    const std::string fallback = preferred == "2x" ? "1x" : "2x";
-
     std::error_code error;
-    auto candidate = root / preferred / "manifest.json";
-    if (std::filesystem::is_regular_file(candidate, error) && !error) return candidate;
+    const auto candidate = root /
+        std::string(core::display_tier_directory(requested_tier)) /
+        "manifest.json";
+    if (std::filesystem::is_regular_file(candidate, error) && !error) {
+        return SelectedManifestPath{
+            .path = candidate,
+            .tier = requested_tier,
+        };
+    }
 
+    // A missing higher tier falls back to the canonical 1080p package. Do not
+    // fall back to the legacy density directories: they are not part of the
+    // display-tier contract and may contain incompatible crop metadata.
+    if (requested_tier == core::DisplayTier::P1080) return std::nullopt;
     error.clear();
-    candidate = root / fallback / "manifest.json";
-    if (std::filesystem::is_regular_file(candidate, error) && !error) return candidate;
+    const auto fallback = root / "1080p" / "manifest.json";
+    if (std::filesystem::is_regular_file(fallback, error) && !error) {
+        return SelectedManifestPath{
+            .path = fallback,
+            .tier = core::DisplayTier::P1080,
+        };
+    }
     return std::nullopt;
 }
 
@@ -160,7 +178,7 @@ bool validate_family_geometry(
 
 std::optional<CharacterManifest> CharacterManifest::load(
     const std::filesystem::path& character_root,
-    int preferred_scale,
+    core::DisplayTier display_tier,
     std::string* error_message
 ) {
     std::error_code error;
@@ -173,12 +191,12 @@ std::optional<CharacterManifest> CharacterManifest::load(
     const auto rig_json = read_json(canonical_root / "rig.json", error_message);
     if (!rig_json) return std::nullopt;
 
-    const auto selected_manifest_path = scale_manifest_path(canonical_root, preferred_scale);
+    const auto selected_manifest_path = display_manifest_path(canonical_root, display_tier);
     if (!selected_manifest_path) {
-        set_error(error_message, "No 1x or 2x character scale manifest is available");
+        set_error(error_message, "No explicit display-tier character manifest is available");
         return std::nullopt;
     }
-    const auto scale_json = read_json(*selected_manifest_path, error_message);
+    const auto scale_json = read_json(selected_manifest_path->path, error_message);
     if (!scale_json) return std::nullopt;
 
     CharacterManifest manifest;
@@ -186,10 +204,18 @@ std::optional<CharacterManifest> CharacterManifest::load(
 
     try {
         manifest.character = rig_json->at("character").get<std::string>();
-        manifest.scale_variant = scale_json->value(
-            "scaleVariant",
-            selected_manifest_path->parent_path().filename().string()
+        const auto manifest_tier = scale_json->at("displayTier").get<std::string>();
+        const auto expected_tier = std::string(
+            core::display_tier_directory(selected_manifest_path->tier)
         );
+        if (manifest_tier != expected_tier) {
+            set_error(
+                error_message,
+                "Character manifest display tier does not match its selected directory"
+            );
+            return std::nullopt;
+        }
+        manifest.display_tier = selected_manifest_path->tier;
         manifest.source_canvas = {
             .width = scale_json->at("sourceCanvas").at("width").get<int>(),
             .height = scale_json->at("sourceCanvas").at("height").get<int>(),
@@ -223,7 +249,7 @@ std::optional<CharacterManifest> CharacterManifest::load(
             return std::nullopt;
         }
 
-        const auto scale_directory = selected_manifest_path->parent_path();
+        const auto scale_directory = selected_manifest_path->path.parent_path();
         for (const auto& [asset_id, asset_json] : scale_json->at("assets").items()) {
             CharacterAsset asset;
             asset.id = asset_id;

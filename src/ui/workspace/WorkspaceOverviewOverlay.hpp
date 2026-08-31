@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/DisplayTier.hpp"
 #include "effects/core/TransitionTimeline.hpp"
 #include "ui/workspace/WorkspaceOverviewModel.hpp"
 #include "ui/workspace/animation/WorkspaceMorphDiagnostics.hpp"
@@ -159,6 +160,7 @@ private:
         std::string_view app_name
     );
     void clear_icon_cache() noexcept;
+    void schedule_asset_retry();
     bool rebuild_dirty_overlays();
     bool ensure_assets();
     void release_assets() noexcept;
@@ -199,6 +201,7 @@ private:
     int drag_target_index_ = -1;
     int overflow_workspace_id_ = 0;
     std::string asset_error_;
+    core::DisplayTier asset_tier_ = core::DisplayTier::P1080;
     int viewport_start_workspace_id_ = 1;
     int viewport_transition_direction_ = 0;
     int active_index_ = 1;
@@ -226,6 +229,8 @@ private:
     bool viewport_animation_active_ = false;
     bool selection_outline_has_start_bounds_ = false;
     bool assets_attempted_ = false;
+    bool asset_tier_selected_ = false;
+    guint asset_retry_id_ = 0;
     bool taskbar_morph_active_ = false;
     bool morph_geometry_frozen_ = false;
     bool morph_shader_capture_pending_ = false;

@@ -203,6 +203,7 @@ add_library(realmheart_ui STATIC
     src/ui/sidebar/ConnectivityPanel.cpp
     src/ui/sidebar/NightLightPanel.cpp
     src/ui/sidebar/RightSidebar.cpp
+    src/ui/sidebar/SidebarGeometry.cpp
     src/ui/sidebar/SidebarFrame.cpp
     src/ui/NotificationToast.cpp
     src/ui/NowPlayingOverlay.cpp
@@ -225,6 +226,7 @@ add_library(realmheart_ui STATIC
     src/ui/powermenu/PowerMenuScene.cpp
     src/ui/powermenu/PowerMenuOverlay.cpp
     src/ui/workspace/WorkspaceOverviewModel.cpp
+    src/ui/workspace/WorkspaceOverviewAssets.cpp
     src/ui/workspace/WorkspaceOverviewOverlay.cpp
     src/ui/workspace/animation/WorkspaceMorphDiagnostics.cpp
     src/ui/workspace/animation/WorkspaceMorphFrontier.cpp
@@ -665,12 +667,47 @@ if(BUILD_TESTING)
     add_executable(
         realmheart_character_manifest_tests
         tests/CharacterManifestTests.cpp
+        src/core/DisplayTier.cpp
         src/animation/character/CharacterManifest.cpp
     )
     target_compile_definitions(realmheart_character_manifest_tests PRIVATE
         REALMHEART_TEST_TESSIA_ROOT="${CMAKE_SOURCE_DIR}/assets/characters/tessia"
     )
     realmheart_register_test(realmheart_character_manifest_tests)
+
+    add_executable(
+        realmheart_workspace_overview_assets_tests
+        tests/WorkspaceOverviewAssetsTests.cpp
+        src/core/DisplayTier.cpp
+        src/ui/workspace/WorkspaceOverviewAssets.cpp
+    )
+    realmheart_register_test(realmheart_workspace_overview_assets_tests)
+
+    add_executable(
+        realmheart_sidebar_geometry_tests
+        tests/SidebarGeometryTests.cpp
+        src/core/DisplayTier.cpp
+        src/ui/sidebar/SidebarGeometry.cpp
+    )
+    realmheart_register_test(realmheart_sidebar_geometry_tests)
+
+    add_executable(
+        realmheart_bar_geometry_tests
+        tests/BarGeometryTests.cpp
+        src/core/DisplayTier.cpp
+    )
+    realmheart_register_test(realmheart_bar_geometry_tests)
+
+    add_executable(
+        realmheart_resolution_asset_package_tests
+        tests/ResolutionAssetPackageTests.cpp
+        src/core/DisplayTier.cpp
+        src/ui/workspace/WorkspaceOverviewAssets.cpp
+    )
+    target_compile_definitions(realmheart_resolution_asset_package_tests PRIVATE
+        REALMHEART_TEST_ASSET_ROOT="${CMAKE_SOURCE_DIR}/assets"
+    )
+    realmheart_register_test(realmheart_resolution_asset_package_tests)
 
     add_executable(realmheart_audio_tests tests/AudioTests.cpp src/core/Command.cpp src/services/Audio.cpp)
     realmheart_register_test(realmheart_audio_tests)

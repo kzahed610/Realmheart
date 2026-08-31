@@ -1,36 +1,10 @@
 #pragma once
 
+#include "ui/sidebar/SidebarGeometry.hpp"
+
 #include <gtk/gtk.h>
 
 namespace realmheart::ui::sidebar {
-
-// Geometry shared by the layer-shell surface, decorative frame, current
-// controls, and the future character composition.
-//
-// The visible frame is 486 px wide. The additional left gutter belongs to
-// the transparent surface, so Tessia can later extend beyond the metal shell
-// without being clipped by the Wayland surface boundary. Because the input
-// region follows only the shell silhouette, the unused gutter stays
-// click-through until character interaction is intentionally added.
-struct SidebarFrameLayout {
-    int frame_width = 486;
-    int character_gutter_width = 240;
-
-    int content_inset_start = 76;
-    int content_inset_end = 42;
-    int content_inset_top = 38;
-    int content_inset_bottom = 38;
-
-    [[nodiscard]] constexpr int surface_width() const noexcept {
-        return frame_width + character_gutter_width;
-    }
-
-    [[nodiscard]] constexpr int frame_origin_x() const noexcept {
-        return character_gutter_width;
-    }
-};
-
-inline constexpr SidebarFrameLayout kDefaultSidebarFrameLayout{};
 
 // Decorative, non-rectangular shell for the right sidebar.
 //
@@ -50,6 +24,7 @@ public:
 
     GtkWidget* widget() const { return root_; }
     void set_child(GtkWidget* child);
+    void set_layout(SidebarFrameLayout layout);
 
     // These full-surface GtkFixed layers are intentionally empty today. Future
     // character renderers may place one or several animated widgets in them.

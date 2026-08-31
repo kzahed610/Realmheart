@@ -6,6 +6,7 @@
 #include "services/Notifications.hpp"
 #include "services/Wifi.hpp"
 #include "ui/bar/WorkspaceWindowTracker.hpp"
+#include "ui/bar/BarGeometry.hpp"
 #include "ui/bar/widgets/BarBackdrop.hpp"
 #include "ui/bar/widgets/BarIconButton.hpp"
 #include "ui/bar/widgets/BatteryWidget.hpp"
@@ -70,6 +71,8 @@ private:
     void request_media_refresh();
     void request_battery_refresh();
     void request_wifi_refresh();
+    void apply_geometry();
+    void schedule_geometry_retry();
     void apply_workspaces(services::WorkspaceSnapshot snapshot);
     void apply_media(const std::optional<services::MediaInfo>& info);
     void apply_battery(const std::optional<services::BatteryStatus>& status);
@@ -115,9 +118,11 @@ private:
     WorkspaceWindowTracker workspace_window_tracker_;
     GWeakRef active_popover_ref_{};
     guint refresh_timer_id_ = 0;
+    guint geometry_retry_id_ = 0;
     unsigned refresh_tick_ = 0;
     bool workspace_morph_active_ = false;
     double workspace_morph_progress_ = 0.0;
+    BarGeometry geometry_{};
 };
 
 } // namespace realmheart::ui::bar

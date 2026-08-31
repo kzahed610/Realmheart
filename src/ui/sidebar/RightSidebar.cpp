@@ -419,10 +419,11 @@ SidebarPlacement sidebar_placement_for(GtkWidget* widget) {
         monitor_height = geometry.height;
     }
 
-    // Fallback: query Hyprland directly via hyprctl. GDK's monitor list can
-    // become permanently invalid (G_IS_LIST_MODEL assertion failures) after
-    // certain gtk4-layer-shell operations, so we can't rely on it alone.
-    if (monitor_height <= 0) {
+    // Pre-realize bootstrap only: GDK cannot expose the assigned output before
+    // the native surface exists. Once realized, the assigned GDK monitor is the
+    // sole authority; never substitute the focused/first monitor there.
+    const bool realized = widget != nullptr && gtk_widget_get_realized(widget);
+    if (monitor_height <= 0 && !realized) {
         GError* error = nullptr;
         gchar* stdout_buf = nullptr;
         gchar* stderr_buf = nullptr;
@@ -462,6 +463,16 @@ SidebarPlacement sidebar_placement_for(GtkWidget* widget) {
     }
 
     if (monitor_height <= 0) return placement;
+
+    placement.monitor_width = monitor_width;
+    placement.monitor_height = monitor_height;
+    placement.display_tier = core::display_tier_for_logical_geometry(
+        monitor_width,
+        monitor_height
+    );
+    placement.frame_layout = SidebarFrameLayout::for_display_tier(
+        placement.display_tier
+    );
 
     placement.height = std::max(
         static_cast<int>(std::lround(
@@ -507,7 +518,7 @@ RightSidebar::RightSidebar(
     );
     layer_spec.anchor_bottom = false;
     layer_spec.margin_top = 76; // default, updated on realize
-    layer_spec.margin_right = kSidebarRightMargin;
+    layer_spec.margin_right = kDefaultSidebarFrameLayout.right_margin;
     apply_layer_surface(GTK_WINDOW(window_), layer_spec);
 
     // Defer geometry computation until the window is realized and we can
@@ -525,6 +536,10 @@ RightSidebar::RightSidebar(
 }
 
 RightSidebar::~RightSidebar() {
+    if (geometry_retry_id_ != 0) {
+        g_source_remove(geometry_retry_id_);
+        geometry_retry_id_ = 0;
+    }
     cancel_character_hide_timeout();
     cancel_prewarm();
     if (power_feedback_timeout_ != 0) {
@@ -549,29 +564,68 @@ RightSidebar::~RightSidebar() {
 }
 
 void RightSidebar::update_geometry_on_realize(GtkWidget* widget) {
-    const auto placement = sidebar_placement_for(widget);
-    gtk_window_set_default_size(
-        GTK_WINDOW(widget),
-        kDefaultSidebarFrameLayout.surface_width(),
-        placement.height
-    );
-
-    // Update the layer surface margin for proper vertical centering
-    gtk_layer_set_margin(GTK_WINDOW(widget), GTK_LAYER_SHELL_EDGE_TOP, placement.top_margin);
+    (void)widget;
+    apply_geometry();
 }
 
 void RightSidebar::apply_geometry() {
     if (window_ == nullptr) return;
     const auto placement = sidebar_placement_for(window_);
+
+    if (placement.monitor_height <= 0) {
+        schedule_geometry_retry();
+        return;
+    }
+
+    const bool geometry_changed =
+        !geometry_initialized_ ||
+        display_tier_ != placement.display_tier ||
+        frame_layout_ != placement.frame_layout ||
+        sidebar_height_ != placement.height;
+
+    display_tier_ = placement.display_tier;
+    frame_layout_ = placement.frame_layout;
+    sidebar_height_ = placement.height;
+    geometry_initialized_ = true;
+
+    if (frame_ != nullptr) frame_->set_layout(frame_layout_);
     gtk_window_set_default_size(
         GTK_WINDOW(window_),
-        kDefaultSidebarFrameLayout.surface_width(),
-        placement.height
+        frame_layout_.surface_width(),
+        sidebar_height_
     );
     gtk_layer_set_margin(
         GTK_WINDOW(window_),
         GTK_LAYER_SHELL_EDGE_TOP,
         placement.top_margin
+    );
+    gtk_layer_set_margin(
+        GTK_WINDOW(window_),
+        GTK_LAYER_SHELL_EDGE_RIGHT,
+        frame_layout_.right_margin
+    );
+
+    if (geometry_changed && character_compositor_ != nullptr) {
+        character_compositor_.reset();
+    }
+    if (character_enabled_) initialize_character_compositor();
+}
+
+gboolean RightSidebar::retry_geometry(gpointer raw) {
+    auto* self = static_cast<RightSidebar*>(raw);
+    self->geometry_retry_id_ = 0;
+    self->apply_geometry();
+    return G_SOURCE_REMOVE;
+}
+
+void RightSidebar::schedule_geometry_retry() {
+    if (window_ == nullptr || geometry_retry_id_ != 0) return;
+    geometry_retry_id_ = g_timeout_add_full(
+        G_PRIORITY_DEFAULT,
+        50,
+        &RightSidebar::retry_geometry,
+        this,
+        nullptr
     );
 }
 
@@ -602,19 +656,14 @@ void RightSidebar::setup_layout() {
     );
     gtk_window_set_child(GTK_WINDOW(window_), effect_view_);
 
-    if (character_enabled_) initialize_character_compositor();
 }
 
 void RightSidebar::initialize_character_compositor() {
-    if (character_compositor_ || frame_ == nullptr) return;
-
-    int preferred_scale = 1;
-    if (GdkMonitor* monitor = resolve_layer_surface_monitor(window_)) {
-        preferred_scale = std::max(gdk_monitor_get_scale_factor(monitor), 1);
-        g_object_unref(monitor);
+    if (character_compositor_ || frame_ == nullptr || window_ == nullptr ||
+        !gtk_widget_get_realized(window_) || !geometry_initialized_) {
+        return;
     }
 
-    const auto placement = sidebar_placement_for(window_);
     std::string character_error;
     const auto character_rig = resolve_project_asset("characters/tessia/rig.json");
     if (!character_rig) {
@@ -627,14 +676,14 @@ void RightSidebar::initialize_character_compositor() {
             frame_->back_art_layer(),
             frame_->front_art_layer(),
             character_rig->parent_path(),
-            preferred_scale,
+            display_tier_,
             {
                 .occlusion_left = static_cast<double>(
-                    frame_->layout().frame_origin_x()
+                    frame_layout_.frame_origin_x()
                 ),
                 .occlusion_top = 0.0,
-                .surface_width = frame_->layout().surface_width(),
-                .surface_height = placement.height,
+                .surface_width = frame_layout_.surface_width(),
+                .surface_height = sidebar_height_,
             },
             &character_error
         );

@@ -767,6 +767,29 @@ SidebarFrame::SidebarFrame(GtkWindow* window, SidebarFrameLayout layout)
     g_signal_connect(shadow, "resize", G_CALLBACK(on_resize), state);
 }
 
+void SidebarFrame::set_layout(SidebarFrameLayout layout) {
+    layout_ = layout;
+    if (root_ == nullptr) return;
+
+    auto* state = static_cast<FrameState*>(g_object_get_data(
+        G_OBJECT(root_),
+        "realmheart-sidebar-frame-state"
+    ));
+    if (state != nullptr) state->layout = layout_;
+
+    if (content_ != nullptr) {
+        gtk_widget_set_margin_start(
+            content_,
+            layout_.frame_origin_x() + layout_.content_inset_start
+        );
+        gtk_widget_set_margin_end(content_, layout_.content_inset_end);
+        gtk_widget_set_margin_top(content_, layout_.content_inset_top);
+        gtk_widget_set_margin_bottom(content_, layout_.content_inset_bottom);
+    }
+    gtk_widget_queue_allocate(root_);
+    gtk_widget_queue_draw(root_);
+}
+
 void SidebarFrame::set_child(GtkWidget* child) {
     if (child == nullptr || content_ != nullptr) return;
 

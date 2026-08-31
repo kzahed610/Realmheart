@@ -40,6 +40,7 @@
 #include "mana_core/ManaCoresSelector.hpp"
 
 #include <gtk/gtk.h>
+#include <gtk4-layer-shell/gtk4-layer-shell.h>
 
 #include <algorithm>
 #include <atomic>
@@ -114,7 +115,6 @@ void sidebar_input_debug(Args&&... args) {
 }
 
 constexpr int kHotspotInputCommitFrames = 30;
-constexpr int kSidebarRightMargin = 2;
 const effects::EffectId kSidebarSurfaceEffect = effects::resolve_effect(
     effects::EffectId::FadeScale,
     effects::EffectTargetType::Sidebar
@@ -128,6 +128,8 @@ struct BackdropInputSetup {
     int frames_remaining = kHotspotInputCommitFrames;
     int sidebar_top_margin = 0;
     int sidebar_height = 1;
+    int sidebar_width = sidebar::kDefaultSidebarFrameLayout.surface_width();
+    int sidebar_right_margin = sidebar::kDefaultSidebarFrameLayout.right_margin;
 };
 
 void draw_hotspot_commit_pixel(
@@ -243,11 +245,13 @@ bool apply_sidebar_backdrop_input_region(
     // Keep the fullscreen Overlay surface reactive only outside the sidebar.
     // If the backdrop is stacked above the sidebar, the carved-out region lets
     // input fall through; if it is below, the result is identical.
-    const int sidebar_width = sidebar::kDefaultSidebarFrameLayout.surface_width();
-    const int sidebar_x = std::max(width - kSidebarRightMargin - sidebar_width, 0);
+    const int sidebar_x = std::max(
+        width - setup.sidebar_right_margin - setup.sidebar_width,
+        0
+    );
     const int sidebar_y = std::clamp(setup.sidebar_top_margin, 0, height);
     const int sidebar_region_width = std::clamp(
-        sidebar_width,
+        setup.sidebar_width,
         0,
         width - sidebar_x
     );
@@ -318,6 +322,8 @@ void enforce_sidebar_backdrop_input_region(
     auto* setup = new BackdropInputSetup{};
     setup->sidebar_top_margin = placement.top_margin;
     setup->sidebar_height = placement.height;
+    setup->sidebar_width = placement.frame_layout.surface_width();
+    setup->sidebar_right_margin = placement.frame_layout.right_margin;
 
     gtk_widget_add_tick_callback(
         GTK_WIDGET(window),
@@ -1660,6 +1666,39 @@ private:
         }
     }
 
+    void apply_hotspot_geometry() {
+        if (hotspot_ == nullptr) return;
+
+        const auto placement = sidebar::sidebar_placement_for(
+            GTK_WIDGET(hotspot_)
+        );
+        if (placement.monitor_height <= 0) return;
+
+        gtk_window_set_default_size(
+            hotspot_,
+            kHotspotHitWidth,
+            placement.height
+        );
+        gtk_layer_set_margin(
+            hotspot_,
+            GTK_LAYER_SHELL_EDGE_TOP,
+            placement.top_margin
+        );
+        if (hotspot_button_ != nullptr) {
+            gtk_widget_set_size_request(
+                hotspot_button_,
+                kHotspotHitWidth,
+                placement.height
+            );
+        }
+        if (hotspot_commit_pixel_ != nullptr) {
+            gtk_drawing_area_set_content_height(
+                GTK_DRAWING_AREA(hotspot_commit_pixel_),
+                placement.height
+            );
+        }
+    }
+
     void ensure_core_initialized() {
         if (!theme_styles_) {
             theme_styles_ = std::make_unique<ThemeStyles>(theme_service_);
@@ -1728,6 +1767,14 @@ private:
             spec.anchor_bottom = false;
             spec.margin_top = placement.top_margin;
             apply_layer_surface(hotspot_, spec);
+            g_signal_connect(
+                hotspot_,
+                "realize",
+                G_CALLBACK(+[](GtkWidget*, gpointer data) {
+                    static_cast<ShellRuntime*>(data)->apply_hotspot_geometry();
+                }),
+                this
+            );
 
             GtkWidget* button = gtk_button_new();
             gtk_button_set_has_frame(GTK_BUTTON(button), FALSE);
@@ -1739,6 +1786,7 @@ private:
                 kHotspotHitWidth,
                 placement.height
             );
+            hotspot_button_ = button;
             gtk_widget_add_css_class(button, "realmheart-right-hotspot-button");
             g_signal_connect(
                 button,
@@ -1760,6 +1808,7 @@ private:
                 GTK_DRAWING_AREA(commit_pixel),
                 placement.height
             );
+            hotspot_commit_pixel_ = commit_pixel;
             gtk_drawing_area_set_draw_func(
                 GTK_DRAWING_AREA(commit_pixel),
                 draw_hotspot_commit_pixel,
@@ -1943,6 +1992,8 @@ private:
     std::unique_ptr<services::AudioMonitor> audio_monitor_;
     std::unique_ptr<bar::VerticalBar> bar_;
     GtkWindow* hotspot_ = nullptr;
+    GtkWidget* hotspot_button_ = nullptr;
+    GtkWidget* hotspot_commit_pixel_ = nullptr;
     GtkWindow* sidebar_backdrop_ = nullptr;
     std::unique_ptr<sidebar::RightSidebar> sidebar_;
     guint right_sidebar_prewarm_id_ = 0;

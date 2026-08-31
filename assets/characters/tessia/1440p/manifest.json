@@ -1,0 +1,330 @@
+{
+  "sourceCanvas": {
+    "width": 731,
+    "height": 1968
+  },
+  "coordinateSystem": "top-left origin; offsets are source-canvas pixels",
+  "assets": {
+    "base.png": {
+      "file": "base.png",
+      "family": "base",
+      "offset": {
+        "x": 64.666667,
+        "y": 0.0
+      },
+      "size": {
+        "width": 601,
+        "height": 1872
+      }
+    },
+    "hand-top.png": {
+      "file": "hand-top.png",
+      "family": "hand-top",
+      "offset": {
+        "x": 8.666667,
+        "y": 33.333333
+      },
+      "size": {
+        "width": 164,
+        "height": 184
+      }
+    },
+    "hand-side.png": {
+      "file": "hand-side.png",
+      "family": "hand-side",
+      "offset": {
+        "x": 533.333333,
+        "y": 670.666667
+      },
+      "size": {
+        "width": 133,
+        "height": 328
+      }
+    },
+    "hair-rear.png": {
+      "file": "hair-rear.png",
+      "family": "hair-rear",
+      "offset": {
+        "x": 27.333333,
+        "y": 430.666667
+      },
+      "size": {
+        "width": 489,
+        "height": 1419
+      }
+    },
+    "hair-flow-rear.png": {
+      "file": "hair-flow-rear.png",
+      "family": "hair-rear",
+      "offset": {
+        "x": 27.333333,
+        "y": 430.666667
+      },
+      "size": {
+        "width": 489,
+        "height": 1419
+      }
+    },
+    "hair-mask-rear.png": {
+      "file": "hair-mask-rear.png",
+      "family": "hair-rear",
+      "offset": {
+        "x": 27.333333,
+        "y": 430.666667
+      },
+      "size": {
+        "width": 489,
+        "height": 1419
+      }
+    },
+    "hair-front.png": {
+      "file": "hair-front.png",
+      "family": "hair-front",
+      "offset": {
+        "x": 196.0,
+        "y": 0.0
+      },
+      "size": {
+        "width": 451,
+        "height": 1536
+      }
+    },
+    "hair-flow-front.png": {
+      "file": "hair-flow-front.png",
+      "family": "hair-front",
+      "offset": {
+        "x": 196.0,
+        "y": 0.0
+      },
+      "size": {
+        "width": 451,
+        "height": 1536
+      }
+    },
+    "hair-mask-front.png": {
+      "file": "hair-mask-front.png",
+      "family": "hair-front",
+      "offset": {
+        "x": 196.0,
+        "y": 0.0
+      },
+      "size": {
+        "width": 451,
+        "height": 1536
+      }
+    },
+    "eyes-user.png": {
+      "file": "eyes-user.png",
+      "family": "eyes",
+      "offset": {
+        "x": 390.666667,
+        "y": 234.0
+      },
+      "size": {
+        "width": 227,
+        "height": 144
+      }
+    },
+    "eyes-inward.png": {
+      "file": "eyes-inward.png",
+      "family": "eyes",
+      "offset": {
+        "x": 390.666667,
+        "y": 234.0
+      },
+      "size": {
+        "width": 227,
+        "height": 144
+      }
+    },
+    "eyes-half.png": {
+      "file": "eyes-half.png",
+      "family": "eyes",
+      "offset": {
+        "x": 390.666667,
+        "y": 234.0
+      },
+      "size": {
+        "width": 227,
+        "height": 144
+      }
+    },
+    "eyes-closed.png": {
+      "file": "eyes-closed.png",
+      "family": "eyes",
+      "offset": {
+        "x": 390.666667,
+        "y": 234.0
+      },
+      "size": {
+        "width": 227,
+        "height": 144
+      }
+    },
+    "mouth-smile.png": {
+      "file": "mouth-smile.png",
+      "family": "mouth",
+      "offset": {
+        "x": 502.0,
+        "y": 366.0
+      },
+      "size": {
+        "width": 88,
+        "height": 75
+      }
+    },
+    "mouth-curious.png": {
+      "file": "mouth-curious.png",
+      "family": "mouth",
+      "offset": {
+        "x": 502.0,
+        "y": 366.0
+      },
+      "size": {
+        "width": 88,
+        "height": 75
+      }
+    }
+  },
+  "families": {
+    "base": {
+      "members": [
+        "base.png"
+      ],
+      "crop": {
+        "x": 64.666667,
+        "y": 0.0,
+        "width": 601,
+        "height": 1872
+      },
+      "padding": {
+        "left": 5,
+        "top": 5,
+        "right": 5,
+        "bottom": 5
+      }
+    },
+    "hand-top": {
+      "members": [
+        "hand-top.png"
+      ],
+      "crop": {
+        "x": 8.666667,
+        "y": 33.333333,
+        "width": 164,
+        "height": 184
+      },
+      "padding": {
+        "left": 5,
+        "top": 5,
+        "right": 5,
+        "bottom": 5
+      }
+    },
+    "hand-side": {
+      "members": [
+        "hand-side.png"
+      ],
+      "crop": {
+        "x": 533.333333,
+        "y": 670.666667,
+        "width": 133,
+        "height": 328
+      },
+      "padding": {
+        "left": 5,
+        "top": 5,
+        "right": 5,
+        "bottom": 5
+      }
+    },
+    "hair-rear": {
+      "members": [
+        "hair-rear.png",
+        "hair-flow-rear.png",
+        "hair-mask-rear.png"
+      ],
+      "crop": {
+        "x": 27.333333,
+        "y": 430.666667,
+        "width": 489,
+        "height": 1419
+      },
+      "padding": {
+        "left": 43,
+        "top": 21,
+        "right": 43,
+        "bottom": 64
+      }
+    },
+    "hair-front": {
+      "members": [
+        "hair-front.png",
+        "hair-flow-front.png",
+        "hair-mask-front.png"
+      ],
+      "crop": {
+        "x": 196.0,
+        "y": 0.0,
+        "width": 451,
+        "height": 1536
+      },
+      "padding": {
+        "left": 32,
+        "top": 16,
+        "right": 32,
+        "bottom": 43
+      }
+    },
+    "eyes": {
+      "members": [
+        "eyes-user.png",
+        "eyes-inward.png",
+        "eyes-half.png",
+        "eyes-closed.png"
+      ],
+      "crop": {
+        "x": 390.666667,
+        "y": 234.0,
+        "width": 227,
+        "height": 144
+      },
+      "padding": {
+        "left": 4,
+        "top": 4,
+        "right": 4,
+        "bottom": 4
+      }
+    },
+    "mouth": {
+      "members": [
+        "mouth-smile.png",
+        "mouth-curious.png"
+      ],
+      "crop": {
+        "x": 502.0,
+        "y": 366.0,
+        "width": 88,
+        "height": 75
+      },
+      "padding": {
+        "left": 3,
+        "top": 3,
+        "right": 3,
+        "bottom": 3
+      }
+    }
+  },
+  "displayTier": "1440p",
+  "derivedFrom": "1080p",
+  "derivation": {
+    "sourceTier": "1080p",
+    "scale": "4/3",
+    "resampler": {
+      "visible": "LANCZOS",
+      "mask": "NEAREST",
+      "flow": "BILINEAR"
+    },
+    "rounding": "round-half-away-from-zero"
+  }
+}

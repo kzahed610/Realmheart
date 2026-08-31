@@ -35,7 +35,7 @@ public:
         GtkWidget* back_host,
         GtkWidget* front_host,
         const std::filesystem::path& character_root,
-        int preferred_scale,
+        core::DisplayTier display_tier,
         CharacterHostGeometry host_geometry,
         std::string* error_message = nullptr
     );

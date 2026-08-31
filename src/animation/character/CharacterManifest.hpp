@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/DisplayTier.hpp"
+
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -87,7 +89,7 @@ class CharacterManifest {
 public:
     static std::optional<CharacterManifest> load(
         const std::filesystem::path& character_root,
-        int preferred_scale,
+        core::DisplayTier display_tier,
         std::string* error_message = nullptr
     );
 
@@ -95,7 +97,7 @@ public:
     [[nodiscard]] const CharacterLayer* find_layer(std::string_view id) const;
 
     std::string character;
-    std::string scale_variant;
+    core::DisplayTier display_tier = core::DisplayTier::P1080;
     std::filesystem::path root;
     CharacterSize source_canvas;
     CharacterPlacement placement;

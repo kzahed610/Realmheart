@@ -1,7 +1,9 @@
 #pragma once
 
+#include "core/DisplayTier.hpp"
 #include "animation/character/CharacterHairMode.hpp"
 #include "animation/character/CharacterQualityPreset.hpp"
+#include "ui/sidebar/SidebarGeometry.hpp"
 #include "effects/core/EffectFrame.hpp"
 #include "services/KeepAwake.hpp"
 #include "services/Notifications.hpp"
@@ -32,6 +34,10 @@ namespace realmheart::ui::sidebar {
 struct SidebarPlacement {
     int height = 760;
     int top_margin = 76;
+    int monitor_width = 0;
+    int monitor_height = 0;
+    core::DisplayTier display_tier = core::DisplayTier::P1080;
+    SidebarFrameLayout frame_layout = kDefaultSidebarFrameLayout;
 };
 
 // Shared by the sidebar surface and its edge hotspot so both remain exactly
@@ -82,6 +88,8 @@ public:
 
 private:
     void update_geometry_on_realize(GtkWidget* widget);
+    static gboolean retry_geometry(gpointer raw);
+    void schedule_geometry_retry();
     struct AsyncUiState {
         std::atomic<bool> alive{true};
         std::atomic<std::uint64_t> generation{0};
@@ -138,6 +146,11 @@ private:
     bool sidebar_presented_ = false;
     bool prewarmed_ = false;
     bool prewarm_frame_active_ = false;
+    core::DisplayTier display_tier_ = core::DisplayTier::P1080;
+    SidebarFrameLayout frame_layout_ = kDefaultSidebarFrameLayout;
+    int sidebar_height_ = 760;
+    bool geometry_initialized_ = false;
+    guint geometry_retry_id_ = 0;
     guint prewarm_tick_id_ = 0;
     guint character_hide_timeout_ = 0;
     std::function<void()> character_hide_completion_;

@@ -6,6 +6,8 @@
 #include "ui/bar/BarGeometry.hpp"
 #include "ui/bar/VerticalBarModel.hpp"
 
+#include <gtk4-layer-shell/gtk4-layer-shell.h>
+
 #include <algorithm>
 #include <initializer_list>
 #include <string>
@@ -13,16 +15,6 @@
 
 namespace realmheart::ui::bar {
 namespace {
-
-int monitor_height_or_fallback(GtkWidget* widget) {
-    constexpr int fallback_height = 1080;
-    GdkMonitor* monitor = resolve_layer_surface_monitor(widget);
-    if (monitor == nullptr) return fallback_height;
-    GdkRectangle geometry{};
-    gdk_monitor_get_geometry(monitor, &geometry);
-    g_object_unref(monitor);
-    return geometry.height > 0 ? geometry.height : fallback_height;
-}
 
 void clear_box(GtkWidget* box) {
     GtkWidget* child = gtk_widget_get_first_child(box);
@@ -70,8 +62,8 @@ VerticalBar::VerticalBar(
     gtk_window_set_title(GTK_WINDOW(window_), "Realmheart Aether Spine");
     gtk_window_set_default_size(
         GTK_WINDOW(window_),
-        kVisualWidth,
-        monitor_height_or_fallback(window_)
+        geometry_.visual_width,
+        geometry_.surface_height
     );
     gtk_window_set_resizable(GTK_WINDOW(window_), FALSE);
     gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
@@ -81,6 +73,14 @@ VerticalBar::VerticalBar(
     // Windows begin at the straight 56 px rail. The curved caps deliberately
     // extend over their rounded top-left and bottom-left corner area.
     apply_layer_surface(GTK_WINDOW(window_), make_bar_surface_spec(kRailWidth));
+    g_signal_connect(
+        window_,
+        "realize",
+        G_CALLBACK(+[](GtkWidget*, gpointer data) {
+            static_cast<VerticalBar*>(data)->apply_geometry();
+        }),
+        this
+    );
 
     async_state_->owner = this;
     setup_layout();
@@ -158,6 +158,10 @@ VerticalBar::VerticalBar(
 }
 
 VerticalBar::~VerticalBar() {
+    if (geometry_retry_id_ != 0) {
+        g_source_remove(geometry_retry_id_);
+        geometry_retry_id_ = 0;
+    }
     if (refresh_timer_id_ != 0) {
         g_source_remove(refresh_timer_id_);
         refresh_timer_id_ = 0;
@@ -188,6 +192,64 @@ VerticalBar::~VerticalBar() {
     }
 }
 
+void VerticalBar::schedule_geometry_retry() {
+    if (geometry_retry_id_ != 0 || window_ == nullptr) return;
+
+    geometry_retry_id_ = g_timeout_add(
+        50,
+        +[](gpointer data) -> gboolean {
+            auto* self = static_cast<VerticalBar*>(data);
+            self->geometry_retry_id_ = 0;
+            self->apply_geometry();
+            return G_SOURCE_REMOVE;
+        },
+        this
+    );
+}
+
+void VerticalBar::apply_geometry() {
+    if (window_ == nullptr) return;
+
+    GdkMonitor* monitor = resolve_layer_surface_monitor(window_);
+    if (monitor == nullptr) {
+        schedule_geometry_retry();
+        return;
+    }
+
+    GdkRectangle monitor_geometry{};
+    gdk_monitor_get_geometry(monitor, &monitor_geometry);
+    g_object_unref(monitor);
+    if (monitor_geometry.width <= 0 || monitor_geometry.height <= 0) {
+        schedule_geometry_retry();
+        return;
+    }
+
+    const BarGeometry next_geometry = bar_geometry_for_logical_geometry(
+        monitor_geometry.width,
+        monitor_geometry.height
+    );
+    geometry_ = next_geometry;
+
+    gtk_window_set_default_size(
+        GTK_WINDOW(window_),
+        geometry_.visual_width,
+        geometry_.surface_height
+    );
+    if (content_container_ != nullptr) {
+        gtk_widget_set_size_request(
+            content_container_,
+            geometry_.rail_width,
+            geometry_.surface_height
+        );
+        gtk_widget_queue_resize(content_container_);
+    }
+    gtk_layer_set_exclusive_zone(
+        GTK_WINDOW(window_),
+        geometry_.rail_width
+    );
+    gtk_widget_queue_resize(window_);
+}
+
 void VerticalBar::setup_layout() {
     root_overlay_ = gtk_overlay_new();
     gtk_widget_add_css_class(root_overlay_, "realmheart-bar-root");
@@ -212,7 +274,11 @@ void VerticalBar::setup_layout() {
         GTK_ORIENTATION_VERTICAL
     );
     gtk_widget_add_css_class(content_container_, "realmheart-vertical-bar");
-    gtk_widget_set_size_request(content_container_, kRailWidth, -1);
+    gtk_widget_set_size_request(
+        content_container_,
+        geometry_.rail_width,
+        geometry_.surface_height
+    );
     gtk_widget_set_halign(content_container_, GTK_ALIGN_START);
     gtk_widget_set_valign(content_container_, GTK_ALIGN_FILL);
     gtk_widget_set_vexpand(content_container_, TRUE);
