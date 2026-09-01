@@ -40,6 +40,9 @@ struct LockSurface::State {
     GtkWidget* title_aura = nullptr;
     double aura_t = 0.0;
     std::function<void()> unlocked_callback;
+    std::function<void()> unlock_started_callback;
+    int monitor_index = -1;
+    bool interactive = true;
 
     std::unique_ptr<AuthPam> auth;
     std::unique_ptr<ScalesRenderer> scales;
@@ -95,10 +98,16 @@ struct LockSurface::State {
     }
 };
 
-LockSurface::LockSurface(GtkApplication* app) : state_(new State) {
+LockSurface::LockSurface(
+    GtkApplication* app,
+    int monitor_index,
+    bool interactive
+) : state_(new State) {
     state_->owner = this;
     state_->application = app;
-    state_->auth = std::make_unique<AuthPam>();
+    state_->monitor_index = monitor_index;
+    state_->interactive = interactive;
+    if (interactive) state_->auth = std::make_unique<AuthPam>();
     state_->scales = std::make_unique<ScalesRenderer>();
     state_->shaders = std::make_unique<ShaderManager>();
     state_->machine = std::make_unique<ScalesStateMachine>();
@@ -108,20 +117,29 @@ LockSurface::LockSurface(GtkApplication* app) : state_(new State) {
     gtk_window_set_decorated(state_->window, FALSE);
     gtk_window_set_resizable(state_->window, TRUE);
     gtk_widget_add_css_class(GTK_WIDGET(state_->window), "realmheart-broken-seal-window");
-    // The window must remain an input target so the password entry can
-    // receive keyboard events. Individual non-interactive children opt out.
-    apply_layer_surface(state_->window, make_lockscreen_surface_spec());
+    // Exactly one Broken Seal surface owns the keyboard. Every other output
+    // gets a visual mirror bound to its own wl_output with no input grab.
+    apply_layer_surface(
+        state_->window,
+        make_lockscreen_surface_spec(
+            monitor_index,
+            interactive ? LayerKeyboardMode::Exclusive : LayerKeyboardMode::None
+        )
+    );
 
     g_signal_connect(
         state_->window,
         "map",
         G_CALLBACK(+[](GtkWidget* widget, gpointer data) {
             auto* state = static_cast<State*>(data);
-            // Re-assert exclusive keyboard mode on map so Hyprland registers
-            // this as a lockscreen (locked=true) and blocks other binds.
+            // Only the interactive surface owns the keyboard. Mirror surfaces
+            // still cover their outputs but never compete for the exclusive
+            // key focus.
             gtk_layer_set_keyboard_mode(
                 GTK_WINDOW(widget),
-                GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE
+                state->interactive
+                    ? GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE
+                    : GTK_LAYER_SHELL_KEYBOARD_MODE_NONE
             );
             // Never advertise opacity, or the compositor skips alpha blending
             // and the surface's transparent pixels become a black rectangle.
@@ -136,7 +154,8 @@ LockSurface::LockSurface(GtkApplication* app) : state_(new State) {
             }
             // Focus the password entry once the surface is mapped so keys
             // reach it (grab_focus before map is a silent no-op).
-            if (state->entry != nullptr && gtk_widget_get_mapped(state->entry)) {
+            if (state->interactive && state->entry != nullptr &&
+                gtk_widget_get_mapped(state->entry)) {
                 gtk_widget_grab_focus(state->entry);
             }
         }),
@@ -171,6 +190,10 @@ void LockSurface::set_unlocked_callback(std::function<void()> callback) {
     if (state_ != nullptr) state_->unlocked_callback = std::move(callback);
 }
 
+void LockSurface::set_unlock_started_callback(std::function<void()> callback) {
+    if (state_ != nullptr) state_->unlock_started_callback = std::move(callback);
+}
+
 void LockSurface::setup_layout() {
     GtkWidget* overlay = gtk_overlay_new();
     gtk_widget_set_hexpand(overlay, TRUE);
@@ -188,6 +211,12 @@ void LockSurface::setup_layout() {
     gtk_widget_set_valign(entry, GTK_ALIGN_CENTER);
     gtk_widget_set_size_request(entry, 260, 44);
     gtk_widget_set_opacity(entry, 0.0);
+    if (!state_->interactive) {
+        gtk_widget_set_sensitive(entry, FALSE);
+        gtk_widget_set_can_target(entry, FALSE);
+        gtk_widget_set_focusable(entry, FALSE);
+        gtk_widget_set_visible(entry, FALSE);
+    }
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), entry);
     state_->entry = entry;
 
@@ -314,12 +343,14 @@ void LockSurface::show() {
     if (gtk_widget_get_realized(GTK_WIDGET(state_->window))) {
         gtk_layer_set_keyboard_mode(
             state_->window,
-            GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE
+            state_->interactive
+                ? GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE
+                : GTK_LAYER_SHELL_KEYBOARD_MODE_NONE
         );
     }
 
     // Show and focus the password entry.
-    if (state_->entry != nullptr) {
+    if (state_->interactive && state_->entry != nullptr) {
         gtk_widget_set_visible(state_->entry, TRUE);
         gtk_widget_grab_focus(state_->entry);
     }
@@ -374,6 +405,19 @@ void LockSurface::force_unlock() {
 bool LockSurface::visible() const noexcept {
     return state_ != nullptr && state_->window != nullptr &&
         gtk_widget_get_visible(GTK_WIDGET(state_->window));
+}
+
+bool LockSurface::mapped() const noexcept {
+    return state_ != nullptr && state_->window != nullptr &&
+        gtk_widget_get_mapped(GTK_WIDGET(state_->window));
+}
+
+bool LockSurface::interactive() const noexcept {
+    return state_ != nullptr && state_->interactive;
+}
+
+int LockSurface::monitor_index() const noexcept {
+    return state_ != nullptr ? state_->monitor_index : -1;
 }
 
 void LockSurface::start_tick() {
@@ -520,8 +564,13 @@ gboolean LockSurface::submit_password() {
             }
             std::cout << "[Lockscreen] authentication succeeded\n";
             if (state_ == nullptr) return;
+            // Start every monitor's Broken Seal erosion together. The primary
+            // surface still owns the completion callback and workspace restore.
+            if (state_->unlock_started_callback) {
+                state_->unlock_started_callback();
+            }
             // Erode the scales (Closing), then fire the callback only once
-            // the surface is hidden — the choreography reverses underneath.
+            // the interactive surface is hidden — choreography reverses underneath.
             state_->owner->hide();
         }
     );

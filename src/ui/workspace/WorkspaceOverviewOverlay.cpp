@@ -1,6 +1,8 @@
 #include "ui/workspace/WorkspaceOverviewOverlay.hpp"
+#include "ui/workspace/WorkspaceOverviewViewport.hpp"
 #include "ui/AssetResolver.hpp"
 #include "ui/LayerSurface.hpp"
+#include "ui/MonitorResolver.hpp"
 #include "ui/bar/BarGeometry.hpp"
 #include "ui/workspace/WorkspaceOverviewAssets.hpp"
 #include "ui/workspace/animation/WorkspaceMorphFrontier.hpp"
@@ -144,23 +146,13 @@ constexpr GdkMemoryFormat kCairoArgb32MemoryFormat =
     GDK_MEMORY_A8R8G8B8_PREMULTIPLIED;
 #endif
 
-std::optional<realmheart::core::DisplayTier> assigned_display_tier(
-    GtkWidget* widget
+std::optional<realmheart::core::DisplayTier> assigned_asset_tier(
+    GtkWidget* widget,
+    int monitor_index
 ) {
-    if (widget == nullptr || !gtk_widget_get_realized(widget)) return std::nullopt;
-
-    GdkMonitor* monitor = resolve_layer_surface_monitor(widget);
-    if (monitor == nullptr) return std::nullopt;
-
-    GdkRectangle geometry{};
-    gdk_monitor_get_geometry(monitor, &geometry);
-    g_object_unref(monitor);
-    if (geometry.width <= 0 || geometry.height <= 0) return std::nullopt;
-
-    return realmheart::core::display_tier_for_logical_geometry(
-        geometry.width,
-        geometry.height
-    );
+    const auto context = monitor_context_for_widget(widget, monitor_index);
+    if (!context) return std::nullopt;
+    return context->asset_tier;
 }
 
 struct Point {
@@ -2055,8 +2047,10 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(
     std::function<void(int, std::string)> activate_window,
     std::function<void(int, std::string)> move_window,
     std::function<void(bool)> set_taskbar_morph_active,
-    std::function<void(double)> set_taskbar_morph_progress
-) : activate_workspace_(std::move(activate_workspace)),
+    std::function<void(double)> set_taskbar_morph_progress,
+    int monitor_index
+) : monitor_index_(monitor_index),
+    activate_workspace_(std::move(activate_workspace)),
     activate_window_(std::move(activate_window)),
     move_window_(std::move(move_window)),
     set_taskbar_morph_active_(std::move(set_taskbar_morph_active)),
@@ -2104,6 +2098,7 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(
     // -1 asks layer-shell to use the full output, including reserved edges.
     spec.exclusive_zone = -1;
     spec.margin_left = 0;
+    spec.monitor_index = monitor_index_;
     apply_layer_surface(window_, spec);
 
     canvas_ = overview_canvas_new(
@@ -2470,9 +2465,10 @@ void WorkspaceOverviewOverlay::try_begin_morph_shader() noexcept {
         return;
     }
 
-    const double scale_x = static_cast<double>(width) / kReferenceWidth;
-    const double scale_y = static_cast<double>(height) / kReferenceHeight;
-    const auto layout = morph_layout(scale_x, scale_y);
+    const auto viewport = workspace_overview_viewport_transform(
+        width, height, kReferenceWidth, kReferenceHeight
+    );
+    const auto layout = morph_layout(viewport.scale, viewport.scale);
     const auto geometry = animation::build_workspace_morph_shader_geometry(
         layout
     );
@@ -2513,9 +2509,10 @@ void WorkspaceOverviewOverlay::update_morph_shader() noexcept {
     const int height = gtk_widget_get_height(canvas_);
     if (width <= 0 || height <= 0) return;
 
-    const double scale_x = static_cast<double>(width) / kReferenceWidth;
-    const double scale_y = static_cast<double>(height) / kReferenceHeight;
-    const auto layout = morph_layout(scale_x, scale_y);
+    const auto viewport = workspace_overview_viewport_transform(
+        width, height, kReferenceWidth, kReferenceHeight
+    );
+    const auto layout = morph_layout(viewport.scale, viewport.scale);
     const auto frame = animation::sample_workspace_morph_frame(
         layout,
         morph_timeline_.progress()
@@ -3762,14 +3759,17 @@ void WorkspaceOverviewOverlay::snapshot(
         gtk_snapshot_append_color(snapshot, &black, &widget_bounds);
     }
 
-    const double scale_x = static_cast<double>(width) / kReferenceWidth;
-    const double scale_y = static_cast<double>(height) / kReferenceHeight;
+    const auto viewport = workspace_overview_viewport_transform(
+        width, height, kReferenceWidth, kReferenceHeight
+    );
+    const double scale_x = viewport.scale;
+    const double scale_y = viewport.scale;
 
     gtk_snapshot_save(snapshot);
     gtk_snapshot_scale(
         snapshot,
-        static_cast<float>(scale_x),
-        static_cast<float>(scale_y)
+        static_cast<float>(viewport.scale),
+        static_cast<float>(viewport.scale)
     );
 
     const graphene_rect_t stage_bounds = GRAPHENE_RECT_INIT(
@@ -4498,10 +4498,11 @@ void WorkspaceOverviewOverlay::handle_drag_begin(double x, double y) {
     const int height = gtk_widget_get_height(canvas_);
     if (width <= 0 || height <= 0) return;
 
-    const double scale_x = static_cast<double>(width) / kReferenceWidth;
-    const double scale_y = static_cast<double>(height) / kReferenceHeight;
-    drag_card_.start_x = x / scale_x;
-    drag_card_.start_y = y / scale_y;
+    const auto viewport = workspace_overview_viewport_transform(
+        width, height, kReferenceWidth, kReferenceHeight
+    );
+    drag_card_.start_x = viewport.to_reference_x(x);
+    drag_card_.start_y = viewport.to_reference_y(y);
     drag_card_.current_x = drag_card_.start_x;
     drag_card_.current_y = drag_card_.start_y;
 
@@ -4623,10 +4624,12 @@ void WorkspaceOverviewOverlay::handle_drag_update(
         gtk_widget_set_cursor_from_name(canvas_, "grabbing");
     }
 
-    const double scale_x = static_cast<double>(width) / kReferenceWidth;
-    const double scale_y = static_cast<double>(height) / kReferenceHeight;
-    drag_card_.current_x = drag_card_.start_x + offset_x / scale_x;
-    drag_card_.current_y = drag_card_.start_y + offset_y / scale_y;
+    const auto viewport = workspace_overview_viewport_transform(
+        width, height, kReferenceWidth, kReferenceHeight
+    );
+    const double scale_x = viewport.scale;
+    drag_card_.current_x = drag_card_.start_x + offset_x / viewport.scale;
+    drag_card_.current_y = drag_card_.start_y + offset_y / viewport.scale;
 
     const bool over_taskbar =
         drag_card_.current_x * scale_x < static_cast<double>(taskbar_visual_width());
@@ -4681,14 +4684,11 @@ void WorkspaceOverviewOverlay::handle_drag_end(
 
     const int width = gtk_widget_get_width(canvas_);
     const int height = gtk_widget_get_height(canvas_);
-    const double scale_x = width > 0
-        ? static_cast<double>(width) / kReferenceWidth
-        : 1.0;
-    const double scale_y = height > 0
-        ? static_cast<double>(height) / kReferenceHeight
-        : 1.0;
-    const double end_x = drag_card_.start_x * scale_x + offset_x;
-    const double end_y = drag_card_.start_y * scale_y + offset_y;
+    const auto viewport = workspace_overview_viewport_transform(
+        width, height, kReferenceWidth, kReferenceHeight
+    );
+    const double end_x = viewport.to_widget_x(drag_card_.start_x) + offset_x;
+    const double end_y = viewport.to_widget_y(drag_card_.start_y) + offset_y;
     reset_drag();
     if (distance < kCardDragThresholdPixels) {
         handle_primary_click(end_x, end_y);
@@ -4702,10 +4702,11 @@ void WorkspaceOverviewOverlay::handle_primary_click(double x, double y) {
     const int height = gtk_widget_get_height(canvas_);
     if (width <= 0 || height <= 0) return;
 
-    const double scale_x = static_cast<double>(width) / kReferenceWidth;
-    const double scale_y = static_cast<double>(height) / kReferenceHeight;
-    const double reference_x = x / scale_x;
-    const double reference_y = y / scale_y - viewport_visual_offset();
+    const auto viewport = workspace_overview_viewport_transform(
+        width, height, kReferenceWidth, kReferenceHeight
+    );
+    const double reference_x = viewport.to_reference_x(x);
+    const double reference_y = viewport.to_reference_y(y) - viewport_visual_offset();
     const auto tops = realm_tops(displayed_heights_);
 
     if (overflow_workspace_id_ != 0 && overflow_animation_progress_ > 0.55) {
@@ -4789,10 +4790,11 @@ void WorkspaceOverviewOverlay::handle_hover(double x, double y) {
     const int height = gtk_widget_get_height(canvas_);
     if (width <= 0 || height <= 0) return;
 
-    const double scale_x = static_cast<double>(width) / kReferenceWidth;
-    const double scale_y = static_cast<double>(height) / kReferenceHeight;
-    const double reference_x = x / scale_x;
-    const double reference_y = y / scale_y - viewport_visual_offset();
+    const auto viewport = workspace_overview_viewport_transform(
+        width, height, kReferenceWidth, kReferenceHeight
+    );
+    const double reference_x = viewport.to_reference_x(x);
+    const double reference_y = viewport.to_reference_y(y) - viewport_visual_offset();
     const auto card = hit_realm_card(
         reference_x,
         reference_y,
@@ -4818,8 +4820,9 @@ void WorkspaceOverviewOverlay::handle_hover(double x, double y) {
 }
 
 bool WorkspaceOverviewOverlay::ensure_assets() {
-    const auto selected_tier = assigned_display_tier(
-        window_ != nullptr ? GTK_WIDGET(window_) : nullptr
+    const auto selected_tier = assigned_asset_tier(
+        window_ != nullptr ? GTK_WIDGET(window_) : nullptr,
+        monitor_index_
     );
     if (!selected_tier) {
         asset_error_ = "Workspace overview assigned monitor is unavailable";

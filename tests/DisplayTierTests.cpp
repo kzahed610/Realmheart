@@ -34,6 +34,33 @@ void test_supported_logical_resolutions_select_explicit_tiers() {
     );
 }
 
+void test_aspect_ratio_and_rotation_do_not_inflate_density_tier() {
+    require(
+        display_tier_for_logical_geometry(3440, 1440) == DisplayTier::P1440,
+        "3440x1440 ultrawide must use the 1440p tier"
+    );
+    require(
+        display_tier_for_logical_geometry(5120, 1440) == DisplayTier::P1440,
+        "5120x1440 super-ultrawide must use the 1440p tier"
+    );
+    require(
+        display_tier_for_logical_geometry(1080, 1920) == DisplayTier::P1080,
+        "rotated 1080p must preserve the 1080p density tier"
+    );
+    require(
+        display_tier_for_logical_geometry(1440, 2560) == DisplayTier::P1440,
+        "rotated 1440p must preserve the 1440p density tier"
+    );
+    require(
+        display_tier_for_logical_geometry(1920, 1200) == DisplayTier::P1080,
+        "1920x1200 must stay on the nearest 1080p density contract"
+    );
+    require(
+        display_tier_for_logical_geometry(2560, 1600) == DisplayTier::P1440,
+        "2560x1600 must stay on the nearest 1440p density contract"
+    );
+}
+
 void test_invalid_geometry_falls_back_to_1080p() {
     require(
         display_tier_for_logical_geometry(0, 0) == DisplayTier::P1080,
@@ -81,6 +108,7 @@ void test_raster_dimension_rounding_is_deterministic() {
 
 int main() {
     test_supported_logical_resolutions_select_explicit_tiers();
+    test_aspect_ratio_and_rotation_do_not_inflate_density_tier();
     test_invalid_geometry_falls_back_to_1080p();
     test_specs_expose_stable_runtime_directory_and_scale();
     test_raster_dimension_rounding_is_deterministic();

@@ -1,6 +1,7 @@
 #include "ui/powermenu/PowerMenuOverlay.hpp"
 
 #include "ui/LayerSurface.hpp"
+#include "ui/MonitorResolver.hpp"
 #include "ui/powermenu/PowerMenuControls.hpp"
 #include "ui/powermenu/PowerMenuScene.hpp"
 
@@ -88,7 +89,7 @@ bool apply_full_input_region(GtkWidget* widget) {
 
 } // namespace
 
-PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions)
+PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions, int monitor_index)
     : actions_(std::move(actions)) {
     window_ = GTK_WINDOW(gtk_application_window_new(app));
     gtk_window_set_title(window_, "Realmheart Power Menu");
@@ -105,6 +106,7 @@ PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions
     spec.anchor_right = true;
     spec.anchor_top = true;
     spec.anchor_bottom = true;
+    spec.monitor_index = monitor_index;
     apply_layer_surface(window_, spec);
     gtk_layer_set_exclusive_zone(window_, -1);
 
@@ -133,13 +135,27 @@ PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions
     gtk_widget_set_hexpand(root, TRUE);
     gtk_widget_set_vexpand(root, TRUE);
 
+    const auto monitor_context = monitor_context_for_index(
+        gdk_display_get_default(), monitor_index
+    );
+
     scene_ = std::make_unique<PowerMenuScene>();
+    if (monitor_context) {
+        scene_->set_viewport_size(
+            monitor_context->logical_width, monitor_context->logical_height
+        );
+    }
     gtk_overlay_set_child(GTK_OVERLAY(root), scene_->widget());
 
     controls_ = std::make_unique<PowerMenuControls>(
         [this](Action action) { activate(action); },
         [this]() { hide(); }
     );
+    if (monitor_context) {
+        controls_->set_viewport_size(
+            monitor_context->logical_width, monitor_context->logical_height
+        );
+    }
     gtk_overlay_add_overlay(GTK_OVERLAY(root), controls_->widget());
     gtk_widget_set_opacity(controls_->widget(), 0.0);
     gtk_widget_set_sensitive(controls_->widget(), FALSE);

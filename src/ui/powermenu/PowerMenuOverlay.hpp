@@ -23,7 +23,7 @@ class PowerMenuOverlay {
 public:
     using Action = PowerMenuConfirmation::Action;
 
-    PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions);
+    PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions, int monitor_index = -1);
     ~PowerMenuOverlay();
 
     PowerMenuOverlay(const PowerMenuOverlay&) = delete;

@@ -90,4 +90,31 @@ TEST_F(WallpaperServiceTest, InvalidPersistedStateReturnsNoWallpaper) {
     EXPECT_EQ(service.load_path(), std::nullopt);
 }
 
+TEST_F(WallpaperServiceTest, PerOutputPathRoundTripsIndependently) {
+    realmheart::services::WallpaperService service(state_file_);
+    const auto left = create_file("left.png");
+    const auto right = create_file("right.webp");
+
+    ASSERT_TRUE(service.persist_output_path("DP-1", left));
+    ASSERT_TRUE(service.persist_output_path("HDMI-A-1", right));
+
+    EXPECT_EQ(
+        service.load_output_path("DP-1"),
+        std::optional<std::filesystem::path>{left}
+    );
+    EXPECT_EQ(
+        service.load_output_path("HDMI-A-1"),
+        std::optional<std::filesystem::path>{right}
+    );
+    EXPECT_EQ(service.load_output_path("DP-2"), std::nullopt);
+}
+
+TEST_F(WallpaperServiceTest, EmptyOutputConnectorIsRejected) {
+    realmheart::services::WallpaperService service(state_file_);
+    const auto image = create_file("wallpaper.png");
+
+    EXPECT_FALSE(service.persist_output_path("", image));
+    EXPECT_EQ(service.load_output_path(""), std::nullopt);
+}
+
 } // namespace

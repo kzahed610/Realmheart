@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <unistd.h>
 
@@ -23,6 +24,7 @@ struct RendererState {
     guint stdin_watch_id = 0;
     double origin_x = 24.0 / 1920.0;
     double origin_y = 1048.0 / 1080.0;
+    int monitor_index = 0;
     bool close_requested = false;
 };
 
@@ -135,7 +137,8 @@ void activate(GtkApplication* application, gpointer data) {
             .logout = [state] { return state->session->logout(); },
             .reboot = [state] { return state->session->reboot(); },
             .power_off = [state] { return state->session->power_off(); },
-        }
+        },
+        state->monitor_index
     );
     state->overlay->set_closed_callback([state] {
         if (state->application != nullptr) {
@@ -148,7 +151,7 @@ void activate(GtkApplication* application, gpointer data) {
 
 void print_usage() {
     std::cerr << "Usage: realmheart-power-menu-renderer "
-              << "[--origin-x 0..1] [--origin-y 0..1]\n";
+              << "[--monitor-index N] [--origin-x 0..1] [--origin-y 0..1]\n";
 }
 
 } // namespace
@@ -157,6 +160,17 @@ int main(int argc, char** argv) {
     RendererState state;
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument = argv[index];
+        if (argument == "--monitor-index") {
+            if (index + 1 >= argc) { print_usage(); return 2; }
+            try {
+                state.monitor_index = std::max(std::stoi(argv[++index]), 0);
+            } catch (...) {
+                print_usage();
+                return 2;
+            }
+            continue;
+        }
+
         double* destination = nullptr;
         if (argument == "--origin-x") destination = &state.origin_x;
         else if (argument == "--origin-y") destination = &state.origin_y;

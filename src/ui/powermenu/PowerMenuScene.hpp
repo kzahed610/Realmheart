@@ -27,6 +27,7 @@ public:
     [[nodiscard]] bool ready() const;
     [[nodiscard]] const std::string& error_message() const;
     void set_visibility_callback(std::function<void(double)> callback);
+    void set_viewport_size(int logical_width, int logical_height);
     void present(double normalized_origin_x, double normalized_origin_y);
     void dismiss(std::function<void()> on_hidden);
     void hide_immediately();
@@ -49,6 +50,7 @@ private:
     void start_media_playback() noexcept;
     void pause_media_playback() noexcept;
     void sync_media_widgets() noexcept;
+    void apply_media_geometry() noexcept;
     [[nodiscard]] bool live_frame_ready() const noexcept;
     void refresh_opening_ripple_source() noexcept;
     void arm_live_handoff() noexcept;
@@ -93,6 +95,9 @@ private:
     gint64 handoff_started_us_ = 0;
     gint64 last_ripple_media_timestamp_us_ = -1;
     bool final_ripple_frame_requested_ = false;
+    int viewport_width_ = 1920;
+    int viewport_height_ = 1080;
+    double media_vertical_anchor_ = 0.5;
 };
 
 } // namespace realmheart::ui::powermenu

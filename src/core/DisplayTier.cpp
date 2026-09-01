@@ -1,5 +1,6 @@
 #include "core/DisplayTier.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace realmheart::core {
@@ -7,16 +8,26 @@ namespace {
 
 constexpr int kP1080Height = 1080;
 constexpr int kP1440Height = 1440;
+constexpr int kP4KHeight = 2160;
+constexpr int kP1080To1440Midpoint = (kP1080Height + kP1440Height) / 2;
+constexpr int kP1440To4KMidpoint = (kP1440Height + kP4KHeight) / 2;
 
 } // namespace
 
 DisplayTier display_tier_for_logical_geometry(int width, int height) noexcept {
-    if (width <= 0 || height <= 0 || height <= kP1080Height) {
-        return DisplayTier::P1080;
-    }
-    if (height <= kP1440Height) {
-        return DisplayTier::P1440;
-    }
+    if (width <= 0 || height <= 0) return DisplayTier::P1080;
+
+    // Density/layout tiers follow the monitor's short edge rather than its raw
+    // height. This preserves the same UI density when a 16:9 monitor is rotated
+    // to portrait, while ultrawides/super-ultrawides with the same vertical
+    // density remain in the same tier as their 16:9 counterparts.
+    const int short_edge = std::min(width, height);
+    // Snap to the nearest authored density family rather than treating every
+    // value above 1080 as QHD. This keeps common 16:10 / fractionally-scaled
+    // logical viewports (for example 1920x1200) on the visually-nearest 1080p
+    // contract while still mapping 1440/1600-class displays to P1440.
+    if (short_edge <= kP1080To1440Midpoint) return DisplayTier::P1080;
+    if (short_edge <= kP1440To4KMidpoint) return DisplayTier::P1440;
     return DisplayTier::P4K;
 }
 

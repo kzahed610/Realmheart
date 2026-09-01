@@ -75,15 +75,17 @@ GdkMonitor* resolve_layer_surface_monitor(
 
 namespace {
 
-void apply_layer_surface_monitor(GtkWindow* window, int requested_index) {
-    if (window == nullptr) return;
+bool apply_layer_surface_monitor(GtkWindow* window, int requested_index) {
+    if (window == nullptr) return false;
     if (GdkMonitor* monitor = resolve_layer_surface_monitor(
             GTK_WIDGET(window),
             requested_index
         )) {
         gtk_layer_set_monitor(window, monitor);
         g_object_unref(monitor);
+        return true;
     }
+    return false;
 }
 
 void apply_layer_surface_monitor_on_realize(GtkWidget* widget, gpointer data) {
@@ -104,11 +106,12 @@ LayerSurfaceSpec make_bar_surface_spec(int width) {
     return spec;
 }
 
-LayerSurfaceSpec make_wallpaper_surface_spec() {
+LayerSurfaceSpec make_wallpaper_surface_spec(int monitor_index) {
     LayerSurfaceSpec spec;
     spec.surface_namespace = "realmheart-wallpaper";
     spec.layer = LayerSurfaceLevel::Background;
     spec.keyboard_mode = LayerKeyboardMode::None;
+    spec.monitor_index = monitor_index;
     spec.anchor_left = true;
     spec.anchor_right = true;
     spec.anchor_top = true;
@@ -139,17 +142,25 @@ LayerSurfaceSpec make_test_surface_spec() {
     return spec;
 }
 
-LayerSurfaceSpec make_lockscreen_surface_spec() {
+LayerSurfaceSpec make_lockscreen_surface_spec(
+    int monitor_index,
+    LayerKeyboardMode keyboard_mode
+) {
     LayerSurfaceSpec spec;
     spec.surface_namespace = "realmheart-broken_seal";
     spec.layer = LayerSurfaceLevel::Overlay;
-    spec.keyboard_mode = LayerKeyboardMode::Exclusive;
+    spec.keyboard_mode = keyboard_mode;
+    spec.monitor_index = monitor_index;
     spec.anchor_left = true;
     spec.anchor_right = true;
     spec.anchor_top = true;
     spec.anchor_bottom = true;
     spec.exclusive_zone = -1;
     return spec;
+}
+
+bool set_layer_surface_monitor(GtkWindow* window, int requested_index) {
+    return apply_layer_surface_monitor(window, requested_index);
 }
 
 void set_layer_surface_level(GtkWindow* window, LayerSurfaceLevel layer) {

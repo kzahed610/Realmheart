@@ -5,7 +5,12 @@ namespace realmheart::ui::wallpaper {
 
 class WallpaperSurface {
 public:
-    WallpaperSurface(GtkApplication* application, GdkMonitor* monitor, GdkPaintable* initial_paintable = nullptr);
+    WallpaperSurface(
+        GtkApplication* application,
+        GdkMonitor* monitor,
+        int monitor_index,
+        GdkPaintable* initial_paintable = nullptr
+    );
     ~WallpaperSurface();
 
     WallpaperSurface(const WallpaperSurface&) = delete;

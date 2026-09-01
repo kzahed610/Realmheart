@@ -800,8 +800,10 @@ LauncherOverlay::LauncherOverlay(
     GtkApplication* app,
     services::LauncherService& service,
     services::WallpaperService& wallpaper_service,
-    CommandReceiptOverlay& command_receipts
-) : service_(service),
+    CommandReceiptOverlay& command_receipts,
+    int monitor_index
+) : monitor_index_(monitor_index),
+    service_(service),
     wallpaper_service_(wallpaper_service),
     command_receipts_(command_receipts) {
     clipboard_async_state_ = std::make_shared<ClipboardAsyncState>();
@@ -898,6 +900,7 @@ void LauncherOverlay::setup_window() {
     spec.anchor_bottom = true;
     spec.anchor_left = true;
     spec.anchor_right = true;
+    spec.monitor_index = monitor_index_;
     apply_layer_surface(window_, spec);
 
     gtk_layer_set_keyboard_mode(window_, GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE);
@@ -926,7 +929,7 @@ void LauncherOverlay::schedule_geometry_retry() {
 void LauncherOverlay::apply_display_geometry() {
     if (window_ == nullptr || !gtk_widget_get_realized(GTK_WIDGET(window_))) return;
 
-    GdkMonitor* monitor = resolve_layer_surface_monitor(GTK_WIDGET(window_));
+    GdkMonitor* monitor = resolve_layer_surface_monitor(GTK_WIDGET(window_), monitor_index_);
     if (monitor == nullptr) {
         schedule_geometry_retry();
         return;

@@ -1,4 +1,5 @@
 #include "ui/powermenu/animation/PowerMenuRippleRenderer.hpp"
+#include "ui/powermenu/PowerMenuMediaGeometry.hpp"
 
 #include "effects/core/ShaderSource.hpp"
 
@@ -150,6 +151,9 @@ struct PowerMenuRippleRenderer::State {
     std::vector<std::uint8_t> source_pixels;
     int source_width = 0;
     int source_height = 0;
+    int viewport_width = 1920;
+    int viewport_height = 1080;
+    float vertical_anchor = 0.5F;
     bool source_upload_pending = false;
 
     GLuint program = 0;
@@ -274,8 +278,44 @@ struct PowerMenuRippleRenderer::State {
             return false;
         }
 
-        source_width = width;
-        source_height = height;
+        // The shader samples the captured texture across the full GL viewport.
+        // Crop the source to the viewport aspect *before* upload so a 16:9
+        // poster/video is never stretched during an ultrawide ripple. Match
+        // the live GtkPicture composition: horizontal crops are centred, while
+        // ultrawide vertical crops are biased toward the authored upper frame.
+        const auto crop = power_menu_cover_crop(
+            width,
+            height,
+            viewport_width,
+            viewport_height,
+            static_cast<double>(vertical_anchor)
+        );
+
+        if (crop.x != 0 || crop.y != 0 || crop.width != width ||
+            crop.height != height) {
+            std::vector<std::uint8_t> cropped(
+                static_cast<std::size_t>(crop.width) *
+                static_cast<std::size_t>(crop.height) * kBytesPerPixel
+            );
+            const std::size_t source_stride =
+                static_cast<std::size_t>(width) * kBytesPerPixel;
+            const std::size_t crop_stride =
+                static_cast<std::size_t>(crop.width) * kBytesPerPixel;
+            for (int row = 0; row < crop.height; ++row) {
+                const auto source_offset =
+                    static_cast<std::size_t>(crop.y + row) * source_stride +
+                    static_cast<std::size_t>(crop.x) * kBytesPerPixel;
+                std::copy_n(
+                    source_pixels.data() + source_offset,
+                    crop_stride,
+                    cropped.data() + static_cast<std::size_t>(row) * crop_stride
+                );
+            }
+            source_pixels.swap(cropped);
+        }
+
+        source_width = crop.width;
+        source_height = crop.height;
         source_upload_pending = true;
         return true;
     }
@@ -510,6 +550,17 @@ bool PowerMenuRippleRenderer::active() const noexcept {
 
 bool PowerMenuRippleRenderer::frame_ready() const noexcept {
     return state_ != nullptr && state_->active && state_->frame_ready;
+}
+
+void PowerMenuRippleRenderer::set_viewport_geometry(
+    int logical_width,
+    int logical_height,
+    double vertical_anchor
+) noexcept {
+    if (state_ == nullptr) return;
+    state_->viewport_width = std::max(logical_width, 1);
+    state_->viewport_height = std::max(logical_height, 1);
+    state_->vertical_anchor = sanitize_unit(vertical_anchor, 0.5F);
 }
 
 bool PowerMenuRippleRenderer::begin(

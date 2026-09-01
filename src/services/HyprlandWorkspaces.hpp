@@ -33,12 +33,26 @@ struct WorkspaceSnapshot {
 class HyprlandWorkspaces {
 public:
     static WorkspaceSnapshot read(const realmheart::core::CommandOptions& options = {});
+    static WorkspaceSnapshot read_for_monitor(
+        std::string_view monitor_name,
+        const realmheart::core::CommandOptions& options = {}
+    );
     static bool switch_to(
         int workspace_id,
         const realmheart::core::CommandOptions& options = {}
     );
+    static bool switch_to_on_monitor(
+        int workspace_id,
+        std::string_view monitor_name,
+        const realmheart::core::CommandOptions& options = {}
+    );
     static bool switch_to_named(
         std::string_view workspace_name,
+        const realmheart::core::CommandOptions& options = {}
+    );
+    static bool switch_to_named_on_monitor(
+        std::string_view workspace_name,
+        std::string_view monitor_name,
         const realmheart::core::CommandOptions& options = {}
     );
     // Enter a named Hyprland submap ("reset" returns to the default map).
@@ -54,6 +68,12 @@ public:
     );
     static WorkspaceSnapshot parse(
         std::string_view active_json,
+        std::string_view workspaces_json,
+        std::string_view clients_json = "[]"
+    );
+    static WorkspaceSnapshot parse_for_monitor(
+        std::string_view monitor_name,
+        std::string_view monitors_json,
         std::string_view workspaces_json,
         std::string_view clients_json = "[]"
     );

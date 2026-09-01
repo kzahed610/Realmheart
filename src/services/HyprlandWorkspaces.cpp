@@ -58,6 +58,34 @@ bool HyprlandWorkspaces::switch_to(
     return result.succeeded() && result.output.find("error:") == std::string::npos;
 }
 
+bool HyprlandWorkspaces::switch_to_on_monitor(
+    int workspace_id,
+    std::string_view monitor_name,
+    const realmheart::core::CommandOptions& options
+) {
+    if (monitor_name.empty()) return switch_to(workspace_id, options);
+    if (workspace_id <= 0 || !realmheart::core::command_exists("hyprctl")) return false;
+
+    const std::string focus_dispatcher =
+        "hl.dsp.focus({ monitor = " + lua_string_literal(monitor_name) + " })";
+    const auto focused = realmheart::core::run_capture(
+        {"hyprctl", "dispatch", focus_dispatcher},
+        options
+    );
+    if (!focused.succeeded() || focused.output.find("error:") != std::string::npos) {
+        return false;
+    }
+    const std::string workspace_dispatcher =
+        "hl.dsp.focus({ workspace = " + std::to_string(workspace_id) +
+        ", on_current_monitor = true })";
+    const auto workspace_result = realmheart::core::run_capture(
+        {"hyprctl", "dispatch", workspace_dispatcher},
+        options
+    );
+    return workspace_result.succeeded() &&
+        workspace_result.output.find("error:") == std::string::npos;
+}
+
 bool HyprlandWorkspaces::switch_to_named(
     std::string_view workspace_name,
     const realmheart::core::CommandOptions& options
@@ -82,6 +110,37 @@ bool HyprlandWorkspaces::switch_to_named(
     );
     return result.succeeded() &&
         result.output.find("error:") == std::string::npos;
+}
+
+bool HyprlandWorkspaces::switch_to_named_on_monitor(
+    std::string_view workspace_name,
+    std::string_view monitor_name,
+    const realmheart::core::CommandOptions& options
+) {
+    if (monitor_name.empty()) return switch_to_named(workspace_name, options);
+    if (workspace_name.empty() || !realmheart::core::command_exists("hyprctl")) {
+        return false;
+    }
+
+    const std::string focus_dispatcher =
+        "hl.dsp.focus({ monitor = " + lua_string_literal(monitor_name) + " })";
+    const auto focused = realmheart::core::run_capture(
+        {"hyprctl", "dispatch", focus_dispatcher},
+        options
+    );
+    if (!focused.succeeded() || focused.output.find("error:") != std::string::npos) {
+        return false;
+    }
+    const std::string workspace = "name:" + std::string(workspace_name);
+    const std::string workspace_dispatcher =
+        "hl.dsp.focus({ workspace = " + lua_string_literal(workspace) +
+        ", on_current_monitor = true })";
+    const auto workspace_result = realmheart::core::run_capture(
+        {"hyprctl", "dispatch", workspace_dispatcher},
+        options
+    );
+    return workspace_result.succeeded() &&
+        workspace_result.output.find("error:") == std::string::npos;
 }
 
 bool HyprlandWorkspaces::set_submap(
@@ -163,6 +222,52 @@ WorkspaceSnapshot HyprlandWorkspaces::read(const realmheart::core::CommandOption
             : std::string_view("[]");
 
     return parse(active.output, workspace_result.output, clients_json);
+}
+
+WorkspaceSnapshot HyprlandWorkspaces::read_for_monitor(
+    std::string_view monitor_name,
+    const realmheart::core::CommandOptions& options
+) {
+    if (monitor_name.empty()) return read(options);
+    if (!realmheart::core::command_exists("hyprctl")) {
+        return unavailable("hyprctl not found");
+    }
+
+    const auto monitors_result = realmheart::core::run_capture(
+        {"hyprctl", "monitors", "-j"}, options
+    );
+    if (!monitors_result.succeeded() || monitors_result.output.empty() ||
+        monitors_result.truncated) {
+        return unavailable(realmheart::core::command_failure_detail(
+            monitors_result, "hyprctl monitors failed"
+        ));
+    }
+
+    const auto workspace_result = realmheart::core::run_capture(
+        {"hyprctl", "workspaces", "-j"}, options
+    );
+    if (!workspace_result.succeeded() || workspace_result.output.empty() ||
+        workspace_result.truncated) {
+        return unavailable(realmheart::core::command_failure_detail(
+            workspace_result, "hyprctl workspaces failed"
+        ));
+    }
+
+    const auto clients_result = realmheart::core::run_capture(
+        {"hyprctl", "clients", "-j"}, options
+    );
+    const std::string_view clients_json =
+        clients_result.succeeded() && !clients_result.output.empty() &&
+        !clients_result.truncated
+            ? std::string_view(clients_result.output)
+            : std::string_view("[]");
+
+    return parse_for_monitor(
+        monitor_name,
+        monitors_result.output,
+        workspace_result.output,
+        clients_json
+    );
 }
 
 WorkspaceSnapshot HyprlandWorkspaces::parse(
@@ -247,6 +352,44 @@ WorkspaceSnapshot HyprlandWorkspaces::parse(
         return snapshot;
     } catch (const json::exception&) {
         return unavailable("unable to parse Hyprland workspace JSON");
+    }
+}
+
+WorkspaceSnapshot HyprlandWorkspaces::parse_for_monitor(
+    std::string_view monitor_name,
+    std::string_view monitors_json,
+    std::string_view workspaces_json,
+    std::string_view clients_json
+) {
+    if (monitor_name.empty()) return unavailable("monitor name is empty");
+    try {
+        const auto monitors = json::parse(monitors_json);
+        if (!monitors.is_array()) return unavailable("unable to parse monitor list");
+
+        std::optional<int> active_id;
+        for (const auto& monitor : monitors) {
+            if (!monitor.is_object() ||
+                monitor.value("name", std::string{}) != std::string(monitor_name)) {
+                continue;
+            }
+            const auto workspace = monitor.find("activeWorkspace");
+            if (workspace != monitor.end() && workspace->is_object() &&
+                workspace->contains("id") && (*workspace)["id"].is_number_integer()) {
+                active_id = (*workspace)["id"].get<int>();
+            }
+            break;
+        }
+        if (!active_id || *active_id <= 0) {
+            return unavailable("unable to resolve monitor active workspace");
+        }
+
+        return parse(
+            "{\"id\":" + std::to_string(*active_id) + "}",
+            workspaces_json,
+            clients_json
+        );
+    } catch (const json::exception&) {
+        return unavailable("unable to parse Hyprland monitor JSON");
     }
 }
 

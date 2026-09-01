@@ -47,8 +47,10 @@ VerticalBar::VerticalBar(
     std::function<void()> launch_launcher,
     std::function<void()> toggle_workspace_overview,
     std::function<void(double, double)> open_power_menu,
-    std::function<void(services::WorkspaceSnapshot)> workspace_snapshot_changed
+    std::function<void(services::WorkspaceSnapshot)> workspace_snapshot_changed,
+    int monitor_index
 ) : app_(app),
+    monitor_index_(monitor_index),
     notification_history_(notification_history),
     battery_service_(battery_service),
     media_service_(media_service),
@@ -72,7 +74,9 @@ VerticalBar::VerticalBar(
 
     // Windows begin at the profile's straight rail. The curved caps deliberately
     // extend over their rounded top-left and bottom-left corner area.
-    apply_layer_surface(GTK_WINDOW(window_), make_bar_surface_spec(geometry_.rail_width));
+    auto surface_spec = make_bar_surface_spec(geometry_.rail_width);
+    surface_spec.monitor_index = monitor_index_;
+    apply_layer_surface(GTK_WINDOW(window_), surface_spec);
     g_signal_connect(
         window_,
         "realize",
@@ -210,7 +214,7 @@ void VerticalBar::schedule_geometry_retry() {
 void VerticalBar::apply_geometry() {
     if (window_ == nullptr) return;
 
-    GdkMonitor* monitor = resolve_layer_surface_monitor(window_);
+    GdkMonitor* monitor = resolve_layer_surface_monitor(window_, monitor_index_);
     if (monitor == nullptr) {
         schedule_geometry_retry();
         return;
@@ -444,6 +448,16 @@ void VerticalBar::setup_layout() {
     gtk_window_set_child(GTK_WINDOW(window_), root_overlay_);
 }
 
+std::string VerticalBar::assigned_monitor_connector() const {
+    if (window_ == nullptr || !gtk_widget_get_realized(window_)) return {};
+    GdkMonitor* monitor = resolve_layer_surface_monitor(window_, monitor_index_);
+    if (monitor == nullptr) return {};
+    const char* connector = gdk_monitor_get_connector(monitor);
+    std::string result = connector != nullptr ? connector : "";
+    g_object_unref(monitor);
+    return result;
+}
+
 std::pair<double, double> VerticalBar::power_menu_origin() const {
     constexpr double kFallbackOriginX = 24.0 / 1920.0;
     constexpr double kFallbackOriginY = 1048.0 / 1080.0;
@@ -461,7 +475,7 @@ std::pair<double, double> VerticalBar::power_menu_origin() const {
         return {kFallbackOriginX, kFallbackOriginY};
     }
 
-    GdkMonitor* monitor = resolve_layer_surface_monitor(window_);
+    GdkMonitor* monitor = resolve_layer_surface_monitor(window_, monitor_index_);
     if (monitor == nullptr) return {kFallbackOriginX, kFallbackOriginY};
 
     GdkRectangle geometry{};
@@ -497,10 +511,11 @@ void VerticalBar::populate_widgets() {
         app_,
         media_service_,
         media_exclusive_open,
-        media_contour_occlusion
+        media_contour_occlusion,
+        monitor_index_
     );
     system_monitor_widget_ = std::make_unique<widgets::SystemMonitorWidget>(
-        app_, system_exclusive_open
+        app_, system_exclusive_open, monitor_index_
     );
     clock_ = std::make_unique<widgets::ClockWidget>();
     battery_widget_ = std::make_unique<widgets::BatteryWidget>(exclusive_open);
@@ -730,11 +745,22 @@ void VerticalBar::activate_workspace(int workspace_id) {
     constexpr int kMinimumWorkspaceId = 1;
     if (workspace_id < kMinimumWorkspaceId) return;
 
-    // Dispatch outside GTK's main loop. hyprctl normally returns quickly, but
-    // a compositor IPC hiccup must never stall pointer handling or animation.
+    // Dispatch outside GTK's main loop. Pin the workspace switch to this bar's
+    // output so clicking a secondary-monitor rune cannot mutate whichever
+    // output happened to be focused a few milliseconds earlier.
     const auto state = async_state_;
-    static_cast<void>(realmheart::core::shared_task_executor().post([state, workspace_id] {
-        if (!services::HyprlandWorkspaces::switch_to(workspace_id)) return;
+    const std::string monitor = assigned_monitor_connector();
+    static_cast<void>(realmheart::core::shared_task_executor().post([
+        state,
+        workspace_id,
+        monitor
+    ] {
+        const bool switched = monitor.empty()
+            ? services::HyprlandWorkspaces::switch_to(workspace_id)
+            : services::HyprlandWorkspaces::switch_to_on_monitor(
+                  workspace_id, monitor
+              );
+        if (!switched) return;
         g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,
             +[](gpointer raw) -> gboolean {
@@ -756,8 +782,11 @@ void VerticalBar::request_workspace_refresh() {
         return;
     }
     const auto state = async_state_;
-    if (!realmheart::core::shared_task_executor().post([state] {
-        auto snapshot = services::HyprlandWorkspaces::read();
+    const std::string monitor = assigned_monitor_connector();
+    if (!realmheart::core::shared_task_executor().post([state, monitor] {
+        auto snapshot = monitor.empty()
+            ? services::HyprlandWorkspaces::read()
+            : services::HyprlandWorkspaces::read_for_monitor(monitor);
         struct Payload {
             std::shared_ptr<AsyncState> state;
             services::WorkspaceSnapshot snapshot;

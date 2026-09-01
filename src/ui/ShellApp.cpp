@@ -21,6 +21,7 @@
 #include "services/UtilityManager.hpp"
 #include "ui/ImageFileFilters.hpp"
 #include "ui/LayerSurface.hpp"
+#include "ui/MonitorResolver.hpp"
 #include "ui/NotesOverlay.hpp"
 #include "ui/NotificationToast.hpp"
 #include "ui/NowPlayingOverlay.hpp"
@@ -354,6 +355,18 @@ private:
         std::atomic<ShellRuntime*> owner{nullptr};
     };
 
+    struct MonitorHotspot {
+        int monitor_index = 0;
+        GtkWindow* window = nullptr;
+        GtkWidget* button = nullptr;
+        GtkWidget* commit_pixel = nullptr;
+    };
+
+    struct LockRestorePoint {
+        std::string connector;
+        int workspace_id = 0;
+    };
+
 public:
     ShellRuntime(
         GtkApplication* application,
@@ -372,7 +385,8 @@ public:
         now_playing_async_state_->owner.store(this);
 
         notification_server_.set_notification_handler([this](const auto& entry) {
-            ensure_toast_overlay();
+            const int monitor_index = invocation_monitor_index();
+            ensure_toast_overlay(monitor_index);
             toast_->show(entry, 4000);
         });
 
@@ -382,7 +396,7 @@ public:
     }
 
     ~ShellRuntime() {
-                power_menu_process_.close();
+        power_menu_process_.close();
 
         cancel_workspace_overview_prewarm();
         cancel_right_sidebar_prewarm();
@@ -392,6 +406,9 @@ public:
         runtime_async_state_->owner.store(nullptr);
         if (lock_surface_ != nullptr) {
             lock_surface_->hide_immediately();
+        }
+        for (const auto& mirror : lock_mirror_surfaces_) {
+            if (mirror != nullptr) mirror->hide_immediately();
         }
         ++lock_choreography_generation_;
         ++runtime_async_state_->volume_generation;
@@ -408,6 +425,7 @@ public:
         workspace_overview_.reset();
         launcher_overlay_.reset();
         command_receipts_.reset();
+        lock_mirror_surfaces_.clear();
         lock_surface_.reset();
         notes_overlay_.reset();
         toast_.reset();
@@ -420,17 +438,24 @@ public:
             sidebar_last_frame_time_ = 0;
         }
         sidebar_.reset();
+        secondary_bars_.clear();
         bar_.reset();
 
         if (sidebar_backdrop_ != nullptr) {
             gtk_window_destroy(sidebar_backdrop_);
             sidebar_backdrop_ = nullptr;
         }
+        destroy_monitor_hotspots();
 
-        if (hotspot_ != nullptr) {
-            gtk_window_destroy(hotspot_);
-            hotspot_ = nullptr;
+        if (monitor_rebuild_idle_id_ != 0) {
+            g_source_remove(monitor_rebuild_idle_id_);
+            monitor_rebuild_idle_id_ = 0;
         }
+        if (monitor_model_ != nullptr && monitor_model_signal_id_ != 0) {
+            g_signal_handler_disconnect(monitor_model_, monitor_model_signal_id_);
+            monitor_model_signal_id_ = 0;
+        }
+        monitor_model_ = nullptr;
 
         // Unsubscribe/remove the display-wide CSS provider while GTK is alive.
         theme_styles_.reset();
@@ -443,23 +468,58 @@ public:
         schedule_workspace_overview_prewarm();
         schedule_right_sidebar_prewarm();
         const std::string current_path = utilities_->load_wallpaper_path();
-        if (current_path.empty()) return;
-        request_wallpaper(current_path, "Unable to restore wallpaper");
+        if (current_path.empty()) {
+            // Per-output selections are independent state. They must still be
+            // restored when the legacy/global wallpaper state is absent.
+            restore_monitor_wallpapers();
+            return;
+        }
+        request_wallpaper(
+            current_path,
+            "Unable to restore wallpaper",
+            [this](bool, std::string) {
+                // Restore output-specific overrides even if the global fallback
+                // failed to decode; a valid monitor-local wallpaper should not
+                // disappear because unrelated global state is stale.
+                restore_monitor_wallpapers();
+            }
+        );
     }
 
     void toggle_character() {
-        ensure_sidebar_initialized();
+        ensure_sidebar_initialized(invocation_monitor_index());
         sidebar_->toggle_character();
     }
 
     void set_character_hair_mode(std::string_view mode_name) {
-        ensure_sidebar_initialized();
+        ensure_sidebar_initialized(invocation_monitor_index());
         static_cast<void>(sidebar_->set_character_hair_mode(mode_name));
     }
 
     void toggle_right_sidebar() {
+        toggle_right_sidebar_on_monitor(invocation_monitor_index());
+    }
+
+    void toggle_right_sidebar_on_monitor(int monitor_index) {
         cancel_right_sidebar_prewarm();
-        ensure_sidebar_initialized();
+
+        if (sidebar_ != nullptr && sidebar_monitor_index_ != monitor_index &&
+            state_.right_sidebar_visible()) {
+            gtk_widget_set_visible(sidebar_->get_window(), FALSE);
+            if (sidebar_backdrop_ != nullptr) {
+                gtk_widget_set_visible(GTK_WIDGET(sidebar_backdrop_), FALSE);
+            }
+            state_.set_right_sidebar_visible(false);
+            sidebar_transition_.snap_hidden();
+            sidebar_.reset();
+            if (sidebar_backdrop_ != nullptr) {
+                gtk_window_destroy(sidebar_backdrop_);
+                sidebar_backdrop_ = nullptr;
+            }
+        }
+
+        active_monitor_index_ = monitor_index;
+        ensure_sidebar_initialized(monitor_index);
         sidebar_->cancel_prewarm();
         const bool before = state_.right_sidebar_visible();
         state_.toggle_right_sidebar();
@@ -469,7 +529,7 @@ public:
             sidebar_transition_.close();
         }
         sidebar_input_debug(
-            "toggle_right_sidebar: ",
+            "toggle_right_sidebar[monitor=", monitor_index, "]: ",
             before ? "open" : "closed",
             " -> ",
             state_.right_sidebar_visible() ? "open" : "closed"
@@ -477,21 +537,24 @@ public:
         apply_right_sidebar_visibility();
     }
 
-    void show_osd_volume_value(double value) {
-        ensure_osd_overlay();
+    void show_osd_volume_value(double value, int monitor_index = -1) {
+        if (monitor_index < 0) monitor_index = invocation_monitor_index();
+        ensure_osd_overlay(monitor_index);
         osd_->show_volume(value);
     }
 
-    void show_osd_brightness_value(double value) {
-        ensure_osd_overlay();
+    void show_osd_brightness_value(double value, int monitor_index = -1) {
+        if (monitor_index < 0) monitor_index = invocation_monitor_index();
+        ensure_osd_overlay(monitor_index);
         osd_->show_brightness(value);
     }
 
     void show_osd_volume() {
         ensure_core_initialized();
+        const int monitor_index = invocation_monitor_index();
         const auto state = runtime_async_state_;
         const std::uint64_t generation = state->volume_generation.fetch_add(1) + 1;
-        static_cast<void>(core::shared_task_executor().post([state, generation] {
+        static_cast<void>(core::shared_task_executor().post([state, generation, monitor_index] {
             std::optional<double> percent;
             if (const auto audio = services::Audio::read_default_sink()) {
                 double volume = audio->volume;
@@ -506,6 +569,7 @@ public:
                 std::shared_ptr<RuntimeAsyncState> state;
                 std::uint64_t generation = 0;
                 std::optional<double> percent;
+                int monitor_index = 0;
             };
             g_idle_add_full(
                 G_PRIORITY_DEFAULT_IDLE,
@@ -515,11 +579,14 @@ public:
                     if (payload->state->alive.load() && owner != nullptr &&
                         payload->state->volume_generation.load() == payload->generation &&
                         payload->percent) {
-                        owner->show_osd_volume_value(*payload->percent);
+                        owner->show_osd_volume_value(
+                            *payload->percent,
+                            payload->monitor_index
+                        );
                     }
                     return G_SOURCE_REMOVE;
                 },
-                new Payload{state, generation, percent},
+                new Payload{state, generation, percent, monitor_index},
                 +[](gpointer raw) { delete static_cast<Payload*>(raw); }
             );
         }));
@@ -527,9 +594,10 @@ public:
 
     void show_osd_brightness() {
         ensure_core_initialized();
+        const int monitor_index = invocation_monitor_index();
         const auto state = runtime_async_state_;
         const std::uint64_t generation = state->brightness_generation.fetch_add(1) + 1;
-        static_cast<void>(core::shared_task_executor().post([state, generation] {
+        static_cast<void>(core::shared_task_executor().post([state, generation, monitor_index] {
             std::optional<double> percent;
             if (const auto brightness = services::Brightness::read()) {
                 percent = brightness->percent;
@@ -539,6 +607,7 @@ public:
                 std::shared_ptr<RuntimeAsyncState> state;
                 std::uint64_t generation = 0;
                 std::optional<double> percent;
+                int monitor_index = 0;
             };
             g_idle_add_full(
                 G_PRIORITY_DEFAULT_IDLE,
@@ -548,11 +617,14 @@ public:
                     if (payload->state->alive.load() && owner != nullptr &&
                         payload->state->brightness_generation.load() == payload->generation &&
                         payload->percent) {
-                        owner->show_osd_brightness_value(*payload->percent);
+                        owner->show_osd_brightness_value(
+                            *payload->percent,
+                            payload->monitor_index
+                        );
                     }
                     return G_SOURCE_REMOVE;
                 },
-                new Payload{state, generation, percent},
+                new Payload{state, generation, percent, monitor_index},
                 +[](gpointer raw) { delete static_cast<Payload*>(raw); }
             );
         }));
@@ -580,27 +652,63 @@ public:
     }
 
     void launch_launcher() {
-        ensure_launcher_initialized();
+        launch_launcher_on_monitor(invocation_monitor_index());
+    }
+
+    void launch_launcher_on_monitor(int monitor_index) {
+        active_monitor_index_ = monitor_index;
+        ensure_launcher_initialized(monitor_index);
         launcher_overlay_->toggle();
     }
 
     void launch_launcher_query(const std::string& query) {
-        ensure_launcher_initialized();
+        const int monitor_index = invocation_monitor_index();
+        active_monitor_index_ = monitor_index;
+        ensure_launcher_initialized(monitor_index);
         launcher_overlay_->show_with_query(query);
     }
 
-    void apply_workspace_snapshot(services::WorkspaceSnapshot snapshot) {
-        workspace_snapshot_ = std::move(snapshot);
-        if (workspace_overview_) {
-            workspace_overview_->set_workspace_snapshot(workspace_snapshot_);
+    [[nodiscard]] const services::WorkspaceSnapshot& workspace_snapshot_for_monitor(
+        int monitor_index
+    ) const {
+        if (monitor_index >= 0 &&
+            static_cast<std::size_t>(monitor_index) < monitor_workspace_snapshots_.size() &&
+            monitor_workspace_snapshots_[static_cast<std::size_t>(monitor_index)].available) {
+            return monitor_workspace_snapshots_[static_cast<std::size_t>(monitor_index)];
+        }
+        return workspace_snapshot_;
+    }
+
+    void apply_workspace_snapshot(
+        int monitor_index,
+        services::WorkspaceSnapshot snapshot
+    ) {
+        if (monitor_index >= 0) {
+            const std::size_t index = static_cast<std::size_t>(monitor_index);
+            if (monitor_workspace_snapshots_.size() <= index) {
+                monitor_workspace_snapshots_.resize(index + 1);
+            }
+            monitor_workspace_snapshots_[index] = snapshot;
+        }
+        workspace_snapshot_ = snapshot;
+        if (workspace_overview_ && overview_monitor_index_ == monitor_index) {
+            workspace_overview_->set_workspace_snapshot(snapshot);
         }
     }
 
     void activate_overview_workspace(int workspace_id) {
         if (workspace_id <= 0) return;
+        const std::string monitor = monitor_connector_for_index(
+            gdk_display_get_default(), overview_monitor_index_
+        );
         static_cast<void>(realmheart::core::shared_task_executor().post(
-            [workspace_id] {
-                if (!services::HyprlandWorkspaces::switch_to(workspace_id)) {
+            [workspace_id, monitor] {
+                const bool activated = monitor.empty()
+                    ? services::HyprlandWorkspaces::switch_to(workspace_id)
+                    : services::HyprlandWorkspaces::switch_to_on_monitor(
+                          workspace_id, monitor
+                      );
+                if (!activated) {
                     std::cerr
                         << "[WorkspaceOverview] unable to activate workspace "
                         << workspace_id << '\n';
@@ -615,10 +723,16 @@ public:
             return;
         }
 
+        const std::string monitor = monitor_connector_for_index(
+            gdk_display_get_default(), overview_monitor_index_
+        );
         static_cast<void>(realmheart::core::shared_task_executor().post(
-            [workspace_id, address = std::move(address)] {
-                const bool workspace_activated =
-                    services::HyprlandWorkspaces::switch_to(workspace_id);
+            [workspace_id, address = std::move(address), monitor] {
+                const bool workspace_activated = monitor.empty()
+                    ? services::HyprlandWorkspaces::switch_to(workspace_id)
+                    : services::HyprlandWorkspaces::switch_to_on_monitor(
+                          workspace_id, monitor
+                      );
                 if (services::HyprlandSession::focus_window(address)) return;
 
                 std::cerr
@@ -650,8 +764,13 @@ public:
         ));
     }
 
-    void ensure_workspace_overview() {
+    void ensure_workspace_overview(int monitor_index) {
+        if (workspace_overview_ != nullptr && overview_monitor_index_ != monitor_index) {
+            workspace_overview_->hide();
+            workspace_overview_.reset();
+        }
         if (workspace_overview_) return;
+        overview_monitor_index_ = monitor_index;
         workspace_overview_ =
             std::make_unique<workspace::WorkspaceOverviewOverlay>(
                 application_,
@@ -671,15 +790,16 @@ public:
                     );
                 },
                 [this](bool active) {
-                    if (bar_ != nullptr) {
-                        bar_->set_workspace_morph_active(active);
+                    if (auto* bar = bar_for_monitor(overview_monitor_index_)) {
+                        bar->set_workspace_morph_active(active);
                     }
                 },
                 [this](double progress) {
-                    if (bar_ != nullptr) {
-                        bar_->set_workspace_morph_progress(progress);
+                    if (auto* bar = bar_for_monitor(overview_monitor_index_)) {
+                        bar->set_workspace_morph_progress(progress);
                     }
-                }
+                },
+                monitor_index
             );
     }
 
@@ -689,8 +809,10 @@ public:
     // hidden-frame warm map keeps the surface mapped-but-invisible; measured
     // idle cost is ~0.7 MB RSS and zero GPU work when not animating.
     void prewarm_workspace_overview() {
-        ensure_workspace_overview();
-        workspace_overview_->set_workspace_snapshot(workspace_snapshot_);
+        ensure_workspace_overview(0);
+        workspace_overview_->set_workspace_snapshot(
+            workspace_snapshot_for_monitor(0)
+        );
         workspace_overview_->prewarm();
     }
 
@@ -724,7 +846,7 @@ public:
     // The backdrop is deliberately NOT mapped - its first map is cheap and a
     // fullscreen input surface has no business appearing uninvited.
     void prewarm_right_sidebar() {
-        ensure_sidebar_initialized();
+        ensure_sidebar_initialized(0);
         sidebar_->prewarm();
     }
 
@@ -752,22 +874,33 @@ public:
     }
 
     void toggle_workspace_overview() {
+        toggle_workspace_overview_on_monitor(invocation_monitor_index());
+    }
+
+    void toggle_workspace_overview_on_monitor(int monitor_index) {
         cancel_workspace_overview_prewarm();
         ensure_core_initialized();
-        ensure_workspace_overview();
+        active_monitor_index_ = monitor_index;
+        ensure_workspace_overview(monitor_index);
         // Refresh the snapshot on every toggle so a boot-time prewarm never
         // serves stale workspace data at open time.
-        workspace_overview_->set_workspace_snapshot(workspace_snapshot_);
-        workspace_overview_->set_morph_sources(
-            bar_ != nullptr
-                ? bar_->workspace_morph_sources()
-                : std::vector<workspace::animation::WorkspaceMorphSource>{}
+        workspace_overview_->set_workspace_snapshot(
+            workspace_snapshot_for_monitor(monitor_index)
         );
+        if (auto* bar = bar_for_monitor(monitor_index)) {
+            workspace_overview_->set_morph_sources(bar->workspace_morph_sources());
+        } else {
+            workspace_overview_->set_morph_sources({});
+        }
         workspace_overview_->toggle();
     }
 
     void toggle_mana_cores() {
-        if (bar_ == nullptr || !gtk_widget_get_realized(bar_->get_window())) {
+        const int monitor_index = invocation_monitor_index();
+        active_monitor_index_ = monitor_index;
+        auto* invocation_bar = bar_for_monitor(monitor_index);
+        if (invocation_bar == nullptr ||
+            !gtk_widget_get_realized(invocation_bar->get_window())) {
             if (mana_cores_deferred_toggle_count_++ >= 10) {
                 mana_cores_deferred_toggle_count_ = 0;
                 std::cerr << "[ManaCores] bar not realized after retries, aborting toggle\n";
@@ -802,9 +935,23 @@ public:
             return;
         }
 
+        const std::string monitor_connector = monitor_connector_for_index(
+            gdk_display_get_default(), monitor_index
+        );
         // No active wallpaper is fine: load_wallpapers_from_library() discovers
         // ~/Pictures/Wallpapers on its own and picks index 0 when the path is empty.
-        const std::string current_path = utilities_->load_wallpaper_path();
+        // Prefer this output's persisted override so the selector previews the
+        // wallpaper that is actually visible on the monitor where it opened.
+        std::string current_path = utilities_->load_wallpaper_path();
+        if (!monitor_connector.empty()) {
+            if (services::WallpaperService* service =
+                    utilities_->get_wallpaper_service()) {
+                if (const auto output_path =
+                        service->load_output_path(monitor_connector)) {
+                    current_path = output_path->string();
+                }
+            }
+        }
 
         // Dismiss transient shell surfaces and hide the bar
         power_menu_process_.close();
@@ -812,17 +959,20 @@ public:
         if (workspace_overview_ && workspace_overview_->visible()) {
             workspace_overview_->hide();
         }
-        if (state_.right_sidebar_visible()) toggle_right_sidebar();
+        if (state_.right_sidebar_visible()) {
+            toggle_right_sidebar_on_monitor(
+                sidebar_monitor_index_ >= 0 ? sidebar_monitor_index_ : monitor_index
+            );
+        }
 
         mana_cores_bar_was_visible_ = bar_ != nullptr && state_.bar_visible();
-        if (mana_cores_bar_was_visible_) {
-            gtk_widget_set_visible(bar_->get_window(), FALSE);
-        }
+        if (mana_cores_bar_was_visible_) hide_all_bars();
 
         mana_cores_launch_pending_ = true;
         const std::uint64_t generation = ++mana_cores_launch_generation_;
-        const int cached_workspace = workspace_snapshot_.available
-            ? workspace_snapshot_.active_id
+        const auto& monitor_workspace = workspace_snapshot_for_monitor(monitor_index);
+        const int cached_workspace = monitor_workspace.available
+            ? monitor_workspace.active_id
             : 0;
         const auto async_state = runtime_async_state_;
 
@@ -830,14 +980,28 @@ public:
             async_state,
             generation,
             cached_workspace,
-            current_path
+            current_path,
+            monitor_index,
+            monitor_connector
         ] {
-            const auto active = services::HyprlandWorkspaces::active_workspace_id();
-            const int original_workspace = active.value_or(cached_workspace);
+            int original_workspace = cached_workspace;
+            if (!monitor_connector.empty()) {
+                const auto snapshot =
+                    services::HyprlandWorkspaces::read_for_monitor(monitor_connector);
+                if (snapshot.available) original_workspace = snapshot.active_id;
+            } else if (const auto active =
+                           services::HyprlandWorkspaces::active_workspace_id()) {
+                original_workspace = *active;
+            }
+
             const bool switched = original_workspace != 0 &&
-                services::HyprlandWorkspaces::switch_to_named(
-                    kManaCoresWorkspaceName
-                );
+                (monitor_connector.empty()
+                    ? services::HyprlandWorkspaces::switch_to_named(
+                          kManaCoresWorkspaceName
+                      )
+                    : services::HyprlandWorkspaces::switch_to_named_on_monitor(
+                          kManaCoresWorkspaceName, monitor_connector
+                      ));
 
             struct Payload {
                 std::shared_ptr<RuntimeAsyncState> state;
@@ -845,6 +1009,8 @@ public:
                 std::string current_path;
                 int original_workspace = 0;
                 bool switched = false;
+                int monitor_index = 0;
+                std::string monitor_connector;
             };
 
             g_idle_add_full(
@@ -857,7 +1023,9 @@ public:
                             payload->generation,
                             std::move(payload->current_path),
                             payload->original_workspace,
-                            payload->switched
+                            payload->switched,
+                            payload->monitor_index,
+                            std::move(payload->monitor_connector)
                         );
                     }
                     return G_SOURCE_REMOVE;
@@ -868,6 +1036,8 @@ public:
                     current_path,
                     original_workspace,
                     switched,
+                    monitor_index,
+                    monitor_connector,
                 },
                 +[](gpointer raw) { delete static_cast<Payload*>(raw); }
             );
@@ -993,55 +1163,192 @@ public:
     }
 
     void toggle_notes() {
-        ensure_notes_overlay();
+        const int monitor_index = invocation_monitor_index();
+        active_monitor_index_ = monitor_index;
+        ensure_notes_overlay(monitor_index);
         notes_overlay_->toggle();
+    }
+
+    void ensure_lock_surfaces(int primary_monitor_index) {
+        GdkDisplay* display = gdk_display_get_default();
+        const int count = std::max(monitor_count(display), 1);
+        primary_monitor_index = std::clamp(primary_monitor_index, 0, count - 1);
+
+        const bool topology_matches = lock_surface_ != nullptr &&
+            lock_surface_->monitor_index() == primary_monitor_index &&
+            static_cast<int>(lock_mirror_surfaces_.size()) == count - 1;
+        if (topology_matches) return;
+
+        if (lock_surface_ != nullptr) lock_surface_->hide_immediately();
+        for (const auto& mirror : lock_mirror_surfaces_) {
+            if (mirror != nullptr) mirror->hide_immediately();
+        }
+        lock_mirror_surfaces_.clear();
+        lock_surface_.reset();
+
+        lock_surface_ = std::make_unique<lockscreen::LockSurface>(
+            application_, primary_monitor_index, true
+        );
+        lock_surface_->set_unlock_started_callback([this] {
+            for (const auto& mirror : lock_mirror_surfaces_) {
+                if (mirror != nullptr) mirror->hide();
+            }
+        });
+        lock_surface_->set_unlocked_callback([this] {
+            finish_lock_unlock();
+        });
+
+        lock_mirror_surfaces_.reserve(static_cast<std::size_t>(count - 1));
+        for (int index = 0; index < count; ++index) {
+            if (index == primary_monitor_index) continue;
+            lock_mirror_surfaces_.push_back(
+                std::make_unique<lockscreen::LockSurface>(
+                    application_, index, false
+                )
+            );
+        }
+        lock_monitor_index_ = primary_monitor_index;
+    }
+
+    [[nodiscard]] bool all_native_lock_surfaces_visible() const {
+        if (lock_surface_ == nullptr || !lock_surface_->mapped()) return false;
+        for (const auto& mirror : lock_mirror_surfaces_) {
+            if (mirror == nullptr || !mirror->mapped()) return false;
+        }
+        return true;
+    }
+
+    void hide_native_lock_surfaces_immediately() {
+        if (lock_surface_ != nullptr) lock_surface_->hide_immediately();
+        for (const auto& mirror : lock_mirror_surfaces_) {
+            if (mirror != nullptr) mirror->hide_immediately();
+        }
+    }
+
+    void fallback_to_hyprlock(std::string_view reason) {
+        if (lock_hyprlock_fallback_active_) return;
+        lock_hyprlock_fallback_active_ = true;
+        lock_choreography_pending_ = false;
+        ++lock_choreography_generation_;
+        std::cerr << "[Lockscreen] " << reason
+                  << "; falling back to hyprlock\n";
+        hide_native_lock_surfaces_immediately();
+        if (!session_->lock()) {
+            std::cerr << "[Lockscreen] unable to launch hyprlock fallback\n";
+            lock_hyprlock_fallback_active_ = false;
+            finish_lock_unlock();
+            return;
+        }
+
+        struct HyprlockWatch {
+            std::shared_ptr<RuntimeAsyncState> state;
+        };
+        g_timeout_add_full(
+            G_PRIORITY_DEFAULT,
+            500,
+            +[](gpointer raw) -> gboolean {
+                auto* watch = static_cast<HyprlockWatch*>(raw);
+                ShellRuntime* owner = watch->state->owner.load();
+                if (!watch->state->alive.load() || owner == nullptr) {
+                    return G_SOURCE_REMOVE;
+                }
+                const auto hyprlock = realmheart::core::run_capture(
+                    {"pgrep", "-x", "hyprlock"}
+                );
+                if (!hyprlock.succeeded() || hyprlock.output.find_first_not_of(
+                        " \t\n\r0123456789") != std::string::npos) {
+                    owner->finish_lock_unlock();
+                    return G_SOURCE_REMOVE;
+                }
+                return G_SOURCE_CONTINUE;
+            },
+            new HyprlockWatch{runtime_async_state_},
+            +[](gpointer raw) { delete static_cast<HyprlockWatch*>(raw); }
+        );
     }
 
     void lock_session() {
         // Ignore re-entry while already locked (SUPER+L while locked must not
         // toggle back to the desktop).
-        if (lock_surface_ != nullptr && lock_surface_->visible()) return;
-
-        // Native lockscreen. If it fails to initialize within 2s,
-        // fall back to hyprlock so the session is never left unlocked.
-        if (lock_surface_ == nullptr) {
-            lock_surface_ = std::make_unique<lockscreen::LockSurface>(application_);
-            lock_surface_->set_unlocked_callback([this] {
-                finish_lock_unlock();
-            });
+        if (lock_hyprlock_fallback_active_ || lock_choreography_pending_ ||
+            (lock_surface_ != nullptr && lock_surface_->visible())) {
+            return;
         }
 
-        // Lock choreography (mana-core style): hide the bar, switch to an
-        // empty named workspace so Hyprland's own workspace animation slides
-        // every window off-stage, and only then present the lockscreen over
-        // the bare wallpaper.
+        const int primary_monitor_index = invocation_monitor_index();
+        ensure_lock_surfaces(primary_monitor_index);
+
+        // Lock choreography (mana-core style): every output moves to its own
+        // empty named workspace, then a Broken Seal surface is mapped on every
+        // monitor. Only the invoking monitor owns password input; the others
+        // are visual mirrors, so the custom lockscreen stays Realmheart-native
+        // without competing exclusive keyboard grabs.
         lock_choreography_pending_ = true;
-        lock_surface_->hide_immediately();
+        hide_native_lock_surfaces_immediately();
+
         // Jail compositor binds BEFORE anything else: from this instant,
         // SUPER+num and friends cannot move focus to a workspace with real
-        // windows. The layer-shell keyboard grab keeps the password entry
-        // working inside the empty-bind submap.
+        // windows. The interactive layer-shell surface receives password input.
         services::HyprlandWorkspaces::set_submap(kLockSubmapName);
-        lock_choreography_workspace_ =
-            services::HyprlandWorkspaces::active_workspace_id().value_or(0);
         lock_choreography_bar_was_visible_ =
             bar_ != nullptr && state_.bar_visible();
-        if (lock_choreography_bar_was_visible_) {
-            gtk_widget_set_visible(bar_->get_window(), FALSE);
+        if (lock_choreography_bar_was_visible_) hide_all_bars();
+
+        GdkDisplay* display = gdk_display_get_default();
+        const int count = std::max(monitor_count(display), 1);
+        std::vector<std::string> connectors;
+        connectors.reserve(static_cast<std::size_t>(count));
+        for (int index = 0; index < count; ++index) {
+            connectors.push_back(monitor_connector_for_index(display, index));
         }
 
         const std::uint64_t generation = ++lock_choreography_generation_;
         const auto async_state = runtime_async_state_;
-        core::shared_task_executor().post([async_state, generation] {
-            const bool switched =
-                services::HyprlandWorkspaces::active_workspace_id().has_value() &&
-                services::HyprlandWorkspaces::switch_to_named(
-                    kLockWorkspaceName
-                );
+        const bool posted = core::shared_task_executor().post([
+            async_state,
+            generation,
+            connectors = std::move(connectors)
+        ]() mutable {
+            bool switched = true;
+            std::vector<LockRestorePoint> restore_points;
+            restore_points.reserve(connectors.size());
+
+            for (std::size_t index = 0; index < connectors.size(); ++index) {
+                const std::string& connector = connectors[index];
+                int original_workspace = 0;
+
+                if (!connector.empty()) {
+                    const auto snapshot =
+                        services::HyprlandWorkspaces::read_for_monitor(connector);
+                    if (snapshot.available) original_workspace = snapshot.active_id;
+                } else if (connectors.size() == 1) {
+                    original_workspace =
+                        services::HyprlandWorkspaces::active_workspace_id().value_or(0);
+                }
+
+                restore_points.push_back({connector, original_workspace});
+                if (original_workspace <= 0) {
+                    switched = false;
+                    continue;
+                }
+
+                const std::string workspace_name = connectors.size() == 1
+                    ? std::string{kLockWorkspaceName}
+                    : std::string{kLockWorkspaceName} + "-" +
+                        std::to_string(index);
+                const bool ok = connector.empty()
+                    ? services::HyprlandWorkspaces::switch_to_named(workspace_name)
+                    : services::HyprlandWorkspaces::switch_to_named_on_monitor(
+                          workspace_name, connector
+                      );
+                switched = switched && ok;
+            }
+
             struct Payload {
                 std::shared_ptr<RuntimeAsyncState> state;
                 std::uint64_t generation = 0;
                 bool switched = false;
+                std::vector<LockRestorePoint> restore_points;
             };
             g_idle_add_full(
                 G_PRIORITY_DEFAULT_IDLE,
@@ -1051,83 +1358,142 @@ public:
                     if (payload->state->alive.load() && owner != nullptr) {
                         owner->finish_lock_choreography(
                             payload->generation,
-                            payload->switched
+                            payload->switched,
+                            std::move(payload->restore_points)
                         );
                     }
                     return G_SOURCE_REMOVE;
                 },
-                new Payload{async_state, generation, switched},
+                new Payload{
+                    async_state,
+                    generation,
+                    switched,
+                    std::move(restore_points)
+                },
                 +[](gpointer raw) { delete static_cast<Payload*>(raw); }
             );
         });
+
+        if (!posted) {
+            lock_choreography_pending_ = false;
+            fallback_to_hyprlock("unable to queue multi-monitor lock choreography");
+        }
     }
 
-    void finish_lock_choreography(std::uint64_t generation, bool switched) {
-        if (generation != lock_choreography_generation_) {
-            return;
-        }
+    void finish_lock_choreography(
+        std::uint64_t generation,
+        bool switched,
+        std::vector<LockRestorePoint> restore_points
+    ) {
+        if (generation != lock_choreography_generation_) return;
         lock_choreography_pending_ = false;
         lock_choreography_switched_ = switched;
+        lock_restore_points_ = std::move(restore_points);
 
-        // No compositor blur by design: the lock stage shows only the
-        // wallpaper on an empty workspace — no windows, nothing to hide.
-        lock_surface_->show();
+        if (lock_topology_dirty_) {
+            fallback_to_hyprlock(
+                "monitor topology changed during Broken Seal lock choreography"
+            );
+            return;
+        }
 
-        services::SessionManager* session = session_.get();
-        lockscreen::LockSurface* surface = lock_surface_.get();
-        struct LockFallback {
-            lockscreen::LockSurface* surface;
-            services::SessionManager* session;
-        };
-        auto* fallback = new LockFallback{surface, session};
-        g_timeout_add(2000, +[](gpointer data) -> gboolean {
-            auto* fb = static_cast<LockFallback*>(data);
-            if (fb->surface == nullptr || fb->surface->visible()) {
-                delete fb;
+        if (!switched) {
+            fallback_to_hyprlock("unable to isolate every monitor workspace");
+            return;
+        }
+
+        // No compositor blur by design: every output now shows an empty lock
+        // workspace over its wallpaper. Map mirrors first, then the interactive
+        // surface last so keyboard focus deterministically lands there.
+        for (const auto& mirror : lock_mirror_surfaces_) {
+            if (mirror != nullptr) mirror->show();
+        }
+        if (lock_surface_ != nullptr) lock_surface_->show();
+
+        const auto async_state = runtime_async_state_;
+        const std::uint64_t fallback_generation = generation;
+        g_timeout_add(2000, +[](gpointer raw) -> gboolean {
+            auto* payload = static_cast<std::pair<
+                std::shared_ptr<RuntimeAsyncState>, std::uint64_t>*>(raw);
+            ShellRuntime* owner = payload->first->owner.load();
+            if (!payload->first->alive.load() || owner == nullptr ||
+                owner->lock_choreography_generation_ != payload->second) {
+                delete payload;
                 return G_SOURCE_REMOVE;
             }
-            std::cerr << "[Lockscreen] surface failed to map, falling back to hyprlock\n";
-            if (fb->session != nullptr) fb->session->lock();
-            // hyprlock's own unlock exits silently — watch for its exit so
-            // the bind jail is lifted even when the native surface lost the
-            // race. Without this the session comes back with dead keybinds.
-            g_timeout_add(500, +[](gpointer) -> gboolean {
-                const auto hyprlock = realmheart::core::run_capture(
-                    {"pgrep", "-x", "hyprlock"}
-                );
-                if (!hyprlock.succeeded() || hyprlock.output.find_first_not_of(
-                        " \t\n\r0123456789") != std::string::npos) {
-                    // pgrep failed or found no hyprlock: release the jail.
-                    services::HyprlandWorkspaces::set_submap("reset");
-                    return G_SOURCE_REMOVE;
-                }
-                return G_SOURCE_CONTINUE;
-            }, nullptr);
-            delete fb;
+            if (owner->all_native_lock_surfaces_visible()) {
+                delete payload;
+                return G_SOURCE_REMOVE;
+            }
+            owner->fallback_to_hyprlock(
+                "one or more Broken Seal monitor surfaces failed to map"
+            );
+            delete payload;
             return G_SOURCE_REMOVE;
-        }, fallback);
+        }, new std::pair<std::shared_ptr<RuntimeAsyncState>, std::uint64_t>{
+            async_state, fallback_generation
+        });
     }
 
     void finish_lock_unlock() {
-        // Reverse choreography: binds back first (the desktop is about to be
-        // visible again), then bar back, original workspace back — windows
-        // slide home on Hyprland's own animation.
+        // Reverse choreography: mirrors disappear first, binds return, then
+        // each monitor goes back to the workspace it owned before locking.
+        for (const auto& mirror : lock_mirror_surfaces_) {
+            if (mirror != nullptr) mirror->hide_immediately();
+        }
         services::HyprlandWorkspaces::set_submap("reset");
-        if (lock_choreography_switched_ && lock_choreography_workspace_ != 0) {
-            services::HyprlandWorkspaces::switch_to(lock_choreography_workspace_);
+
+        // Restore every monitor for which we captured an original workspace.
+        // This is intentionally independent of the aggregate `switched` flag:
+        // if one output failed to enter its lock workspace after another one
+        // succeeded, the successful output still has to be restored.
+        for (const auto& restore : lock_restore_points_) {
+            if (restore.workspace_id <= 0) continue;
+            if (!restore.connector.empty()) {
+                services::HyprlandWorkspaces::switch_to_on_monitor(
+                    restore.workspace_id, restore.connector
+                );
+            } else {
+                services::HyprlandWorkspaces::switch_to(restore.workspace_id);
+            }
         }
-        if (lock_choreography_bar_was_visible_ && bar_ != nullptr) {
-            gtk_widget_set_visible(bar_->get_window(), TRUE);
+        lock_restore_points_.clear();
+
+        if (lock_choreography_bar_was_visible_ && state_.bar_visible()) {
+            present_all_bars();
         }
+        lock_choreography_pending_ = false;
         lock_choreography_switched_ = false;
-        lock_choreography_workspace_ = 0;
+        lock_choreography_bar_was_visible_ = false;
+        lock_hyprlock_fallback_active_ = false;
+
+        // If the monitor model changed while Broken Seal was active, its old
+        // wl_output-bound surfaces are intentionally kept alive until the
+        // fallback/unlock completes. Drop them now so the next lock rebuilds
+        // against the new topology instead of reusing stale output bindings.
+        if (lock_topology_dirty_) {
+            hide_native_lock_surfaces_immediately();
+            lock_mirror_surfaces_.clear();
+            lock_surface_.reset();
+            lock_monitor_index_ = -1;
+            lock_topology_dirty_ = false;
+        }
     }
 
     void open_logout_menu(
         double origin_x = 24.0 / 1920.0,
         double origin_y = 1048.0 / 1080.0
     ) {
-        power_menu_process_.toggle(origin_x, origin_y);
+        power_menu_process_.toggle(invocation_monitor_index(), origin_x, origin_y);
+    }
+
+    void open_logout_menu_on_monitor(
+        int monitor_index,
+        double origin_x,
+        double origin_y
+    ) {
+        active_monitor_index_ = monitor_index;
+        power_menu_process_.toggle(monitor_index, origin_x, origin_y);
     }
 
     void quit() {
@@ -1276,7 +1642,7 @@ private:
 
         last_now_playing_identity_ = std::move(identity);
         if (!info) return;
-        ensure_now_playing_overlay();
+        ensure_now_playing_overlay(invocation_monitor_index());
         const std::string title = info->title.empty()
             ? "Unknown track"
             : info->title;
@@ -1288,7 +1654,9 @@ private:
         std::uint64_t generation,
         std::string current_path,
         int original_workspace,
-        bool switched
+        bool switched,
+        int monitor_index,
+        std::string monitor_connector
     ) {
         if (generation != mana_cores_launch_generation_) return;
         mana_cores_launch_pending_ = false;
@@ -1303,27 +1671,57 @@ private:
         if (!mana_cores_selector_) {
             mana_cores_selector_ = std::make_unique<realmheart::mana_core::ManaCoresSelector>();
         }
-        // Set dismiss callback to restore workspace + bar when selector closes
-        mana_cores_selector_->set_dismiss_callback([this, original_workspace]() {
-            handle_mana_cores_dismiss(original_workspace);
+        const wallpaper::WallpaperOutputTarget wallpaper_target{
+            monitor_index,
+            monitor_connector
+        };
+        // Set dismiss callback to restore workspace + bar when selector closes.
+        // Keep the connector in wallpaper_target before moving our local copy
+        // into the dismiss callback.
+        mana_cores_selector_->set_dismiss_callback([
+            this,
+            original_workspace,
+            monitor_connector = std::move(monitor_connector)
+        ] {
+            handle_mana_cores_dismiss(original_workspace, monitor_connector);
         });
-        // Set apply callback to commit the selected wallpaper
-        mana_cores_selector_->set_apply_callback([this](const std::string& path) {
+        // Set apply callback to commit the selected wallpaper only to the
+        // output that owns this Mana Cores session. The selector is a
+        // monitor-local surface; applying from monitor A must never mutate
+        // monitor B's wallpaper.
+        mana_cores_selector_->set_apply_callback([
+            this, wallpaper_target
+        ](const std::string& path) {
             if (wallpaper_controller_) {
-                wallpaper_controller_->prepare_wallpaper_async(
+                wallpaper_controller_->prepare_wallpaper_for_output_async(
                     std::filesystem::path(path),
-                    [this, path](bool success, std::string error_msg) {
+                    wallpaper_target,
+                    [this, path, wallpaper_target](bool success, std::string error_msg) {
                         if (!success) {
                             std::cerr << "[ManaCores] wallpaper prepare failed: " << error_msg << "\n";
                             return;
                         }
                         wallpaper_controller_->commit_prepared_wallpaper_async(
-                            [this, path](bool success, std::string error_msg) {
+                            [this, path, wallpaper_target](
+                                bool success,
+                                std::string error_msg
+                            ) {
                                 if (!success) {
                                     std::cerr << "[ManaCores] wallpaper commit failed: " << error_msg << "\n";
                                 } else {
-                                    if (services::WallpaperService* service = utilities_->get_wallpaper_service()) {
-                                        service->update_state(path);
+                                    if (services::WallpaperService* service =
+                                            utilities_->get_wallpaper_service()) {
+                                        if (!wallpaper_target.connector.empty()) {
+                                            if (!service->persist_output_path(
+                                                    wallpaper_target.connector, path
+                                                )) {
+                                                std::cerr
+                                                    << "[ManaCores] wallpaper changed, but the output-specific path could not be persisted\n";
+                                            }
+                                        } else {
+                                            std::cerr
+                                                << "[ManaCores] output connector unavailable; wallpaper override is session-only\n";
+                                        }
                                     }
                                     generate_theme_for(path);
                                 }
@@ -1335,7 +1733,7 @@ private:
         });
 
         // Use the stored application reference
-        mana_cores_selector_->present(application_);
+        mana_cores_selector_->present(application_, monitor_index);
 
         // Load wallpapers from the library for the selector
         mana_cores_selector_->load_wallpapers_from_library(std::filesystem::path(current_path));
@@ -1343,6 +1741,8 @@ private:
 
     void restore_mana_cores_workspace() {
         const int workspace_id = mana_cores_restore_workspace_id_;
+        const std::string monitor_connector =
+            std::exchange(mana_cores_restore_monitor_connector_, {});
         mana_cores_restore_workspace_id_ = 0;
         ++mana_cores_launch_generation_;
         mana_cores_launch_pending_ = false;
@@ -1357,10 +1757,14 @@ private:
         const auto async_state = runtime_async_state_;
         const bool posted = core::shared_task_executor().post([
             async_state,
-            workspace_id
+            workspace_id,
+            monitor_connector
         ] {
-            const bool restored =
-                services::HyprlandWorkspaces::switch_to(workspace_id);
+            const bool restored = monitor_connector.empty()
+                ? services::HyprlandWorkspaces::switch_to(workspace_id)
+                : services::HyprlandWorkspaces::switch_to_on_monitor(
+                      workspace_id, monitor_connector
+                  );
 
             struct Payload {
                 std::shared_ptr<RuntimeAsyncState> state;
@@ -1395,18 +1799,92 @@ private:
     }
 
     void restore_mana_cores_chrome() {
-        if (mana_cores_bar_was_visible_ && bar_ != nullptr &&
-            state_.bar_visible()) {
-            bar_->refresh();
-            gtk_window_present(GTK_WINDOW(bar_->get_window()));
+        if (mana_cores_bar_was_visible_ && state_.bar_visible()) {
+            present_all_bars();
         }
         mana_cores_bar_was_visible_ = false;
     }
 
-    void handle_mana_cores_dismiss(int original_workspace) {
-        // Restore the original workspace if we were switched
+    void handle_mana_cores_dismiss(
+        int original_workspace,
+        const std::string& monitor_connector
+    ) {
+        // Restore the exact output/workspace pair that owned the selector.
         mana_cores_restore_workspace_id_ = original_workspace;
+        mana_cores_restore_monitor_connector_ = monitor_connector;
         restore_mana_cores_workspace();
+    }
+
+    struct MonitorWallpaperRestore {
+        wallpaper::WallpaperOutputTarget target;
+        std::filesystem::path path;
+    };
+
+    void restore_monitor_wallpapers() {
+        monitor_wallpaper_restore_jobs_.clear();
+        monitor_wallpaper_restore_index_ = 0;
+        if (wallpaper_controller_ == nullptr) return;
+
+        services::WallpaperService* service = utilities_->get_wallpaper_service();
+        GdkDisplay* display = gdk_display_get_default();
+        GListModel* monitors = display != nullptr
+            ? gdk_display_get_monitors(display)
+            : nullptr;
+        if (service == nullptr || monitors == nullptr) return;
+
+        const guint count = g_list_model_get_n_items(monitors);
+        for (guint index = 0; index < count; ++index) {
+            const std::string connector = monitor_connector_for_index(
+                display, static_cast<int>(index)
+            );
+            if (connector.empty()) continue;
+            const auto path = service->load_output_path(connector);
+            if (!path) continue;
+            monitor_wallpaper_restore_jobs_.push_back(MonitorWallpaperRestore{
+                wallpaper::WallpaperOutputTarget{
+                    static_cast<int>(index), connector
+                },
+                *path
+            });
+        }
+        restore_next_monitor_wallpaper();
+    }
+
+    void restore_next_monitor_wallpaper() {
+        if (wallpaper_controller_ == nullptr ||
+            monitor_wallpaper_restore_index_ >=
+                monitor_wallpaper_restore_jobs_.size()) {
+            monitor_wallpaper_restore_jobs_.clear();
+            monitor_wallpaper_restore_index_ = 0;
+            return;
+        }
+
+        const MonitorWallpaperRestore job =
+            monitor_wallpaper_restore_jobs_[monitor_wallpaper_restore_index_++];
+        wallpaper_controller_->prepare_wallpaper_for_output_async(
+            job.path,
+            job.target,
+            [this, job](bool success, std::string error_message) {
+                if (!success) {
+                    std::cerr
+                        << "Unable to restore wallpaper for output "
+                        << job.target.connector << ": " << error_message << '\n';
+                    restore_next_monitor_wallpaper();
+                    return;
+                }
+                wallpaper_controller_->commit_prepared_wallpaper_async(
+                    [this, job](bool commit_success, std::string commit_error) {
+                        if (!commit_success) {
+                            std::cerr
+                                << "Unable to commit wallpaper for output "
+                                << job.target.connector << ": "
+                                << commit_error << '\n';
+                        }
+                        restore_next_monitor_wallpaper();
+                    }
+                );
+            }
+        );
     }
 
     using WallpaperRequestCompletion =
@@ -1494,20 +1972,68 @@ private:
         }
     }
 
-    void ensure_toast_overlay() {
-        if (!toast_) {
-            toast_ = std::make_unique<NotificationToast>(application_);
+    [[nodiscard]] int invocation_monitor_index() const {
+        return focused_monitor_index(gdk_display_get_default());
+    }
+
+    [[nodiscard]] bar::VerticalBar* bar_for_monitor(int monitor_index) const {
+        if (monitor_index <= 0) return bar_.get();
+        const std::size_t offset = static_cast<std::size_t>(monitor_index - 1);
+        return offset < secondary_bars_.size()
+            ? secondary_bars_[offset].get()
+            : bar_.get();
+    }
+
+    [[nodiscard]] bar::VerticalBar* active_bar() const {
+        return bar_for_monitor(active_monitor_index_);
+    }
+
+    void hide_all_bars() {
+        if (bar_ != nullptr) gtk_widget_set_visible(bar_->get_window(), FALSE);
+        for (const auto& bar : secondary_bars_) {
+            if (bar != nullptr) gtk_widget_set_visible(bar->get_window(), FALSE);
         }
     }
 
-    void ensure_now_playing_overlay() {
+    void present_all_bars() {
+        if (bar_ != nullptr) {
+            bar_->refresh();
+            gtk_window_present(GTK_WINDOW(bar_->get_window()));
+        }
+        for (const auto& bar : secondary_bars_) {
+            if (bar == nullptr) continue;
+            bar->refresh();
+            gtk_window_present(GTK_WINDOW(bar->get_window()));
+        }
+    }
+
+    void ensure_toast_overlay(int monitor_index) {
+        if (toast_ != nullptr && toast_monitor_index_ != monitor_index) {
+            toast_.reset();
+        }
+        if (!toast_) {
+            toast_monitor_index_ = monitor_index;
+            toast_ = std::make_unique<NotificationToast>(application_, monitor_index);
+        }
+    }
+
+    void ensure_now_playing_overlay(int monitor_index) {
+        if (now_playing_ != nullptr && now_playing_monitor_index_ != monitor_index) {
+            now_playing_.reset();
+        }
         if (now_playing_) return;
-        now_playing_ = std::make_unique<NowPlayingOverlay>(application_);
+        now_playing_monitor_index_ = monitor_index;
+        now_playing_ = std::make_unique<NowPlayingOverlay>(application_, monitor_index);
         now_playing_->set_system_osd_visible(system_osd_visible_);
     }
 
-    void ensure_osd_overlay() {
+    void ensure_osd_overlay(int monitor_index) {
+        if (osd_ != nullptr && osd_monitor_index_ != monitor_index) {
+            osd_.reset();
+            system_osd_visible_ = false;
+        }
         if (osd_) return;
+        osd_monitor_index_ = monitor_index;
         osd_ = std::make_unique<OSDOverlay>(
             application_,
             [this](bool visible) {
@@ -1515,31 +2041,55 @@ private:
                 if (now_playing_) {
                     now_playing_->set_system_osd_visible(visible);
                 }
-            }
+            },
+            monitor_index
         );
     }
 
-    void ensure_notes_overlay() {
+    void ensure_notes_overlay(int monitor_index) {
         ensure_core_initialized();
         if (!notes_service_) {
             notes_service_ = std::make_unique<services::NotesService>();
         }
+        if (notes_overlay_ != nullptr && notes_monitor_index_ != monitor_index) {
+            notes_overlay_.reset();
+        }
         if (!notes_overlay_) {
+            notes_monitor_index_ = monitor_index;
             notes_overlay_ = std::make_unique<NotesOverlay>(
                 application_,
-                notes_service_.get()
+                notes_service_.get(),
+                monitor_index
             );
         }
     }
 
-    void ensure_sidebar_initialized() {
+    void ensure_sidebar_initialized(int monitor_index) {
         ensure_core_initialized();
+        if (sidebar_ != nullptr && sidebar_monitor_index_ != monitor_index) {
+            if (sidebar_tick_id_ != 0) {
+                gtk_widget_remove_tick_callback(sidebar_->get_window(), sidebar_tick_id_);
+                sidebar_tick_id_ = 0;
+                sidebar_last_frame_time_ = 0;
+            }
+            sidebar_.reset();
+            if (sidebar_backdrop_ != nullptr) {
+                gtk_window_destroy(sidebar_backdrop_);
+                sidebar_backdrop_ = nullptr;
+            }
+        }
         if (!sidebar_) {
+            sidebar_monitor_index_ = monitor_index;
             sidebar_ = std::make_unique<sidebar::RightSidebar>(
                 application_,
                 notification_history_,
-                [this](double value) { show_osd_volume_value(value); },
-                [this](double value) { show_osd_brightness_value(value); }
+                [this, monitor_index](double value) {
+                    show_osd_volume_value(value, monitor_index);
+                },
+                [this, monitor_index](double value) {
+                    show_osd_brightness_value(value, monitor_index);
+                },
+                monitor_index
             );
             gtk_widget_set_visible(sidebar_->get_window(), FALSE);
         }
@@ -1566,6 +2116,7 @@ private:
             backdrop_spec.anchor_right = true;
             backdrop_spec.anchor_top = true;
             backdrop_spec.anchor_bottom = true;
+            backdrop_spec.monitor_index = monitor_index;
             apply_layer_surface(sidebar_backdrop_, backdrop_spec);
 
             GtkWidget* dismiss_button = gtk_button_new();
@@ -1582,7 +2133,11 @@ private:
                 "clicked",
                 G_CALLBACK(+[](GtkButton*, gpointer data) {
                     sidebar_input_debug("backdrop button: clicked");
-                    static_cast<ShellRuntime*>(data)->toggle_right_sidebar();
+                    auto* runtime = static_cast<ShellRuntime*>(data);
+                    const int owner = runtime->sidebar_monitor_index_;
+                    runtime->toggle_right_sidebar_on_monitor(
+                        owner >= 0 ? owner : runtime->invocation_monitor_index()
+                    );
                 }),
                 this
             );
@@ -1649,7 +2204,7 @@ private:
         }
     }
 
-    void ensure_launcher_initialized() {
+    void ensure_launcher_initialized(int monitor_index) {
         ensure_core_initialized();
         if (!launcher_service_) {
             launcher_service_ = std::make_unique<services::LauncherService>();
@@ -1657,47 +2212,348 @@ private:
         if (!command_receipts_) {
             command_receipts_ = std::make_unique<CommandReceiptOverlay>();
         }
+        if (launcher_overlay_ != nullptr && launcher_monitor_index_ != monitor_index) {
+            launcher_overlay_->hide();
+            launcher_overlay_.reset();
+        }
         if (!launcher_overlay_) {
+            launcher_monitor_index_ = monitor_index;
             launcher_overlay_ = std::make_unique<LauncherOverlay>(
                 application_,
                 *launcher_service_,
                 *utilities_->get_wallpaper_service(),
-                *command_receipts_
+                *command_receipts_,
+                monitor_index
             );
         }
     }
 
-    void apply_hotspot_geometry() {
-        if (hotspot_ == nullptr) return;
+    void apply_hotspot_geometry(GtkWindow* window) {
+        if (window == nullptr) return;
+        auto it = std::find_if(
+            hotspots_.begin(),
+            hotspots_.end(),
+            [window](const MonitorHotspot& hotspot) {
+                return hotspot.window == window;
+            }
+        );
+        if (it == hotspots_.end()) return;
 
         const auto placement = sidebar::sidebar_placement_for(
-            GTK_WIDGET(hotspot_)
+            GTK_WIDGET(window),
+            it->monitor_index
         );
         if (placement.monitor_height <= 0) return;
 
         gtk_window_set_default_size(
-            hotspot_,
+            window,
             placement.frame_layout.hotspot_hit_width,
             placement.height
         );
         gtk_layer_set_margin(
-            hotspot_,
+            window,
             GTK_LAYER_SHELL_EDGE_TOP,
             placement.top_margin
         );
-        if (hotspot_button_ != nullptr) {
+        if (it->button != nullptr) {
             gtk_widget_set_size_request(
-                hotspot_button_,
+                it->button,
                 placement.frame_layout.hotspot_hit_width,
                 placement.height
             );
         }
-        if (hotspot_commit_pixel_ != nullptr) {
+        if (it->commit_pixel != nullptr) {
             gtk_drawing_area_set_content_height(
-                GTK_DRAWING_AREA(hotspot_commit_pixel_),
+                GTK_DRAWING_AREA(it->commit_pixel),
                 placement.height
             );
         }
+    }
+
+    void destroy_monitor_hotspots() {
+        for (auto& hotspot : hotspots_) {
+            if (hotspot.window != nullptr) {
+                gtk_window_destroy(hotspot.window);
+                hotspot.window = nullptr;
+            }
+        }
+        hotspots_.clear();
+    }
+
+    void create_monitor_hotspot(int monitor_index) {
+        MonitorHotspot hotspot;
+        hotspot.monitor_index = monitor_index;
+        hotspot.window = GTK_WINDOW(gtk_application_window_new(application_));
+        gtk_window_set_decorated(hotspot.window, FALSE);
+        gtk_window_set_resizable(hotspot.window, FALSE);
+        gtk_widget_add_css_class(
+            GTK_WIDGET(hotspot.window),
+            "realmheart-right-hotspot-window"
+        );
+
+        const auto placement = sidebar::sidebar_placement_for(
+            GTK_WIDGET(hotspot.window),
+            monitor_index
+        );
+        gtk_window_set_default_size(
+            hotspot.window,
+            placement.frame_layout.hotspot_hit_width,
+            placement.height
+        );
+
+        LayerSurfaceSpec spec;
+        spec.surface_namespace = "realmheart-right-hotspot";
+        spec.layer = LayerSurfaceLevel::Overlay;
+        spec.anchor_right = true;
+        spec.anchor_top = true;
+        spec.anchor_bottom = false;
+        spec.margin_top = placement.top_margin;
+        spec.monitor_index = monitor_index;
+        apply_layer_surface(hotspot.window, spec);
+        g_signal_connect(
+            hotspot.window,
+            "realize",
+            G_CALLBACK(+[](GtkWidget* widget, gpointer data) {
+                static_cast<ShellRuntime*>(data)->apply_hotspot_geometry(
+                    GTK_WINDOW(widget)
+                );
+            }),
+            this
+        );
+
+        GtkWidget* button = gtk_button_new();
+        gtk_button_set_has_frame(GTK_BUTTON(button), FALSE);
+        gtk_widget_set_focusable(button, FALSE);
+        gtk_widget_set_hexpand(button, TRUE);
+        gtk_widget_set_vexpand(button, TRUE);
+        gtk_widget_set_size_request(
+            button,
+            placement.frame_layout.hotspot_hit_width,
+            placement.height
+        );
+        hotspot.button = button;
+        gtk_widget_add_css_class(button, "realmheart-right-hotspot-button");
+        g_object_set_data(
+            G_OBJECT(button),
+            "realmheart-monitor-index",
+            GINT_TO_POINTER(monitor_index)
+        );
+        g_signal_connect(
+            button,
+            "clicked",
+            G_CALLBACK(+[](GtkButton* clicked, gpointer data) {
+                const int target = GPOINTER_TO_INT(g_object_get_data(
+                    G_OBJECT(clicked),
+                    "realmheart-monitor-index"
+                ));
+                sidebar_input_debug(
+                    "hotspot button: clicked monitor=", target
+                );
+                static_cast<ShellRuntime*>(data)->toggle_right_sidebar_on_monitor(
+                    target
+                );
+            }),
+            this
+        );
+
+        GtkWidget* overlay = gtk_overlay_new();
+        gtk_widget_set_hexpand(overlay, TRUE);
+        gtk_widget_set_vexpand(overlay, TRUE);
+        gtk_overlay_set_child(GTK_OVERLAY(overlay), button);
+
+        GtkWidget* commit_pixel = gtk_drawing_area_new();
+        gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(commit_pixel), 1);
+        gtk_drawing_area_set_content_height(
+            GTK_DRAWING_AREA(commit_pixel),
+            placement.height
+        );
+        hotspot.commit_pixel = commit_pixel;
+        gtk_drawing_area_set_draw_func(
+            GTK_DRAWING_AREA(commit_pixel),
+            draw_hotspot_commit_pixel,
+            nullptr,
+            nullptr
+        );
+        gtk_widget_set_halign(commit_pixel, GTK_ALIGN_END);
+        gtk_widget_set_valign(commit_pixel, GTK_ALIGN_FILL);
+        gtk_widget_set_can_target(commit_pixel, FALSE);
+        gtk_widget_set_focusable(commit_pixel, FALSE);
+        gtk_overlay_add_overlay(GTK_OVERLAY(overlay), commit_pixel);
+        gtk_overlay_set_measure_overlay(
+            GTK_OVERLAY(overlay),
+            commit_pixel,
+            FALSE
+        );
+
+        gtk_window_set_child(hotspot.window, overlay);
+        hotspots_.push_back(hotspot);
+        gtk_window_present(hotspot.window);
+        enforce_hotspot_input_region(hotspot.window);
+    }
+
+    void rebuild_monitor_surfaces() {
+        GdkDisplay* display = gdk_display_get_default();
+        const int count = std::max(monitor_count(display), 1);
+
+        // A wl_output appearing/disappearing while native Broken Seal is up
+        // invalidates the exact set of fullscreen security surfaces. Keep the
+        // custom lockscreen for normal multi-monitor use, but fail closed to
+        // hyprlock for the rare hotplug-while-locked case. Hidden lock surfaces
+        // can simply be rebuilt lazily on the next lock.
+        const bool native_lock_visible =
+            lock_surface_ != nullptr && lock_surface_->visible();
+        if (lock_choreography_pending_) {
+            // Let the in-flight workspace worker return its restore points
+            // first; finish_lock_choreography() will then fail closed to
+            // hyprlock without losing the workspaces we must restore.
+            lock_topology_dirty_ = true;
+        } else if (native_lock_visible) {
+            lock_topology_dirty_ = true;
+            fallback_to_hyprlock(
+                "monitor topology changed while Broken Seal was active"
+            );
+        } else if (lock_surface_ != nullptr || !lock_mirror_surfaces_.empty()) {
+            hide_native_lock_surfaces_immediately();
+            lock_mirror_surfaces_.clear();
+            lock_surface_.reset();
+            lock_monitor_index_ = -1;
+            lock_topology_dirty_ = false;
+        }
+
+        // A topology change can arrive mid-sidebar transition.  Remove the
+        // frame callback before destroying/recreating the monitor-bound
+        // surface so a stale tick can never dereference the previous sidebar.
+        if (sidebar_tick_id_ != 0 && sidebar_ != nullptr) {
+            gtk_widget_remove_tick_callback(sidebar_->get_window(), sidebar_tick_id_);
+            sidebar_tick_id_ = 0;
+            sidebar_last_frame_time_ = 0;
+        }
+
+        // Short-lived fullscreen/transient surfaces cannot retain a removed
+        // wl_output. Close them before recreating monitor-owned shell chrome.
+        power_menu_process_.close();
+        if (mana_cores_selector_ != nullptr && mana_cores_selector_->is_visible()) {
+            mana_cores_selector_->request_dismiss();
+        }
+
+        if (state_.right_sidebar_visible()) {
+            if (sidebar_ != nullptr) {
+                gtk_widget_set_visible(sidebar_->get_window(), FALSE);
+            }
+            if (sidebar_backdrop_ != nullptr) {
+                gtk_widget_set_visible(GTK_WIDGET(sidebar_backdrop_), FALSE);
+            }
+            state_.set_right_sidebar_visible(false);
+            sidebar_transition_.snap_hidden();
+        }
+        sidebar_.reset();
+        if (sidebar_backdrop_ != nullptr) {
+            gtk_window_destroy(sidebar_backdrop_);
+            sidebar_backdrop_ = nullptr;
+        }
+
+        workspace_overview_.reset();
+        launcher_overlay_.reset();
+        notes_overlay_.reset();
+        toast_.reset();
+        osd_.reset();
+        now_playing_.reset();
+        overview_monitor_index_ = -1;
+        launcher_monitor_index_ = -1;
+        notes_monitor_index_ = -1;
+        sidebar_monitor_index_ = -1;
+        toast_monitor_index_ = -1;
+        osd_monitor_index_ = -1;
+        now_playing_monitor_index_ = -1;
+        system_osd_visible_ = false;
+        active_monitor_index_ = std::clamp(active_monitor_index_, 0, count - 1);
+        monitor_workspace_snapshots_.resize(static_cast<std::size_t>(count));
+
+        destroy_monitor_hotspots();
+        secondary_bars_.clear();
+        bar_.reset();
+
+        auto make_bar = [this](int monitor_index) {
+            return std::make_unique<bar::VerticalBar>(
+                application_,
+                notification_history_,
+                *battery_,
+                *media_,
+                [this, monitor_index] {
+                    toggle_right_sidebar_on_monitor(monitor_index);
+                },
+                [this, monitor_index] {
+                    launch_launcher_on_monitor(monitor_index);
+                },
+                [this, monitor_index] {
+                    toggle_workspace_overview_on_monitor(monitor_index);
+                },
+                [this, monitor_index](double origin_x, double origin_y) {
+                    open_logout_menu_on_monitor(monitor_index, origin_x, origin_y);
+                },
+                [this, monitor_index](services::WorkspaceSnapshot snapshot) {
+                    apply_workspace_snapshot(monitor_index, std::move(snapshot));
+                },
+                monitor_index
+            );
+        };
+
+        bar_ = make_bar(0);
+        secondary_bars_.reserve(static_cast<std::size_t>(std::max(count - 1, 0)));
+        for (int index = 1; index < count; ++index) {
+            secondary_bars_.push_back(make_bar(index));
+        }
+
+        hotspots_.reserve(static_cast<std::size_t>(count));
+        for (int index = 0; index < count; ++index) {
+            create_monitor_hotspot(index);
+        }
+        apply_bar_visibility();
+    }
+
+    void schedule_monitor_surface_rebuild() {
+        if (monitor_rebuild_idle_id_ != 0) return;
+        monitor_rebuild_idle_id_ = g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            +[](gpointer data) -> gboolean {
+                auto* self = static_cast<ShellRuntime*>(data);
+                self->monitor_rebuild_idle_id_ = 0;
+                self->rebuild_monitor_surfaces();
+                return G_SOURCE_REMOVE;
+            },
+            this,
+            nullptr
+        );
+    }
+
+    void ensure_monitor_watch() {
+        if (monitor_model_ != nullptr) return;
+        GdkDisplay* display = gdk_display_get_default();
+        if (display == nullptr) return;
+        monitor_model_ = gdk_display_get_monitors(display);
+        if (monitor_model_ == nullptr) return;
+        monitor_model_signal_id_ = g_signal_connect(
+            monitor_model_,
+            "items-changed",
+            G_CALLBACK(+[](
+                GListModel*, guint, guint, guint, gpointer data
+            ) {
+                static_cast<ShellRuntime*>(data)->schedule_monitor_surface_rebuild();
+            }),
+            this
+        );
+    }
+
+    void ensure_monitor_surfaces() {
+        ensure_monitor_watch();
+        const int expected = std::max(monitor_count(gdk_display_get_default()), 1);
+        const int current = bar_ == nullptr
+            ? 0
+            : 1 + static_cast<int>(secondary_bars_.size());
+        if (current == expected && static_cast<int>(hotspots_.size()) == expected) {
+            return;
+        }
+        rebuild_monitor_surfaces();
     }
 
     void ensure_core_initialized() {
@@ -1725,112 +2581,7 @@ private:
             audio_monitor_->start();
         }
         start_now_playing_monitor();
-        if (!bar_) {
-            bar_ = std::make_unique<bar::VerticalBar>(
-                application_,
-                notification_history_,
-                *battery_,
-                *media_,
-                [this] { toggle_right_sidebar(); },
-                [this] { launch_launcher(); },
-                [this] { toggle_workspace_overview(); },
-                [this](double origin_x, double origin_y) {
-                    open_logout_menu(origin_x, origin_y);
-                },
-                [this](services::WorkspaceSnapshot snapshot) {
-                    apply_workspace_snapshot(std::move(snapshot));
-                }
-            );
-        }
-        if (hotspot_ == nullptr) {
-            hotspot_ = GTK_WINDOW(gtk_application_window_new(application_));
-            gtk_window_set_decorated(hotspot_, FALSE);
-            gtk_window_set_resizable(hotspot_, FALSE);
-            gtk_widget_add_css_class(
-                GTK_WIDGET(hotspot_),
-                "realmheart-right-hotspot-window"
-            );
-
-            const auto placement = sidebar::sidebar_placement_for(
-                GTK_WIDGET(hotspot_)
-            );
-            gtk_window_set_default_size(
-                hotspot_,
-                placement.frame_layout.hotspot_hit_width,
-                placement.height
-            );
-
-            LayerSurfaceSpec spec;
-            spec.surface_namespace = "realmheart-right-hotspot";
-            spec.layer = LayerSurfaceLevel::Overlay;
-            spec.anchor_right = true;
-            spec.anchor_top = true;
-            spec.anchor_bottom = false;
-            spec.margin_top = placement.top_margin;
-            apply_layer_surface(hotspot_, spec);
-            g_signal_connect(
-                hotspot_,
-                "realize",
-                G_CALLBACK(+[](GtkWidget*, gpointer data) {
-                    static_cast<ShellRuntime*>(data)->apply_hotspot_geometry();
-                }),
-                this
-            );
-
-            GtkWidget* button = gtk_button_new();
-            gtk_button_set_has_frame(GTK_BUTTON(button), FALSE);
-            gtk_widget_set_focusable(button, FALSE);
-            gtk_widget_set_hexpand(button, TRUE);
-            gtk_widget_set_vexpand(button, TRUE);
-            gtk_widget_set_size_request(
-                button,
-                placement.frame_layout.hotspot_hit_width,
-                placement.height
-            );
-            hotspot_button_ = button;
-            gtk_widget_add_css_class(button, "realmheart-right-hotspot-button");
-            g_signal_connect(
-                button,
-                "clicked",
-                G_CALLBACK(+[](GtkButton*, gpointer data) {
-                    sidebar_input_debug("hotspot button: clicked");
-                    static_cast<ShellRuntime*>(data)->toggle_right_sidebar();
-                }),
-                this
-            );
-            GtkWidget* overlay = gtk_overlay_new();
-            gtk_widget_set_hexpand(overlay, TRUE);
-            gtk_widget_set_vexpand(overlay, TRUE);
-            gtk_overlay_set_child(GTK_OVERLAY(overlay), button);
-
-            GtkWidget* commit_pixel = gtk_drawing_area_new();
-            gtk_drawing_area_set_content_width(GTK_DRAWING_AREA(commit_pixel), 1);
-            gtk_drawing_area_set_content_height(
-                GTK_DRAWING_AREA(commit_pixel),
-                placement.height
-            );
-            hotspot_commit_pixel_ = commit_pixel;
-            gtk_drawing_area_set_draw_func(
-                GTK_DRAWING_AREA(commit_pixel),
-                draw_hotspot_commit_pixel,
-                nullptr,
-                nullptr
-            );
-            gtk_widget_set_halign(commit_pixel, GTK_ALIGN_END);
-            gtk_widget_set_valign(commit_pixel, GTK_ALIGN_FILL);
-            gtk_widget_set_can_target(commit_pixel, FALSE);
-            gtk_widget_set_focusable(commit_pixel, FALSE);
-            gtk_overlay_add_overlay(GTK_OVERLAY(overlay), commit_pixel);
-            gtk_overlay_set_measure_overlay(
-                GTK_OVERLAY(overlay),
-                commit_pixel,
-                FALSE
-            );
-
-            gtk_window_set_child(hotspot_, overlay);
-            gtk_window_present(hotspot_);
-            enforce_hotspot_input_region(hotspot_);
-        }
+        ensure_monitor_surfaces();
         if (!wallpaper_controller_) {
             wallpaper_controller_ = std::make_unique<wallpaper::WallpaperController>(
                 application_,
@@ -1916,7 +2667,8 @@ private:
             // are accepted by this surface.
             gtk_window_present(sidebar_backdrop_);
             const auto placement = sidebar::sidebar_placement_for(
-                GTK_WIDGET(sidebar_backdrop_)
+                GTK_WIDGET(sidebar_backdrop_),
+                sidebar_monitor_index_
             );
             enforce_sidebar_backdrop_input_region(
                 sidebar_backdrop_,
@@ -1951,12 +2703,10 @@ private:
     }
 
     void apply_bar_visibility() {
-        GtkWidget* window = bar_->get_window();
         if (state_.bar_visible()) {
-            bar_->refresh();
-            gtk_window_present(GTK_WINDOW(window));
+            present_all_bars();
         } else {
-            gtk_widget_set_visible(window, FALSE);
+            hide_all_bars();
         }
     }
 
@@ -1987,16 +2737,24 @@ private:
 
     std::unique_ptr<ThemeStyles> theme_styles_;
     std::unique_ptr<NotesOverlay> notes_overlay_;
+    int notes_monitor_index_ = -1;
     std::unique_ptr<NotificationToast> toast_;
+    int toast_monitor_index_ = -1;
     std::unique_ptr<NowPlayingOverlay> now_playing_;
+    int now_playing_monitor_index_ = -1;
     std::unique_ptr<OSDOverlay> osd_;
+    int osd_monitor_index_ = -1;
     std::unique_ptr<services::AudioMonitor> audio_monitor_;
     std::unique_ptr<bar::VerticalBar> bar_;
-    GtkWindow* hotspot_ = nullptr;
-    GtkWidget* hotspot_button_ = nullptr;
-    GtkWidget* hotspot_commit_pixel_ = nullptr;
+    std::vector<std::unique_ptr<bar::VerticalBar>> secondary_bars_;
+    std::vector<MonitorHotspot> hotspots_;
+    GListModel* monitor_model_ = nullptr;
+    gulong monitor_model_signal_id_ = 0;
+    guint monitor_rebuild_idle_id_ = 0;
+    int active_monitor_index_ = 0;
     GtkWindow* sidebar_backdrop_ = nullptr;
     std::unique_ptr<sidebar::RightSidebar> sidebar_;
+    int sidebar_monitor_index_ = -1;
     guint right_sidebar_prewarm_id_ = 0;
     effects::TransitionTimeline sidebar_transition_{{0.22, 0.16}};
     guint sidebar_tick_id_ = 0;
@@ -2004,16 +2762,23 @@ private:
     bool sidebar_character_exit_complete_ = true;
     std::unique_ptr<CommandReceiptOverlay> command_receipts_;
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
+    int launcher_monitor_index_ = -1;
     std::unique_ptr<workspace::WorkspaceOverviewOverlay> workspace_overview_;
+    int overview_monitor_index_ = -1;
     guint workspace_overview_prewarm_id_ = 0;
     std::unique_ptr<lockscreen::LockSurface> lock_surface_;
+    std::vector<std::unique_ptr<lockscreen::LockSurface>> lock_mirror_surfaces_;
+    int lock_monitor_index_ = -1;
     // Lock choreography state (mana-core style workspace slide).
     bool lock_choreography_pending_ = false;
     bool lock_choreography_switched_ = false;
     bool lock_choreography_bar_was_visible_ = false;
-    int lock_choreography_workspace_ = 0;
+    std::vector<LockRestorePoint> lock_restore_points_;
     std::uint64_t lock_choreography_generation_ = 0;
+    bool lock_topology_dirty_ = false;
+    bool lock_hyprlock_fallback_active_ = false;
     services::WorkspaceSnapshot workspace_snapshot_;
+    std::vector<services::WorkspaceSnapshot> monitor_workspace_snapshots_;
     powermenu::PowerMenuProcess power_menu_process_;
     std::unique_ptr<realmheart::mana_core::ManaCoresSelector> mana_cores_selector_;
     bool mana_cores_launch_pending_ = false;
@@ -2021,8 +2786,11 @@ private:
     bool mana_cores_bar_was_visible_ = false;
     int mana_cores_deferred_toggle_count_ = 0;
     int mana_cores_restore_workspace_id_ = 0;
+    std::string mana_cores_restore_monitor_connector_;
     std::uint64_t mana_cores_launch_generation_ = 0;
     std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;
+    std::vector<MonitorWallpaperRestore> monitor_wallpaper_restore_jobs_;
+    std::size_t monitor_wallpaper_restore_index_ = 0;
 
     ShellState state_;
 };

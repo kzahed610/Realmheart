@@ -41,6 +41,11 @@ public:
         std::filesystem::path path,
         SetWallpaperCallback callback = {}
     );
+    void prepare_wallpaper_for_output_async(
+        std::filesystem::path path,
+        WallpaperOutputTarget target,
+        SetWallpaperCallback callback = {}
+    );
     void commit_prepared_wallpaper_async(
         SetWallpaperCallback callback = {}
     );

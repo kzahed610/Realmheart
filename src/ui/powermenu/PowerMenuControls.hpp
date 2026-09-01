@@ -21,6 +21,7 @@ public:
     PowerMenuControls& operator=(const PowerMenuControls&) = delete;
 
     [[nodiscard]] GtkWidget* widget() const;
+    void set_viewport_size(int logical_width, int logical_height);
     void focus_first();
     [[nodiscard]] bool prepare_for_interaction();
     void set_armed(std::optional<Action> action);
@@ -34,6 +35,7 @@ private:
     [[nodiscard]] bool advance_animations(GdkFrameClock* frame_clock);
     [[nodiscard]] double animation_amount(std::size_t index) const;
     [[nodiscard]] bool contains_action(double x, double y) const;
+    [[nodiscard]] PowerMenuLayout layout_for_allocation(int width, int height) const;
 
     GtkWidget* root_ = nullptr;
     GtkWidget* canvas_ = nullptr;
@@ -44,6 +46,8 @@ private:
     guint animation_tick_id_ = 0;
     gint64 last_animation_frame_time_ = 0;
     std::optional<Action> armed_action_;
+    int viewport_width_ = 0;
+    int viewport_height_ = 0;
     ActionCallback on_action_;
     DismissCallback on_dismiss_;
 };

@@ -25,7 +25,7 @@ public:
 
     [[nodiscard]] bool is_visible() const noexcept { return visible_; }
 
-    void present(GtkApplication* app);
+    void present(GtkApplication* app, int monitor_index = -1);
     void dismiss();
 
     // Set callback invoked when selector is dismissed (Esc or apply complete)
@@ -68,6 +68,7 @@ private:
     GtkWindow* window_ = nullptr;
     GtkWidget* canvas_ = nullptr;
     bool visible_ = false;
+    int monitor_index_ = -1;
 
     // Wallpaper library & pixbufs
     std::vector<std::filesystem::path> all_wallpaper_paths_;

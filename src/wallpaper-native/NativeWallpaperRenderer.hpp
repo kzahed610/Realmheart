@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 struct zwlr_layer_shell_v1;
@@ -35,6 +36,11 @@ public:
         const std::string& path,
         std::string* error_message = nullptr
     );
+    [[nodiscard]] bool prepare_wallpaper_for_output(
+        const std::string& path,
+        const std::string& output_name,
+        std::string* error_message = nullptr
+    );
     [[nodiscard]] bool commit_prepared_wallpaper(
         std::string* error_message = nullptr
     );
@@ -59,6 +65,8 @@ private:
         int logical_width = 0;
         int logical_height = 0;
         int scale = 1;
+        std::string name;
+        Texture override_texture;
         bool configured = false;
         bool closed = false;
     };
@@ -133,7 +141,8 @@ private:
     [[nodiscard]] bool upload_texture(
         const std::string& path,
         Texture& texture,
-        std::string* error_message
+        std::string* error_message,
+        std::string_view target_output = {}
     );
     [[nodiscard]] GLuint compile_shader(
         GLenum type,
@@ -144,6 +153,10 @@ private:
 
     void draw_all();
     void draw_output(OutputSurface& output, float progress);
+    [[nodiscard]] OutputSurface* find_output_by_name(
+        std::string_view name
+    ) noexcept;
+    void clear_output_overrides() noexcept;
     void advance_animation();
     void destroy_texture(Texture& texture) noexcept;
     void destroy_output_surface(OutputSurface& output) noexcept;
@@ -181,6 +194,7 @@ private:
     Texture current_texture_;
     Texture next_texture_;
     Texture prepared_texture_;
+    std::string prepared_output_name_;
     bool animating_ = false;
     std::chrono::steady_clock::time_point animation_started_{};
     std::chrono::milliseconds transition_duration_{350};

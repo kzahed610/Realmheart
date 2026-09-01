@@ -303,7 +303,8 @@ std::unique_ptr<CharacterCompositor> CharacterCompositor::create(
     GtkWidget* back_host,
     GtkWidget* front_host,
     const std::filesystem::path& character_root,
-    core::DisplayTier display_tier,
+    core::DisplayTier asset_tier,
+    core::DisplayTier layout_tier,
     CharacterHostGeometry host_geometry,
     std::string* error_message
 ) {
@@ -317,7 +318,7 @@ std::unique_ptr<CharacterCompositor> CharacterCompositor::create(
     }
 
     auto manifest = CharacterManifest::load(
-        character_root, display_tier, error_message
+        character_root, asset_tier, error_message
     );
     if (!manifest) return nullptr;
 
@@ -326,7 +327,7 @@ std::unique_ptr<CharacterCompositor> CharacterCompositor::create(
             back_host,
             front_host,
             std::move(*manifest),
-            display_tier,
+            layout_tier,
             host_geometry
         )
     );

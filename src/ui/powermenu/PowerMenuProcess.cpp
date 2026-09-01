@@ -76,6 +76,7 @@ PowerMenuProcess::~PowerMenuProcess() {
 }
 
 void PowerMenuProcess::toggle(
+    int monitor_index,
     double normalized_origin_x,
     double normalized_origin_y
 ) {
@@ -83,7 +84,7 @@ void PowerMenuProcess::toggle(
         request_close();
         return;
     }
-    static_cast<void>(launch(normalized_origin_x, normalized_origin_y));
+    static_cast<void>(launch(monitor_index, normalized_origin_x, normalized_origin_y));
 }
 
 void PowerMenuProcess::close() noexcept {
@@ -96,6 +97,7 @@ bool PowerMenuProcess::running() const noexcept {
 }
 
 bool PowerMenuProcess::launch(
+    int monitor_index,
     double normalized_origin_x,
     double normalized_origin_y
 ) {
@@ -118,8 +120,11 @@ bool PowerMenuProcess::launch(
         sanitize_origin(normalized_origin_y, 1048.0 / 1080.0)
     );
 
-    std::array<gchar*, 6> arguments{
+    const std::string monitor = std::to_string(std::max(monitor_index, 0));
+    std::array<gchar*, 8> arguments{
         const_cast<gchar*>(helper.c_str()),
+        const_cast<gchar*>("--monitor-index"),
+        const_cast<gchar*>(monitor.c_str()),
         const_cast<gchar*>("--origin-x"),
         const_cast<gchar*>(origin_x.c_str()),
         const_cast<gchar*>("--origin-y"),
@@ -175,6 +180,7 @@ bool PowerMenuProcess::launch(
     );
 
     std::cerr << "[PowerMenuProcess] helper started: pid=" << child_pid_
+              << " monitor=" << monitor
               << " origin=" << origin_x << ',' << origin_y << '\n';
     return true;
 }

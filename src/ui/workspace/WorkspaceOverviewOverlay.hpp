@@ -27,7 +27,8 @@ public:
         std::function<void(int, std::string)> activate_window = {},
         std::function<void(int, std::string)> move_window = {},
         std::function<void(bool)> set_taskbar_morph_active = {},
-        std::function<void(double)> set_taskbar_morph_progress = {}
+        std::function<void(double)> set_taskbar_morph_progress = {},
+        int monitor_index = -1
     );
     ~WorkspaceOverviewOverlay();
 
@@ -167,6 +168,7 @@ private:
     bool ensure_assets();
     void release_assets() noexcept;
 
+    int monitor_index_ = -1;
     GtkWindow* window_ = nullptr;
     GtkWidget* overlay_stack_ = nullptr;
     GtkWidget* canvas_ = nullptr;

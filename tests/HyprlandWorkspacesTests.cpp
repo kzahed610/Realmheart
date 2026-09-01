@@ -186,6 +186,131 @@ void test_clients_are_attached_to_their_workspaces() {
             "initial class must be used when the current class is absent");
 }
 
+
+void test_monitor_specific_fixture_selects_each_output_workspace() {
+    constexpr auto monitors = R"([
+        {"name":"HDMI-A-1","activeWorkspace":{"id":2,"name":"2"}},
+        {"name":"DP-1","activeWorkspace":{"id":7,"name":"7"}}
+    ])";
+    constexpr auto workspaces = R"([
+        {"id":2,"name":"two","windows":1},
+        {"id":7,"name":"seven","windows":2}
+    ])";
+
+    const auto hdmi = realmheart::services::HyprlandWorkspaces::parse_for_monitor(
+        "HDMI-A-1", monitors, workspaces
+    );
+    const auto dp = realmheart::services::HyprlandWorkspaces::parse_for_monitor(
+        "DP-1", monitors, workspaces
+    );
+
+    require(hdmi.available && hdmi.active_id == 2,
+            "HDMI bar must use HDMI-A-1's active workspace");
+    require(dp.available && dp.active_id == 7,
+            "DP bar must use DP-1's active workspace");
+    require(!realmheart::services::HyprlandWorkspaces::parse_for_monitor(
+                "missing", monitors, workspaces
+            ).available,
+            "missing output must fail deterministically instead of borrowing another monitor's workspace");
+}
+
+void test_switch_to_on_monitor_focuses_output_before_workspace() {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("realmheart-workspace-monitor-switch-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    const auto executable = root / "hyprctl";
+    const auto output = root / "arguments.txt";
+    {
+        std::ofstream script(executable);
+        script << "#!/bin/sh\n"
+               << "printf '%s\\n' \"$*\" >> \"$REALMHEART_HYPRCTL_TEST_OUTPUT\"\n";
+    }
+    std::filesystem::permissions(
+        executable,
+        std::filesystem::perms::owner_read |
+            std::filesystem::perms::owner_write |
+            std::filesystem::perms::owner_exec,
+        std::filesystem::perm_options::replace
+    );
+
+    const char* old_path_value = std::getenv("PATH");
+    const std::string old_path = old_path_value == nullptr ? std::string{} : old_path_value;
+    const std::string test_path = root.string() + (old_path.empty() ? "" : ":" + old_path);
+    ::setenv("PATH", test_path.c_str(), 1);
+    ::setenv("REALMHEART_HYPRCTL_TEST_OUTPUT", output.string().c_str(), 1);
+
+    const bool switched = realmheart::services::HyprlandWorkspaces::switch_to_on_monitor(
+        6, "DP-1"
+    );
+
+    ::setenv("PATH", old_path.c_str(), 1);
+    ::unsetenv("REALMHEART_HYPRCTL_TEST_OUTPUT");
+
+    require(switched, "monitor-specific workspace dispatch must report success");
+    std::ifstream recorded(output);
+    std::string first;
+    std::string second;
+    std::getline(recorded, first);
+    std::getline(recorded, second);
+    require(first == "dispatch hl.dsp.focus({ monitor = \"DP-1\" })",
+            "monitor-specific switch must focus the exact connector first");
+    require(second == "dispatch hl.dsp.focus({ workspace = 6, on_current_monitor = true })",
+            "monitor-specific switch must then select the requested workspace");
+
+    std::filesystem::remove_all(root);
+}
+
+
+void test_switch_to_named_on_monitor_focuses_output_before_named_workspace() {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("realmheart-named-workspace-monitor-switch-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    const auto executable = root / "hyprctl";
+    const auto output = root / "arguments.txt";
+    {
+        std::ofstream script(executable);
+        script << "#!/bin/sh\n"
+               << "printf '%s\\n' \"$*\" >> \"$REALMHEART_HYPRCTL_TEST_OUTPUT\"\n";
+    }
+    std::filesystem::permissions(
+        executable,
+        std::filesystem::perms::owner_read |
+            std::filesystem::perms::owner_write |
+            std::filesystem::perms::owner_exec,
+        std::filesystem::perm_options::replace
+    );
+
+    const char* old_path_value = std::getenv("PATH");
+    const std::string old_path = old_path_value == nullptr ? std::string{} : old_path_value;
+    const std::string test_path = root.string() + (old_path.empty() ? "" : ":" + old_path);
+    ::setenv("PATH", test_path.c_str(), 1);
+    ::setenv("REALMHEART_HYPRCTL_TEST_OUTPUT", output.string().c_str(), 1);
+
+    const bool switched = realmheart::services::HyprlandWorkspaces::switch_to_named_on_monitor(
+        "realmheart-mana-cores", "HDMI-A-1"
+    );
+
+    ::setenv("PATH", old_path.c_str(), 1);
+    ::unsetenv("REALMHEART_HYPRCTL_TEST_OUTPUT");
+
+    require(switched, "monitor-specific named workspace dispatch must report success");
+    std::ifstream recorded(output);
+    std::string first;
+    std::string second;
+    std::getline(recorded, first);
+    std::getline(recorded, second);
+    require(first == "dispatch hl.dsp.focus({ monitor = \"HDMI-A-1\" })",
+            "named workspace switch must focus the exact connector first");
+    require(second == "dispatch hl.dsp.focus({ workspace = \"name:realmheart-mana-cores\", on_current_monitor = true })",
+            "named workspace switch must then select the named workspace");
+
+    std::filesystem::remove_all(root);
+}
+
 void test_malformed_clients_fixture_is_unavailable() {
     const auto snapshot = realmheart::services::HyprlandWorkspaces::parse(
         R"({"id":1})",
@@ -205,6 +330,9 @@ int main() {
     test_malformed_active_fixture_is_unavailable();
     test_malformed_workspace_fixture_is_unavailable();
     test_clients_are_attached_to_their_workspaces();
+    test_monitor_specific_fixture_selects_each_output_workspace();
+    test_switch_to_on_monitor_focuses_output_before_workspace();
+    test_switch_to_named_on_monitor_focuses_output_before_named_workspace();
     test_malformed_clients_fixture_is_unavailable();
     std::cout << "Workspace parser tests passed\n";
     return 0;

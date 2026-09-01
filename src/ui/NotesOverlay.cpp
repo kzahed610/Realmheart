@@ -5,8 +5,12 @@
 
 namespace realmheart::ui {
 
-NotesOverlay::NotesOverlay(GtkApplication* app, services::NotesService* notes_service)
-    : notes_service_(notes_service) {
+NotesOverlay::NotesOverlay(
+    GtkApplication* app,
+    services::NotesService* notes_service,
+    int monitor_index
+) : notes_service_(notes_service),
+    monitor_index_(monitor_index) {
     lifetime_->owner = this;
 
     window_ = GTK_WIDGET(gtk_application_window_new(app));
@@ -20,6 +24,7 @@ NotesOverlay::NotesOverlay(GtkApplication* app, services::NotesService* notes_se
     spec.surface_namespace = "realmheart-notes";
     spec.layer = LayerSurfaceLevel::Overlay;
     spec.keyboard_mode = LayerKeyboardMode::Exclusive;
+    spec.monitor_index = monitor_index_;
     apply_layer_surface(GTK_WINDOW(window_), spec);
     g_signal_connect(window_, "realize", G_CALLBACK(+[](GtkWidget*, gpointer data) {
         static_cast<NotesOverlay*>(data)->apply_geometry();
@@ -126,7 +131,7 @@ void NotesOverlay::schedule_geometry_retry() {
 void NotesOverlay::apply_geometry() {
     if (window_ == nullptr) return;
 
-    GdkMonitor* monitor = resolve_layer_surface_monitor(window_);
+    GdkMonitor* monitor = resolve_layer_surface_monitor(window_, monitor_index_);
     if (monitor == nullptr) {
         if (gtk_widget_get_visible(window_)) schedule_geometry_retry();
         return;

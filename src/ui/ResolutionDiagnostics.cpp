@@ -1,6 +1,7 @@
 #include "ui/ResolutionDiagnostics.hpp"
 
 #include "core/DisplayTier.hpp"
+#include "core/MonitorContext.hpp"
 #include "ui/AssetResolver.hpp"
 #include "ui/NotesGeometry.hpp"
 #include "ui/bar/BarGeometry.hpp"
@@ -50,8 +51,25 @@ std::string resolution_compatibility_report() {
     std::ostringstream report;
     report << "Realmheart resolution compatibility report\n"
            << "=========================================\n"
-           << "Tier selection is based on the assigned monitor's logical geometry.\n"
-           << "GTK layout values below are logical pixels; they are not multiplied by GDK scale.\n\n";
+           << "Layout tiers follow the assigned monitor's logical short edge.\n"
+           << "Raster asset tiers may be higher when the monitor backing scale requires it.\n"
+           << "GTK layout values below are logical pixels; ultrawide width does not inflate density.\n\n";
+
+    report << "Monitor-context examples:\n";
+    for (const auto& example : std::array{
+             core::monitor_context_for_geometry(0, 0, 0, 3440, 1440, 1),
+             core::monitor_context_for_geometry(0, 0, 0, 5120, 1440, 1),
+             core::monitor_context_for_geometry(0, 0, 0, 1920, 1080, 2.0),
+             core::monitor_context_for_geometry(0, 0, 0, 2560, 1440, 1.5),
+         }) {
+        report << "  " << example.logical_width << 'x' << example.logical_height
+               << " scale=" << example.scale
+               << " aspect=" << core::monitor_aspect_class_name(example.aspect)
+               << " layout=" << core::display_tier_name(example.layout_tier)
+               << " assets=" << core::display_tier_name(example.asset_tier)
+               << '\n';
+    }
+    report << '\n';
 
     for (const auto& tier_case : kTiers) {
         const auto spec = core::display_tier_spec(tier_case.tier);

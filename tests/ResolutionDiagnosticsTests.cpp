@@ -43,6 +43,14 @@ void test_report_contains_geometry_and_resolved_tier_paths() {
     else ::unsetenv("REALMHEART_ASSET_DIR");
     fs::remove_all(root, error);
 
+    require(report.find("3440x1440 scale=1 aspect=ultrawide layout=1440p assets=1440p") != std::string::npos,
+            "report must document ultrawide density behavior");
+    require(report.find("5120x1440 scale=1 aspect=super-ultrawide layout=1440p assets=1440p") != std::string::npos,
+            "report must document super-ultrawide density behavior");
+    require(report.find("1920x1080 scale=2 aspect=standard layout=1080p assets=4k") != std::string::npos,
+            "report must document mixed-DPI layout/asset tier separation");
+    require(report.find("2560x1440 scale=1.5 aspect=standard layout=1440p assets=4k") != std::string::npos,
+            "report must document fractional mixed-DPI tier separation");
     require(report.find("1080p (1920x1080)") != std::string::npos,
             "report must include the 1080p contract");
     require(report.find("taskbar: rail=56 cap=20 visual=76") != std::string::npos,

@@ -129,6 +129,10 @@ void test_wallpaper_surface_spec_is_fullscreen_background_and_noninteractive() {
     require(spec.margin_left == 0 && spec.margin_right == 0 &&
             spec.margin_top == 0 && spec.margin_bottom == 0,
             "wallpaper must not leave monitor-edge gaps");
+
+    const auto monitor_two = realmheart::ui::make_wallpaper_surface_spec(2);
+    require(monitor_two.monitor_index == 2,
+            "each wallpaper surface must retain its requested output through realization");
 }
 
 void test_test_surface_spec_is_nonexclusive() {
@@ -137,6 +141,28 @@ void test_test_surface_spec_is_nonexclusive() {
     require(spec.anchor_left && spec.anchor_top, "test surface must anchor top-left");
     require(!spec.anchor_bottom && !spec.anchor_right, "test surface must not stretch across an edge");
     require(spec.exclusive_zone == 0, "test surface must not reserve compositor space");
+}
+
+void test_lockscreen_surface_spec_supports_per_output_mirrors() {
+    const auto interactive = realmheart::ui::make_lockscreen_surface_spec(1);
+    require(interactive.surface_namespace == "realmheart-broken_seal",
+            "Broken Seal namespace must remain stable");
+    require(interactive.monitor_index == 1,
+            "interactive Broken Seal must preserve its owning monitor");
+    require(interactive.keyboard_mode == realmheart::ui::LayerKeyboardMode::Exclusive,
+            "interactive Broken Seal must own the keyboard exclusively");
+    require(interactive.anchor_left && interactive.anchor_right &&
+            interactive.anchor_top && interactive.anchor_bottom,
+            "Broken Seal must fill its assigned output");
+    require(interactive.exclusive_zone == -1,
+            "Broken Seal must ignore panel exclusive zones");
+
+    const auto mirror = realmheart::ui::make_lockscreen_surface_spec(2,
+        realmheart::ui::LayerKeyboardMode::None);
+    require(mirror.monitor_index == 2,
+            "Broken Seal mirror must preserve its own output");
+    require(mirror.keyboard_mode == realmheart::ui::LayerKeyboardMode::None,
+            "Broken Seal mirrors must never compete for keyboard focus");
 }
 
 void mark_destroyed(gpointer data, GObject* /*object*/) {
@@ -170,6 +196,7 @@ int main() {
     test_bar_surface_spec_is_reusable_and_reserves_its_width();
     test_wallpaper_surface_spec_is_fullscreen_background_and_noninteractive();
     test_test_surface_spec_is_nonexclusive();
+    test_lockscreen_surface_spec_supports_per_output_mirrors();
     test_image_file_filter_model_owns_exactly_one_valid_filter();
     std::cout << "UI foundation tests passed\n";
     return 0;

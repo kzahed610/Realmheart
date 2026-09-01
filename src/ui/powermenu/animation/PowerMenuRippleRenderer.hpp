@@ -23,6 +23,15 @@ public:
     [[nodiscard]] bool active() const noexcept;
     [[nodiscard]] bool frame_ready() const noexcept;
 
+    // The ripple samples a captured frame directly in GL. Tell it the target
+    // viewport so the capture can be cover-cropped before upload instead of
+    // stretching a 16:9 frame across an ultrawide output.
+    void set_viewport_geometry(
+        int logical_width,
+        int logical_height,
+        double vertical_anchor = 0.5
+    ) noexcept;
+
     [[nodiscard]] bool begin(
         GdkPaintable* source,
         double normalized_origin_x,

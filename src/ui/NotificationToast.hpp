@@ -14,7 +14,7 @@ namespace realmheart::ui {
 
 class NotificationToast {
 public:
-    explicit NotificationToast(GtkApplication* app);
+    explicit NotificationToast(GtkApplication* app, int monitor_index = -1);
     ~NotificationToast();
 
     void show(const services::NotificationEntry& entry, int timeout_ms);
@@ -35,6 +35,7 @@ private:
     static gboolean dismiss_timeout(gpointer data);
 
     GtkApplication* app_ = nullptr;
+    int monitor_index_ = -1;
     GtkWidget* window_ = nullptr;
     GtkWidget* reveal_ = nullptr;
     GtkWidget* label_app_ = nullptr;

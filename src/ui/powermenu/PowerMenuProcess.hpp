@@ -17,12 +17,13 @@ public:
     PowerMenuProcess(const PowerMenuProcess&) = delete;
     PowerMenuProcess& operator=(const PowerMenuProcess&) = delete;
 
-    void toggle(double normalized_origin_x, double normalized_origin_y);
+    void toggle(int monitor_index, double normalized_origin_x, double normalized_origin_y);
     void close() noexcept;
     [[nodiscard]] bool running() const noexcept;
 
 private:
     [[nodiscard]] bool launch(
+        int monitor_index,
         double normalized_origin_x,
         double normalized_origin_y
     );

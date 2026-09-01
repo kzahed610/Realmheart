@@ -151,6 +151,7 @@ target_compile_options(realmheart PRIVATE ${REALMHEART_WARNING_FLAGS})
 
 add_library(realmheart_ui STATIC
     src/core/DisplayTier.cpp
+    src/core/MonitorContext.cpp
     src/core/TaskExecutor.cpp
     src/effects/core/EffectFrame.cpp
     src/effects/core/EffectRegistry.cpp
@@ -180,6 +181,7 @@ add_library(realmheart_ui STATIC
     src/ui/ThemeStyles.cpp
     src/ui/styles/CssModuleLoader.cpp
     src/ui/LayerSurface.cpp
+    src/ui/MonitorResolver.cpp
     src/ui/wallpaper/WallpaperBackend.cpp
     src/ui/wallpaper/WallpaperSurface.cpp
     src/ui/wallpaper/GtkWallpaperBackend.cpp
@@ -688,6 +690,21 @@ if(BUILD_TESTING)
     realmheart_register_test(realmheart_workspace_overview_assets_tests)
 
     add_executable(
+        realmheart_monitor_context_tests
+        tests/MonitorContextTests.cpp
+        src/core/DisplayTier.cpp
+        src/core/MonitorContext.cpp
+    )
+    realmheart_register_test(realmheart_monitor_context_tests)
+
+    add_executable(
+        realmheart_workspace_overview_viewport_tests
+        tests/WorkspaceOverviewViewportTests.cpp
+    )
+    target_include_directories(realmheart_workspace_overview_viewport_tests PRIVATE src)
+    realmheart_register_test(realmheart_workspace_overview_viewport_tests)
+
+    add_executable(
         realmheart_sidebar_geometry_tests
         tests/SidebarGeometryTests.cpp
         src/core/DisplayTier.cpp
@@ -733,6 +750,7 @@ if(BUILD_TESTING)
         realmheart_resolution_diagnostics_tests
         tests/ResolutionDiagnosticsTests.cpp
         src/core/DisplayTier.cpp
+        src/core/MonitorContext.cpp
         src/ui/AssetResolver.cpp
         src/ui/ResolutionDiagnostics.cpp
         src/ui/NotesGeometry.cpp
@@ -972,6 +990,12 @@ if(BUILD_TESTING)
         REALMHEART_TEST_POWER_MENU_ROOT="${CMAKE_SOURCE_DIR}/assets/power-menu"
     )
     realmheart_register_test(realmheart_power_menu_video_state_tests)
+
+    add_executable(
+        realmheart_power_menu_media_geometry_tests
+        tests/PowerMenuMediaGeometryTests.cpp
+    )
+    realmheart_register_test(realmheart_power_menu_media_geometry_tests)
 
     add_executable(realmheart_session_manager_tests tests/SessionManagerTests.cpp src/core/Command.cpp src/services/SessionManager.cpp)
     realmheart_register_test(realmheart_session_manager_tests)

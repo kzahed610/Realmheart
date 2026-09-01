@@ -484,9 +484,11 @@ std::string percent_text(double percent) {
 
 OSDOverlay::OSDOverlay(
     GtkApplication* app,
-    std::function<void(bool)> visibility_changed
+    std::function<void(bool)> visibility_changed,
+    int monitor_index
 )
     : app_(app),
+      monitor_index_(monitor_index),
       visibility_changed_(std::move(visibility_changed)) {
     window_ = GTK_WIDGET(gtk_application_window_new(app_));
     gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
@@ -568,6 +570,7 @@ OSDOverlay::OSDOverlay(
     spec.keyboard_mode = LayerKeyboardMode::None;
     spec.anchor_top = true;
     spec.margin_top = 28;
+    spec.monitor_index = monitor_index_;
     apply_layer_surface(GTK_WINDOW(window_), spec);
 
     osd_reveal_clip_set_revealed_immediately(as_osd_reveal(reveal_), false);

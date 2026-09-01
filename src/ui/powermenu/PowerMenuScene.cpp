@@ -1,5 +1,4 @@
 #include "ui/powermenu/PowerMenuScene.hpp"
-
 #include "ui/AssetResolver.hpp"
 #include "ui/powermenu/animation/PowerMenuRippleRenderer.hpp"
 
@@ -41,34 +40,40 @@ PowerMenuScene::PowerMenuScene() {
     gtk_widget_remove_css_class(widget_, "background");
     gtk_widget_set_opacity(widget_, 0.0);
 
-    media_layer_ = gtk_overlay_new();
+    // Keep the media widgets constrained to the real output viewport. Earlier
+    // versions physically resized the GtkPicture children to the oversized
+    // cover rectangle (for example ~5120x2880 on a 5120x1440 output) and moved
+    // them inside GtkFixed. Even with overflow clipping, those giant children
+    // could inflate GTK's requested overlay allocation, so the controls were
+    // vertically centred in a phantom canvas while Wayland clipped the actual
+    // layer surface to 1440px. GtkPicture's centred COVER gives the same visual
+    // crop without letting off-screen media geometry participate in layout.
+    media_layer_ = gtk_fixed_new();
     configure_layer(media_layer_);
+    gtk_widget_set_overflow(media_layer_, GTK_OVERFLOW_HIDDEN);
     gtk_widget_add_css_class(media_layer_, "realmheart-power-menu-media");
     gtk_widget_remove_css_class(media_layer_, "background");
     gtk_widget_set_visible(media_layer_, FALSE);
     gtk_overlay_set_child(GTK_OVERLAY(widget_), media_layer_);
 
     poster_picture_ = gtk_picture_new();
-    configure_layer(poster_picture_);
     gtk_widget_add_css_class(poster_picture_, "realmheart-power-menu-poster");
     gtk_picture_set_can_shrink(GTK_PICTURE(poster_picture_), TRUE);
     gtk_picture_set_content_fit(GTK_PICTURE(poster_picture_), GTK_CONTENT_FIT_COVER);
-    gtk_overlay_set_child(GTK_OVERLAY(media_layer_), poster_picture_);
+    gtk_widget_set_halign(poster_picture_, GTK_ALIGN_START);
+    gtk_widget_set_valign(poster_picture_, GTK_ALIGN_START);
+    gtk_fixed_put(GTK_FIXED(media_layer_), poster_picture_, 0.0, 0.0);
 
     // GtkMediaStream is already a GdkPaintable. Display it through GtkPicture
-    // instead of GtkVideo so Realmheart owns playback and the live frame stays
-    // in the ordinary GTK scene graph with the exact same COVER geometry as
-    // the cached transition poster.
+    // so Realmheart owns playback while the fixed viewport owns the crop.
     video_widget_ = gtk_picture_new();
-    configure_layer(video_widget_);
     gtk_widget_add_css_class(video_widget_, "realmheart-power-menu-video");
     gtk_picture_set_can_shrink(GTK_PICTURE(video_widget_), TRUE);
-    gtk_picture_set_content_fit(
-        GTK_PICTURE(video_widget_),
-        GTK_CONTENT_FIT_COVER
-    );
+    gtk_picture_set_content_fit(GTK_PICTURE(video_widget_), GTK_CONTENT_FIT_COVER);
+    gtk_widget_set_halign(video_widget_, GTK_ALIGN_START);
+    gtk_widget_set_valign(video_widget_, GTK_ALIGN_START);
     gtk_widget_set_visible(video_widget_, FALSE);
-    gtk_overlay_add_overlay(GTK_OVERLAY(media_layer_), video_widget_);
+    gtk_fixed_put(GTK_FIXED(media_layer_), video_widget_, 0.0, 0.0);
 
     if (GdkDisplay* display = gdk_display_get_default(); display != nullptr) {
         GtkCssProvider* provider = gtk_css_provider_new();
@@ -129,6 +134,22 @@ const std::string& PowerMenuScene::error_message() const { return error_message_
 void PowerMenuScene::set_visibility_callback(std::function<void(double)> callback) {
     visibility_callback_ = std::move(callback);
     publish_visibility();
+}
+
+void PowerMenuScene::set_viewport_size(int logical_width, int logical_height) {
+    viewport_width_ = std::max(logical_width, 1);
+    viewport_height_ = std::max(logical_height, 1);
+    // Keep the authored video centred on every aspect ratio. The opening
+    // ripple and settled GtkPicture share this anchor, so ultrawide outputs
+    // crop symmetrically instead of jumping or hiding either the faces or
+    // the lower action buttons.
+    media_vertical_anchor_ = 0.5;
+    apply_media_geometry();
+    if (ripple_renderer_ != nullptr) {
+        ripple_renderer_->set_viewport_geometry(
+            viewport_width_, viewport_height_, media_vertical_anchor_
+        );
+    }
 }
 
 void PowerMenuScene::present(
@@ -249,6 +270,7 @@ bool PowerMenuScene::ensure_poster() {
         GTK_PICTURE(poster_picture_),
         GDK_PAINTABLE(poster_texture_)
     );
+    apply_media_geometry();
     std::cerr << "[PowerMenuScene] static poster loaded lazily: "
               << poster_path_.filename().string() << '\n';
     return true;
@@ -264,6 +286,9 @@ void PowerMenuScene::release_poster() noexcept {
 void PowerMenuScene::ensure_ripple_renderer() {
     if (ripple_renderer_ != nullptr) return;
     ripple_renderer_ = std::make_unique<animation::PowerMenuRippleRenderer>();
+    ripple_renderer_->set_viewport_geometry(
+        viewport_width_, viewport_height_, media_vertical_anchor_
+    );
     gtk_overlay_add_overlay(GTK_OVERLAY(widget_), ripple_renderer_->widget());
     std::cerr << "[PowerMenuRipple] GL renderer created lazily\n";
 }
@@ -382,6 +407,24 @@ void PowerMenuScene::pause_media_playback() noexcept {
     }
     gtk_media_stream_pause(media_stream_);
     media_playback_started_ = false;
+}
+
+
+void PowerMenuScene::apply_media_geometry() noexcept {
+    if (media_layer_ == nullptr || poster_picture_ == nullptr ||
+        video_widget_ == nullptr || viewport_width_ <= 0 || viewport_height_ <= 0) {
+        return;
+    }
+
+    // The ripple renderer receives the source paintable directly and computes
+    // its own centred cover crop from the source's intrinsic dimensions. The
+    // settled GtkPictures only need the real viewport allocation: COVER crops
+    // the paintable inside those bounds without creating an oversized child.
+    gtk_widget_set_size_request(media_layer_, viewport_width_, viewport_height_);
+    for (GtkWidget* picture : {poster_picture_, video_widget_}) {
+        gtk_widget_set_size_request(picture, viewport_width_, viewport_height_);
+        gtk_fixed_move(GTK_FIXED(media_layer_), picture, 0.0, 0.0);
+    }
 }
 
 void PowerMenuScene::sync_media_widgets() noexcept {
@@ -522,6 +565,10 @@ void PowerMenuScene::handle_stream_notify(GtkMediaStream* stream) {
         return;
     }
     if (stream == media_stream_ && gtk_media_stream_is_prepared(stream)) {
+        // Recompute using the decoded video's intrinsic aspect before the
+        // first live handoff. This prevents a poster/video aspect mismatch
+        // from producing a one-frame geometry jump.
+        apply_media_geometry();
         sync_media_widgets();
     }
 }

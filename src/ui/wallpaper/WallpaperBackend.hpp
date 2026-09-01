@@ -12,6 +12,15 @@ enum class WallpaperBackendType {
     Native,
 };
 
+struct WallpaperOutputTarget {
+    int monitor_index = -1;
+    std::string connector;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return monitor_index >= 0 || !connector.empty();
+    }
+};
+
 [[nodiscard]] std::optional<WallpaperBackendType> parse_wallpaper_backend_type(
     std::string_view value
 );
@@ -43,6 +52,11 @@ public:
     // commit_prepared_wallpaper() makes that prepared image authoritative.
     [[nodiscard]] virtual bool prepare_wallpaper(
         const std::filesystem::path& path,
+        std::string* error_message = nullptr
+    ) = 0;
+    [[nodiscard]] virtual bool prepare_wallpaper_for_output(
+        const std::filesystem::path& path,
+        const WallpaperOutputTarget& target,
         std::string* error_message = nullptr
     ) = 0;
     [[nodiscard]] virtual bool commit_prepared_wallpaper(

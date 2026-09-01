@@ -16,7 +16,8 @@ class OSDOverlay {
 public:
     explicit OSDOverlay(
         GtkApplication* app,
-        std::function<void(bool)> visibility_changed = {}
+        std::function<void(bool)> visibility_changed = {},
+        int monitor_index = -1
     );
     ~OSDOverlay();
 
@@ -42,6 +43,7 @@ private:
     static gboolean dismiss_timeout(gpointer data);
 
     GtkApplication* app_ = nullptr;
+    int monitor_index_ = -1;
     std::function<void(bool)> visibility_changed_;
     GtkWidget* window_ = nullptr;
     GtkWidget* reveal_ = nullptr;

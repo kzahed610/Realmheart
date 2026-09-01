@@ -37,7 +37,8 @@ public:
         std::function<void()> launch_launcher,
         std::function<void()> toggle_workspace_overview = {},
         std::function<void(double, double)> open_power_menu = {},
-        std::function<void(services::WorkspaceSnapshot)> workspace_snapshot_changed = {}
+        std::function<void(services::WorkspaceSnapshot)> workspace_snapshot_changed = {},
+        int monitor_index = -1
     );
     ~VerticalBar();
 
@@ -85,8 +86,10 @@ private:
     void request_workspace_overview_toggle();
     void activate_workspace(int workspace_id);
     [[nodiscard]] std::pair<double, double> power_menu_origin() const;
+    [[nodiscard]] std::string assigned_monitor_connector() const;
 
     GtkApplication* app_ = nullptr;
+    int monitor_index_ = -1;
     GtkWidget* window_ = nullptr;
     GtkWidget* root_overlay_ = nullptr;
     GtkWidget* content_container_ = nullptr;

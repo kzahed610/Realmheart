@@ -12,7 +12,11 @@ namespace realmheart::ui::lockscreen {
 // title as GTK widgets above it. PAM auth via AuthPam.
 class LockSurface {
 public:
-    explicit LockSurface(GtkApplication* app);
+    explicit LockSurface(
+        GtkApplication* app,
+        int monitor_index = -1,
+        bool interactive = true
+    );
     ~LockSurface();
 
     LockSurface(const LockSurface&) = delete;
@@ -20,6 +24,7 @@ public:
 
     // Invoked when the user authenticates successfully and the surface hides.
     void set_unlocked_callback(std::function<void()> callback);
+    void set_unlock_started_callback(std::function<void()> callback);
 
     [[nodiscard]] GtkWindow* window() const noexcept;
 
@@ -32,6 +37,9 @@ public:
     void hide_immediately();
 
     [[nodiscard]] bool visible() const noexcept;
+    [[nodiscard]] bool mapped() const noexcept;
+    [[nodiscard]] bool interactive() const noexcept;
+    [[nodiscard]] int monitor_index() const noexcept;
 
 private:
     void setup_layout();

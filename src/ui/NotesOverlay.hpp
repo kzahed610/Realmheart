@@ -12,7 +12,7 @@ namespace realmheart::ui {
 
 class NotesOverlay {
 public:
-    NotesOverlay(GtkApplication* app, services::NotesService* notes_service);
+    NotesOverlay(GtkApplication* app, services::NotesService* notes_service, int monitor_index = -1);
     ~NotesOverlay();
 
     void show();
@@ -30,6 +30,7 @@ private:
     GtkWidget* status_label_ = nullptr;
     GtkTextBuffer* buffer_ = nullptr;
     services::NotesService* notes_service_ = nullptr;
+    int monitor_index_ = -1;
     std::shared_ptr<LifetimeState> lifetime_ = std::make_shared<LifetimeState>();
     NotesLayout layout_{};
     guint geometry_retry_id_ = 0;

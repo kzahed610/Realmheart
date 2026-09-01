@@ -76,8 +76,10 @@ constexpr guint kSystemRevealDurationMs = 240;
 
 SystemMonitorWidget::SystemMonitorWidget(
     GtkApplication* app,
-    std::function<void()> request_exclusive_open
-) : request_exclusive_open_(std::move(request_exclusive_open)) {
+    std::function<void()> request_exclusive_open,
+    int monitor_index
+) : request_exclusive_open_(std::move(request_exclusive_open)),
+    monitor_index_(monitor_index) {
     async_state_->owner = this;
 
     button_ = gtk_button_new();
@@ -127,6 +129,7 @@ SystemMonitorWidget::SystemMonitorWidget(
     system_surface.anchor_left = true;
     system_surface.anchor_top = true;
     system_surface.exclusive_zone = 0;
+    system_surface.monitor_index = monitor_index_;
     realmheart::ui::apply_layer_surface(GTK_WINDOW(layer_window_), system_surface);
 
     // Align from the physical monitor origin, not from the usable area already

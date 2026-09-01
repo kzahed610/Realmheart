@@ -18,6 +18,17 @@ void set_error(std::string* destination, const std::string& message) {
     if (destination != nullptr) *destination = message;
 }
 
+std::string base64_token(std::string_view value) {
+    gchar* encoded = g_base64_encode(
+        reinterpret_cast<const guchar*>(value.data()),
+        value.size()
+    );
+    if (encoded == nullptr) return {};
+    std::string result = encoded;
+    g_free(encoded);
+    return result;
+}
+
 std::string encoded_path_command(
     std::string_view verb,
     const std::filesystem::path& path,
@@ -38,6 +49,32 @@ std::string encoded_path_command(
     command += encoded;
     command.push_back('\n');
     g_free(encoded);
+    return command;
+}
+
+std::string encoded_output_path_command(
+    std::string_view verb,
+    std::string_view connector,
+    const std::filesystem::path& path,
+    std::string* error_message
+) {
+    if (connector.empty()) {
+        set_error(error_message, "native wallpaper output connector is empty");
+        return {};
+    }
+    const std::string encoded_connector = base64_token(connector);
+    const std::string encoded_path = base64_token(path.string());
+    if (encoded_connector.empty() || encoded_path.empty()) {
+        set_error(error_message, "unable to encode wallpaper output transaction");
+        return {};
+    }
+
+    std::string command(verb);
+    command.push_back(' ');
+    command += encoded_connector;
+    command.push_back(' ');
+    command += encoded_path;
+    command.push_back('\n');
     return command;
 }
 
@@ -165,6 +202,15 @@ bool NativeWallpaperBackend::prepare_wallpaper(
     return prepare_wallpaper_locked(path, error_message);
 }
 
+bool NativeWallpaperBackend::prepare_wallpaper_for_output(
+    const std::filesystem::path& path,
+    const WallpaperOutputTarget& target,
+    std::string* error_message
+) {
+    std::lock_guard lock(operation_mutex_);
+    return prepare_wallpaper_for_output_locked(path, target, error_message);
+}
+
 bool NativeWallpaperBackend::commit_prepared_wallpaper(
     std::string* error_message
 ) {
@@ -206,6 +252,33 @@ bool NativeWallpaperBackend::prepare_wallpaper_locked(
     if (!initialized_ && !initialize_locked(error_message)) return false;
 
     const std::string command = encoded_path_command("PREPARE", path, error_message);
+    if (command.empty()) return false;
+    if (!send_line(command, error_message) ||
+        !read_response("PREPARED", error_message)) {
+        stop_locked();
+        return false;
+    }
+    return true;
+}
+
+bool NativeWallpaperBackend::prepare_wallpaper_for_output_locked(
+    const std::filesystem::path& path,
+    const WallpaperOutputTarget& target,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!target.valid() || target.connector.empty()) {
+        set_error(
+            error_message,
+            "native per-output wallpaper apply requires a monitor connector"
+        );
+        return false;
+    }
+    if (!initialized_ && !initialize_locked(error_message)) return false;
+
+    const std::string command = encoded_output_path_command(
+        "PREPARE_OUTPUT", target.connector, path, error_message
+    );
     if (command.empty()) return false;
     if (!send_line(command, error_message) ||
         !read_response("PREPARED", error_message)) {

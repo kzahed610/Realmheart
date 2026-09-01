@@ -16,6 +16,7 @@
 #include "services/Wifi.hpp"
 #include "ui/AssetResolver.hpp"
 #include "ui/LayerSurface.hpp"
+#include "ui/MonitorResolver.hpp"
 #include "ui/bar/widgets/ThemedSvgIcon.hpp"
 #include "ui/components/NotificationWidget.hpp"
 #include "ui/components/SliderWidget.hpp"
@@ -417,79 +418,36 @@ private:
     guint click_feedback_timeout_ = 0;
 };
 
-SidebarPlacement sidebar_placement_for(GtkWidget* widget) {
+SidebarPlacement sidebar_placement_for(GtkWidget* widget, int monitor_index) {
     SidebarPlacement placement;
 
-    // Try GDK's monitor list first (the fast path).
-    int monitor_width = 0;
-    int monitor_height = 0;
+    if (widget != nullptr && gtk_widget_get_realized(widget)) {
+        const auto context = monitor_context_for_widget(widget, monitor_index);
+        if (!context) return placement;
 
-    if (GdkMonitor* monitor = resolve_layer_surface_monitor(widget)) {
-        GdkRectangle geometry{};
-        gdk_monitor_get_geometry(monitor, &geometry);
-        g_object_unref(monitor);
-        monitor_width = geometry.width;
-        monitor_height = geometry.height;
+        placement.monitor_index = context->index;
+        placement.monitor_width = context->logical_width;
+        placement.monitor_height = context->logical_height;
+        placement.display_tier = context->layout_tier;
+        placement.asset_tier = context->asset_tier;
+        placement.aspect = context->aspect;
+        placement.frame_layout = SidebarFrameLayout::for_display_tier(
+            placement.display_tier
+        );
+        placement.height = sidebar_height_for_logical_height(
+            placement.monitor_height
+        );
+        placement.top_margin = std::max(
+            (placement.monitor_height - placement.height) / 2,
+            0
+        );
+        return placement;
     }
 
-    // Pre-realize bootstrap only: GDK cannot expose the assigned output before
-    // the native surface exists. Once realized, the assigned GDK monitor is the
-    // sole authority; never substitute the focused/first monitor there.
-    const bool realized = widget != nullptr && gtk_widget_get_realized(widget);
-    if (monitor_height <= 0 && !realized) {
-        GError* error = nullptr;
-        gchar* stdout_buf = nullptr;
-        gchar* stderr_buf = nullptr;
-        gint exit_status = 0;
-        if (g_spawn_command_line_sync(
-                "hyprctl monitors -j",
-                &stdout_buf,
-                &stderr_buf,
-                &exit_status,
-                &error
-            ) && error == nullptr && exit_status == 0 && stdout_buf != nullptr) {
-            // Minimal JSON extraction: find the first {"width":W,"height":H pair.
-            // We avoid a full JSON parser to keep this lightweight; hyprctl's
-            // output is stable and always well-formed.
-            const std::string json(stdout_buf);
-            const auto w_pos = json.find("\"width\"");
-            const auto h_pos = json.find("\"height\"");
-            if (w_pos != std::string::npos && h_pos != std::string::npos) {
-                // Parse width: skip to the colon, then the number
-                auto parse_after = [](const std::string& s, std::size_t pos) -> int {
-                    auto colon = s.find(':', pos);
-                    if (colon == std::string::npos) return 0;
-                    // Find the first digit
-                    auto digit_start = s.find_first_of("0123456789", colon);
-                    if (digit_start == std::string::npos) return 0;
-                    char* end = nullptr;
-                    long val = std::strtol(s.c_str() + digit_start, &end, 10);
-                    return static_cast<int>(val);
-                };
-                monitor_width = parse_after(json, w_pos);
-                monitor_height = parse_after(json, h_pos);
-            }
-        }
-        if (error) g_error_free(error);
-        if (stdout_buf) g_free(stdout_buf);
-        if (stderr_buf) g_free(stderr_buf);
-    }
-
-    if (monitor_height <= 0) return placement;
-
-    placement.monitor_width = monitor_width;
-    placement.monitor_height = monitor_height;
-    placement.display_tier = core::display_tier_for_logical_geometry(
-        monitor_width,
-        monitor_height
-    );
-    placement.frame_layout = SidebarFrameLayout::for_display_tier(
-        placement.display_tier
-    );
-
-    placement.height = sidebar_height_for_logical_height(monitor_height);
-    placement.top_margin = std::max((monitor_height - placement.height) / 2, 0);
-    (void)monitor_width; // reserved for future horizontal centering
+    // Before realization, keep the historical safe bootstrap geometry. The
+    // requested monitor is bound by layer-shell at realization, and that
+    // assigned GDK monitor becomes the sole geometry authority immediately.
+    placement.monitor_index = std::max(monitor_index, 0);
     return placement;
 }
 
@@ -497,8 +455,10 @@ RightSidebar::RightSidebar(
     GtkApplication* app,
     services::NotificationHistory& notification_history,
     std::function<void(double)> show_volume_osd,
-    std::function<void(double)> show_brightness_osd
+    std::function<void(double)> show_brightness_osd,
+    int monitor_index
 ) : app_(app),
+    monitor_index_(monitor_index),
     keep_awake_(std::make_shared<services::KeepAwake>()),
     notification_history_(notification_history),
     show_volume_osd_(std::move(show_volume_osd)),
@@ -527,6 +487,7 @@ RightSidebar::RightSidebar(
     layer_spec.anchor_bottom = false;
     layer_spec.margin_top = 76; // default, updated on realize
     layer_spec.margin_right = kDefaultSidebarFrameLayout.right_margin;
+    layer_spec.monitor_index = monitor_index_;
     apply_layer_surface(GTK_WINDOW(window_), layer_spec);
 
     // Defer geometry computation until the window is realized and we can
@@ -578,7 +539,7 @@ void RightSidebar::update_geometry_on_realize(GtkWidget* widget) {
 
 void RightSidebar::apply_geometry() {
     if (window_ == nullptr) return;
-    const auto placement = sidebar_placement_for(window_);
+    const auto placement = sidebar_placement_for(GTK_WIDGET(window_), monitor_index_);
 
     if (placement.monitor_height <= 0) {
         schedule_geometry_retry();
@@ -588,10 +549,12 @@ void RightSidebar::apply_geometry() {
     const bool geometry_changed =
         !geometry_initialized_ ||
         display_tier_ != placement.display_tier ||
+        asset_tier_ != placement.asset_tier ||
         frame_layout_ != placement.frame_layout ||
         sidebar_height_ != placement.height;
 
     display_tier_ = placement.display_tier;
+    asset_tier_ = placement.asset_tier;
     frame_layout_ = placement.frame_layout;
 
     if (container_ != nullptr) {
@@ -763,6 +726,7 @@ void RightSidebar::initialize_character_compositor() {
             frame_->back_art_layer(),
             frame_->front_art_layer(),
             character_rig->parent_path(),
+            asset_tier_,
             display_tier_,
             {
                 .occlusion_left = static_cast<double>(

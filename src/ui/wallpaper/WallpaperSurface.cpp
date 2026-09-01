@@ -9,6 +9,7 @@ namespace realmheart::ui::wallpaper {
 WallpaperSurface::WallpaperSurface(
     GtkApplication* application,
     GdkMonitor* monitor,
+    int monitor_index,
     GdkPaintable* initial_paintable
 ) {
     if (application == nullptr) throw std::invalid_argument("wallpaper surface requires a GTK application");
@@ -27,7 +28,12 @@ WallpaperSurface::WallpaperSurface(
     gtk_widget_set_vexpand(GTK_WIDGET(picture_), TRUE);
     gtk_window_set_child(window_, GTK_WIDGET(picture_));
 
-    apply_layer_surface(window_, make_wallpaper_surface_spec());
+    const auto spec = make_wallpaper_surface_spec(monitor_index);
+    apply_layer_surface(window_, spec);
+
+    // Keep the concrete GDK output assignment authoritative even before the
+    // realize callback runs. The spec carries the same index so realization
+    // cannot silently retarget every wallpaper surface back to monitor 0.
     gtk_layer_set_monitor(window_, monitor);
 
     if (initial_paintable != nullptr) {

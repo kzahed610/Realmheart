@@ -42,6 +42,80 @@ bool is_supported_extension(std::string extension) {
     return std::find(std::begin(supported), std::end(supported), extension) != std::end(supported);
 }
 
+std::string connector_file_key(std::string_view connector) {
+    constexpr char hex[] = "0123456789abcdef";
+    std::string key;
+    key.reserve(connector.size() * 2);
+    for (const unsigned char value : connector) {
+        key.push_back(hex[value >> 4]);
+        key.push_back(hex[value & 0x0f]);
+    }
+    return key;
+}
+
+std::optional<std::filesystem::path> read_saved_path(
+    const std::filesystem::path& state_file,
+    const WallpaperService& service
+) {
+    std::ifstream input(state_file);
+    std::string saved_path;
+    if (!input || !std::getline(input, saved_path) || saved_path.empty()) {
+        return std::nullopt;
+    }
+    if (!saved_path.empty() && saved_path.back() == '\r') saved_path.pop_back();
+    if (saved_path.empty()) return std::nullopt;
+
+    std::filesystem::path path(saved_path);
+    if (!service.validate_image(path)) return std::nullopt;
+    return path;
+}
+
+bool persist_saved_path(
+    const std::filesystem::path& state_file,
+    const std::filesystem::path& path,
+    const WallpaperService& service
+) {
+    if (!service.validate_image(path)) return false;
+
+    std::error_code error;
+    auto absolute_path = std::filesystem::absolute(path, error);
+    if (error) return false;
+    absolute_path = absolute_path.lexically_normal();
+
+    const auto parent = state_file.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, error);
+        if (error) return false;
+    }
+
+    const auto temporary = state_file.string() + ".tmp-" +
+                           std::to_string(static_cast<unsigned long>(::getpid()));
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) return false;
+        output << absolute_path.string() << '\n';
+        output.flush();
+        if (!output) {
+            output.close();
+            std::filesystem::remove(temporary, error);
+            return false;
+        }
+        output.close();
+        if (output.fail()) {
+            std::filesystem::remove(temporary, error);
+            return false;
+        }
+    }
+
+    std::filesystem::rename(temporary, state_file, error);
+    if (error) {
+        std::error_code cleanup_error;
+        std::filesystem::remove(temporary, cleanup_error);
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 WallpaperService::WallpaperService(std::filesystem::path state_file)
@@ -83,45 +157,32 @@ std::optional<std::filesystem::path> WallpaperService::load_path() const {
 }
 
 bool WallpaperService::persist_path(const std::filesystem::path& path) const {
-    if (!validate_image(path)) return false;
+    return persist_saved_path(state_file_, path, *this);
+}
 
-    std::error_code error;
-    auto absolute_path = std::filesystem::absolute(path, error);
-    if (error) return false;
-    absolute_path = absolute_path.lexically_normal();
+std::filesystem::path WallpaperService::output_state_file(
+    std::string_view connector
+) const {
+    if (connector.empty()) return {};
+    return state_file_.parent_path() / "outputs" /
+           (connector_file_key(connector) + ".txt");
+}
 
-    const auto parent = state_file_.parent_path();
-    if (!parent.empty()) {
-        std::filesystem::create_directories(parent, error);
-        if (error) return false;
-    }
+std::optional<std::filesystem::path> WallpaperService::load_output_path(
+    std::string_view connector
+) const {
+    const auto file = output_state_file(connector);
+    if (file.empty()) return std::nullopt;
+    return read_saved_path(file, *this);
+}
 
-    const auto temporary = state_file_.string() + ".tmp-" +
-                           std::to_string(static_cast<unsigned long>(::getpid()));
-    {
-        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-        if (!output) return false;
-        output << absolute_path.string() << '\n';
-        output.flush();
-        if (!output) {
-            output.close();
-            std::filesystem::remove(temporary, error);
-            return false;
-        }
-        output.close();
-        if (output.fail()) {
-            std::filesystem::remove(temporary, error);
-            return false;
-        }
-    }
-
-    std::filesystem::rename(temporary, state_file_, error);
-    if (error) {
-        std::error_code cleanup_error;
-        std::filesystem::remove(temporary, cleanup_error);
-        return false;
-    }
-    return true;
+bool WallpaperService::persist_output_path(
+    std::string_view connector,
+    const std::filesystem::path& path
+) const {
+    const auto file = output_state_file(connector);
+    if (file.empty()) return false;
+    return persist_saved_path(file, path, *this);
 }
 
 bool WallpaperService::update_state(const std::filesystem::path& path) {

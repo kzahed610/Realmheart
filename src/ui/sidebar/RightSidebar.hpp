@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/DisplayTier.hpp"
+#include "core/MonitorContext.hpp"
 #include "animation/character/CharacterHairMode.hpp"
 #include "animation/character/CharacterQualityPreset.hpp"
 #include "ui/sidebar/SidebarGeometry.hpp"
@@ -37,13 +38,16 @@ struct SidebarPlacement {
     int top_margin = 76;
     int monitor_width = 0;
     int monitor_height = 0;
+    int monitor_index = 0;
     core::DisplayTier display_tier = core::DisplayTier::P1080;
+    core::DisplayTier asset_tier = core::DisplayTier::P1080;
+    core::MonitorAspectClass aspect = core::MonitorAspectClass::Standard;
     SidebarFrameLayout frame_layout = kDefaultSidebarFrameLayout;
 };
 
 // Shared by the sidebar surface and its edge hotspot so both remain exactly
 // aligned if the height fraction changes later.
-[[nodiscard]] SidebarPlacement sidebar_placement_for(GtkWidget* widget);
+[[nodiscard]] SidebarPlacement sidebar_placement_for(GtkWidget* widget, int monitor_index = -1);
 
 class SidebarFrame;
 class QuickControlTile;
@@ -57,7 +61,8 @@ public:
         GtkApplication* app,
         services::NotificationHistory& notification_history,
         std::function<void(double)> show_volume_osd = {},
-        std::function<void(double)> show_brightness_osd = {}
+        std::function<void(double)> show_brightness_osd = {},
+        int monitor_index = -1
     );
     ~RightSidebar();
 
@@ -148,7 +153,9 @@ private:
     bool sidebar_presented_ = false;
     bool prewarmed_ = false;
     bool prewarm_frame_active_ = false;
+    int monitor_index_ = -1;
     core::DisplayTier display_tier_ = core::DisplayTier::P1080;
+    core::DisplayTier asset_tier_ = core::DisplayTier::P1080;
     SidebarFrameLayout frame_layout_ = kDefaultSidebarFrameLayout;
     int sidebar_height_ = 760;
     bool geometry_initialized_ = false;

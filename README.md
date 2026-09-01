@@ -72,13 +72,13 @@ https://github.com/user-attachments/assets/0efbbdd1-fc3a-41f3-87fb-a696f99375a5
 
 | | |
 | --- | --- |
-| **Status bar** | Clock, workspace runes with previews, system monitor, media controls, battery, network, notifications, quick notes. |
-| **Launcher** | App search with usage-aware ranking, window focusing, calculator, fish command execution, clipboard history, emoji search. |
-| **Control panel** | Wi-Fi, Bluetooth, volume, brightness, Night Light, power profiles, GameMode, notification history. |
-| **Lock screen** | Custom shader-rendered lock surface with real PAM authentication. |
-| **Power menu** | Fullscreen animated scene with lock, suspend, logout, reboot, and power-off. |
-| **Wallpaper engine** | Native Wayland/EGL renderer with output-aware cropping and smooth transitions. Every wallpaper change also regenerates the theme colors. |
-| **Wallpaper switcher** | Carousel overlay to cycle through, preview, and apply wallpapers from your library. |
+| **Status bar** | One output-aware bar per monitor with clock, workspace runes and previews, system monitor, media controls, battery, network, notifications, and quick notes. |
+| **Launcher** | Monitor-local app search with usage-aware ranking, window focusing, calculator, fish command execution, clipboard history, emoji search. |
+| **Control panel** | Monitor-local Wi-Fi, Bluetooth, volume, brightness, Night Light, power profiles, GameMode, notification history. |
+| **Lock screen** | Custom Broken Seal lock surfaces across all active outputs with real PAM authentication; `hyprlock` is only a fail-closed fallback. |
+| **Power menu** | Output-local fullscreen animated scene with lock, suspend, logout, reboot, and power-off; standard, ultrawide, and super-ultrawide layouts keep the video and controls correctly composed. |
+| **Wallpaper engine** | Native Wayland/EGL renderer with per-output wallpapers, connector-based persistence, hotplug handling, output-aware cropping, and smooth transitions. Wallpaper changes also regenerate the theme colors. |
+| **Wallpaper switcher** | Carousel overlay to cycle through and preview wallpapers; on multi-monitor setups it applies to the monitor where the selector was opened. |
 | **Notifications** | D-Bus server, transient toasts, unread state, persistent history. |
 | **Utilities** | Screenshots, region capture, screen recording, brightness/volume OSDs. |
 | **Hyprland FX plugin** | Required compositor-side rendering for window transitions and the lock-screen/power-menu presentation. |
@@ -128,7 +128,8 @@ Optional extras:
 | `grim` + `slurp` | Screenshots and region capture |
 | `wl-clipboard` + `cliphist` | Clipboard integration and history |
 | `wf-recorder` | Screen recording |
-| `hyprlock` / `hypridle` | Lock action and idle handling |
+| `hyprlock` | Emergency fail-closed fallback if the custom Broken Seal lock cannot safely cover every active output |
+| `hypridle` | Idle/session integration |
 | `hyprsunset` | Night Light |
 
 ---
@@ -220,16 +221,72 @@ Run the test suite with `ctest --test-dir build-hybrid --output-on-failure`.
 
 ## Supported monitors
 
-Realmheart officially supports these display tiers:
+Realmheart does not treat the desktop as one fixed 1920×1080 canvas. Every
+output gets its own monitor context with independent logical geometry, scale,
+layout density, asset density, and connector identity.
 
-| Display tier | Resolution | Status |
-| --- | --- | --- |
-| 1080p | 1920×1080 | Stable |
-| 1440p | 2560×1440 | Supported |
-| 4K | 3840×2160 | Supported |
+### Validated display matrix
 
-1080p remains the stable baseline. 1440p and 4K are now part of the supported
-monitor matrix.
+| Layout | Resolution / topology | Realmheart behaviour | Status |
+| --- | --- | --- | --- |
+| 1080p | 1920×1080 | 1080p layout and assets | Stable baseline |
+| 1440p | 2560×1440 | 1440p layout and assets | Supported |
+| 4K | 3840×2160 | 4K layout and assets | Supported |
+| 1080p ultrawide | 2560×1080 | 1080p layout; wider viewport | Supported |
+| 1440p ultrawide | 3440×1440 | 1440p layout; wider viewport | Supported |
+| 1440p super-ultrawide | 5120×1440 | 1440p layout; super-ultrawide viewport | Supported |
+| Mixed resolution | 1920×1080 + 2560×1440 | Independent per-output layout/assets | Supported |
+| Mixed resolution | 2560×1440 + 3840×2160 | Independent per-output layout/assets | Supported |
+| Mixed DPI | e.g. 3840×2160 at 2× scale | 1080p logical layout with 4K raster assets | Supported |
+
+Layout density is chosen from the output's **logical short edge**, not its raw
+width. A 3440×1440 monitor therefore keeps the same UI density as 2560×1440
+instead of inflating every control just because the screen is wider. Layout and
+asset tiers are resolved separately, so a scaled 4K panel can use comfortable
+1080p logical geometry without throwing away 4K artwork.
+
+Multi-monitor behaviour is explicitly output-owned:
+
+- the Status Bar/Taskbar, wallpaper surface, and sidebar hotspot are created per output;
+- launcher, sidebar, Notes, Workspace Overview, OSDs, toasts, and the power menu
+  open on the monitor where they were invoked and stay bound to that output;
+- the wallpaper selector applies only to its owning output, with per-connector
+  wallpaper state restored after restart;
+- Broken Seal covers every active monitor while one PAM-authenticated surface
+  owns keyboard input; a successful unlock closes all lock surfaces together;
+- ultrawide Workspace Overview and power-menu media preserve aspect ratio instead
+  of stretching 16:9 artwork, while interactive controls stay inside the real
+  monitor viewport;
+- output hotplug/reconfiguration rebuilds monitor-bound shell surfaces instead
+  of assuming a permanent monitor 0.
+
+### Display diagnostics and isolated testing
+
+Inspect the compiled display contracts and asset provenance with:
+
+```bash
+./build-hybrid/realmheart --resolution-status
+```
+
+Realmheart also ships an isolated nested-Hyprland harness for testing layouts
+without changing the physical monitor configuration. Interactive mode needs
+`wayvnc`, `gtk-vnc`, and `python-gobject`:
+
+```bash
+sudo pacman -S --needed wayvnc gtk-vnc python-gobject
+
+python tools/display-tests/isolated_hyprland.py ultrawide-1080 --interactive
+python tools/display-tests/isolated_hyprland.py ultrawide-1440 --interactive
+python tools/display-tests/isolated_hyprland.py super-ultrawide-1440 --interactive
+python tools/display-tests/isolated_hyprland.py dual-1080-1440 --interactive
+python tools/display-tests/isolated_hyprland.py dual-1440-4k --interactive
+python tools/display-tests/isolated_hyprland.py mixed-dpi --interactive
+```
+
+Multi-output layouts open one viewer per virtual monitor. Clicking inside a
+viewer makes that output the invocation target, which allows monitor ownership,
+per-output wallpapers, mixed-density surfaces, and lock-screen coverage to be
+validated interactively.
 
 ---
 
@@ -247,8 +304,10 @@ The required FX plugin compiles against Hyprland's internal plugin ABI and
 must be rebuilt after every Hyprland update. The current build targets the
 0.56 ABI.
 
-Stable, clean-account-tested baseline: CachyOS/Arch Linux, Hyprland 0.56.2,
-GTK 4.22, with the 1080p, 1440p, and 4K display tiers supported.
+Stable host baseline: CachyOS/Arch Linux, Hyprland 0.56.2, GTK 4.22.
+Display compatibility is additionally regression-tested in isolated Hyprland
+sessions across the standard, ultrawide, super-ultrawide, mixed-resolution,
+and mixed-DPI matrix documented above.
 
 ---
 
@@ -256,7 +315,6 @@ GTK 4.22, with the 1080p, 1440p, and 4K display tiers supported.
 
 Rough order, no dates:
 
-- More display support: ultrawide and mixed multi-monitor setups.
 - A few selected distributions beyond Arch/CachyOS.
 - More widgets.
 - A settings overlay for customizing Realmheart itself plus some general

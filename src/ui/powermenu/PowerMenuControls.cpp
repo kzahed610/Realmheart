@@ -838,6 +838,18 @@ GtkWidget* PowerMenuControls::widget() const {
     return root_;
 }
 
+void PowerMenuControls::set_viewport_size(int logical_width, int logical_height) {
+    viewport_width_ = std::max(logical_width, 1);
+    viewport_height_ = std::max(logical_height, 1);
+    update_layout();
+}
+
+PowerMenuLayout PowerMenuControls::layout_for_allocation(int width, int height) const {
+    const int layout_width = viewport_width_ > 0 ? viewport_width_ : width;
+    const int layout_height = viewport_height_ > 0 ? viewport_height_ : height;
+    return power_menu_layout(layout_width, layout_height);
+}
+
 void PowerMenuControls::focus_first() {
     if (prepare_for_interaction()) return;
 
@@ -884,7 +896,7 @@ void PowerMenuControls::sync_animation_targets() {
     const int height = gtk_widget_get_height(button_layer_);
     if (width <= 0 || height <= 0) return;
 
-    const PowerMenuLayout layout = power_menu_layout(width, height);
+    const PowerMenuLayout layout = layout_for_allocation(width, height);
     bool needs_animation = false;
     for (std::size_t index = 0; index < buttons_.size(); ++index) {
         const bool active = is_pointer_highlighted(buttons_[index]) ||
@@ -961,7 +973,7 @@ void PowerMenuControls::update_layout() {
 
     sync_animation_targets();
 
-    const PowerMenuLayout layout = power_menu_layout(width, height);
+    const PowerMenuLayout layout = layout_for_allocation(width, height);
     for (std::size_t index = 0; index < buttons_.size(); ++index) {
         const auto collapsed = power_menu_button_bounds(layout.buttons[index], false);
         const auto expanded = power_menu_button_bounds(layout.buttons[index], true);
@@ -982,7 +994,7 @@ void PowerMenuControls::update_layout() {
 
 void PowerMenuControls::draw(cairo_t* cr, int width, int height) const {
     if (width <= 0 || height <= 0) return;
-    const PowerMenuLayout layout = power_menu_layout(width, height);
+    const PowerMenuLayout layout = layout_for_allocation(width, height);
 
     std::array<PowerMenuRect, 5> visual_bounds{};
     for (std::size_t index = 0; index < layout.buttons.size(); ++index) {
@@ -1035,7 +1047,7 @@ bool PowerMenuControls::contains_action(double x, double y) const {
     const int width = gtk_widget_get_width(root_);
     const int height = gtk_widget_get_height(root_);
     if (width <= 0 || height <= 0) return false;
-    const PowerMenuLayout layout = power_menu_layout(width, height);
+    const PowerMenuLayout layout = layout_for_allocation(width, height);
     for (std::size_t index = 0; index < layout.buttons.size(); ++index) {
         const auto collapsed = power_menu_button_bounds(layout.buttons[index], false);
         const auto expanded = power_menu_button_bounds(layout.buttons[index], true);

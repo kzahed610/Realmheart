@@ -35,7 +35,8 @@ public:
         GtkWidget* back_host,
         GtkWidget* front_host,
         const std::filesystem::path& character_root,
-        core::DisplayTier display_tier,
+        core::DisplayTier asset_tier,
+        core::DisplayTier layout_tier,
         CharacterHostGeometry host_geometry,
         std::string* error_message = nullptr
     );

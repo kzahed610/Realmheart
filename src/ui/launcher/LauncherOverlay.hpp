@@ -32,7 +32,8 @@ public:
         GtkApplication* app,
         services::LauncherService& service,
         services::WallpaperService& wallpaper_service,
-        CommandReceiptOverlay& command_receipts
+        CommandReceiptOverlay& command_receipts,
+        int monitor_index = -1
     );
     ~LauncherOverlay();
 
@@ -277,6 +278,7 @@ private:
     GtkWidget* results_list_ = nullptr;
     GtkWidget* result_selection_indicator_ = nullptr;
 
+    int monitor_index_ = -1;
     launcher::LauncherGeometry launcher_geometry_{};
     core::DisplayTier display_tier_ = core::DisplayTier::P1080;
     bool geometry_initialized_ = false;

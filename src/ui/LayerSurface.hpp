@@ -40,17 +40,23 @@ struct LayerSurfaceSpec {
 };
 
 LayerSurfaceSpec make_bar_surface_spec(int width);
-LayerSurfaceSpec make_wallpaper_surface_spec();
+LayerSurfaceSpec make_wallpaper_surface_spec(int monitor_index = -1);
 LayerSurfaceSpec make_layer_surface_spec(std::string_view ns, LayerSurfaceLevel level, LayerKeyboardMode keyboard);
 LayerSurfaceSpec make_test_surface_spec();
 // Fullscreen exclusive overlay for the lockscreen. exclusive_zone
 // is -1 so the surface ignores every other surface's exclusive zone.
-LayerSurfaceSpec make_lockscreen_surface_spec();
+LayerSurfaceSpec make_lockscreen_surface_spec(
+    int monitor_index = -1,
+    LayerKeyboardMode keyboard_mode = LayerKeyboardMode::Exclusive
+);
 // Returns a referenced monitor; callers must g_object_unref it.
 GdkMonitor* resolve_layer_surface_monitor(
     GtkWidget* widget,
     int requested_index = -1
 );
+// Retargets an already-realized layer surface to a concrete GDK monitor index.
+// Returns false when the requested monitor is not currently available.
+bool set_layer_surface_monitor(GtkWindow* window, int requested_index);
 void set_layer_surface_level(GtkWindow* window, LayerSurfaceLevel layer);
 void apply_layer_surface(GtkWindow* window, const LayerSurfaceSpec& spec);
 

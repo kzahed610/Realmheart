@@ -340,7 +340,7 @@ gboolean ManaCoresSelector::transparency_retry_callback(GtkWidget* widget, GdkFr
     return G_SOURCE_CONTINUE;
 }
 
-void ManaCoresSelector::present(GtkApplication* app) {
+void ManaCoresSelector::present(GtkApplication* app, int monitor_index) {
     // Toggle: if already visible, dismiss instead of re-presenting
     if (visible_) {
         if (state_ == State::Assembling || state_ == State::Idle) {
@@ -350,6 +350,7 @@ void ManaCoresSelector::present(GtkApplication* app) {
     }
     if (app == nullptr) return;
 
+    monitor_index_ = std::max(monitor_index, 0);
     visible_ = true;
     state_ = State::Assembling;
     assemble_phase_ = AssemblePhase::Emerge;
@@ -360,9 +361,13 @@ void ManaCoresSelector::present(GtkApplication* app) {
 
     // Initialize layout from monitor dimensions
     GdkDisplay* display = gdk_display_get_default();
-    GListModel* monitors = gdk_display_get_monitors(display);
+    GListModel* monitors = display != nullptr ? gdk_display_get_monitors(display) : nullptr;
     if (monitors && g_list_model_get_n_items(monitors) > 0) {
-        GdkMonitor* monitor = GDK_MONITOR(g_list_model_get_item(monitors, 0));
+        const guint count = g_list_model_get_n_items(monitors);
+        const guint selected = static_cast<guint>(monitor_index_) < count
+            ? static_cast<guint>(monitor_index_)
+            : 0U;
+        GdkMonitor* monitor = GDK_MONITOR(g_list_model_get_item(monitors, selected));
         if (monitor) {
             GdkRectangle geom;
             gdk_monitor_get_geometry(monitor, &geom);
@@ -434,7 +439,10 @@ void ManaCoresSelector::dismiss() {
 }
 
 void ManaCoresSelector::setup_window(GtkApplication* app) {
-    if (window_) return;
+    if (window_) {
+        static_cast<void>(ui::set_layer_surface_monitor(window_, monitor_index_));
+        return;
+    }
 
     window_ = GTK_WINDOW(gtk_application_window_new(app));
     gtk_window_set_decorated(window_, FALSE);
@@ -456,7 +464,7 @@ void ManaCoresSelector::setup_window(GtkApplication* app) {
     spec.margin_left = 0;
     spec.margin_right = 0;
     spec.exclusive_zone = -1;
-    spec.monitor_index = -1;
+    spec.monitor_index = monitor_index_;
 
     ui::apply_layer_surface(window_, spec);
     gtk_layer_set_exclusive_zone(window_, -1);

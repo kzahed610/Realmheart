@@ -498,7 +498,8 @@ std::string fallback_artist(const std::string& artist) {
 
 } // namespace
 
-NowPlayingOverlay::NowPlayingOverlay(GtkApplication* app) : app_(app) {
+NowPlayingOverlay::NowPlayingOverlay(GtkApplication* app, int monitor_index)
+    : app_(app), monitor_index_(monitor_index) {
     window_ = GTK_WIDGET(gtk_application_window_new(app_));
     gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
     gtk_window_set_resizable(GTK_WINDOW(window_), FALSE);
@@ -591,6 +592,7 @@ NowPlayingOverlay::NowPlayingOverlay(GtkApplication* app) : app_(app) {
     spec.keyboard_mode = LayerKeyboardMode::None;
     spec.anchor_top = true;
     spec.margin_top = kNormalTopMargin;
+    spec.monitor_index = monitor_index_;
     apply_layer_surface(GTK_WINDOW(window_), spec);
 
     current_top_margin_ = kNormalTopMargin;

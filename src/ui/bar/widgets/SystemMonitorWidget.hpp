@@ -16,7 +16,8 @@ class SystemMonitorWidget {
 public:
     SystemMonitorWidget(
         GtkApplication* app,
-        std::function<void()> request_exclusive_open
+        std::function<void()> request_exclusive_open,
+        int monitor_index = -1
     );
     ~SystemMonitorWidget();
 
@@ -51,6 +52,7 @@ private:
     UsageRow add_row(GtkWidget* parent, const char* name);
 
     std::function<void()> request_exclusive_open_;
+    int monitor_index_ = -1;
     GtkWidget* button_ = nullptr;
     GtkWidget* metrics_ = nullptr;
     GtkWidget* layer_window_ = nullptr;

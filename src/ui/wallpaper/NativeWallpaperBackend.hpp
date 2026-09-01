@@ -28,6 +28,11 @@ public:
         const std::filesystem::path& path,
         std::string* error_message = nullptr
     ) override;
+    [[nodiscard]] bool prepare_wallpaper_for_output(
+        const std::filesystem::path& path,
+        const WallpaperOutputTarget& target,
+        std::string* error_message = nullptr
+    ) override;
     [[nodiscard]] bool commit_prepared_wallpaper(
         std::string* error_message = nullptr
     ) override;
@@ -41,6 +46,11 @@ private:
     );
     [[nodiscard]] bool prepare_wallpaper_locked(
         const std::filesystem::path& path,
+        std::string* error_message = nullptr
+    );
+    [[nodiscard]] bool prepare_wallpaper_for_output_locked(
+        const std::filesystem::path& path,
+        const WallpaperOutputTarget& target,
         std::string* error_message = nullptr
     );
     [[nodiscard]] bool commit_prepared_wallpaper_locked(

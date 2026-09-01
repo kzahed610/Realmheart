@@ -24,7 +24,8 @@ public:
         GtkApplication* app,
         services::MediaService& media_service,
         std::function<void()> request_exclusive_open,
-        std::function<void(int)> set_bar_contour_occlusion
+        std::function<void(int)> set_bar_contour_occlusion,
+        int monitor_index = -1
     );
     ~MediaWidget();
 
@@ -61,6 +62,7 @@ private:
     void apply_art(const std::string& art_url, std::uint64_t generation, GdkPixbuf* pixbuf);
 
     services::MediaService& media_service_;
+    int monitor_index_ = -1;
     std::function<void()> request_exclusive_open_;
     std::function<void(int)> set_bar_contour_occlusion_;
     BarIconButton button_;

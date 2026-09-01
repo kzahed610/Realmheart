@@ -13,7 +13,7 @@ namespace realmheart::ui {
 
 class NowPlayingOverlay {
 public:
-    explicit NowPlayingOverlay(GtkApplication* app);
+    explicit NowPlayingOverlay(GtkApplication* app, int monitor_index = -1);
     ~NowPlayingOverlay();
 
     NowPlayingOverlay(const NowPlayingOverlay&) = delete;
@@ -36,6 +36,7 @@ private:
     );
 
     GtkApplication* app_ = nullptr;
+    int monitor_index_ = -1;
     GtkWidget* window_ = nullptr;
     GtkWidget* reveal_ = nullptr;
     GtkWidget* title_label_ = nullptr;

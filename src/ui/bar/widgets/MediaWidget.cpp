@@ -190,8 +190,10 @@ MediaWidget::MediaWidget(
     GtkApplication* app,
     services::MediaService& media_service,
     std::function<void()> request_exclusive_open,
-    std::function<void(int)> set_bar_contour_occlusion
+    std::function<void(int)> set_bar_contour_occlusion,
+    int monitor_index
 ) : media_service_(media_service),
+    monitor_index_(monitor_index),
     request_exclusive_open_(std::move(request_exclusive_open)),
     set_bar_contour_occlusion_(std::move(set_bar_contour_occlusion)),
     button_(
@@ -227,6 +229,7 @@ MediaWidget::MediaWidget(
     media_surface.anchor_top = true;
     media_surface.anchor_bottom = true;
     media_surface.exclusive_zone = 0;
+    media_surface.monitor_index = monitor_index_;
     realmheart::ui::apply_layer_surface(GTK_WINDOW(layer_window_), media_surface);
 
     // The vertical bar already reserves a left-side exclusive zone. A normal

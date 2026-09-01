@@ -523,7 +523,8 @@ std::string display_summary(const services::NotificationEntry& entry) {
 
 } // namespace
 
-NotificationToast::NotificationToast(GtkApplication* app) : app_(app) {
+NotificationToast::NotificationToast(GtkApplication* app, int monitor_index)
+    : app_(app), monitor_index_(monitor_index) {
     window_ = GTK_WIDGET(gtk_application_window_new(app_));
     gtk_window_set_decorated(GTK_WINDOW(window_), FALSE);
     gtk_window_set_resizable(GTK_WINDOW(window_), FALSE);
@@ -648,6 +649,7 @@ NotificationToast::NotificationToast(GtkApplication* app) : app_(app) {
     spec.anchor_top = true;
     spec.margin_right = 24;
     spec.margin_top = 24;
+    spec.monitor_index = monitor_index_;
     apply_layer_surface(GTK_WINDOW(window_), spec);
 
     notification_reveal_set_revealed_immediately(

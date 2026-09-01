@@ -118,17 +118,61 @@ void test_visual_state_selects_hover_bounds_only_while_expanded() {
     require_near(hovered.width, shutdown.hover_bounds.width, "hover state must expand");
 }
 
-void test_ultrawide_surface_centers_base_and_controls_together() {
+void test_ultrawide_controls_fit_height_and_remain_fully_visible() {
     const PowerMenuLayout layout = realmheart::ui::powermenu::power_menu_layout(2560.0, 1080.0);
 
-    require_near(layout.scale, 2560.0 / 2400.0, "ultrawide cover scale must follow surface width");
-    require_near(layout.offset_x, 0.0, "ultrawide cover must fill the surface width");
-    require_near(layout.offset_y, -180.0, "ultrawide cover crop must remain vertically centered");
+    require_near(layout.scale, 0.8, "1080p ultrawide controls must retain 1080p density");
+    require_near(layout.offset_x, 320.0, "extra ultrawide width must be split around the controls");
+    require_near(layout.offset_y, 0.0, "height-fit controls must not be vertically cropped");
     require_near(
         layout.buttons[0].bounds.x,
-        930.0 * (2560.0 / 2400.0),
-        "controls must share the background cover transform"
+        320.0 + 930.0 * 0.8,
+        "ultrawide controls must remain centered in the viewport"
     );
+
+    const auto& power = layout.buttons.back().hover_bounds;
+    require(
+        power.y >= 0.0 && power.y + power.height <= 1080.0,
+        "ultrawide shutdown hover state must remain fully on-screen"
+    );
+}
+
+void test_super_ultrawide_controls_do_not_follow_media_cover_scale() {
+    const PowerMenuLayout layout = realmheart::ui::powermenu::power_menu_layout(5120.0, 1440.0);
+
+    const double expected_scale = 1440.0 / 1350.0;
+    require_near(
+        layout.scale,
+        expected_scale,
+        "32:9 controls must follow output height rather than media cover width"
+    );
+    require_near(
+        layout.offset_x,
+        (5120.0 - 2400.0 * expected_scale) * 0.5,
+        "32:9 controls must center the fitted authored canvas horizontally"
+    );
+    const auto& first_hover = layout.buttons.front().hover_bounds;
+    const auto& last_hover = layout.buttons.back().hover_bounds;
+    const double top_margin = first_hover.y;
+    const double bottom_margin = 1440.0 - (last_hover.y + last_hover.height);
+    require_near(
+        top_margin,
+        bottom_margin,
+        "32:9 must center the full hover-expanded action stack vertically"
+    );
+    require(
+        top_margin >= 1440.0 * 0.04,
+        "32:9 action stack must retain the viewport-safe top margin"
+    );
+
+    for (const auto& button : layout.buttons) {
+        for (const auto* bounds : {&button.bounds, &button.hover_bounds}) {
+            require(bounds->x >= 0.0, "32:9 button must not clip the left edge");
+            require(bounds->y >= 0.0, "32:9 button must not clip the top edge");
+            require(bounds->x + bounds->width <= 5120.0, "32:9 button must not clip the right edge");
+            require(bounds->y + bounds->height <= 1440.0, "32:9 button must not clip the bottom edge");
+        }
+    }
 }
 
 } // namespace
@@ -139,7 +183,8 @@ int main() {
     test_all_actions_share_one_normal_size();
     test_hover_state_expands_around_each_button_center();
     test_visual_state_selects_hover_bounds_only_while_expanded();
-    test_ultrawide_surface_centers_base_and_controls_together();
+    test_ultrawide_controls_fit_height_and_remain_fully_visible();
+    test_super_ultrawide_controls_do_not_follow_media_cover_scale();
     std::cout << "PowerMenuLayout tests passed\n";
     return 0;
 }

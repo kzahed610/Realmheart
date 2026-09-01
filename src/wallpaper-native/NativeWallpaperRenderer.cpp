@@ -310,6 +310,7 @@ bool NativeWallpaperRenderer::set_wallpaper(
     if (!upload_texture(path, candidate, error_message)) return false;
 
     if (current_texture_.id == 0) {
+        clear_output_overrides();
         current_texture_ = candidate;
         draw_all();
         return true;
@@ -344,6 +345,37 @@ bool NativeWallpaperRenderer::prepare_wallpaper(
     Texture candidate;
     if (!upload_texture(path, candidate, error_message)) return false;
     prepared_texture_ = candidate;
+    prepared_output_name_.clear();
+    return true;
+}
+
+bool NativeWallpaperRenderer::prepare_wallpaper_for_output(
+    const std::string& path,
+    const std::string& output_name,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!initialized_) {
+        set_error(error_message, "native wallpaper renderer is not initialized");
+        return false;
+    }
+    if (animating_) {
+        set_error(error_message, "native wallpaper renderer is still transitioning");
+        return false;
+    }
+    if (output_name.empty() || find_output_by_name(output_name) == nullptr) {
+        set_error(
+            error_message,
+            "native wallpaper output is unavailable: " + output_name
+        );
+        return false;
+    }
+
+    discard_prepared_wallpaper();
+    Texture candidate;
+    if (!upload_texture(path, candidate, error_message, output_name)) return false;
+    prepared_texture_ = candidate;
+    prepared_output_name_ = output_name;
     return true;
 }
 
@@ -364,7 +396,31 @@ bool NativeWallpaperRenderer::commit_prepared_wallpaper(
         return false;
     }
 
+    if (!prepared_output_name_.empty()) {
+        OutputSurface* output = find_output_by_name(prepared_output_name_);
+        if (output == nullptr) {
+            set_error(
+                error_message,
+                "native wallpaper output disappeared before commit: " +
+                    prepared_output_name_
+            );
+            discard_prepared_wallpaper();
+            return false;
+        }
+        if (!make_pbuffer_current(error_message)) return false;
+
+        destroy_texture(output->override_texture);
+        output->override_texture = prepared_texture_;
+        prepared_texture_ = {};
+        prepared_output_name_.clear();
+        if (output->configured && !output->closed) {
+            draw_output(*output, 1.0F);
+        }
+        return true;
+    }
+
     if (current_texture_.id == 0) {
+        clear_output_overrides();
         current_texture_ = prepared_texture_;
         prepared_texture_ = {};
         draw_all();
@@ -382,6 +438,7 @@ bool NativeWallpaperRenderer::commit_prepared_wallpaper(
 }
 
 void NativeWallpaperRenderer::discard_prepared_wallpaper() noexcept {
+    prepared_output_name_.clear();
     if (!initialized_ || prepared_texture_.id == 0) return;
     if (!make_pbuffer_current()) return;
     destroy_texture(prepared_texture_);
@@ -524,7 +581,14 @@ void NativeWallpaperRenderer::output_scale(
     }
 }
 
-void NativeWallpaperRenderer::output_name(void*, wl_output*, const char*) {}
+void NativeWallpaperRenderer::output_name(
+    void* data,
+    wl_output*,
+    const char* name
+) {
+    auto* surface = static_cast<OutputSurface*>(data);
+    surface->name = name != nullptr ? name : "";
+}
 void NativeWallpaperRenderer::output_description(void*, wl_output*, const char*) {}
 
 void NativeWallpaperRenderer::layer_surface_configure(
@@ -666,7 +730,8 @@ bool NativeWallpaperRenderer::configure_egl_surface(
 bool NativeWallpaperRenderer::upload_texture(
     const std::string& path,
     Texture& texture,
-    std::string* error_message
+    std::string* error_message,
+    std::string_view target_output
 ) {
     if (!make_pbuffer_current(error_message)) return false;
 
@@ -684,6 +749,7 @@ bool NativeWallpaperRenderer::upload_texture(
         double required_scale = 0.0;
         for (const auto& output : outputs_) {
             if (!output->configured || output->closed) continue;
+            if (!target_output.empty() && output->name != target_output) continue;
             const int output_width = std::max(
                 output->logical_width * output->scale,
                 1
@@ -934,7 +1000,10 @@ void NativeWallpaperRenderer::draw_all() {
 }
 
 void NativeWallpaperRenderer::draw_output(OutputSurface& output, float progress) {
-    if (output.egl_surface == EGL_NO_SURFACE || current_texture_.id == 0) return;
+    const Texture& current = output.override_texture.id != 0
+        ? output.override_texture
+        : current_texture_;
+    if (output.egl_surface == EGL_NO_SURFACE || current.id == 0) return;
 
     if (eglMakeCurrent(
             egl_display_,
@@ -964,10 +1033,10 @@ void NativeWallpaperRenderer::draw_output(OutputSurface& output, float progress)
         1.0F, 1.0F,
     };
 
-    const Texture& incoming = next_texture_.id != 0 ? next_texture_ : current_texture_;
+    const Texture& incoming = next_texture_.id != 0 ? next_texture_ : current;
     const auto current_uv = cover_uv(
-        current_texture_.width,
-        current_texture_.height,
+        current.width,
+        current.height,
         pixel_width,
         pixel_height
     );
@@ -999,7 +1068,7 @@ void NativeWallpaperRenderer::draw_output(OutputSurface& output, float progress)
     );
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, current_texture_.id);
+    glBindTexture(GL_TEXTURE_2D, current.id);
     glUniform1i(current_sampler_uniform_, 0);
 
     glActiveTexture(GL_TEXTURE1);
@@ -1018,6 +1087,25 @@ void NativeWallpaperRenderer::draw_output(OutputSurface& output, float progress)
     eglSwapBuffers(egl_display_, output.egl_surface);
 }
 
+NativeWallpaperRenderer::OutputSurface*
+NativeWallpaperRenderer::find_output_by_name(std::string_view name) noexcept {
+    if (name.empty()) return nullptr;
+    const auto found = std::find_if(
+        outputs_.begin(),
+        outputs_.end(),
+        [name](const auto& output) {
+            return output != nullptr && output->name == name;
+        }
+    );
+    return found != outputs_.end() ? found->get() : nullptr;
+}
+
+void NativeWallpaperRenderer::clear_output_overrides() noexcept {
+    for (const auto& output : outputs_) {
+        if (output != nullptr) destroy_texture(output->override_texture);
+    }
+}
+
 void NativeWallpaperRenderer::advance_animation() {
     const auto elapsed = std::chrono::steady_clock::now() - animation_started_;
     const bool complete = elapsed >= active_transition_duration_;
@@ -1026,6 +1114,7 @@ void NativeWallpaperRenderer::advance_animation() {
     if (!complete) return;
 
     if (!make_pbuffer_current()) return;
+    clear_output_overrides();
     destroy_texture(current_texture_);
     current_texture_ = next_texture_;
     next_texture_ = {};
@@ -1058,6 +1147,10 @@ void NativeWallpaperRenderer::destroy_texture(Texture& texture) noexcept {
 }
 
 void NativeWallpaperRenderer::destroy_output_surface(OutputSurface& output) noexcept {
+    if (initialized_) {
+        (void)make_pbuffer_current();
+        destroy_texture(output.override_texture);
+    }
     if (output.egl_surface != EGL_NO_SURFACE && egl_display_ != EGL_NO_DISPLAY) {
         eglDestroySurface(egl_display_, output.egl_surface);
         output.egl_surface = EGL_NO_SURFACE;
@@ -1170,6 +1263,51 @@ void NativeWallpaperRenderer::process_command(const std::string& command) {
         g_free(decoded);
         return path;
     };
+
+    constexpr std::string_view prepare_output_prefix = "PREPARE_OUTPUT ";
+    if (command.starts_with(prepare_output_prefix)) {
+        const std::string payload = command.substr(prepare_output_prefix.size());
+        const std::size_t separator = payload.find(' ');
+        if (separator == std::string::npos) {
+            send_error("invalid output-targeted wallpaper transaction");
+            return;
+        }
+        const auto decode_token = [](std::string_view encoded)
+            -> std::optional<std::string> {
+            gsize decoded_size = 0;
+            guchar* decoded = g_base64_decode(
+                std::string(encoded).c_str(), &decoded_size
+            );
+            if (decoded == nullptr || decoded_size == 0) {
+                if (decoded != nullptr) g_free(decoded);
+                return std::nullopt;
+            }
+            std::string value(
+                reinterpret_cast<const char*>(decoded),
+                static_cast<std::size_t>(decoded_size)
+            );
+            g_free(decoded);
+            return value;
+        };
+
+        const auto output_name = decode_token(
+            std::string_view(payload).substr(0, separator)
+        );
+        const auto path = decode_token(
+            std::string_view(payload).substr(separator + 1)
+        );
+        if (!output_name || !path) {
+            send_error("invalid encoded output-targeted wallpaper transaction");
+            return;
+        }
+        std::string error;
+        if (!prepare_wallpaper_for_output(*path, *output_name, &error)) {
+            send_error(error);
+            return;
+        }
+        std::cout << "PREPARED\n" << std::flush;
+        return;
+    }
 
     constexpr std::string_view prepare_prefix = "PREPARE ";
     if (command.starts_with(prepare_prefix)) {
