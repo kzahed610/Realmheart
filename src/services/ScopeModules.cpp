@@ -66,7 +66,7 @@ realmheart::core::ModuleRegistry build_confirmed_module_registry() {
 
     registry.add(ModuleDescriptor{
         "screenshot.region-pipeline",
-        "Interactive screenshot region selector with resize handles and options toolbar",
+        "Frozen-frame smart screenshot selector with content targeting, ratios, guides, and selectable OCR",
         ModulePhase::Surface,
         {"screenshot"},
         true

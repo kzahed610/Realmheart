@@ -52,12 +52,12 @@ hl.bind("SUPER + R", hl.dsp.exec_cmd("$HOME/.local/bin/realmheart-reload"),
     { description = "Shell: Restart Realmheart" })
 
 --##! Utilities
-hl.bind("SUPER + SHIFT + S", hl.dsp.exec_cmd(realmheartCommand .. "screenshot-area"),
-    { description = "Utilities: Screen snip" })
+hl.bind("SUPER + SHIFT + S", hl.dsp.exec_cmd("realmheart-screenshot"),
+    { description = "Utilities: Smart screenshot / OCR" })
 hl.bind("SUPER + SHIFT + A", hl.dsp.exec_cmd("pidof slurp || " .. hyprScripts .. "/snip_to_search.sh"),
     { description = "Utilities: Google Lens" })
-hl.bind("SUPER + SHIFT + X", hl.dsp.exec_cmd(realmheartCommand .. "extract-ocr"),
-    { description = "Utilities: Character recognition >> clipboard" })
+hl.bind("SUPER + SHIFT + X", hl.dsp.exec_cmd("realmheart-screenshot"),
+    { description = "Utilities: Smart screenshot / OCR" })
 hl.bind("SUPER + SHIFT + R", hl.dsp.exec_cmd(realmheartCommand .. "start-recording"),
     { locked = true, description = "Utilities: Start screen recording" })
 hl.bind("SUPER + SHIFT + C", hl.dsp.exec_cmd("hyprctl reload"),
@@ -65,14 +65,10 @@ hl.bind("SUPER + SHIFT + C", hl.dsp.exec_cmd("hyprctl reload"),
 hl.bind("CTRL + ALT + R", hl.dsp.exec_cmd(realmheartCommand .. "stop-recording"),
     { locked = true, description = "Utilities: Stop screen recording" })
 
-local grimhyprctl = "grim -o \"$(hyprctl activeworkspace -j | jq -r '.monitor')\""
-hl.bind("Print", hl.dsp.exec_cmd(grimhyprctl .. " - | wl-copy"),
-    { locked = true, description = "Utilities: Screenshot >> clipboard" })
-hl.bind("CTRL + Print", hl.dsp.exec_cmd(
-    "mkdir -p $(xdg-user-dir PICTURES)/Screenshots && " ..
-    grimhyprctl .. " $(xdg-user-dir PICTURES)/Screenshots/Screenshot_\"$(date '+%Y-%m-%d_%H.%M.%S')\".png"
-), { locked = true, non_consuming = true, description = "Utilities: Screenshot >> clipboard & file" })
-hl.bind("CTRL + Print", hl.dsp.exec_cmd(grimhyprctl .. " - | wl-copy"), { locked = true, non_consuming = true })
+hl.bind("Print", hl.dsp.exec_cmd("realmheart-screenshot"),
+    { locked = true, description = "Utilities: Smart screenshot / OCR" })
+hl.bind("CTRL + Print", hl.dsp.exec_cmd("realmheart-screenshot"),
+    { locked = true, non_consuming = true, description = "Utilities: Smart screenshot / OCR" })
 --# AI
 hl.bind("SUPER + SHIFT + ALT + mouse:273", hl.dsp.exec_cmd(hyprScripts .. "/ai/primary-buffer-query.sh"),
     { description = "Utilities: Generate AI summary for selected text" })

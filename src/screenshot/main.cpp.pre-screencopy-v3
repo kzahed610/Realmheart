@@ -1,0 +1,29 @@
+#include "screenshot/MonitorCapture.hpp"
+#include "screenshot/MonitorResolver.hpp"
+#include "screenshot/ScreenshotOverlay.hpp"
+
+#include <iostream>
+
+int main() {
+    using namespace realmheart::screenshot;
+
+    const auto resolved = MonitorResolver::detect_under_cursor();
+    if (!resolved.monitor) {
+        std::cerr << "[Screenshot] " << resolved.error << '\n';
+        return 1;
+    }
+
+    const auto captured = MonitorCapture::capture_once(*resolved.monitor);
+    if (!captured.path) {
+        std::cerr << "[Screenshot] " << captured.error << '\n';
+        return 1;
+    }
+
+    const auto capture_path = *captured.path;
+    const int status = ScreenshotOverlay::run(
+        capture_path,
+        resolved.monitor->connector
+    );
+    MonitorCapture::remove_quietly(capture_path);
+    return status;
+}

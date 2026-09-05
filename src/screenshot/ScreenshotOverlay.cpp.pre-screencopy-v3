@@ -1,0 +1,185 @@
+#include "screenshot/ScreenshotOverlay.hpp"
+
+#include "core/Command.hpp"
+#include "ui/LayerSurface.hpp"
+
+#include <gdk/gdkkeysyms.h>
+#include <gtk/gtk.h>
+#include <gtk4-layer-shell/gtk4-layer-shell.h>
+
+#include <iostream>
+#include <string>
+
+namespace realmheart::screenshot {
+namespace {
+
+struct OverlayContext {
+    std::filesystem::path frame_path;
+    std::string monitor_connector;
+    GtkWindow* window = nullptr;
+};
+
+void install_instant_screenshot_layer_rule() {
+    // Hyprland owns layer-surface map/unmap animations. Install the rule before
+    // the screenshot surface is mapped so the frozen frame appears/disappears
+    // instantaneously instead of looking like a fullscreen window animation.
+    // This mirrors Hyprland's own grimblast strategy for its selection layer.
+    const auto result = realmheart::core::run_capture({
+        "hyprctl",
+        "keyword",
+        "layerrule",
+        "match:namespace ^realmheart-screenshot$, no_anim on, blur off"
+    });
+
+    if (!result.succeeded()) {
+        std::cerr << "[Screenshot] Unable to install no-animation layer rule: "
+                  << realmheart::core::command_failure_detail(
+                         result,
+                         "hyprctl rejected screenshot layer rule"
+                     )
+                  << '\n';
+    }
+}
+
+GdkMonitor* find_monitor_by_connector(GtkWidget* widget, const std::string& connector) {
+    if (widget == nullptr || connector.empty()) return nullptr;
+
+    GdkDisplay* display = gtk_widget_get_display(widget);
+    if (display == nullptr) return nullptr;
+
+    GListModel* monitors = gdk_display_get_monitors(display);
+    if (monitors == nullptr) return nullptr;
+
+    const guint count = g_list_model_get_n_items(monitors);
+    for (guint index = 0; index < count; ++index) {
+        GdkMonitor* monitor = GDK_MONITOR(g_list_model_get_item(monitors, index));
+        if (monitor == nullptr) continue;
+
+        const char* current_connector = gdk_monitor_get_connector(monitor);
+        if (current_connector != nullptr && connector == current_connector) {
+            return monitor; // referenced by g_list_model_get_item; caller owns ref
+        }
+        g_object_unref(monitor);
+    }
+    return nullptr;
+}
+
+gboolean on_key_pressed(
+    GtkEventControllerKey*,
+    guint keyval,
+    guint,
+    GdkModifierType,
+    gpointer user_data
+) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (keyval != GDK_KEY_Escape || context == nullptr || context->window == nullptr) {
+        return GDK_EVENT_PROPAGATE;
+    }
+
+    gtk_window_destroy(context->window);
+    return GDK_EVENT_STOP;
+}
+
+void on_window_destroy(GtkWidget*, gpointer user_data) {
+    auto* app = G_APPLICATION(user_data);
+    if (app != nullptr) g_application_quit(app);
+}
+
+void activate(GtkApplication* app, gpointer user_data) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr) {
+        g_application_quit(G_APPLICATION(app));
+        return;
+    }
+
+    GError* error = nullptr;
+    GdkTexture* texture = gdk_texture_new_from_filename(
+        context->frame_path.c_str(),
+        &error
+    );
+    if (texture == nullptr) {
+        std::cerr << "[Screenshot] Unable to load frozen frame: "
+                  << (error != nullptr ? error->message : "unknown GTK error")
+                  << '\n';
+        if (error != nullptr) g_error_free(error);
+        g_application_quit(G_APPLICATION(app));
+        return;
+    }
+
+    GtkWidget* window_widget = gtk_application_window_new(app);
+    context->window = GTK_WINDOW(window_widget);
+    gtk_window_set_title(context->window, "Realmheart Screenshot");
+    gtk_window_set_decorated(context->window, false);
+    gtk_window_set_resizable(context->window, false);
+
+    auto spec = realmheart::ui::make_layer_surface_spec(
+        "realmheart-screenshot",
+        realmheart::ui::LayerSurfaceLevel::Overlay,
+        realmheart::ui::LayerKeyboardMode::Exclusive
+    );
+    spec.anchor_left = true;
+    spec.anchor_right = true;
+    spec.anchor_top = true;
+    spec.anchor_bottom = true;
+    spec.exclusive_zone = -1;
+    realmheart::ui::apply_layer_surface(context->window, spec);
+
+    GtkWidget* picture = gtk_picture_new_for_paintable(GDK_PAINTABLE(texture));
+    g_object_unref(texture);
+    gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_FILL);
+    gtk_picture_set_can_shrink(GTK_PICTURE(picture), true);
+    gtk_widget_set_hexpand(picture, true);
+    gtk_widget_set_vexpand(picture, true);
+    gtk_window_set_child(context->window, picture);
+
+    GtkEventController* key_controller = gtk_event_controller_key_new();
+    g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_pressed), context);
+    gtk_widget_add_controller(window_widget, key_controller);
+
+    g_signal_connect(window_widget, "destroy", G_CALLBACK(on_window_destroy), app);
+
+    // LayerSurface deliberately avoids resolving monitors before realization because
+    // that can crash GTK while scale metadata is incomplete. Realize without mapping,
+    // bind the layer surface to the connector that Hyprland reported under the cursor,
+    // then present it for the first time.
+    gtk_widget_realize(window_widget);
+    if (GdkMonitor* monitor = find_monitor_by_connector(
+            window_widget,
+            context->monitor_connector
+        )) {
+        gtk_layer_set_monitor(context->window, monitor);
+        g_object_unref(monitor);
+    } else {
+        std::cerr << "[Screenshot] GDK could not resolve monitor connector '"
+                  << context->monitor_connector
+                  << "'; compositor monitor selection will be used as fallback\n";
+    }
+
+    gtk_widget_set_cursor_from_name(window_widget, "crosshair");
+    gtk_window_present(context->window);
+}
+
+} // namespace
+
+int ScreenshotOverlay::run(
+    const std::filesystem::path& frozen_frame,
+    const std::string& monitor_connector
+) {
+    install_instant_screenshot_layer_rule();
+
+    OverlayContext context;
+    context.frame_path = frozen_frame;
+    context.monitor_connector = monitor_connector;
+
+    GtkApplication* app = gtk_application_new(
+        "dev.realmheart.Screenshot",
+        G_APPLICATION_NON_UNIQUE
+    );
+    g_signal_connect(app, "activate", G_CALLBACK(activate), &context);
+
+    const int status = g_application_run(G_APPLICATION(app), 0, nullptr);
+    g_object_unref(app);
+    return status;
+}
+
+} // namespace realmheart::screenshot

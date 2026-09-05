@@ -94,6 +94,40 @@ std::string current_executable_path() {
     return error ? std::string{} : path.string();
 }
 
+
+bool is_screenshot_command(realmheart::core::ShellCommand command) {
+    return command == realmheart::core::ShellCommand::ScreenshotFull ||
+           command == realmheart::core::ShellCommand::ScreenshotArea ||
+           command == realmheart::core::ShellCommand::ExtractOCR;
+}
+
+int run_screenshot_helper_direct() {
+    const std::string executable = current_executable_path();
+    if (!executable.empty()) {
+        const auto sibling = std::filesystem::path(executable).parent_path() /
+            "realmheart-screenshot";
+        if (::access(sibling.c_str(), X_OK) == 0) {
+            ::execl(
+                sibling.c_str(),
+                sibling.c_str(),
+                static_cast<char*>(nullptr)
+            );
+            std::cerr << "Unable to launch Realmheart screenshot helper: "
+                      << std::strerror(errno) << '\n';
+            return 1;
+        }
+    }
+
+    ::execlp(
+        "realmheart-screenshot",
+        "realmheart-screenshot",
+        static_cast<char*>(nullptr)
+    );
+    std::cerr << "Unable to launch realmheart-screenshot from PATH: "
+              << std::strerror(errno) << '\n';
+    return 1;
+}
+
 int run_restart_helper(int argc, char** argv) {
     if (argc != 4) {
         std::cerr << "Invalid internal restart-helper invocation\n";
@@ -246,6 +280,9 @@ int main(int argc, char** argv) {
             return 2;
         }
 
+        if (is_screenshot_command(*shell_command)) {
+            return run_screenshot_helper_direct();
+        }
         const auto result = realmheart::core::send_shell_command(*shell_command, shell_argument);
         switch (result) {
         case realmheart::core::ShellControlResult::Delivered:

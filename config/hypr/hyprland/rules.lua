@@ -85,6 +85,15 @@ hl.workspace_rule({ workspace = "special:special", gaps_out = 30 })
 
 -- ######## Layer rules ########
 hl.layer_rule({ match = { namespace = ".*" }, xray = true})
+
+-- Screenshot selection must map/unmap without compositor animation. Its
+-- backing pixels are already a frozen compositor frame, so blur must also stay
+-- disabled or the transition becomes perceptible instead of looking paused.
+hl.layer_rule({
+    match = { namespace = "realmheart-screenshot" },
+    no_anim = true,
+    blur = false,
+})
 hl.layer_rule({ match = { namespace = "walker" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "selection" }, no_anim = true})
 hl.layer_rule({ match = { namespace = "overview" }, no_anim = true})

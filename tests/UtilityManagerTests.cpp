@@ -36,40 +36,27 @@ public:
     }
 };
 
-void test_screenshot_full() {
+void test_screenshot_tool_launch() {
     auto mock = std::make_unique<MockUtilityExecutor>();
     auto* mock_ptr = mock.get();
     realmheart::services::UtilityManager util(std::move(mock));
-    bool result = util.take_screenshot_full("/tmp/test.png");
-    if (!result) { std::cerr << "Full screenshot failed\n"; exit(1); }
-    if (mock_ptr->background_calls[0] != std::vector<std::string>{"grim", "/tmp/test.png"}) { std::cerr << "Wrong command\n"; exit(1); }
-    std::cout << "test_screenshot_full PASSED\n";
-}
 
-void test_screenshot_area() {
-    auto mock = std::make_unique<MockUtilityExecutor>();
-    auto* mock_ptr = mock.get();
-    realmheart::services::UtilityManager util(std::move(mock));
-    bool result = util.take_screenshot_area("/tmp/area.png");
-    if (!result) { std::cerr << "Area screenshot failed\n"; exit(1); }
-    if (mock_ptr->background_calls[0][0] != "sh") { std::cerr << "Should use shell\n"; exit(1); }
-    std::cout << "test_screenshot_area PASSED\n";
-}
+    if (!util.launch_screenshot_tool()) {
+        std::cerr << "Screenshot helper launch failed
+";
+        exit(1);
+    }
+    if (mock_ptr->background_calls.size() != 1 ||
+        mock_ptr->background_calls.front().size() != 1 ||
+        std::filesystem::path(mock_ptr->background_calls.front().front()).filename() !=
+            "realmheart-screenshot") {
+        std::cerr << "Screenshot action must launch realmheart-screenshot directly
+";
+        exit(1);
+    }
 
-void test_ocr_area() {
-    auto mock = std::make_unique<MockUtilityExecutor>();
-    auto* mock_ptr = mock.get();
-    realmheart::services::UtilityManager util(std::move(mock));
-    
-    bool result = util.extract_text_from_area();
-    
-    if (!result) { std::cerr << "OCR failed\n"; exit(1); }
-    if (mock_ptr->background_calls.size() != 1) { std::cerr << "OCR must be one race-free pipeline\n"; exit(1); }
-    if (mock_ptr->background_calls[0][0] != "sh") { std::cerr << "OCR should use one shell pipeline\n"; exit(1); }
-    if (mock_ptr->background_calls[0][2].find("tesseract") == std::string::npos) { std::cerr << "Missing tesseract\n"; exit(1); }
-    if (mock_ptr->background_calls[0][2].find("trap") == std::string::npos) { std::cerr << "Missing OCR cleanup\n"; exit(1); }
-    
-    std::cout << "test_ocr_area PASSED\n";
+    std::cout << "test_screenshot_tool_launch PASSED
+";
 }
 
 void test_clipboard_copy() {
@@ -256,9 +243,7 @@ void test_generate_colors_uses_new_wallpaper_and_updates_theme() {
 }
 
 int main() {
-    test_screenshot_full();
-    test_screenshot_area();
-    test_ocr_area();
+    test_screenshot_tool_launch();
     test_clipboard_copy();
     test_clipboard_paste();
     test_launch_wofi();

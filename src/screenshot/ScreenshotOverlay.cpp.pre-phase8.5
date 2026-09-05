@@ -1,0 +1,1938 @@
+#include "screenshot/ScreenshotOverlay.hpp"
+
+#include "screenshot/ClipboardExporter.hpp"
+#include "screenshot/OcrEngine.hpp"
+#include "screenshot/SelectionGeometry.hpp"
+#include "screenshot/SmartRegionLoader.hpp"
+#include "ui/LayerSurface.hpp"
+
+#include <gdk/gdkkeysyms.h>
+#include <gtk/gtk.h>
+#include <gtk4-layer-shell/gtk4-layer-shell.h>
+
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace realmheart::screenshot {
+namespace {
+
+constexpr double kDimAlpha = 0.44;
+constexpr double kSmartTargetDimAlpha = 0.18;
+constexpr double kSemanticOutlineAlpha = 0.20;
+constexpr double kGuideAlpha = 0.60;
+constexpr double kMinimumSelectionLogical = 3.0;
+constexpr double kPi = 3.14159265358979323846;
+
+struct Rgba {
+    double r = 1.0;
+    double g = 1.0;
+    double b = 1.0;
+    double a = 1.0;
+};
+
+constexpr Rgba kAetherGold{0.96, 0.84, 0.42, 1.0};
+constexpr Rgba kAetherGoldSoft{0.92, 0.77, 0.35, 1.0};
+constexpr Rgba kArcaneViolet{0.62, 0.47, 0.96, 1.0};
+constexpr Rgba kArcaneVioletSoft{0.54, 0.42, 0.90, 1.0};
+constexpr Rgba kLayerNeutral{0.76, 0.78, 0.90, 1.0};
+constexpr Rgba kTextWhite{0.98, 0.98, 1.0, 1.0};
+constexpr Rgba kBackdrop{0.05, 0.05, 0.07, 0.86};
+constexpr Rgba kBackdropBorder{1.0, 1.0, 1.0, 0.08};
+
+void set_source_rgba(cairo_t* cr, const Rgba& color, double alpha_scale = 1.0) {
+    cairo_set_source_rgba(cr, color.r, color.g, color.b, color.a * alpha_scale);
+}
+
+Rgba alpha(const Rgba& color, double a) {
+    return Rgba{color.r, color.g, color.b, a};
+}
+
+Rgba smart_target_color(SemanticRegionSource source) {
+    switch (source) {
+        case SemanticRegionSource::Content:
+            return kAetherGoldSoft;
+        case SemanticRegionSource::Layer:
+            return kLayerNeutral;
+        case SemanticRegionSource::Window:
+        default:
+            return kArcaneVioletSoft;
+    }
+}
+
+struct DetectionState {
+    std::mutex mutex;
+    std::optional<SmartRegionLoadResult> result;
+    std::atomic_bool ready{false};
+};
+
+struct OverlayContext {
+    const FrozenFrame* frame = nullptr;
+    MonitorTarget monitor;
+    SemanticRegionSnapshot semantic_storage;
+    const SemanticRegionSnapshot* semantic_regions = &semantic_storage;
+    std::chrono::steady_clock::time_point process_start{};
+    GtkWindow* window = nullptr;
+    GtkWidget* canvas = nullptr;
+
+    DetectionState detection_state;
+    std::thread detection_thread;
+    guint detection_poll_source = 0;
+    bool detection_started = false;
+
+    bool pointer_inside = false;
+    bool selecting = false;
+    bool completed = false;
+    double pointer_x = 0.0;
+    double pointer_y = 0.0;
+    double start_x = 0.0;
+    double start_y = 0.0;
+    double current_x = 0.0;
+    double current_y = 0.0;
+
+    SelectionRatio ratio = SelectionRatio::Free;
+    std::array<GtkToggleButton*, 4> ratio_buttons{};
+    GtkWidget* ratio_toolbar = nullptr;
+
+    bool ocr_region_selecting = false;
+    bool ocr_processing = false;
+    bool ocr_ready = false;
+    bool ocr_text_selecting = false;
+    SelectionRect ocr_region_canvas{};
+    PixelRect ocr_region_pixels{};
+    std::vector<OcrWord> ocr_words;
+    std::optional<std::size_t> ocr_anchor_word;
+    std::optional<std::size_t> ocr_focus_word;
+
+    std::size_t smart_target_cycle = 0;
+    double smart_cycle_anchor_x = 0.0;
+    double smart_cycle_anchor_y = 0.0;
+    const SemanticRegion* smart_cycle_anchor_primary = nullptr;
+    bool smart_cycle_anchor_valid = false;
+};
+
+GdkMonitor* find_monitor_by_connector(GtkWidget* widget, const std::string& connector) {
+    if (widget == nullptr || connector.empty()) return nullptr;
+
+    GdkDisplay* display = gtk_widget_get_display(widget);
+    if (display == nullptr) return nullptr;
+
+    GListModel* monitors = gdk_display_get_monitors(display);
+    if (monitors == nullptr) return nullptr;
+
+    const guint count = g_list_model_get_n_items(monitors);
+    for (guint index = 0; index < count; ++index) {
+        GdkMonitor* monitor = GDK_MONITOR(g_list_model_get_item(monitors, index));
+        if (monitor == nullptr) continue;
+
+        const char* current_connector = gdk_monitor_get_connector(monitor);
+        if (current_connector != nullptr && connector == current_connector) {
+            return monitor; // referenced by g_list_model_get_item; caller owns ref
+        }
+        g_object_unref(monitor);
+    }
+    return nullptr;
+}
+
+double clamp_coordinate(double value, int extent) {
+    return std::clamp(value, 0.0, static_cast<double>(std::max(0, extent)));
+}
+
+void queue_canvas(OverlayContext* context) {
+    if (context != nullptr && context->canvas != nullptr) {
+        gtk_widget_queue_draw(context->canvas);
+    }
+}
+
+SelectionRect current_selection(const OverlayContext& context) {
+    if (context.canvas == nullptr) return {};
+
+    return selection_for_ratio(
+        context.start_x,
+        context.start_y,
+        context.current_x,
+        context.current_y,
+        gtk_widget_get_width(context.canvas),
+        gtk_widget_get_height(context.canvas),
+        context.ratio
+    );
+}
+
+struct SmartTargetView {
+    const SemanticRegion* region = nullptr;
+    SelectionRect rect;
+    std::size_t candidate_index = 0;
+    std::size_t candidate_count = 0;
+};
+
+SelectionRect semantic_rect_to_canvas(
+    const SemanticRegionSnapshot& snapshot,
+    const SelectionRect& rect,
+    int canvas_width,
+    int canvas_height
+) {
+    if (snapshot.monitor_width <= 0.0 || snapshot.monitor_height <= 0.0 ||
+        canvas_width <= 0 || canvas_height <= 0) {
+        return {};
+    }
+
+    const double scale_x = static_cast<double>(canvas_width) / snapshot.monitor_width;
+    const double scale_y = static_cast<double>(canvas_height) / snapshot.monitor_height;
+    return SelectionRect{
+        .x = rect.x * scale_x,
+        .y = rect.y * scale_y,
+        .width = rect.width * scale_x,
+        .height = rect.height * scale_y,
+    };
+}
+
+bool contains_point(const SelectionRect& rect, double x, double y) {
+    return rect.width > 1.0 && rect.height > 1.0 &&
+        x >= rect.x && y >= rect.y &&
+        x < rect.x + rect.width && y < rect.y + rect.height;
+}
+
+double rect_intersection_area(const SelectionRect& left, const SelectionRect& right) {
+    const double x1 = std::max(left.x, right.x);
+    const double y1 = std::max(left.y, right.y);
+    const double x2 = std::min(left.x + left.width, right.x + right.width);
+    const double y2 = std::min(left.y + left.height, right.y + right.height);
+    return std::max(0.0, x2 - x1) * std::max(0.0, y2 - y1);
+}
+
+double rect_iou(const SelectionRect& left, const SelectionRect& right) {
+    const double intersection = rect_intersection_area(left, right);
+    if (intersection <= 0.0) return 0.0;
+    const double left_area = left.width * left.height;
+    const double right_area = right.width * right.height;
+    const double union_area = left_area + right_area - intersection;
+    return union_area > 0.0 ? intersection / union_area : 0.0;
+}
+
+bool visually_same_target(const SelectionRect& left, const SelectionRect& right) {
+    constexpr double edge_epsilon = 4.0;
+    const bool edges_match =
+        std::abs(left.x - right.x) <= edge_epsilon &&
+        std::abs(left.y - right.y) <= edge_epsilon &&
+        std::abs((left.x + left.width) - (right.x + right.width)) <= edge_epsilon &&
+        std::abs((left.y + left.height) - (right.y + right.height)) <= edge_epsilon;
+    return edges_match || rect_iou(left, right) >= 0.965;
+}
+
+std::vector<SmartTargetView> smart_targets_at(
+    const OverlayContext& context,
+    double x,
+    double y
+) {
+    std::vector<SmartTargetView> targets;
+    if (context.canvas == nullptr || context.semantic_regions == nullptr ||
+        !context.semantic_regions->available) {
+        return targets;
+    }
+
+    const int width = gtk_widget_get_width(context.canvas);
+    const int height = gtk_widget_get_height(context.canvas);
+    for (const auto& region : context.semantic_regions->regions) {
+        const SelectionRect rect = semantic_rect_to_canvas(
+            *context.semantic_regions,
+            region.rect,
+            width,
+            height
+        );
+        if (!contains_point(rect, x, y)) continue;
+
+        bool duplicate = false;
+        for (const auto& existing : targets) {
+            if (visually_same_target(existing.rect, rect)) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+
+        targets.push_back(SmartTargetView{
+            .region = &region,
+            .rect = rect,
+        });
+    }
+
+    for (std::size_t index = 0; index < targets.size(); ++index) {
+        targets[index].candidate_index = index;
+        targets[index].candidate_count = targets.size();
+    }
+    return targets;
+}
+
+std::optional<SmartTargetView> smart_target_at(
+    const OverlayContext& context,
+    double x,
+    double y
+) {
+    auto targets = smart_targets_at(context, x, y);
+    if (targets.empty()) return std::nullopt;
+
+    const std::size_t index = context.smart_target_cycle % targets.size();
+    return targets[index];
+}
+
+void reset_smart_target_cycle(OverlayContext* context, double x, double y, bool force = false) {
+    if (context == nullptr) return;
+
+    const auto targets = smart_targets_at(*context, x, y);
+    const SemanticRegion* primary = targets.empty() ? nullptr : targets.front().region;
+
+    constexpr double reset_distance = 8.0;
+    const double delta_x = x - context->smart_cycle_anchor_x;
+    const double delta_y = y - context->smart_cycle_anchor_y;
+    const bool moved_far =
+        delta_x * delta_x + delta_y * delta_y >= reset_distance * reset_distance;
+    const bool primary_changed = primary != context->smart_cycle_anchor_primary;
+
+    if (force || !context->smart_cycle_anchor_valid || moved_far || primary_changed) {
+        context->smart_target_cycle = 0;
+        context->smart_cycle_anchor_x = x;
+        context->smart_cycle_anchor_y = y;
+        context->smart_cycle_anchor_primary = primary;
+        context->smart_cycle_anchor_valid = true;
+    }
+}
+
+bool cycle_smart_target(OverlayContext* context, int direction) {
+    if (context == nullptr || context->selecting || !context->pointer_inside || direction == 0) {
+        return false;
+    }
+
+    auto targets = smart_targets_at(*context, context->pointer_x, context->pointer_y);
+    if (targets.size() <= 1) return false;
+
+    const std::size_t count = targets.size();
+    const std::size_t current = context->smart_target_cycle % count;
+    if (direction > 0) {
+        context->smart_target_cycle = (current + 1) % count;
+    } else {
+        context->smart_target_cycle = (current + count - 1) % count;
+    }
+    context->smart_cycle_anchor_x = context->pointer_x;
+    context->smart_cycle_anchor_y = context->pointer_y;
+    context->smart_cycle_anchor_primary = targets.front().region;
+    context->smart_cycle_anchor_valid = true;
+    queue_canvas(context);
+    return true;
+}
+
+
+SelectionRect pixel_rect_to_canvas(
+    const OverlayContext& context,
+    const PixelRect& rect
+) {
+    if (context.canvas == nullptr || context.frame == nullptr ||
+        context.frame->width <= 0 || context.frame->height <= 0) {
+        return {};
+    }
+
+    const int canvas_width = gtk_widget_get_width(context.canvas);
+    const int canvas_height = gtk_widget_get_height(context.canvas);
+    if (canvas_width <= 0 || canvas_height <= 0) return {};
+
+    const double scale_x = static_cast<double>(canvas_width) /
+        static_cast<double>(context.frame->width);
+    const double scale_y = static_cast<double>(canvas_height) /
+        static_cast<double>(context.frame->height);
+    return SelectionRect{
+        .x = rect.x * scale_x,
+        .y = rect.y * scale_y,
+        .width = rect.width * scale_x,
+        .height = rect.height * scale_y,
+    };
+}
+
+bool ocr_mode_active(const OverlayContext& context) {
+    return context.ocr_region_selecting || context.ocr_processing || context.ocr_ready;
+}
+
+void set_ratio_toolbar_visible(OverlayContext* context, bool visible) {
+    if (context != nullptr && context->ratio_toolbar != nullptr) {
+        gtk_widget_set_visible(context->ratio_toolbar, visible);
+    }
+}
+
+void clear_ocr_mode(OverlayContext* context) {
+    if (context == nullptr) return;
+    context->ocr_region_selecting = false;
+    context->ocr_processing = false;
+    context->ocr_ready = false;
+    context->ocr_text_selecting = false;
+    context->ocr_region_canvas = {};
+    context->ocr_region_pixels = {};
+    context->ocr_words.clear();
+    context->ocr_anchor_word.reset();
+    context->ocr_focus_word.reset();
+    set_ratio_toolbar_visible(context, true);
+    queue_canvas(context);
+}
+
+std::optional<std::size_t> ocr_word_at(
+    const OverlayContext& context,
+    double x,
+    double y,
+    bool allow_nearest
+) {
+    if (!context.ocr_ready || context.ocr_words.empty()) return std::nullopt;
+
+    std::optional<std::size_t> nearest;
+    double nearest_distance_sq = 60.0 * 60.0;
+
+    for (std::size_t index = 0; index < context.ocr_words.size(); ++index) {
+        const SelectionRect rect = pixel_rect_to_canvas(context, context.ocr_words[index].rect);
+        if (contains_point(rect, x, y)) return index;
+        if (!allow_nearest) continue;
+
+        const double dx = x < rect.x
+            ? rect.x - x
+            : x > rect.x + rect.width
+                ? x - (rect.x + rect.width)
+                : 0.0;
+        const double dy = y < rect.y
+            ? rect.y - y
+            : y > rect.y + rect.height
+                ? y - (rect.y + rect.height)
+                : 0.0;
+        const double distance_sq = dx * dx + dy * dy;
+        if (distance_sq < nearest_distance_sq) {
+            nearest_distance_sq = distance_sq;
+            nearest = index;
+        }
+    }
+    return nearest;
+}
+
+bool ocr_word_selected(const OverlayContext& context, std::size_t index) {
+    if (!context.ocr_anchor_word || !context.ocr_focus_word) return false;
+    const std::size_t first = std::min(*context.ocr_anchor_word, *context.ocr_focus_word);
+    const std::size_t last = std::max(*context.ocr_anchor_word, *context.ocr_focus_word);
+    return index >= first && index <= last;
+}
+
+std::string selected_ocr_text(const OverlayContext& context) {
+    if (!context.ocr_anchor_word || !context.ocr_focus_word || context.ocr_words.empty()) {
+        return {};
+    }
+
+    const std::size_t first = std::min(*context.ocr_anchor_word, *context.ocr_focus_word);
+    const std::size_t last = std::min(
+        std::max(*context.ocr_anchor_word, *context.ocr_focus_word),
+        context.ocr_words.size() - 1
+    );
+
+    std::string output;
+    const OcrWord* previous = nullptr;
+    for (std::size_t index = first; index <= last; ++index) {
+        const OcrWord& word = context.ocr_words[index];
+        if (previous != nullptr) {
+            if (word.block != previous->block || word.paragraph != previous->paragraph) {
+                output += "\n\n";
+            } else if (word.line != previous->line) {
+                output += '\n';
+            } else {
+                output += ' ';
+            }
+        }
+        output += word.text;
+        previous = &word;
+    }
+    return output;
+}
+
+bool copy_selected_ocr_and_close(OverlayContext* context) {
+    if (context == nullptr || context->window == nullptr || context->completed) return false;
+    const std::string text = selected_ocr_text(*context);
+    if (text.empty()) return false;
+
+    std::string error;
+    if (!ClipboardExporter::copy_text(text, error)) {
+        std::cerr << "[Screenshot] " << error << '\n';
+        return false;
+    }
+
+    context->completed = true;
+    std::cout << "[Screenshot] Copied OCR text (" << text.size()
+              << " bytes) to clipboard\n";
+    gtk_window_destroy(context->window);
+    return true;
+}
+
+SelectionRect current_ocr_region(const OverlayContext& context) {
+    return normalize_selection(
+        context.start_x,
+        context.start_y,
+        context.current_x,
+        context.current_y
+    );
+}
+
+void begin_ocr(OverlayContext* context, const SelectionRect& selection);
+
+void rounded_rectangle(
+    cairo_t* cr,
+    double x,
+    double y,
+    double width,
+    double height,
+    double radius
+) {
+    const double right = x + width;
+    const double bottom = y + height;
+
+    cairo_new_sub_path(cr);
+    cairo_arc(cr, right - radius, y + radius, radius, -kPi / 2.0, 0.0);
+    cairo_arc(cr, right - radius, bottom - radius, radius, 0.0, kPi / 2.0);
+    cairo_arc(cr, x + radius, bottom - radius, radius, kPi / 2.0, kPi);
+    cairo_arc(cr, x + radius, y + radius, radius, kPi, 3.0 * kPi / 2.0);
+    cairo_close_path(cr);
+}
+
+void draw_badge(
+    cairo_t* cr,
+    const std::string& text,
+    double center_x,
+    double center_y,
+    int canvas_width,
+    int canvas_height,
+    const Rgba& accent = kAetherGold,
+    double accent_strength = 0.95
+) {
+    cairo_save(cr);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, 12.5);
+
+    cairo_text_extents_t extents{};
+    cairo_text_extents(cr, text.c_str(), &extents);
+
+    constexpr double pad_x = 10.0;
+    constexpr double pad_y = 6.0;
+    const double box_width = extents.width + pad_x * 2.0 + 10.0;
+    const double box_height = extents.height + pad_y * 2.0;
+
+    const double max_x = std::max(8.0, static_cast<double>(canvas_width) - box_width - 8.0);
+    const double max_y = std::max(8.0, static_cast<double>(canvas_height) - box_height - 8.0);
+    const double x = std::clamp(center_x - box_width / 2.0, 8.0, max_x);
+    const double y = std::clamp(center_y - box_height / 2.0, 8.0, max_y);
+    const double radius = 10.0;
+
+    rounded_rectangle(cr, x, y, box_width, box_height, radius);
+    set_source_rgba(cr, kBackdrop);
+    cairo_fill_preserve(cr);
+
+    cairo_set_line_width(cr, 1.0);
+    set_source_rgba(cr, kBackdropBorder);
+    cairo_stroke(cr);
+
+    rounded_rectangle(cr, x + 3.0, y + 3.0, 4.0, box_height - 6.0, 2.0);
+    set_source_rgba(cr, accent, accent_strength);
+    cairo_fill(cr);
+
+    set_source_rgba(cr, kTextWhite, 0.98);
+    cairo_move_to(
+        cr,
+        x + pad_x + 8.0 - extents.x_bearing,
+        y + pad_y - extents.y_bearing
+    );
+    cairo_show_text(cr, text.c_str());
+    cairo_restore(cr);
+}
+
+void draw_crosshair(cairo_t* cr, double x, double y, int width, int height) {
+    cairo_save(cr);
+
+    cairo_set_line_width(cr, 2.4);
+    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.28);
+    cairo_move_to(cr, x, 0.0);
+    cairo_line_to(cr, x, static_cast<double>(height));
+    cairo_move_to(cr, 0.0, y);
+    cairo_line_to(cr, static_cast<double>(width), y);
+    cairo_stroke(cr);
+
+    cairo_set_line_width(cr, 0.9);
+    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, kGuideAlpha);
+    cairo_move_to(cr, x, 0.0);
+    cairo_line_to(cr, x, static_cast<double>(height));
+    cairo_move_to(cr, 0.0, y);
+    cairo_line_to(cr, static_cast<double>(width), y);
+    cairo_stroke(cr);
+
+    cairo_arc(cr, x, y, 4.0, 0.0, kPi * 2.0);
+    set_source_rgba(cr, kAetherGold, 0.95);
+    cairo_fill_preserve(cr);
+    cairo_set_line_width(cr, 1.0);
+    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.90);
+    cairo_stroke(cr);
+
+    cairo_restore(cr);
+}
+
+void draw_outside_dim(
+    cairo_t* cr,
+    const SelectionRect& selection,
+    int width,
+    int height,
+    double alpha
+) {
+    const double right = selection.x + selection.width;
+    const double bottom = selection.y + selection.height;
+
+    cairo_save(cr);
+    cairo_set_source_rgba(cr, 0.02, 0.02, 0.03, alpha);
+
+    cairo_rectangle(cr, 0.0, 0.0, static_cast<double>(width), selection.y);
+    cairo_rectangle(
+        cr,
+        0.0,
+        bottom,
+        static_cast<double>(width),
+        std::max(0.0, static_cast<double>(height) - bottom)
+    );
+    cairo_rectangle(cr, 0.0, selection.y, selection.x, selection.height);
+    cairo_rectangle(
+        cr,
+        right,
+        selection.y,
+        std::max(0.0, static_cast<double>(width) - right),
+        selection.height
+    );
+    cairo_fill(cr);
+
+    cairo_set_line_width(cr, 1.0);
+    cairo_rectangle(cr, selection.x + 0.5, selection.y + 0.5,
+                    std::max(0.0, selection.width - 1.0),
+                    std::max(0.0, selection.height - 1.0));
+    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.06);
+    cairo_stroke(cr);
+    cairo_restore(cr);
+}
+
+void draw_selection_border(
+    cairo_t* cr,
+    const SelectionRect& selection,
+    const Rgba& accent = kAetherGold,
+    double fill_alpha = 0.06
+) {
+    const double x = selection.x + 0.5;
+    const double y = selection.y + 0.5;
+    const double width = std::max(0.0, selection.width - 1.0);
+    const double height = std::max(0.0, selection.height - 1.0);
+    if (width <= 0.0 || height <= 0.0) return;
+
+    constexpr double radius = 10.0;
+    constexpr double corner_len = 16.0;
+
+    cairo_save(cr);
+    rounded_rectangle(cr, x, y, width, height, radius);
+    set_source_rgba(cr, accent, fill_alpha);
+    cairo_fill_preserve(cr);
+
+    cairo_set_line_width(cr, 2.8);
+    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.40);
+    cairo_stroke_preserve(cr);
+
+    cairo_set_line_width(cr, 1.15);
+    set_source_rgba(cr, alpha(accent, 0.96));
+    cairo_stroke(cr);
+
+    const double right = x + width;
+    const double bottom = y + height;
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_width(cr, 2.2);
+    set_source_rgba(cr, accent, 0.98);
+
+    cairo_move_to(cr, x + radius * 0.7, y);
+    cairo_line_to(cr, std::min(right - radius, x + corner_len), y);
+    cairo_move_to(cr, x, y + radius * 0.7);
+    cairo_line_to(cr, x, std::min(bottom - radius, y + corner_len));
+
+    cairo_move_to(cr, std::max(x + radius, right - corner_len), y);
+    cairo_line_to(cr, right - radius * 0.7, y);
+    cairo_move_to(cr, right, y + radius * 0.7);
+    cairo_line_to(cr, right, std::min(bottom - radius, y + corner_len));
+
+    cairo_move_to(cr, x + radius * 0.7, bottom);
+    cairo_line_to(cr, std::min(right - radius, x + corner_len), bottom);
+    cairo_move_to(cr, x, std::max(y + radius, bottom - corner_len));
+    cairo_line_to(cr, x, bottom - radius * 0.7);
+
+    cairo_move_to(cr, std::max(x + radius, right - corner_len), bottom);
+    cairo_line_to(cr, right - radius * 0.7, bottom);
+    cairo_move_to(cr, right, std::max(y + radius, bottom - corner_len));
+    cairo_line_to(cr, right, bottom - radius * 0.7);
+    cairo_stroke(cr);
+    cairo_restore(cr);
+}
+
+void draw_rule_of_thirds(cairo_t* cr, const SelectionRect& selection) {
+    if (selection.width <= 0.0 || selection.height <= 0.0) return;
+
+    const double x1 = selection.x + selection.width / 3.0;
+    const double x2 = selection.x + selection.width * 2.0 / 3.0;
+    const double y1 = selection.y + selection.height / 3.0;
+    const double y2 = selection.y + selection.height * 2.0 / 3.0;
+
+    cairo_save(cr);
+    cairo_rectangle(cr, selection.x, selection.y, selection.width, selection.height);
+    cairo_clip(cr);
+
+    // Dark under-stroke keeps the guides readable on bright screenshots.
+    cairo_set_line_width(cr, 2.0);
+    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.34);
+    cairo_move_to(cr, x1, selection.y);
+    cairo_line_to(cr, x1, selection.y + selection.height);
+    cairo_move_to(cr, x2, selection.y);
+    cairo_line_to(cr, x2, selection.y + selection.height);
+    cairo_move_to(cr, selection.x, y1);
+    cairo_line_to(cr, selection.x + selection.width, y1);
+    cairo_move_to(cr, selection.x, y2);
+    cairo_line_to(cr, selection.x + selection.width, y2);
+    cairo_stroke(cr);
+
+    cairo_set_line_width(cr, 0.8);
+    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.46);
+    cairo_move_to(cr, x1, selection.y);
+    cairo_line_to(cr, x1, selection.y + selection.height);
+    cairo_move_to(cr, x2, selection.y);
+    cairo_line_to(cr, x2, selection.y + selection.height);
+    cairo_move_to(cr, selection.x, y1);
+    cairo_line_to(cr, selection.x + selection.width, y1);
+    cairo_move_to(cr, selection.x, y2);
+    cairo_line_to(cr, selection.x + selection.width, y2);
+    cairo_stroke(cr);
+    cairo_restore(cr);
+}
+
+void draw_measurements(
+    cairo_t* cr,
+    const OverlayContext& context,
+    const SelectionRect& selection,
+    int width,
+    int height
+) {
+    if (context.frame == nullptr) return;
+
+    const PixelRect pixels = selection_to_pixels(
+        selection,
+        width,
+        height,
+        context.frame->width,
+        context.frame->height
+    );
+    if (pixels.width <= 0 || pixels.height <= 0) return;
+
+    const int left = pixels.x;
+    const int top = pixels.y;
+    const int right = std::max(0, context.frame->width - pixels.x - pixels.width);
+    const int bottom = std::max(0, context.frame->height - pixels.y - pixels.height);
+
+    std::string dimension_text =
+        std::to_string(pixels.width) + " × " + std::to_string(pixels.height);
+    if (selection_ratio_is_fixed(context.ratio)) {
+        dimension_text += "  ·  ";
+        dimension_text += selection_ratio_label(context.ratio);
+    }
+
+    draw_badge(
+        cr,
+        dimension_text,
+        selection.x + selection.width / 2.0,
+        std::max(20.0, selection.y - 20.0),
+        width,
+        height,
+        kAetherGold
+    );
+
+    if (selection.x > 72.0) {
+        draw_badge(
+            cr,
+            std::to_string(left) + " px",
+            selection.x / 2.0,
+            selection.y + selection.height / 2.0,
+            width,
+            height,
+            kAetherGoldSoft,
+            0.88
+        );
+    }
+    if (static_cast<double>(width) - selection.x - selection.width > 72.0) {
+        draw_badge(
+            cr,
+            std::to_string(right) + " px",
+            selection.x + selection.width +
+                (static_cast<double>(width) - selection.x - selection.width) / 2.0,
+            selection.y + selection.height / 2.0,
+            width,
+            height,
+            kAetherGoldSoft,
+            0.88
+        );
+    }
+    if (selection.y > 52.0) {
+        draw_badge(
+            cr,
+            std::to_string(top) + " px",
+            selection.x + selection.width / 2.0,
+            selection.y / 2.0,
+            width,
+            height,
+            kAetherGoldSoft,
+            0.88
+        );
+    }
+    if (static_cast<double>(height) - selection.y - selection.height > 52.0) {
+        draw_badge(
+            cr,
+            std::to_string(bottom) + " px",
+            selection.x + selection.width / 2.0,
+            selection.y + selection.height +
+                (static_cast<double>(height) - selection.y - selection.height) / 2.0,
+            width,
+            height,
+            kAetherGoldSoft,
+            0.88
+        );
+    }
+}
+
+SelectionRect inset_outline_rect(
+    const SelectionRect& rect,
+    int width,
+    int height
+) {
+    constexpr double inset = 1.5;
+    const double left = std::clamp(rect.x, inset, std::max(inset, static_cast<double>(width) - inset));
+    const double top = std::clamp(rect.y, inset, std::max(inset, static_cast<double>(height) - inset));
+    const double right = std::clamp(
+        rect.x + rect.width,
+        inset,
+        std::max(inset, static_cast<double>(width) - inset)
+    );
+    const double bottom = std::clamp(
+        rect.y + rect.height,
+        inset,
+        std::max(inset, static_cast<double>(height) - inset)
+    );
+    return SelectionRect{
+        .x = left,
+        .y = top,
+        .width = std::max(0.0, right - left),
+        .height = std::max(0.0, bottom - top),
+    };
+}
+
+void draw_semantic_region_outlines(
+    cairo_t* cr,
+    const OverlayContext& context,
+    int width,
+    int height
+) {
+    if (context.semantic_regions == nullptr || !context.semantic_regions->available) return;
+
+    cairo_save(cr);
+    for (const auto& region : context.semantic_regions->regions) {
+        const SelectionRect canvas_rect = semantic_rect_to_canvas(
+            *context.semantic_regions,
+            region.rect,
+            width,
+            height
+        );
+        const SelectionRect outline = inset_outline_rect(canvas_rect, width, height);
+        if (outline.width <= 1.0 || outline.height <= 1.0) continue;
+
+        const Rgba color = smart_target_color(region.source);
+        rounded_rectangle(cr, outline.x, outline.y, outline.width, outline.height, 8.0);
+        cairo_set_line_width(cr, 1.0);
+        set_source_rgba(cr, color, region.source == SemanticRegionSource::Content ? kSemanticOutlineAlpha + 0.02 : kSemanticOutlineAlpha - 0.06);
+        cairo_stroke(cr);
+    }
+    cairo_restore(cr);
+}
+
+void draw_smart_target(
+    cairo_t* cr,
+    const OverlayContext& context,
+    const SmartTargetView& target,
+    int width,
+    int height
+) {
+    if (context.frame == nullptr || target.region == nullptr) return;
+
+    const Rgba accent = smart_target_color(target.region->source);
+    draw_outside_dim(
+        cr,
+        target.rect,
+        width,
+        height,
+        kSmartTargetDimAlpha
+    );
+    const SelectionRect outline = inset_outline_rect(target.rect, width, height);
+    draw_selection_border(cr, outline, accent, 0.08);
+
+    const PixelRect pixels = selection_to_pixels(
+        target.rect,
+        width,
+        height,
+        context.frame->width,
+        context.frame->height
+    );
+    if (pixels.width <= 0 || pixels.height <= 0) return;
+
+    std::string label = semantic_region_source_label(target.region->source);
+    if (target.candidate_count > 1) {
+        label += " ";
+        label += std::to_string(target.candidate_index + 1);
+        label += "/";
+        label += std::to_string(target.candidate_count);
+    }
+    label += "  ·  ";
+    label += std::to_string(pixels.width);
+    label += " × ";
+    label += std::to_string(pixels.height);
+
+    draw_badge(
+        cr,
+        label,
+        target.rect.x + target.rect.width / 2.0,
+        std::max(20.0, target.rect.y - 20.0),
+        width,
+        height,
+        accent
+    );
+}
+
+void draw_ocr_region_state(
+    cairo_t* cr,
+    OverlayContext& context,
+    int width,
+    int height
+) {
+    SelectionRect region = context.ocr_region_canvas;
+    if (context.ocr_region_selecting) {
+        region = current_ocr_region(context);
+    }
+    if (region.width <= 0.0 || region.height <= 0.0) return;
+
+    draw_outside_dim(cr, region, width, height, kDimAlpha);
+    draw_selection_border(cr, region, kArcaneViolet, 0.08);
+
+    if (context.ocr_processing) {
+        draw_badge(
+            cr,
+            "OCR · Recognizing…",
+            region.x + region.width / 2.0,
+            std::max(20.0, region.y - 20.0),
+            width,
+            height,
+            kArcaneViolet
+        );
+        return;
+    }
+
+    if (context.ocr_region_selecting && context.frame != nullptr) {
+        const PixelRect pixels = selection_to_pixels(
+            region,
+            width,
+            height,
+            context.frame->width,
+            context.frame->height
+        );
+        draw_badge(
+            cr,
+            "OCR · " + std::to_string(pixels.width) + " × " + std::to_string(pixels.height),
+            region.x + region.width / 2.0,
+            std::max(20.0, region.y - 20.0),
+            width,
+            height,
+            kArcaneViolet
+        );
+        return;
+    }
+
+    if (!context.ocr_ready) return;
+
+    for (std::size_t index = 0; index < context.ocr_words.size(); ++index) {
+        const SelectionRect word_rect = pixel_rect_to_canvas(context, context.ocr_words[index].rect);
+        if (word_rect.width <= 0.0 || word_rect.height <= 0.0) continue;
+
+        cairo_save(cr);
+        rounded_rectangle(cr, word_rect.x, word_rect.y, word_rect.width, word_rect.height, 4.0);
+        if (ocr_word_selected(context, index)) {
+            set_source_rgba(cr, kArcaneViolet, 0.26);
+            cairo_fill_preserve(cr);
+            cairo_set_line_width(cr, 1.2);
+            set_source_rgba(cr, kAetherGold, 0.96);
+        } else {
+            set_source_rgba(cr, kArcaneVioletSoft, 0.12);
+            cairo_fill_preserve(cr);
+            cairo_set_line_width(cr, 0.85);
+            set_source_rgba(cr, kArcaneViolet, 0.52);
+        }
+        cairo_stroke(cr);
+        cairo_restore(cr);
+    }
+
+    std::string badge = "OCR · " + std::to_string(context.ocr_words.size()) + " words";
+    if (context.ocr_anchor_word && context.ocr_focus_word) {
+        const std::size_t first = std::min(*context.ocr_anchor_word, *context.ocr_focus_word);
+        const std::size_t last = std::max(*context.ocr_anchor_word, *context.ocr_focus_word);
+        badge += " · " + std::to_string(last - first + 1) + " selected";
+    }
+    badge += " · Ctrl+C";
+    draw_badge(
+        cr,
+        badge,
+        region.x + region.width / 2.0,
+        std::max(20.0, region.y - 20.0),
+        width,
+        height,
+        kArcaneViolet
+    );
+}
+
+bool copy_selection_and_close(
+    OverlayContext* context,
+    const SelectionRect& selection,
+    const char* kind
+) {
+    if (context == nullptr || context->canvas == nullptr ||
+        context->frame == nullptr || context->window == nullptr ||
+        context->completed) {
+        return false;
+    }
+
+    const int width = gtk_widget_get_width(context->canvas);
+    const int height = gtk_widget_get_height(context->canvas);
+    const PixelRect pixels = selection_to_pixels(
+        selection,
+        width,
+        height,
+        context->frame->width,
+        context->frame->height
+    );
+    if (pixels.width <= 1 || pixels.height <= 1) return false;
+
+    std::string error;
+    if (!ClipboardExporter::copy_png(*context->frame, pixels, error)) {
+        std::cerr << "[Screenshot] " << error << '\n';
+        return false;
+    }
+
+    context->completed = true;
+    std::cout << "[Screenshot] Copied "
+              << pixels.width << 'x' << pixels.height << ' '
+              << kind << " to clipboard\n";
+    gtk_window_destroy(context->window);
+    return true;
+}
+
+
+gboolean run_ocr_idle(gpointer user_data) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr || context->frame == nullptr || context->window == nullptr ||
+        !context->ocr_processing) {
+        return G_SOURCE_REMOVE;
+    }
+
+    OcrResult result = OcrEngine::recognize(*context->frame, context->ocr_region_pixels);
+    context->ocr_processing = false;
+
+    if (!result.ok) {
+        std::cerr << "[Screenshot] OCR failed: " << result.error << '\n';
+        clear_ocr_mode(context);
+        return G_SOURCE_REMOVE;
+    }
+
+    context->ocr_words = std::move(result.words);
+    context->ocr_ready = true;
+    context->ocr_anchor_word.reset();
+    context->ocr_focus_word.reset();
+    std::cout << "[Screenshot] OCR recognized " << context->ocr_words.size()
+              << " word(s)\n";
+    queue_canvas(context);
+    return G_SOURCE_REMOVE;
+}
+
+void begin_ocr(OverlayContext* context, const SelectionRect& selection) {
+    if (context == nullptr || context->canvas == nullptr || context->frame == nullptr ||
+        context->ocr_processing || context->completed) {
+        return;
+    }
+
+    const int width = gtk_widget_get_width(context->canvas);
+    const int height = gtk_widget_get_height(context->canvas);
+    const PixelRect pixels = selection_to_pixels(
+        selection,
+        width,
+        height,
+        context->frame->width,
+        context->frame->height
+    );
+    if (pixels.width <= 2 || pixels.height <= 2) return;
+
+    context->selecting = false;
+    context->ocr_region_selecting = false;
+    context->ocr_text_selecting = false;
+    context->ocr_ready = false;
+    context->ocr_processing = true;
+    context->ocr_region_canvas = selection;
+    context->ocr_region_pixels = pixels;
+    context->ocr_words.clear();
+    context->ocr_anchor_word.reset();
+    context->ocr_focus_word.reset();
+    set_ratio_toolbar_visible(context, false);
+    queue_canvas(context);
+
+    // Let GTK commit the "Recognizing…" state before Tesseract runs. The screen
+    // itself is already frozen, so the synchronous OCR work cannot change what
+    // the user selected.
+    g_idle_add(run_ocr_idle, context);
+}
+
+void draw_overlay(
+    GtkDrawingArea*,
+    cairo_t* cr,
+    int width,
+    int height,
+    gpointer user_data
+) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr) return;
+
+    if (ocr_mode_active(*context)) {
+        draw_ocr_region_state(cr, *context, width, height);
+    } else if (context->selecting) {
+        const SelectionRect selection = current_selection(*context);
+        if (selection.width > 0.0 && selection.height > 0.0) {
+            draw_outside_dim(cr, selection, width, height, kDimAlpha);
+            if (selection_ratio_is_fixed(context->ratio)) {
+                draw_rule_of_thirds(cr, selection);
+            }
+            draw_selection_border(cr, selection, kAetherGold, 0.06);
+            draw_measurements(cr, *context, selection, width, height);
+        }
+    } else {
+        draw_semantic_region_outlines(cr, *context, width, height);
+        if (context->pointer_inside) {
+            if (const auto target = smart_target_at(
+                *context,
+                context->pointer_x,
+                context->pointer_y
+            )) {
+                draw_smart_target(cr, *context, *target, width, height);
+            }
+        }
+    }
+
+    if ((context->pointer_inside || context->selecting || context->ocr_region_selecting) &&
+        !context->ocr_ready && !context->ocr_processing) {
+        draw_crosshair(
+            cr,
+            context->pointer_x,
+            context->pointer_y,
+            width,
+            height
+        );
+    }
+}
+
+gboolean on_key_pressed(
+    GtkEventControllerKey*,
+    guint keyval,
+    guint,
+    GdkModifierType state,
+    gpointer user_data
+) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr || context->window == nullptr) {
+        return GDK_EVENT_PROPAGATE;
+    }
+
+    if (keyval == GDK_KEY_Escape) {
+        if (ocr_mode_active(*context)) {
+            clear_ocr_mode(context);
+        } else {
+            gtk_window_destroy(context->window);
+        }
+        return GDK_EVENT_STOP;
+    }
+
+    if (context->ocr_ready) {
+        const bool control = (state & GDK_CONTROL_MASK) != 0;
+        if (control && (keyval == GDK_KEY_a || keyval == GDK_KEY_A)) {
+            if (!context->ocr_words.empty()) {
+                context->ocr_anchor_word = 0;
+                context->ocr_focus_word = context->ocr_words.size() - 1;
+                queue_canvas(context);
+            }
+            return GDK_EVENT_STOP;
+        }
+        if ((control && (keyval == GDK_KEY_c || keyval == GDK_KEY_C)) ||
+            keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter) {
+            if (copy_selected_ocr_and_close(context)) {
+                return GDK_EVENT_STOP;
+            }
+            return GDK_EVENT_STOP;
+        }
+        return GDK_EVENT_PROPAGATE;
+    }
+
+    if (context->ocr_processing || context->ocr_region_selecting) {
+        return GDK_EVENT_PROPAGATE;
+    }
+
+    if (keyval == GDK_KEY_Tab || keyval == GDK_KEY_ISO_Left_Tab) {
+        const bool reverse = keyval == GDK_KEY_ISO_Left_Tab ||
+            (state & GDK_SHIFT_MASK) != 0;
+        if (cycle_smart_target(context, reverse ? -1 : 1)) {
+            return GDK_EVENT_STOP;
+        }
+    }
+
+    int ratio_index = -1;
+    if (keyval == GDK_KEY_1 || keyval == GDK_KEY_KP_1) ratio_index = 0;
+    if (keyval == GDK_KEY_2 || keyval == GDK_KEY_KP_2) ratio_index = 1;
+    if (keyval == GDK_KEY_3 || keyval == GDK_KEY_KP_3) ratio_index = 2;
+    if (keyval == GDK_KEY_4 || keyval == GDK_KEY_KP_4) ratio_index = 3;
+
+    if (ratio_index >= 0) {
+        context->ratio = static_cast<SelectionRatio>(ratio_index);
+        GtkToggleButton* button = context->ratio_buttons[static_cast<std::size_t>(ratio_index)];
+        if (button != nullptr && !gtk_toggle_button_get_active(button)) {
+            gtk_toggle_button_set_active(button, true);
+        }
+        queue_canvas(context);
+        return GDK_EVENT_STOP;
+    }
+
+    return GDK_EVENT_PROPAGATE;
+}
+
+void on_motion_enter(
+    GtkEventControllerMotion*,
+    double x,
+    double y,
+    gpointer user_data
+) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr || context->canvas == nullptr) return;
+
+    context->pointer_inside = true;
+    context->pointer_x = x;
+    context->pointer_y = y;
+    reset_smart_target_cycle(context, x, y, true);
+    queue_canvas(context);
+}
+
+void on_motion(
+    GtkEventControllerMotion*,
+    double x,
+    double y,
+    gpointer user_data
+) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr || context->canvas == nullptr) return;
+
+    const int width = gtk_widget_get_width(context->canvas);
+    const int height = gtk_widget_get_height(context->canvas);
+    context->pointer_inside = true;
+    const double next_x = clamp_coordinate(x, width);
+    const double next_y = clamp_coordinate(y, height);
+    if (!context->selecting && !ocr_mode_active(*context)) {
+        reset_smart_target_cycle(context, next_x, next_y);
+    }
+    context->pointer_x = next_x;
+    context->pointer_y = next_y;
+
+    if (context->selecting || context->ocr_region_selecting) {
+        context->current_x = context->pointer_x;
+        context->current_y = context->pointer_y;
+    }
+    if (context->ocr_text_selecting) {
+        if (const auto word = ocr_word_at(*context, context->pointer_x, context->pointer_y, true)) {
+            context->ocr_focus_word = *word;
+        }
+    }
+    queue_canvas(context);
+}
+
+void on_motion_leave(GtkEventControllerMotion*, gpointer user_data) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr) return;
+
+    if (!context->selecting && !context->ocr_region_selecting && !context->ocr_text_selecting) {
+        context->pointer_inside = false;
+    }
+    queue_canvas(context);
+}
+
+gboolean on_scroll(
+    GtkEventControllerScroll*,
+    double,
+    double delta_y,
+    gpointer user_data
+) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr || ocr_mode_active(*context) || std::abs(delta_y) < 0.01) {
+        return GDK_EVENT_PROPAGATE;
+    }
+
+    if (cycle_smart_target(context, delta_y > 0.0 ? 1 : -1)) {
+        return GDK_EVENT_STOP;
+    }
+    return GDK_EVENT_PROPAGATE;
+}
+
+void on_drag_begin(
+    GtkGestureDrag*,
+    double start_x,
+    double start_y,
+    gpointer user_data
+) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr || context->canvas == nullptr) return;
+
+    const int width = gtk_widget_get_width(context->canvas);
+    const int height = gtk_widget_get_height(context->canvas);
+
+    if (context->ocr_ready) {
+        context->ocr_text_selecting = true;
+        context->pointer_inside = true;
+        context->pointer_x = clamp_coordinate(start_x, width);
+        context->pointer_y = clamp_coordinate(start_y, height);
+        context->ocr_anchor_word = ocr_word_at(
+            *context,
+            context->pointer_x,
+            context->pointer_y,
+            false
+        );
+        context->ocr_focus_word = context->ocr_anchor_word;
+        queue_canvas(context);
+        return;
+    }
+    if (context->ocr_processing || context->ocr_region_selecting) return;
+
+    context->selecting = true;
+    context->pointer_inside = true;
+    context->start_x = clamp_coordinate(start_x, width);
+    context->start_y = clamp_coordinate(start_y, height);
+    context->current_x = context->start_x;
+    context->current_y = context->start_y;
+    context->pointer_x = context->start_x;
+    context->pointer_y = context->start_y;
+    queue_canvas(context);
+}
+
+void on_drag_update(
+    GtkGestureDrag* gesture,
+    double offset_x,
+    double offset_y,
+    gpointer user_data
+) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr || context->canvas == nullptr) return;
+
+    const int width = gtk_widget_get_width(context->canvas);
+    const int height = gtk_widget_get_height(context->canvas);
+
+    if (context->ocr_text_selecting) {
+        double start_x = 0.0;
+        double start_y = 0.0;
+        if (!gtk_gesture_drag_get_start_point(gesture, &start_x, &start_y)) return;
+        context->pointer_x = clamp_coordinate(start_x + offset_x, width);
+        context->pointer_y = clamp_coordinate(start_y + offset_y, height);
+        if (const auto word = ocr_word_at(*context, context->pointer_x, context->pointer_y, true)) {
+            context->ocr_focus_word = *word;
+        }
+        queue_canvas(context);
+        return;
+    }
+
+    if (!context->selecting) return;
+    context->current_x = clamp_coordinate(context->start_x + offset_x, width);
+    context->current_y = clamp_coordinate(context->start_y + offset_y, height);
+    context->pointer_x = context->current_x;
+    context->pointer_y = context->current_y;
+    queue_canvas(context);
+}
+
+void on_drag_end(
+    GtkGestureDrag* gesture,
+    double offset_x,
+    double offset_y,
+    gpointer user_data
+) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr || context->canvas == nullptr ||
+        context->frame == nullptr || context->window == nullptr) {
+        return;
+    }
+
+    const int width = gtk_widget_get_width(context->canvas);
+    const int height = gtk_widget_get_height(context->canvas);
+
+    if (context->ocr_text_selecting) {
+        double start_x = 0.0;
+        double start_y = 0.0;
+        if (gtk_gesture_drag_get_start_point(gesture, &start_x, &start_y)) {
+            context->pointer_x = clamp_coordinate(start_x + offset_x, width);
+            context->pointer_y = clamp_coordinate(start_y + offset_y, height);
+            if (const auto word = ocr_word_at(
+                    *context,
+                    context->pointer_x,
+                    context->pointer_y,
+                    true
+                )) {
+                context->ocr_focus_word = *word;
+            }
+        }
+        context->ocr_text_selecting = false;
+        queue_canvas(context);
+        return;
+    }
+
+    if (!context->selecting) return;
+    context->current_x = clamp_coordinate(context->start_x + offset_x, width);
+    context->current_y = clamp_coordinate(context->start_y + offset_y, height);
+    context->pointer_x = context->current_x;
+    context->pointer_y = context->current_y;
+
+    const SelectionRect selection = current_selection(*context);
+    if (
+        selection.width < kMinimumSelectionLogical ||
+        selection.height < kMinimumSelectionLogical
+    ) {
+        context->selecting = false;
+        if (const auto target = smart_target_at(
+                *context,
+                context->pointer_x,
+                context->pointer_y
+            )) {
+            if (copy_selection_and_close(context, target->rect, "smart target")) {
+                return;
+            }
+        }
+        queue_canvas(context);
+        return;
+    }
+
+    if (!copy_selection_and_close(context, selection, "region")) {
+        context->selecting = false;
+        queue_canvas(context);
+    }
+}
+
+
+void on_ocr_drag_begin(
+    GtkGestureDrag*,
+    double start_x,
+    double start_y,
+    gpointer user_data
+) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr || context->canvas == nullptr ||
+        context->ocr_processing || context->ocr_ready || context->completed) {
+        return;
+    }
+
+    const int width = gtk_widget_get_width(context->canvas);
+    const int height = gtk_widget_get_height(context->canvas);
+    context->ocr_region_selecting = true;
+    context->selecting = false;
+    context->pointer_inside = true;
+    context->start_x = clamp_coordinate(start_x, width);
+    context->start_y = clamp_coordinate(start_y, height);
+    context->current_x = context->start_x;
+    context->current_y = context->start_y;
+    context->pointer_x = context->start_x;
+    context->pointer_y = context->start_y;
+    set_ratio_toolbar_visible(context, false);
+    queue_canvas(context);
+}
+
+void on_ocr_drag_update(
+    GtkGestureDrag*,
+    double offset_x,
+    double offset_y,
+    gpointer user_data
+) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr || context->canvas == nullptr ||
+        !context->ocr_region_selecting) {
+        return;
+    }
+
+    const int width = gtk_widget_get_width(context->canvas);
+    const int height = gtk_widget_get_height(context->canvas);
+    context->current_x = clamp_coordinate(context->start_x + offset_x, width);
+    context->current_y = clamp_coordinate(context->start_y + offset_y, height);
+    context->pointer_x = context->current_x;
+    context->pointer_y = context->current_y;
+    queue_canvas(context);
+}
+
+void on_ocr_drag_end(
+    GtkGestureDrag*,
+    double offset_x,
+    double offset_y,
+    gpointer user_data
+) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr || context->canvas == nullptr ||
+        context->frame == nullptr || !context->ocr_region_selecting) {
+        return;
+    }
+
+    const int width = gtk_widget_get_width(context->canvas);
+    const int height = gtk_widget_get_height(context->canvas);
+    context->current_x = clamp_coordinate(context->start_x + offset_x, width);
+    context->current_y = clamp_coordinate(context->start_y + offset_y, height);
+    context->pointer_x = context->current_x;
+    context->pointer_y = context->current_y;
+
+    SelectionRect selection = current_ocr_region(*context);
+    if (selection.width < kMinimumSelectionLogical ||
+        selection.height < kMinimumSelectionLogical) {
+        context->ocr_region_selecting = false;
+        if (const auto target = smart_target_at(
+                *context,
+                context->pointer_x,
+                context->pointer_y
+            )) {
+            begin_ocr(context, target->rect);
+            return;
+        }
+        set_ratio_toolbar_visible(context, true);
+        queue_canvas(context);
+        return;
+    }
+
+    begin_ocr(context, selection);
+}
+
+void on_ratio_toggled(GtkToggleButton* button, gpointer user_data) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr || !gtk_toggle_button_get_active(button)) return;
+
+    for (std::size_t index = 0; index < context->ratio_buttons.size(); ++index) {
+        if (context->ratio_buttons[index] == button) {
+            context->ratio = static_cast<SelectionRatio>(index);
+            queue_canvas(context);
+            return;
+        }
+    }
+}
+
+GtkWidget* make_ratio_toolbar(OverlayContext* context) {
+    if (context == nullptr) return nullptr;
+
+    GtkWidget* toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    gtk_widget_set_halign(toolbar, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(toolbar, GTK_ALIGN_END);
+    gtk_widget_set_margin_bottom(toolbar, 24);
+    gtk_widget_add_css_class(toolbar, "rh-shot-toolbar");
+
+    constexpr std::array<const char*, 4> labels{
+        "Free",
+        "16:9",
+        "1:1",
+        "4:3",
+    };
+
+    GtkToggleButton* group = nullptr;
+    for (std::size_t index = 0; index < labels.size(); ++index) {
+        GtkWidget* widget = gtk_toggle_button_new_with_label(labels[index]);
+        auto* button = GTK_TOGGLE_BUTTON(widget);
+        context->ratio_buttons[index] = button;
+
+        if (group == nullptr) {
+            group = button;
+        } else {
+            gtk_toggle_button_set_group(button, group);
+        }
+
+        gtk_widget_set_focusable(widget, false);
+        gtk_widget_add_css_class(widget, "rh-shot-ratio-button");
+        gtk_widget_set_tooltip_text(
+            widget,
+            index == 0 ? "Free selection (1)" :
+            index == 1 ? "16:9 selection (2)" :
+            index == 2 ? "1:1 selection (3)" :
+                         "4:3 selection (4)"
+        );
+        g_signal_connect(button, "toggled", G_CALLBACK(on_ratio_toggled), context);
+        gtk_box_append(GTK_BOX(toolbar), widget);
+    }
+
+    gtk_toggle_button_set_active(context->ratio_buttons[0], true);
+    return toolbar;
+}
+
+bool screenshot_timing_enabled() {
+    return std::getenv("REALMHEART_SCREENSHOT_TIMING") != nullptr;
+}
+
+void print_smart_target_summary(
+    const SemanticRegionSnapshot& snapshot,
+    const std::string& connector
+) {
+    if (!snapshot.available) return;
+
+    std::size_t contents = 0;
+    std::size_t windows = 0;
+    std::size_t layers = 0;
+    for (const auto& region : snapshot.regions) {
+        switch (region.source) {
+            case SemanticRegionSource::Content:
+                ++contents;
+                break;
+            case SemanticRegionSource::Layer:
+                ++layers;
+                break;
+            case SemanticRegionSource::Window:
+            default:
+                ++windows;
+                break;
+        }
+    }
+
+    std::cout << "[Screenshot] Smart targets: "
+              << contents << " content, "
+              << windows << " window(s), "
+              << layers << " layer(s) on "
+              << connector << '\n';
+
+    if (std::getenv("REALMHEART_SCREENSHOT_DEBUG") != nullptr) {
+        for (const auto& region : snapshot.regions) {
+            std::cout << "[Screenshot]   "
+                      << semantic_region_source_label(region.source)
+                      << " x=" << region.rect.x
+                      << " y=" << region.rect.y
+                      << " w=" << region.rect.width
+                      << " h=" << region.rect.height
+                      << "  " << region.label << '\n';
+        }
+    }
+}
+
+gboolean poll_smart_region_detection(gpointer user_data) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr) return G_SOURCE_REMOVE;
+    if (!context->detection_state.ready.load(std::memory_order_acquire)) {
+        return G_SOURCE_CONTINUE;
+    }
+
+    std::optional<SmartRegionLoadResult> loaded;
+    {
+        std::lock_guard lock(context->detection_state.mutex);
+        if (context->detection_state.result.has_value()) {
+            loaded = std::move(context->detection_state.result);
+            context->detection_state.result.reset();
+        }
+    }
+
+    context->detection_poll_source = 0;
+    if (!loaded.has_value()) return G_SOURCE_REMOVE;
+
+    context->smart_cycle_anchor_primary = nullptr;
+    context->smart_cycle_anchor_valid = false;
+    context->smart_target_cycle = 0;
+    context->semantic_storage = std::move(loaded->snapshot);
+    context->semantic_regions = &context->semantic_storage;
+
+    if (!loaded->content_error.empty() &&
+        std::getenv("REALMHEART_SCREENSHOT_DEBUG") != nullptr) {
+        std::cerr << "[Screenshot] Content smart targets unavailable: "
+                  << loaded->content_error << '\n';
+    }
+
+    print_smart_target_summary(context->semantic_storage, context->monitor.connector);
+
+    if (screenshot_timing_enabled()) {
+        const double elapsed = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - context->process_start
+        ).count();
+        std::cerr << "[Screenshot timing] semantic targets "
+                  << loaded->semantic_ms << " ms\n";
+        std::cerr << "[Screenshot timing] content worker "
+                  << loaded->content_ms << " ms\n";
+        std::cerr << "[Screenshot timing] smart targets visible by "
+                  << elapsed << " ms\n";
+    }
+
+    queue_canvas(context);
+    return G_SOURCE_REMOVE;
+}
+
+void start_smart_region_detection(OverlayContext* context) {
+    if (context == nullptr || context->frame == nullptr || context->detection_started) return;
+    context->detection_started = true;
+
+    const FrozenFrame* frame = context->frame;
+    const MonitorTarget monitor = context->monitor;
+    DetectionState* state = &context->detection_state;
+
+    context->detection_thread = std::thread([state, frame, monitor]() {
+        SmartRegionLoadResult loaded = SmartRegionLoader::load(monitor, *frame);
+        {
+            std::lock_guard lock(state->mutex);
+            state->result = std::move(loaded);
+        }
+        state->ready.store(true, std::memory_order_release);
+    });
+
+    context->detection_poll_source = g_timeout_add(
+        8,
+        poll_smart_region_detection,
+        context
+    );
+}
+
+void on_window_map(GtkWidget*, gpointer user_data) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr) return;
+
+    if (screenshot_timing_enabled()) {
+        const double elapsed = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - context->process_start
+        ).count();
+        std::cerr << "[Screenshot timing] overlay mapped " << elapsed << " ms\n";
+    }
+
+    // Nothing expensive runs before this point. The frozen screen is already
+    // mapped; smart-target discovery can now consume CPU without delaying it.
+    start_smart_region_detection(context);
+}
+
+void on_window_destroy(GtkWidget*, gpointer user_data) {
+    auto* app = G_APPLICATION(user_data);
+    if (app != nullptr) g_application_quit(app);
+}
+
+void install_overlay_css(GtkWidget* widget) {
+    if (widget == nullptr) return;
+
+    GtkCssProvider* provider = gtk_css_provider_new();
+    const char* css = R"CSS(
+        .rh-shot-toolbar {
+            background: rgba(14, 14, 18, 0.72);
+            border: 1px solid rgba(255, 255, 255, 0.09);
+            border-radius: 999px;
+            padding: 6px;
+            box-shadow: 0 10px 24px rgba(0, 0, 0, 0.25);
+        }
+
+        .rh-shot-ratio-button {
+            color: rgba(245, 245, 252, 0.92);
+            background: transparent;
+            border: none;
+            border-radius: 999px;
+            min-height: 30px;
+            min-width: 56px;
+            padding: 0 14px;
+            font-weight: 700;
+        }
+
+        .rh-shot-ratio-button:hover {
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        .rh-shot-ratio-button:checked {
+            color: rgba(18, 16, 10, 0.96);
+            background: linear-gradient(to bottom, rgba(244, 215, 120, 0.98), rgba(235, 192, 92, 0.98));
+        }
+    )CSS";
+    gtk_css_provider_load_from_string(provider, css);
+    gtk_style_context_add_provider_for_display(
+        gtk_widget_get_display(widget),
+        GTK_STYLE_PROVIDER(provider),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
+    );
+    g_object_unref(provider);
+}
+
+void activate(GtkApplication* app, gpointer user_data) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr || context->frame == nullptr) {
+        g_application_quit(G_APPLICATION(app));
+        return;
+    }
+
+    const FrozenFrame& frame = *context->frame;
+    if (frame.width <= 0 || frame.height <= 0 || frame.stride <= 0 || frame.rgba.empty()) {
+        std::cerr << "[Screenshot] Frozen Wayland frame is empty\n";
+        g_application_quit(G_APPLICATION(app));
+        return;
+    }
+
+    GBytes* bytes = g_bytes_new(frame.rgba.data(), frame.rgba.size());
+    GdkTexture* texture = gdk_memory_texture_new(
+        frame.width,
+        frame.height,
+        GDK_MEMORY_R8G8B8A8,
+        bytes,
+        static_cast<gsize>(frame.stride)
+    );
+    g_bytes_unref(bytes);
+    if (texture == nullptr) {
+        std::cerr << "[Screenshot] Unable to create texture from frozen Wayland frame\n";
+        g_application_quit(G_APPLICATION(app));
+        return;
+    }
+
+    GtkWidget* window_widget = gtk_application_window_new(app);
+    context->window = GTK_WINDOW(window_widget);
+    gtk_window_set_title(context->window, "Realmheart Screenshot");
+    gtk_window_set_decorated(context->window, false);
+    gtk_window_set_resizable(context->window, false);
+
+    auto spec = realmheart::ui::make_layer_surface_spec(
+        "selection",
+        realmheart::ui::LayerSurfaceLevel::Overlay,
+        realmheart::ui::LayerKeyboardMode::Exclusive
+    );
+    spec.anchor_left = true;
+    spec.anchor_right = true;
+    spec.anchor_top = true;
+    spec.anchor_bottom = true;
+    spec.exclusive_zone = -1;
+    realmheart::ui::apply_layer_surface(context->window, spec);
+
+    install_overlay_css(window_widget);
+
+    GtkWidget* overlay = gtk_overlay_new();
+    gtk_widget_set_hexpand(overlay, true);
+    gtk_widget_set_vexpand(overlay, true);
+
+    GtkWidget* picture = gtk_picture_new_for_paintable(GDK_PAINTABLE(texture));
+    g_object_unref(texture);
+    gtk_picture_set_content_fit(GTK_PICTURE(picture), GTK_CONTENT_FIT_FILL);
+    gtk_picture_set_can_shrink(GTK_PICTURE(picture), true);
+    gtk_widget_set_hexpand(picture, true);
+    gtk_widget_set_vexpand(picture, true);
+    gtk_widget_set_can_target(picture, false);
+    gtk_overlay_set_child(GTK_OVERLAY(overlay), picture);
+
+    GtkWidget* canvas = gtk_drawing_area_new();
+    context->canvas = canvas;
+    gtk_widget_set_hexpand(canvas, true);
+    gtk_widget_set_vexpand(canvas, true);
+    gtk_widget_set_can_target(canvas, true);
+    gtk_drawing_area_set_draw_func(
+        GTK_DRAWING_AREA(canvas),
+        draw_overlay,
+        context,
+        nullptr
+    );
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), canvas);
+
+    GtkWidget* ratio_toolbar = make_ratio_toolbar(context);
+    context->ratio_toolbar = ratio_toolbar;
+    if (ratio_toolbar != nullptr) {
+        gtk_overlay_add_overlay(GTK_OVERLAY(overlay), ratio_toolbar);
+    }
+
+    GtkEventController* motion = gtk_event_controller_motion_new();
+    g_signal_connect(motion, "enter", G_CALLBACK(on_motion_enter), context);
+    g_signal_connect(motion, "motion", G_CALLBACK(on_motion), context);
+    g_signal_connect(motion, "leave", G_CALLBACK(on_motion_leave), context);
+    gtk_widget_add_controller(canvas, motion);
+
+    GtkEventController* scroll = gtk_event_controller_scroll_new(
+        static_cast<GtkEventControllerScrollFlags>(
+            GTK_EVENT_CONTROLLER_SCROLL_VERTICAL |
+            GTK_EVENT_CONTROLLER_SCROLL_DISCRETE
+        )
+    );
+    g_signal_connect(scroll, "scroll", G_CALLBACK(on_scroll), context);
+    gtk_widget_add_controller(canvas, scroll);
+
+    GtkGesture* drag = gtk_gesture_drag_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(drag), GDK_BUTTON_PRIMARY);
+    g_signal_connect(drag, "drag-begin", G_CALLBACK(on_drag_begin), context);
+    g_signal_connect(drag, "drag-update", G_CALLBACK(on_drag_update), context);
+    g_signal_connect(drag, "drag-end", G_CALLBACK(on_drag_end), context);
+    gtk_widget_add_controller(canvas, GTK_EVENT_CONTROLLER(drag));
+
+    GtkGesture* ocr_drag = gtk_gesture_drag_new();
+    gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(ocr_drag), GDK_BUTTON_SECONDARY);
+    g_signal_connect(ocr_drag, "drag-begin", G_CALLBACK(on_ocr_drag_begin), context);
+    g_signal_connect(ocr_drag, "drag-update", G_CALLBACK(on_ocr_drag_update), context);
+    g_signal_connect(ocr_drag, "drag-end", G_CALLBACK(on_ocr_drag_end), context);
+    gtk_widget_add_controller(canvas, GTK_EVENT_CONTROLLER(ocr_drag));
+
+    gtk_window_set_child(context->window, overlay);
+
+    GtkEventController* key_controller = gtk_event_controller_key_new();
+    g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_pressed), context);
+    gtk_widget_add_controller(window_widget, key_controller);
+
+    g_signal_connect(window_widget, "map", G_CALLBACK(on_window_map), context);
+    g_signal_connect(window_widget, "destroy", G_CALLBACK(on_window_destroy), app);
+
+    // Bind the layer to the resolved connector before its first visible commit.
+    gtk_widget_realize(window_widget);
+    if (GdkMonitor* monitor = find_monitor_by_connector(
+            window_widget,
+            context->monitor.connector
+        )) {
+        gtk_layer_set_monitor(context->window, monitor);
+        g_object_unref(monitor);
+    } else {
+        std::cerr << "[Screenshot] GDK could not resolve monitor connector '"
+                  << context->monitor.connector
+                  << "'; compositor monitor selection will be used as fallback\n";
+    }
+
+    gtk_widget_set_cursor_from_name(canvas, "crosshair");
+    gtk_window_present(context->window);
+}
+
+} // namespace
+
+int ScreenshotOverlay::run(
+    const FrozenFrame& frozen_frame,
+    const MonitorTarget& monitor,
+    std::chrono::steady_clock::time_point process_start
+) {
+    OverlayContext context;
+    context.frame = &frozen_frame;
+    context.monitor = monitor;
+    context.process_start = process_start;
+    context.semantic_storage.monitor_width = monitor.logical_width;
+    context.semantic_storage.monitor_height = monitor.logical_height;
+    context.semantic_regions = &context.semantic_storage;
+
+    GtkApplication* app = gtk_application_new(
+        "dev.realmheart.Screenshot",
+        G_APPLICATION_NON_UNIQUE
+    );
+    g_signal_connect(app, "activate", G_CALLBACK(activate), &context);
+
+    const int status = g_application_run(G_APPLICATION(app), 0, nullptr);
+
+    if (context.detection_poll_source != 0) {
+        g_source_remove(context.detection_poll_source);
+        context.detection_poll_source = 0;
+    }
+    if (context.detection_thread.joinable()) {
+        context.detection_thread.join();
+    }
+
+    g_object_unref(app);
+    return status;
+}
+
+} // namespace realmheart::screenshot

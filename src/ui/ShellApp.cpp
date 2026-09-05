@@ -637,18 +637,14 @@ public:
     }
 
     void take_screenshot_full() {
-        const auto path = user_media_directory(G_USER_DIRECTORY_PICTURES, "Pictures") /
-            "Screenshots" /
-            ("full_" + std::to_string(std::time(nullptr)) + ".png");
-        utilities_->take_screenshot_full(path.string());
+        utilities_->launch_screenshot_tool();
     }
 
     void take_screenshot_area() {
-        utilities_->take_screenshot_area_to_clipboard();
+        utilities_->launch_screenshot_tool();
     }
-
     void extract_ocr_area() {
-        utilities_->extract_text_from_area();
+        utilities_->launch_screenshot_tool();
     }
 
     void launch_launcher() {

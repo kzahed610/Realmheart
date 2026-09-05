@@ -1,0 +1,16 @@
+#pragma once
+
+#include <filesystem>
+#include <string>
+
+namespace realmheart::screenshot {
+
+class ScreenshotOverlay {
+public:
+    static int run(
+        const std::filesystem::path& frozen_frame,
+        const std::string& monitor_connector
+    );
+};
+
+} // namespace realmheart::screenshot

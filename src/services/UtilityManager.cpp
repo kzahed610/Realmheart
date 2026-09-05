@@ -32,6 +32,18 @@ bool ensure_parent_directory(const std::filesystem::path& path) {
     return !error;
 }
 
+std::string screenshot_helper_command() {
+    std::error_code error;
+    const auto self = std::filesystem::read_symlink("/proc/self/exe", error);
+    if (!error && !self.empty()) {
+        const auto sibling = self.parent_path() / "realmheart-screenshot";
+        if (::access(sibling.c_str(), X_OK) == 0) {
+            return sibling.string();
+        }
+    }
+    return "realmheart-screenshot";
+}
+
 } // namespace
 
 
@@ -65,33 +77,8 @@ UtilityManager::UtilityManager(
 
 UtilityManager::~UtilityManager() = default;
 
-bool UtilityManager::take_screenshot_full(const std::string& path) {
-    if (!ensure_parent_directory(path)) return false;
-    return executor_->run_background({"grim", path});
-}
-
-bool UtilityManager::take_screenshot_area(const std::string& path) {
-    if (!ensure_parent_directory(path)) return false;
-    return executor_->run_background({
-        "sh", "-c", "geometry=$(slurp) || exit $?; grim -g \"$geometry\" \"$1\"", "realmheart-screenshot", path
-    });
-}
-
-bool UtilityManager::take_screenshot_area_to_clipboard() {
-    return executor_->run_background({
-        "sh", "-c", "geometry=$(slurp) || exit $?; if [ -n \"$geometry\" ]; then grim -g \"$geometry\" - | wl-copy --type image/png; fi",
-        "realmheart-screenshot-area"
-    });
-}
-
-bool UtilityManager::extract_text_from_area() {
-    return executor_->run_background({
-        "sh", "-c",
-        "image=$(mktemp /tmp/realmheart-ocr.XXXXXX.png) || exit 1; "
-        "trap 'rm -f \"$image\"' EXIT; "
-        "geometry=$(slurp) || exit $?; "
-        "grim -g \"$geometry\" \"$image\" && tesseract \"$image\" stdout -l eng 2>/dev/null | wl-copy"
-    });
+bool UtilityManager::launch_screenshot_tool() {
+    return executor_->run_background({screenshot_helper_command()});
 }
 
 bool UtilityManager::set_wallpaper(const std::string& path) {

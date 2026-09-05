@@ -55,10 +55,7 @@ public:
 
     services::ThemeService& get_theme_service() { return *theme_service_; }
 
-    bool take_screenshot_full(const std::string& path);
-    bool take_screenshot_area(const std::string& path);
-    bool take_screenshot_area_to_clipboard();
-    bool extract_text_from_area();
+    bool launch_screenshot_tool();
 
     bool set_wallpaper(const std::string& path);
     bool choose_wallpaper();

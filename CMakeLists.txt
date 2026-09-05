@@ -277,6 +277,95 @@ target_link_libraries(realmheart PRIVATE
     Threads::Threads
 )
 
+# Standalone screenshot surface. Kept separate from the main shell while the
+# replacement screenshot interaction stack is developed and compositor-tested.
+pkg_check_modules(REALMHEART_SCREENSHOT_WAYLAND REQUIRED IMPORTED_TARGET wayland-client)
+pkg_check_modules(REALMHEART_SCREENSHOT_WLR_PROTOCOLS REQUIRED wlr-protocols)
+pkg_get_variable(REALMHEART_SCREENSHOT_WLR_DATADIR wlr-protocols pkgdatadir)
+find_program(REALMHEART_WAYLAND_SCANNER NAMES wayland-scanner REQUIRED)
+set(REALMHEART_WLR_SCREENCOPY_XML
+    "${REALMHEART_SCREENSHOT_WLR_DATADIR}/unstable/wlr-screencopy-unstable-v1.xml"
+)
+if(NOT EXISTS "${REALMHEART_WLR_SCREENCOPY_XML}")
+    message(FATAL_ERROR
+        "Realmheart screenshot: wlr-screencopy-unstable-v1.xml was not found in "
+        "${REALMHEART_SCREENSHOT_WLR_DATADIR}"
+    )
+endif()
+
+set(REALMHEART_SCREENSHOT_PROTOCOL_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/screenshot")
+set(REALMHEART_SCREENSHOT_PROTOCOL_HEADER
+    "${REALMHEART_SCREENSHOT_PROTOCOL_DIR}/wlr-screencopy-unstable-v1-client-protocol.h"
+)
+set(REALMHEART_SCREENSHOT_PROTOCOL_CODE
+    "${REALMHEART_SCREENSHOT_PROTOCOL_DIR}/wlr-screencopy-unstable-v1-protocol.c"
+)
+add_custom_command(
+    OUTPUT
+        "${REALMHEART_SCREENSHOT_PROTOCOL_HEADER}"
+        "${REALMHEART_SCREENSHOT_PROTOCOL_CODE}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${REALMHEART_SCREENSHOT_PROTOCOL_DIR}"
+    COMMAND "${REALMHEART_WAYLAND_SCANNER}" client-header
+        "${REALMHEART_WLR_SCREENCOPY_XML}"
+        "${REALMHEART_SCREENSHOT_PROTOCOL_HEADER}"
+    COMMAND "${REALMHEART_WAYLAND_SCANNER}" private-code
+        "${REALMHEART_WLR_SCREENCOPY_XML}"
+        "${REALMHEART_SCREENSHOT_PROTOCOL_CODE}"
+    DEPENDS "${REALMHEART_WLR_SCREENCOPY_XML}"
+    VERBATIM
+)
+add_custom_target(realmheart_screenshot_protocol
+    DEPENDS
+        "${REALMHEART_SCREENSHOT_PROTOCOL_HEADER}"
+        "${REALMHEART_SCREENSHOT_PROTOCOL_CODE}"
+)
+
+find_package(OpenCV REQUIRED COMPONENTS core imgproc ximgproc)
+
+add_executable(realmheart_screenshot_regions
+    src/screenshot/RegionWorker.cpp
+)
+set_target_properties(realmheart_screenshot_regions PROPERTIES
+    OUTPUT_NAME "realmheart-screenshot-regions"
+)
+target_include_directories(realmheart_screenshot_regions PRIVATE
+    ${OpenCV_INCLUDE_DIRS}
+)
+target_compile_options(realmheart_screenshot_regions PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_link_libraries(realmheart_screenshot_regions PRIVATE
+    ${OpenCV_LIBS}
+)
+
+add_executable(realmheart_screenshot
+    src/screenshot/main.cpp
+    src/screenshot/MonitorResolver.cpp
+    src/screenshot/WaylandScreencopy.cpp
+    src/screenshot/ScreenshotOverlay.cpp
+    src/screenshot/ClipboardExporter.cpp
+    src/screenshot/OcrEngine.cpp
+    src/screenshot/SmartRegionLoader.cpp
+    src/core/Command.cpp
+    "${REALMHEART_SCREENSHOT_PROTOCOL_CODE}"
+)
+add_dependencies(realmheart_screenshot realmheart_screenshot_protocol)
+add_dependencies(realmheart_screenshot realmheart_screenshot_regions)
+set_target_properties(realmheart_screenshot PROPERTIES
+    OUTPUT_NAME "realmheart-screenshot"
+)
+target_include_directories(realmheart_screenshot PRIVATE
+    src
+    third_party
+    "${REALMHEART_SCREENSHOT_PROTOCOL_DIR}"
+)
+target_compile_options(realmheart_screenshot PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_link_libraries(realmheart_screenshot PRIVATE
+    realmheart_ui
+    PkgConfig::GTK4
+    PkgConfig::GTK4_LAYER_SHELL
+    PkgConfig::REALMHEART_SCREENSHOT_WAYLAND
+    Threads::Threads
+)
+
 add_executable(realmheart_power_menu_renderer
     src/powermenu-renderer/main.cpp
     src/core/Command.cpp
@@ -418,11 +507,22 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
     endif()
 endif()
 
+add_dependencies(realmheart realmheart_screenshot)
+find_program(REALMHEART_SCREENSHOT_WL_COPY NAMES wl-copy)
+find_program(REALMHEART_SCREENSHOT_TESSERACT NAMES tesseract)
+if(NOT REALMHEART_SCREENSHOT_WL_COPY)
+    message(WARNING "Realmheart screenshot: wl-copy was not found; image/text clipboard export will fail at runtime")
+endif()
+if(NOT REALMHEART_SCREENSHOT_TESSERACT)
+    message(STATUS "Realmheart screenshot: tesseract not found; screenshots work, OCR mode will be unavailable")
+endif()
 if(TARGET realmheart_fx)
     install(TARGETS realmheart_fx LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/realmheart)
 endif()
 
 install(TARGETS realmheart realmheart_power_menu_renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS realmheart_screenshot RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS realmheart_screenshot_regions RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(TARGETS realmheart_auth_helper RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/realmheart)
 # Set the setuid bit on the auth helper so the user shell can use PAM.
 install(CODE "execute_process(COMMAND chmod u+s \"\$ENV{DESTDIR}${CMAKE_INSTALL_FULL_LIBEXECDIR}/realmheart/realmheart-auth-helper\")")
