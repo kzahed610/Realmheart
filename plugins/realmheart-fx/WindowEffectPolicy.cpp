@@ -2,10 +2,42 @@
 
 #include <array>
 #include <cstddef>
+#include <limits>
 
 namespace {
 
 const WindowEffectPool kNoEffectPool{std::string{kNoWindowEffect}};
+
+bool effectSupports(
+    std::string_view name,
+    WindowEffectCapabilityMask requiredCapabilities
+) noexcept {
+    const auto* effect = findWindowEffect(name);
+    return effect != nullptr &&
+        (effect->capabilities & requiredCapabilities) == requiredCapabilities;
+}
+
+std::uint64_t nextDeterministicValue(std::uint64_t value) noexcept {
+    value += 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27U)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31U);
+}
+
+std::uint64_t unbiasedIndex(
+    std::uint64_t randomValue,
+    std::uint64_t bound
+) noexcept {
+    if (bound <= 1U)
+        return 0U;
+
+    const std::uint64_t rejectionCount = -bound % bound;
+    const std::uint64_t maximumAccepted =
+        std::numeric_limits<std::uint64_t>::max() - rejectionCount;
+    while (rejectionCount != 0U && randomValue > maximumAccepted)
+        randomValue = nextDeterministicValue(randomValue);
+    return randomValue % bound;
+}
 
 enum class EWindowClassMatch {
     Exact,
@@ -212,10 +244,31 @@ const WindowEffectPool& automaticCloseEffectsForWindow(
 
 std::string_view chooseWindowEffect(
     const WindowEffectPool& pool,
-    std::uint64_t randomValue
+    std::uint64_t randomValue,
+    WindowEffectCapabilityMask requiredCapabilities
 ) noexcept {
     if (pool.empty())
         return kNoWindowEffect;
 
-    return pool[static_cast<std::size_t>(randomValue % pool.size())];
+    std::size_t eligibleCount = 0U;
+    for (const auto& effect : pool) {
+        if (effectSupports(effect, requiredCapabilities))
+            ++eligibleCount;
+    }
+    if (eligibleCount == 0U)
+        return kNoWindowEffect;
+
+    const auto selected = unbiasedIndex(
+        randomValue,
+        static_cast<std::uint64_t>(eligibleCount)
+    );
+    std::size_t index = 0U;
+    for (const auto& effect : pool) {
+        if (!effectSupports(effect, requiredCapabilities))
+            continue;
+        if (index++ == selected)
+            return effect;
+    }
+
+    return kNoWindowEffect;
 }

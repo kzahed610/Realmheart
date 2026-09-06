@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <sys/stat.h>
 
 namespace {
 
@@ -169,6 +170,41 @@ open = "aether-sunder"
     const auto missing = loadWindowEffectConfig(directory / "missing.toml");
     assert(!missing.success);
     assert(missing.error.find("could not open") != std::string::npos);
+
+    const auto repeatedTablePath = writeConfig(
+        directory,
+        "repeated-table.toml",
+        R"TOML([windows]
+open = "void"
+close = "void"
+
+[windows]
+open = "aether-sunder"
+)TOML"
+    );
+    const auto repeatedTable = loadWindowEffectConfig(repeatedTablePath);
+    assert(!repeatedTable.success);
+    assert(repeatedTable.error.find("may appear only once") != std::string::npos);
+
+    const auto symlinkPath = directory / "symlink.toml";
+    std::filesystem::create_symlink(validPath, symlinkPath);
+    const auto symlink = loadWindowEffectConfig(symlinkPath);
+    assert(!symlink.success);
+
+    const auto fifoPath = directory / "config.fifo";
+    assert(::mkfifo(fifoPath.c_str(), 0600) == 0);
+    const auto fifo = loadWindowEffectConfig(fifoPath);
+    assert(!fifo.success);
+    assert(fifo.error.find("regular file") != std::string::npos);
+
+    const auto oversizedPath = writeConfig(
+        directory,
+        "oversized.toml",
+        std::string(256U * 1024U + 1U, 'x')
+    );
+    const auto oversized = loadWindowEffectConfig(oversizedPath);
+    assert(!oversized.success);
+    assert(oversized.error.find("byte limit") != std::string::npos);
 
     const auto summary = windowEffectConfigSummary(valid.config, validPath);
     assert(summary.find("source=file") != std::string::npos);

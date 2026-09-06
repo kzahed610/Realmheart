@@ -23,5 +23,6 @@
 
 [[nodiscard]] std::string_view chooseWindowEffect(
     const WindowEffectPool& pool,
-    std::uint64_t randomValue
+    std::uint64_t randomValue,
+    WindowEffectCapabilityMask requiredCapabilities = 0U
 ) noexcept;

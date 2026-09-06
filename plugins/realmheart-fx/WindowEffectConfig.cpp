@@ -1,10 +1,16 @@
 #include "WindowEffectConfig.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <unordered_set>
 #include <vector>
 
@@ -15,6 +21,92 @@ enum class EConfigSection {
     Windows,
     WindowRule,
 };
+
+constexpr std::size_t kMaximumConfigBytes = 256U * 1024U;
+constexpr std::size_t kMaximumConfigLineBytes = 16U * 1024U;
+constexpr std::size_t kMaximumConfigStringBytes = 4U * 1024U;
+constexpr std::size_t kMaximumConfigRules = 256U;
+constexpr std::size_t kMaximumPoolEntries = 64U;
+
+bool readRegularFile(
+    const std::filesystem::path& path,
+    std::size_t maximumBytes,
+    std::string& output,
+    std::string& error
+) {
+    const int descriptor = ::open(
+        path.c_str(),
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+    );
+    if (descriptor < 0) {
+        error = "could not open " + path.string() + ": " +
+            std::string(std::strerror(errno));
+        return false;
+    }
+
+    struct stat metadata {};
+    if (::fstat(descriptor, &metadata) != 0) {
+        error = "could not inspect " + path.string() + ": " +
+            std::string(std::strerror(errno));
+        ::close(descriptor);
+        return false;
+    }
+    if (!S_ISREG(metadata.st_mode)) {
+        error = path.string() + " is not a regular file";
+        ::close(descriptor);
+        return false;
+    }
+    if (metadata.st_size < 0 ||
+        static_cast<std::uintmax_t>(metadata.st_size) > maximumBytes) {
+        error = path.string() + " exceeds the " +
+            std::to_string(maximumBytes) + " byte limit";
+        ::close(descriptor);
+        return false;
+    }
+
+    output.clear();
+    output.reserve(static_cast<std::size_t>(metadata.st_size));
+    std::array<char, 8192> buffer{};
+    while (true) {
+        const ssize_t count = ::read(descriptor, buffer.data(), buffer.size());
+        if (count == 0)
+            break;
+        if (count < 0) {
+            if (errno == EINTR)
+                continue;
+            error = "could not read " + path.string() + ": " +
+                std::string(std::strerror(errno));
+            ::close(descriptor);
+            return false;
+        }
+        if (output.size() + static_cast<std::size_t>(count) > maximumBytes) {
+            error = path.string() + " exceeds the " +
+                std::to_string(maximumBytes) + " byte limit";
+            ::close(descriptor);
+            return false;
+        }
+        output.append(buffer.data(), static_cast<std::size_t>(count));
+    }
+
+    ::close(descriptor);
+    return true;
+}
+
+bool asciiOnly(std::string_view value) noexcept {
+    for (const unsigned char character : value) {
+        if (character > 0x7FU)
+            return false;
+    }
+    return true;
+}
+
+#if defined(REALMHEART_INSTALL_WINDOW_EFFECT_DIR)
+bool nonSymlinkDirectory(const std::filesystem::path& path) noexcept {
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    return !error && status.type() == std::filesystem::file_type::directory;
+}
+#endif
 
 std::string_view trim(std::string_view value) noexcept {
     const auto first = value.find_first_not_of(" \t\r\n");
@@ -78,6 +170,11 @@ bool parseQuotedString(
         !((value.front() == '"' && value.back() == '"') ||
           (value.front() == '\'' && value.back() == '\''))) {
         error = "expected a quoted TOML string";
+        return false;
+    }
+    if (value.size() - 2U > kMaximumConfigStringBytes) {
+        error = "string exceeds the " +
+            std::to_string(kMaximumConfigStringBytes) + " byte limit";
         return false;
     }
 
@@ -175,12 +272,22 @@ std::optional<WindowEffectPool> parseEffectPool(
                 error = "@all resolved to no renderable effects";
                 return std::nullopt;
             }
+            if (effects.size() > kMaximumPoolEntries) {
+                error = "effect pool exceeds the " +
+                    std::to_string(kMaximumPoolEntries) + " entry limit";
+                return std::nullopt;
+            }
             return effects;
         }
 
         WindowEffectPool effects;
         if (!appendEffect(std::move(effectName), effects, error))
             return std::nullopt;
+        if (effects.size() > kMaximumPoolEntries) {
+            error = "effect pool exceeds the " +
+                std::to_string(kMaximumPoolEntries) + " entry limit";
+            return std::nullopt;
+        }
         return effects;
     }
 
@@ -243,6 +350,11 @@ std::optional<WindowEffectPool> parseEffectPool(
         }
         if (!appendEffect(std::move(effectName), effects, error))
             return std::nullopt;
+        if (effects.size() > kMaximumPoolEntries) {
+            error = "effect pool exceeds the " +
+                std::to_string(kMaximumPoolEntries) + " entry limit";
+            return std::nullopt;
+        }
 
         while (offset < value.size() &&
                (value[offset] == ' ' || value[offset] == '\t')) {
@@ -355,7 +467,6 @@ std::filesystem::path defaultWindowEffectAssetRoot() {
     //    instead of baking-in the original absolute source path.
     std::ifstream maps("/proc/self/maps");
     std::string line;
-    std::vector<std::filesystem::path> selfDirs;
     while (maps && std::getline(maps, line)) {
         // Look for a mapping of realmheart-fx.so.
         const auto marker = line.find("realmheart-fx.so");
@@ -379,6 +490,8 @@ std::filesystem::path defaultWindowEffectAssetRoot() {
                  soDir / "effects" / "windows",
                  soDir / ".." / "effects" / "windows",
                  soDir / ".." / "realmheart" / "effects" / "windows",
+                 soDir / ".." / ".." / "share" / "realmheart" /
+                     "effects" / "windows",
              }) {
             std::error_code error;
             if (std::filesystem::is_directory(candidate, error) && !error) {
@@ -387,7 +500,14 @@ std::filesystem::path defaultWindowEffectAssetRoot() {
         }
     }
 
-    // 3. Compile-time constant as a last resort (original behaviour). The
+#if defined(REALMHEART_INSTALL_WINDOW_EFFECT_DIR)
+    // Packaged installs keep the plugin under lib/realmheart and effects under
+    // share/realmheart, so the data directory is not adjacent to the .so.
+    if (nonSymlinkDirectory(REALMHEART_INSTALL_WINDOW_EFFECT_DIR))
+        return REALMHEART_INSTALL_WINDOW_EFFECT_DIR;
+#endif
+
+    // 4. Compile-time constant as a last resort (original behaviour). The
     //    macro name varies by target (plugin vs test vs GL probe); any one that
     //    is defined becomes the fallback.
 #if defined(REALMHEART_WINDOW_EFFECT_ASSET_DIR)
@@ -408,11 +528,10 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
     result.config = builtInWindowEffectConfig();
     result.config.sourcePath = path;
 
-    std::ifstream stream(path);
-    if (!stream) {
-        result.error = "could not open " + path.string();
+    std::string contents;
+    if (!readRegularFile(path, kMaximumConfigBytes, contents, result.error))
         return result;
-    }
+    std::istringstream stream(contents);
 
     SWindowEffectConfig parsed = builtInWindowEffectConfig();
     parsed.rules.clear();
@@ -420,6 +539,7 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
     parsed.loadedFromFile = true;
 
     EConfigSection section = EConfigSection::None;
+    bool hasWindowsTable = false;
     SWindowEffectRule* currentRule = nullptr;
     std::unordered_set<std::string> currentKeys;
     std::string rawLine;
@@ -427,11 +547,23 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
 
     while (std::getline(stream, rawLine)) {
         ++lineNumber;
+        if (rawLine.size() > kMaximumConfigLineBytes) {
+            result.error = loadError(
+                lineNumber,
+                "line exceeds the " + std::to_string(kMaximumConfigLineBytes) +
+                    " byte limit"
+            );
+            return result;
+        }
         const std::string_view line = trim(stripComment(rawLine));
         if (line.empty())
             continue;
 
         if (line == "[windows]") {
+            if (hasWindowsTable) {
+                result.error = loadError(lineNumber, "[windows] may appear only once");
+                return result;
+            }
             if (currentRule != nullptr) {
                 std::string validationError;
                 if (!validateRule(*currentRule, validationError)) {
@@ -439,6 +571,7 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
                     return result;
                 }
             }
+            hasWindowsTable = true;
             section = EConfigSection::Windows;
             currentRule = nullptr;
             currentKeys.clear();
@@ -452,6 +585,14 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
                     result.error = loadError(lineNumber, validationError);
                     return result;
                 }
+            }
+            if (parsed.rules.size() >= kMaximumConfigRules) {
+                result.error = loadError(
+                    lineNumber,
+                    "configuration exceeds the " +
+                        std::to_string(kMaximumConfigRules) + " rule limit"
+                );
+                return result;
             }
             section = EConfigSection::WindowRule;
             parsed.rules.emplace_back();
@@ -475,6 +616,13 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
         const std::string_view value = trim(line.substr(equals + 1U));
         if (key.empty() || value.empty()) {
             result.error = loadError(lineNumber, "expected non-empty key and value");
+            return result;
+        }
+        if (section == EConfigSection::None) {
+            result.error = loadError(
+                lineNumber,
+                "key appears outside [windows] or [[windows.rules]]"
+            );
             return result;
         }
         if (!currentKeys.insert(key).second) {
@@ -516,6 +664,13 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
                     result.error = loadError(lineNumber, "class pattern cannot be empty");
                     return result;
                 }
+                if (!asciiOnly(pattern)) {
+                    result.error = loadError(
+                        lineNumber,
+                        "class patterns must contain ASCII characters"
+                    );
+                    return result;
+                }
                 currentRule->windowClass = std::move(pattern);
             } else if (key == "class_match") {
                 const auto match = parseMatchMode(value, parseError);
@@ -532,6 +687,13 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
                 }
                 if (pattern.empty()) {
                     result.error = loadError(lineNumber, "title pattern cannot be empty");
+                    return result;
+                }
+                if (!asciiOnly(pattern)) {
+                    result.error = loadError(
+                        lineNumber,
+                        "title patterns must contain ASCII characters"
+                    );
                     return result;
                 }
                 currentRule->windowTitle = std::move(pattern);
@@ -564,6 +726,11 @@ SWindowEffectConfigLoadResult loadWindowEffectConfig(
         }
 
         result.error = loadError(lineNumber, "key appears outside [windows] or [[windows.rules]]");
+        return result;
+    }
+
+    if (stream.bad()) {
+        result.error = loadError(lineNumber, "error while reading configuration");
         return result;
     }
 

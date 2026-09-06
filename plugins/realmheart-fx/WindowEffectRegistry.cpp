@@ -3,8 +3,14 @@
 #include <algorithm>
 #include <charconv>
 #include <cmath>
-#include <fstream>
+#include <array>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <limits>
 #include <sstream>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <unordered_set>
 #include <vector>
 
@@ -15,6 +21,11 @@ constexpr WindowEffectCapabilityMask kTexturedWindowCapabilities =
     windowEffectCapabilityBit(EWindowEffectCapability::Texture2D) |
     windowEffectCapabilityBit(EWindowEffectCapability::ExternalTexture) |
     windowEffectCapabilityBit(EWindowEffectCapability::RoundedSource);
+
+constexpr std::size_t kMaximumManifestBytes = 256U * 1024U;
+constexpr std::size_t kMaximumManifestLineBytes = 16U * 1024U;
+constexpr std::size_t kMaximumEffectManifests = 64U;
+constexpr std::size_t kMaximumManifestStringBytes = 4U * 1024U;
 
 std::vector<SWindowEffectSpec> g_windowEffectSpecs{{
     .name = std::string{kNoWindowEffect},
@@ -33,6 +44,107 @@ std::string_view trim(std::string_view value) noexcept {
 
     const auto last = value.find_last_not_of(" \t\r\n");
     return value.substr(first, last - first + 1U);
+}
+
+bool readRegularFile(
+    const std::filesystem::path& path,
+    std::size_t maximumBytes,
+    std::string& output,
+    std::string& error
+) {
+    const int descriptor = ::open(
+        path.c_str(),
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+    );
+    if (descriptor < 0) {
+        error = "could not open effect manifest: " +
+            std::string(std::strerror(errno));
+        return false;
+    }
+
+    struct stat metadata {};
+    if (::fstat(descriptor, &metadata) != 0) {
+        error = "could not inspect effect manifest: " +
+            std::string(std::strerror(errno));
+        ::close(descriptor);
+        return false;
+    }
+    if (!S_ISREG(metadata.st_mode)) {
+        error = "effect manifest is not a regular file";
+        ::close(descriptor);
+        return false;
+    }
+    if (metadata.st_size < 0 ||
+        static_cast<std::uintmax_t>(metadata.st_size) > maximumBytes) {
+        error = "effect manifest exceeds the " +
+            std::to_string(maximumBytes) + " byte limit";
+        ::close(descriptor);
+        return false;
+    }
+
+    output.clear();
+    output.reserve(static_cast<std::size_t>(metadata.st_size));
+    std::array<char, 8192> buffer{};
+    while (true) {
+        const ssize_t count = ::read(descriptor, buffer.data(), buffer.size());
+        if (count == 0)
+            break;
+        if (count < 0) {
+            if (errno == EINTR)
+                continue;
+            error = "could not read effect manifest: " +
+                std::string(std::strerror(errno));
+            ::close(descriptor);
+            return false;
+        }
+        if (output.size() + static_cast<std::size_t>(count) > maximumBytes) {
+            error = "effect manifest exceeds the " +
+                std::to_string(maximumBytes) + " byte limit";
+            ::close(descriptor);
+            return false;
+        }
+        output.append(buffer.data(), static_cast<std::size_t>(count));
+    }
+
+    ::close(descriptor);
+    return true;
+}
+
+bool nonSymlinkDirectory(const std::filesystem::path& path) noexcept {
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    return !error && status.type() == std::filesystem::file_type::directory;
+}
+
+bool nonSymlinkRegularFile(const std::filesystem::path& path) noexcept {
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    return !error && status.type() == std::filesystem::file_type::regular;
+}
+
+bool containedPath(
+    const std::filesystem::path& root,
+    const std::filesystem::path& candidate
+) noexcept {
+    std::error_code error;
+    const auto canonicalRoot = std::filesystem::canonical(root, error);
+    if (error)
+        return false;
+    const auto canonicalCandidate = std::filesystem::canonical(candidate, error);
+    if (error)
+        return false;
+    const auto relative = std::filesystem::relative(
+        canonicalCandidate,
+        canonicalRoot,
+        error
+    );
+    if (error || relative.empty() || relative.is_absolute())
+        return false;
+    for (const auto& component : relative) {
+        if (component == "..")
+            return false;
+    }
+    return true;
 }
 
 std::string_view stripComment(std::string_view line) noexcept {
@@ -88,6 +200,11 @@ bool parseQuotedString(
         !((value.front() == '"' && value.back() == '"') ||
           (value.front() == '\'' && value.back() == '\''))) {
         error = "expected a quoted TOML string";
+        return false;
+    }
+    if (value.size() - 2U > kMaximumManifestStringBytes) {
+        error = "string exceeds the " +
+            std::to_string(kMaximumManifestStringBytes) + " byte limit";
         return false;
     }
 
@@ -154,10 +271,15 @@ bool parsePositiveFloat(std::string_view value, float& output, std::string& erro
         return false;
     }
 
-    std::string storage{value};
-    char* end = nullptr;
-    const float parsed = std::strtof(storage.c_str(), &end);
-    if (end == storage.c_str() || *end != '\0' || !std::isfinite(parsed) || parsed <= 0.0F) {
+    float parsed = 0.0F;
+    const auto [end, status] = std::from_chars(
+        value.data(),
+        value.data() + value.size(),
+        parsed,
+        std::chars_format::general
+    );
+    if (status != std::errc{} || end != value.data() + value.size() ||
+        !std::isfinite(parsed) || parsed <= 0.0F) {
         error = "expected a finite positive number";
         return false;
     }
@@ -187,7 +309,7 @@ bool safeRelativePath(const std::filesystem::path& path) noexcept {
         return false;
 
     for (const auto& component : path) {
-        if (component == "..")
+        if (component == ".." || component == ".")
             return false;
     }
     return true;
@@ -212,6 +334,10 @@ struct SParsedManifest {
     bool hasShader = false;
     bool hasOpenDuration = false;
     bool hasCloseDuration = false;
+    std::size_t nameLine = 0U;
+    std::size_t shaderLine = 0U;
+    std::size_t openDurationLine = 0U;
+    std::size_t closeDurationLine = 0U;
 };
 
 bool parseManifest(
@@ -220,11 +346,12 @@ bool parseManifest(
     SWindowEffectSpec& output,
     std::string& error
 ) {
-    std::ifstream stream(manifest);
-    if (!stream) {
-        error = manifestError(manifest, 0U, "could not open effect manifest");
+    std::string contents;
+    if (!readRegularFile(manifest, kMaximumManifestBytes, contents, error)) {
+        error = manifestError(manifest, 0U, error);
         return false;
     }
+    std::istringstream stream(contents);
 
     enum class ESection {
         None,
@@ -233,10 +360,13 @@ bool parseManifest(
     };
 
     SParsedManifest parsed;
+    parsed.spec.displayName.clear();
     parsed.spec.reversible = true;
     parsed.spec.capabilities = kTexturedWindowCapabilities;
 
     ESection section = ESection::None;
+    bool hasEffectTable = false;
+    bool hasCapabilitiesTable = false;
     std::unordered_set<std::string> effectKeys;
     std::unordered_set<std::string> capabilityKeys;
     std::string rawLine;
@@ -244,15 +374,38 @@ bool parseManifest(
 
     while (std::getline(stream, rawLine)) {
         ++lineNumber;
+        if (rawLine.size() > kMaximumManifestLineBytes) {
+            error = manifestError(
+                manifest,
+                lineNumber,
+                "line exceeds the " + std::to_string(kMaximumManifestLineBytes) +
+                    " byte limit"
+            );
+            return false;
+        }
         const std::string_view line = trim(stripComment(rawLine));
         if (line.empty())
             continue;
 
         if (line == "[effect]") {
+            if (hasEffectTable) {
+                error = manifestError(manifest, lineNumber, "[effect] may appear only once");
+                return false;
+            }
+            hasEffectTable = true;
             section = ESection::Effect;
             continue;
         }
         if (line == "[capabilities]") {
+            if (hasCapabilitiesTable) {
+                error = manifestError(
+                    manifest,
+                    lineNumber,
+                    "[capabilities] may appear only once"
+                );
+                return false;
+            }
+            hasCapabilitiesTable = true;
             section = ESection::Capabilities;
             continue;
         }
@@ -271,6 +424,15 @@ bool parseManifest(
         const std::string_view value = trim(line.substr(equals + 1U));
         if (key.empty() || value.empty()) {
             error = manifestError(manifest, lineNumber, "expected non-empty key and value");
+            return false;
+        }
+
+        if (section == ESection::None) {
+            error = manifestError(
+                manifest,
+                lineNumber,
+                "key appears outside [effect] or [capabilities]"
+            );
             return false;
         }
 
@@ -296,6 +458,7 @@ bool parseManifest(
                     return false;
                 }
                 parsed.hasName = true;
+                parsed.nameLine = lineNumber;
             } else if (key == "display_name") {
                 if (!parseQuotedString(value, parsed.spec.displayName, parseError)) {
                     error = manifestError(manifest, lineNumber, parseError);
@@ -318,18 +481,21 @@ bool parseManifest(
                 }
                 parsed.spec.fragmentShaderAsset = manifest.parent_path().filename() / relativeShader;
                 parsed.hasShader = true;
+                parsed.shaderLine = lineNumber;
             } else if (key == "open_duration") {
                 if (!parsePositiveFloat(value, parsed.spec.openDurationSeconds, parseError)) {
                     error = manifestError(manifest, lineNumber, parseError);
                     return false;
                 }
                 parsed.hasOpenDuration = true;
+                parsed.openDurationLine = lineNumber;
             } else if (key == "close_duration") {
                 if (!parsePositiveFloat(value, parsed.spec.closeDurationSeconds, parseError)) {
                     error = manifestError(manifest, lineNumber, parseError);
                     return false;
                 }
                 parsed.hasCloseDuration = true;
+                parsed.closeDurationLine = lineNumber;
             } else if (key == "reversible") {
                 if (!parseBoolean(value, parsed.spec.reversible, parseError)) {
                     error = manifestError(manifest, lineNumber, parseError);
@@ -375,11 +541,21 @@ bool parseManifest(
         return false;
     }
 
+    if (stream.bad()) {
+        error = manifestError(manifest, lineNumber, "error while reading effect manifest");
+        return false;
+    }
+
     if (!parsed.hasName || !parsed.hasShader ||
         !parsed.hasOpenDuration || !parsed.hasCloseDuration) {
+        const std::size_t missingLine =
+            !parsed.hasName ? parsed.nameLine :
+            !parsed.hasShader ? parsed.shaderLine :
+            !parsed.hasOpenDuration ? parsed.openDurationLine :
+            parsed.closeDurationLine;
         error = manifestError(
             manifest,
-            0U,
+            missingLine,
             "[effect] requires id, shader, open_duration, and close_duration"
         );
         return false;
@@ -389,11 +565,10 @@ bool parseManifest(
         parsed.spec.displayName = parsed.spec.name;
 
     const auto shaderPath = effectRoot / parsed.spec.fragmentShaderAsset;
-    std::error_code shaderError;
-    if (!std::filesystem::is_regular_file(shaderPath, shaderError) || shaderError) {
+    if (!nonSymlinkRegularFile(shaderPath) || !containedPath(effectRoot, shaderPath)) {
         error = manifestError(
             manifest,
-            0U,
+            parsed.shaderLine,
             "shader file does not exist: " + shaderPath.string()
         );
         return false;
@@ -403,7 +578,7 @@ bool parseManifest(
         !windowEffectSupports(parsed.spec, EWindowEffectCapability::Texture2D)) {
         error = manifestError(
             manifest,
-            0U,
+            parsed.nameLine,
             "source_texture and texture_2d capabilities are required by the current renderer"
         );
         return false;
@@ -420,24 +595,47 @@ SWindowEffectRegistryLoadResult loadWindowEffectRegistry(
 ) {
     SWindowEffectRegistryLoadResult result;
 
-    std::error_code rootError;
-    if (!std::filesystem::is_directory(effectRoot, rootError) || rootError) {
+    if (!nonSymlinkDirectory(effectRoot)) {
         result.error = "effect root is unavailable: " + effectRoot.string();
         return result;
     }
 
     std::vector<std::filesystem::path> manifests;
+    std::error_code rootError;
     for (std::filesystem::directory_iterator iterator(effectRoot, rootError), end;
          !rootError && iterator != end;
          iterator.increment(rootError)) {
+        const auto effectDirectory = iterator->path();
         std::error_code typeError;
-        if (!iterator->is_directory(typeError) || typeError)
+        const auto type = std::filesystem::symlink_status(effectDirectory, typeError);
+        if (typeError)
+            continue;
+        if (type.type() == std::filesystem::file_type::symlink) {
+            result.error = "effect root contains a symlinked directory: " +
+                effectDirectory.string();
+            return result;
+        }
+        if (type.type() != std::filesystem::file_type::directory)
             continue;
 
-        const auto manifest = iterator->path() / "effect.toml";
+        const auto manifest = effectDirectory / "effect.toml";
         std::error_code manifestErrorCode;
-        if (std::filesystem::is_regular_file(manifest, manifestErrorCode) &&
-            !manifestErrorCode) {
+        const auto manifestType = std::filesystem::symlink_status(
+            manifest,
+            manifestErrorCode
+        );
+        if (manifestErrorCode || manifestType.type() == std::filesystem::file_type::not_found)
+            continue;
+        if (manifestType.type() == std::filesystem::file_type::symlink) {
+            result.error = "effect manifest is a symlink: " + manifest.string();
+            return result;
+        }
+        if (manifestType.type() == std::filesystem::file_type::regular) {
+            if (manifests.size() >= kMaximumEffectManifests) {
+                result.error = "effect root exceeds the " +
+                    std::to_string(kMaximumEffectManifests) + " manifest limit";
+                return result;
+            }
             manifests.push_back(manifest);
         }
     }

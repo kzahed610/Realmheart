@@ -111,6 +111,16 @@ int main() {
     assert(chooseWindowEffect(randomPool, 2U) == "none");
     assert(chooseWindowEffect(randomPool, 3U) == "void");
     assert(chooseWindowEffect({}, 99U) == "none");
+    assert(chooseWindowEffect(
+        WindowEffectPool{"none", "void"},
+        0U,
+        windowEffectCapabilityBit(EWindowEffectCapability::ExternalTexture)
+    ) == "void");
+    assert(chooseWindowEffect(
+        WindowEffectPool{"none", "void"},
+        0U,
+        windowEffectCapabilityBit(EWindowEffectCapability::RoundedSource)
+    ) == "void");
 
     expectExcluded(builtIn, "");
     expectExcluded(builtIn, "realmheart");

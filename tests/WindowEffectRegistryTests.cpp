@@ -4,6 +4,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <string_view>
 
 namespace {
@@ -99,6 +100,53 @@ close_duration = 0.5
     assert(!broken.success);
     assert(broken.error.find("shader file does not exist") != std::string::npos);
     assert(findWindowEffect("test-effect") != nullptr);
+
+    const auto duplicateRoot = temporaryRoot / "duplicate-root";
+    writeFile(
+        duplicateRoot / "duplicate" / "effect.toml",
+        R"TOML([effect]
+id = "duplicate"
+shader = "duplicate.frag"
+open_duration = 0.5
+close_duration = 0.5
+
+[effect]
+display_name = "Duplicate"
+)TOML"
+    );
+    writeFile(duplicateRoot / "duplicate" / "duplicate.frag", "shader");
+    const auto duplicate = loadWindowEffectRegistry(duplicateRoot);
+    assert(!duplicate.success);
+    assert(duplicate.error.find("may appear only once") != std::string::npos);
+
+    const auto symlinkRoot = temporaryRoot / "symlink-root";
+    const auto outsideShader = temporaryRoot / "outside.frag";
+    writeFile(outsideShader, "shader");
+    writeFile(
+        symlinkRoot / "symlinked" / "effect.toml",
+        R"TOML([effect]
+id = "symlinked"
+shader = "shader.frag"
+open_duration = 0.5
+close_duration = 0.5
+)TOML"
+    );
+    std::filesystem::create_symlink(
+        outsideShader,
+        symlinkRoot / "symlinked" / "shader.frag"
+    );
+    const auto symlinked = loadWindowEffectRegistry(symlinkRoot);
+    assert(!symlinked.success);
+    assert(symlinked.error.find("shader file does not exist") != std::string::npos);
+
+    const auto oversizedRoot = temporaryRoot / "oversized-root";
+    writeFile(
+        oversizedRoot / "oversized" / "effect.toml",
+        std::string(256U * 1024U + 1U, 'x')
+    );
+    const auto oversized = loadWindowEffectRegistry(oversizedRoot);
+    assert(!oversized.success);
+    assert(oversized.error.find("byte limit") != std::string::npos);
 
     std::filesystem::remove_all(temporaryRoot);
     return 0;

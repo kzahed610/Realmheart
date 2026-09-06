@@ -113,6 +113,7 @@ if(REALMHEART_BUILD_HYPRLAND_PLUGIN AND HYPRLAND_FOUND AND GLESV2_FOUND)
     )
     target_compile_definitions(realmheart_fx PRIVATE
         REALMHEART_WINDOW_EFFECT_ASSET_DIR="${CMAKE_SOURCE_DIR}/effects/windows"
+        REALMHEART_INSTALL_WINDOW_EFFECT_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/effects/windows"
     )
     target_compile_options(realmheart_fx PRIVATE ${REALMHEART_WARNING_FLAGS})
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

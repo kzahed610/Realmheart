@@ -117,8 +117,10 @@ close = "aether-sunder"
 ```
 
 Each eligible open or close event chooses independently and uniformly from its
-resolved pool; repeated selections are valid random outcomes. Rules are
-evaluated top-to-bottom and matching is case-insensitive. A rule may match
+resolved pool; repeated selections are valid random outcomes. Capability flags
+are enforced against the actual render target, including external textures and
+rounded sources, so an incompatible pool member is skipped rather than armed.
+Rules are evaluated top-to-bottom and matching is ASCII case-insensitive. A rule may match
 `class`, `title`, or both. `class_match` and `title_match` accept `exact`,
 `prefix`, or `contains`. A rule may assign only `open`, only `close`, or both.
 The registered effect name `none` disables that direction; including `none` in
@@ -126,8 +128,12 @@ an array gives the event a chance to run without an effect.
 
 The parser intentionally supports this small, strict TOML assignment schema
 rather than arbitrary TOML values. Arrays must be one-line quoted-string arrays.
-Empty pools, duplicates, `@all` inside an array, unknown tables, keys, match
-modes, or effect names reject the reload with a line-numbered error.
+Empty pools, duplicates, repeated singleton tables, `@all` inside an array,
+unknown tables, keys, match modes, non-ASCII match patterns, or effect names
+reject the reload with a line-numbered error. Manifest/config files and shader
+sources are regular-file-only and bounded; symlinked effect directories,
+manifests, and shaders are rejected rather than escaping the configured effect
+root.
 
 Install the included baseline:
 

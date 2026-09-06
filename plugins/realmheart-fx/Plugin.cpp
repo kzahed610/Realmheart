@@ -29,10 +29,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <limits>
 #include <random>
@@ -40,6 +43,8 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -62,6 +67,7 @@ constexpr float kAutomaticOpenDurationScale = 0.82F;
 constexpr float kAutomaticCloseDurationScale = 0.82F;
 constexpr const char* kDiagnosticLog = "/tmp/realmheart-fx.log";
 constexpr const char* kCommandName = "realmheart-fx";
+constexpr std::size_t kMaximumShaderBytes = 2U * 1024U * 1024U;
 
 constexpr const char* kVertexShader = R"GLSL(#version 300 es
 precision highp float;
@@ -177,6 +183,7 @@ struct SWindowAnimation {
     PHLWINDOWREF window;
     PHLMONITORREF monitor;
     const SWindowEffectSpec* effect = nullptr;
+    WindowEffectPool candidateEffects;
     EWindowAnimationMode mode = EWindowAnimationMode::ManualCycle;
 
     // Opening/manual effects sample the live target every frame. Closing owns
@@ -358,6 +365,42 @@ std::string currentWindowEffectConfigStatus() {
     ) + " status=" + g_state->effectConfigStatus;
 }
 
+struct SShaderHandleGuard {
+    GLuint value = 0;
+
+    explicit SShaderHandleGuard(GLuint handle) noexcept : value(handle) {}
+
+    ~SShaderHandleGuard() {
+        if (value != 0)
+            glDeleteShader(value);
+    }
+
+    SShaderHandleGuard(const SShaderHandleGuard&) = delete;
+    SShaderHandleGuard& operator=(const SShaderHandleGuard&) = delete;
+
+    GLuint release() noexcept {
+        return std::exchange(value, 0U);
+    }
+};
+
+struct SProgramHandleGuard {
+    GLuint value = 0;
+
+    explicit SProgramHandleGuard(GLuint handle) noexcept : value(handle) {}
+
+    ~SProgramHandleGuard() {
+        if (value != 0)
+            glDeleteProgram(value);
+    }
+
+    SProgramHandleGuard(const SProgramHandleGuard&) = delete;
+    SProgramHandleGuard& operator=(const SProgramHandleGuard&) = delete;
+
+    GLuint release() noexcept {
+        return std::exchange(value, 0U);
+    }
+};
+
 GLuint compileShader(GLenum type, const std::string& source) {
     const GLuint shader = glCreateShader(type);
     const char* sourcePointer = source.c_str();
@@ -378,46 +421,94 @@ GLuint compileShader(GLenum type, const std::string& source) {
 }
 
 GLuint createProgram(const std::string& vertex, const std::string& fragment) {
-    const GLuint vertexShader = compileShader(GL_VERTEX_SHADER, vertex);
-    const GLuint fragmentShader = compileShader(GL_FRAGMENT_SHADER, fragment);
-    const GLuint program = glCreateProgram();
+    SShaderHandleGuard vertexShader{compileShader(GL_VERTEX_SHADER, vertex)};
+    SShaderHandleGuard fragmentShader{compileShader(GL_FRAGMENT_SHADER, fragment)};
+    SProgramHandleGuard program{glCreateProgram()};
+    if (program.value == 0)
+        throw std::runtime_error("Realmheart FX program allocation failed");
 
-    glAttachShader(program, vertexShader);
-    glAttachShader(program, fragmentShader);
-    glLinkProgram(program);
+    glAttachShader(program.value, vertexShader.value);
+    glAttachShader(program.value, fragmentShader.value);
+    glLinkProgram(program.value);
 
-    glDetachShader(program, vertexShader);
-    glDetachShader(program, fragmentShader);
-    glDeleteShader(vertexShader);
-    glDeleteShader(fragmentShader);
+    glDetachShader(program.value, vertexShader.value);
+    glDetachShader(program.value, fragmentShader.value);
 
     GLint linked = GL_FALSE;
-    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    glGetProgramiv(program.value, GL_LINK_STATUS, &linked);
     if (linked == GL_TRUE)
-        return program;
+        return program.release();
 
     GLint length = 0;
-    glGetProgramiv(program, GL_INFO_LOG_LENGTH, &length);
+    glGetProgramiv(program.value, GL_INFO_LOG_LENGTH, &length);
     std::string log(static_cast<std::size_t>(std::max(length, 1)), '\0');
-    glGetProgramInfoLog(program, length, nullptr, log.data());
-    glDeleteProgram(program);
+    glGetProgramInfoLog(program.value, length, nullptr, log.data());
     throw std::runtime_error("Realmheart FX program linking failed: " + log);
+}
+
+std::string readBoundedShaderFile(const std::filesystem::path& path) {
+    const int descriptor = ::open(
+        path.c_str(),
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+    );
+    if (descriptor < 0)
+        throw std::runtime_error("could not open shader: " + path.string());
+
+    struct stat metadata {};
+    if (::fstat(descriptor, &metadata) != 0) {
+        const std::string message = std::strerror(errno);
+        ::close(descriptor);
+        throw std::runtime_error(
+            "could not inspect shader " + path.string() + ": " + message
+        );
+    }
+    if (!S_ISREG(metadata.st_mode) || metadata.st_size < 0 ||
+        static_cast<std::uintmax_t>(metadata.st_size) > kMaximumShaderBytes) {
+        ::close(descriptor);
+        throw std::runtime_error(
+            "shader is not a regular file within the size limit: " + path.string()
+        );
+    }
+
+    std::string output;
+    output.reserve(static_cast<std::size_t>(metadata.st_size));
+    std::array<char, 8192> buffer{};
+    while (true) {
+        const ssize_t count = ::read(descriptor, buffer.data(), buffer.size());
+        if (count == 0)
+            break;
+        if (count < 0) {
+            if (errno == EINTR)
+                continue;
+            const std::string message = std::strerror(errno);
+            ::close(descriptor);
+            throw std::runtime_error(
+                "could not read shader " + path.string() + ": " + message
+            );
+        }
+        if (output.size() + static_cast<std::size_t>(count) > kMaximumShaderBytes) {
+            ::close(descriptor);
+            throw std::runtime_error(
+                "shader exceeds the size limit: " + path.string()
+            );
+        }
+        output.append(buffer.data(), static_cast<std::size_t>(count));
+    }
+    ::close(descriptor);
+    return output;
 }
 
 std::string readEffectShader(const SWindowEffectSpec& effect) {
     const std::filesystem::path shaderPath =
         defaultWindowEffectAssetRoot() / effect.fragmentShaderAsset;
-    std::ifstream stream(shaderPath, std::ios::binary);
-    if (!stream) {
+    try {
+        return readBoundedShaderFile(shaderPath);
+    } catch (const std::exception& exception) {
         throw std::runtime_error(
             "could not read " + std::string(effect.displayName) +
-            " shader at " + shaderPath.string()
+            " shader at " + shaderPath.string() + ": " + exception.what()
         );
     }
-
-    std::ostringstream buffer;
-    buffer << stream.rdbuf();
-    return buffer.str();
 }
 
 std::string externalVariant(std::string fragment) {
@@ -486,22 +577,30 @@ void initialiseEffects() {
         if (windowEffectIsNone(spec) || spec.fragmentShaderAsset.empty())
             continue;
 
-        const std::string fragment = readEffectShader(spec);
         SCompiledWindowEffect compiled{
             .spec = &spec,
         };
-        compiled.shaders[0].program = createProgram(kVertexShader, fragment);
-        fillLocations(compiled.shaders[0]);
+        try {
+            const std::string fragment = readEffectShader(spec);
+            compiled.shaders[0].program = createProgram(kVertexShader, fragment);
+            fillLocations(compiled.shaders[0]);
 
-        if (windowEffectSupports(spec, EWindowEffectCapability::ExternalTexture)) {
-            compiled.shaders[1].program = createProgram(
-                kVertexShader,
-                externalVariant(fragment)
+            if (windowEffectSupports(spec, EWindowEffectCapability::ExternalTexture)) {
+                compiled.shaders[1].program = createProgram(
+                    kVertexShader,
+                    externalVariant(fragment)
+                );
+                fillLocations(compiled.shaders[1]);
+            }
+
+            g_state->effects.push_back(std::move(compiled));
+        } catch (const std::exception& exception) {
+            compiled.destroy();
+            appendDiagnostic(
+                "effect skipped during shader initialization: effect=" +
+                spec.name + " reason=" + exception.what()
             );
-            fillLocations(compiled.shaders[1]);
         }
-
-        g_state->effects.push_back(std::move(compiled));
     }
 
     g_state->sceneBlitShader.program = createProgram(
@@ -987,12 +1086,33 @@ GLenum textureTarget(const SP<Render::ITexture>& texture) {
 
 bool effectSupportsTarget(
     const SWindowEffectSpec& effect,
-    GLenum target
+    GLenum target,
+    bool roundedSource
 ) noexcept {
-    return (target == GL_TEXTURE_2D &&
+    const bool textureSupported =
+        (target == GL_TEXTURE_2D &&
             windowEffectSupports(effect, EWindowEffectCapability::Texture2D)) ||
         (target == GL_TEXTURE_EXTERNAL_OES &&
          windowEffectSupports(effect, EWindowEffectCapability::ExternalTexture));
+    return textureSupported &&
+        (!roundedSource ||
+         windowEffectSupports(effect, EWindowEffectCapability::RoundedSource));
+}
+
+WindowEffectCapabilityMask requiredCapabilitiesForTarget(
+    GLenum target,
+    bool roundedSource
+) noexcept {
+    WindowEffectCapabilityMask required = 0U;
+    if (target == GL_TEXTURE_2D)
+        required |= windowEffectCapabilityBit(EWindowEffectCapability::Texture2D);
+    else if (target == GL_TEXTURE_EXTERNAL_OES)
+        required |= windowEffectCapabilityBit(EWindowEffectCapability::ExternalTexture);
+    else
+        return 0U;
+    if (roundedSource)
+        required |= windowEffectCapabilityBit(EWindowEffectCapability::RoundedSource);
+    return required;
 }
 
 bool windowIsFullscreen(const PHLWINDOW& window) {
@@ -1228,6 +1348,7 @@ std::string armFocusedWindow(std::string_view effectName = "void") {
         .window = window,
         .monitor = window->m_monitor.lock(),
         .effect = effect,
+        .candidateEffects = WindowEffectPool{std::string{effect->name}},
         .mode = EWindowAnimationMode::ManualCycle,
         .closeFrame = {},
         .box = currentWindowRenderBox(window),
@@ -1405,6 +1526,7 @@ void onWindowOpen(PHLWINDOW window) {
         .window = window,
         .monitor = window->m_monitor.lock(),
         .effect = effect,
+        .candidateEffects = effectPool,
         .mode = EWindowAnimationMode::AutomaticOpen,
         .closeFrame = {},
         .box = currentWindowRenderBox(window),
@@ -1438,13 +1560,6 @@ void onRenderStage(eRenderStage stage) {
     }
     if (stage != RENDER_POST_WINDOWS)
         return;
-    const SWindowEffectSpec* effect = animation.effect;
-    SCompiledWindowEffect* compiled = compiledEffect(effect);
-    if (effect == nullptr || compiled == nullptr) {
-        cancelAnimation("selected effect became unavailable");
-        return;
-    }
-
     const auto currentMonitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
     const auto window = animation.window.lock();
 
@@ -1580,8 +1695,32 @@ void onRenderStage(eRenderStage stage) {
 
     if (sourceTextureId == 0 || !validBox(effectBox))
         return;
-    if (!effectSupportsTarget(*effect, target)) {
-        cancelAnimation("unsupported source texture type for selected effect");
+    const bool roundedSource = rounding > 0.0F;
+    const auto requiredCapabilities = requiredCapabilitiesForTarget(
+        target,
+        roundedSource
+    );
+    if (requiredCapabilities == 0U) {
+        cancelAnimation("unsupported source texture target");
+        return;
+    }
+    const SWindowEffectSpec* effect = animation.effect;
+    if (effect == nullptr || !effectSupportsTarget(*effect, target, roundedSource)) {
+        const std::string_view replacement = chooseWindowEffect(
+            animation.candidateEffects,
+            g_state->effectRandom(),
+            requiredCapabilities
+        );
+        effect = findWindowEffect(replacement);
+        if (effect == nullptr || !effectSupportsTarget(*effect, target, roundedSource)) {
+            cancelAnimation("no compatible effect for source target");
+            return;
+        }
+        animation.effect = effect;
+    }
+    SCompiledWindowEffect* compiled = compiledEffect(effect);
+    if (compiled == nullptr) {
+        cancelAnimation("selected effect became unavailable");
         return;
     }
 
@@ -1873,7 +2012,8 @@ void onWindowClose(PHLWINDOW window) {
     );
     const std::string_view effectName = chooseWindowEffect(
         effectPool,
-        g_state->effectRandom()
+        g_state->effectRandom(),
+        requiredCapabilitiesForTarget(GL_TEXTURE_2D, window->rounding() > 0.0F)
     );
     if (effectName == kNoWindowEffect) {
         appendDiagnostic(
@@ -1937,7 +2077,7 @@ void onWindowClose(PHLWINDOW window) {
         );
         return;
     }
-    if (!effectSupportsTarget(*effect, GL_TEXTURE_2D)) {
+    if (!effectSupportsTarget(*effect, GL_TEXTURE_2D, window->rounding() > 0.0F)) {
         appendDiagnostic(
             "automatic close skipped: class=" + std::string(windowClass) +
             " reason=effect does not support the owned 2D snapshot"
@@ -1964,6 +2104,7 @@ void onWindowClose(PHLWINDOW window) {
         .window = window,
         .monitor = monitor,
         .effect = effect,
+        .candidateEffects = effectPool,
         .mode = EWindowAnimationMode::AutomaticClose,
         .closeFrame = std::move(closeFrame),
         .heldReflowWindows = std::move(heldReflowWindows),
