@@ -259,6 +259,8 @@ target_compile_definitions(realmheart_ui PRIVATE
     REALMHEART_SOURCE_STYLE_DIR="${CMAKE_SOURCE_DIR}/styles"
     REALMHEART_INSTALL_EFFECT_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/effects"
     REALMHEART_SOURCE_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects"
+    REALMHEART_AUTH_HELPER_PATH="${CMAKE_INSTALL_FULL_LIBEXECDIR}/realmheart/realmheart-auth-helper"
+    REALMHEART_AUTH_HELPER_RELATIVE_PATH="${CMAKE_INSTALL_LIBEXECDIR}/realmheart/realmheart-auth-helper"
 )
 target_compile_options(realmheart_ui PRIVATE ${REALMHEART_WARNING_FLAGS})
 target_link_libraries(realmheart_ui PRIVATE
@@ -525,7 +527,37 @@ install(TARGETS realmheart_screenshot RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR
 install(TARGETS realmheart_screenshot_regions RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(TARGETS realmheart_auth_helper RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/realmheart)
 # Set the setuid bit on the auth helper so the user shell can use PAM.
-install(CODE "execute_process(COMMAND chmod u+s \"\$ENV{DESTDIR}${CMAKE_INSTALL_FULL_LIBEXECDIR}/realmheart/realmheart-auth-helper\")")
+set(_realmheart_auth_helper_install_code [=[
+    set(_realmheart_auth_helper
+        ""
+    )
+    if(IS_ABSOLUTE "@REALMHEART_LIBEXEC_DIR@")
+        set(_realmheart_auth_helper
+            "$ENV{DESTDIR}@REALMHEART_LIBEXEC_DIR@/realmheart/realmheart-auth-helper"
+        )
+    else()
+        set(_realmheart_auth_helper
+            "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@REALMHEART_LIBEXEC_DIR@/realmheart/realmheart-auth-helper"
+        )
+    endif()
+    execute_process(
+        COMMAND chmod u+s "${_realmheart_auth_helper}"
+        RESULT_VARIABLE _realmheart_auth_helper_chmod_result
+    )
+    if(_realmheart_auth_helper_chmod_result)
+        message(FATAL_ERROR
+            "Realmheart: unable to setuid auth helper at ${_realmheart_auth_helper}"
+        )
+    endif()
+]=])
+string(REPLACE
+    "@REALMHEART_LIBEXEC_DIR@"
+    "${CMAKE_INSTALL_LIBEXECDIR}"
+    _realmheart_auth_helper_install_code
+    "${_realmheart_auth_helper_install_code}"
+)
+install(CODE "${_realmheart_auth_helper_install_code}")
+unset(_realmheart_auth_helper_install_code)
 if(REALMHEART_NATIVE_WALLPAPER_BUILT)
     install(TARGETS realmheart-wallpaper-renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
@@ -575,6 +607,14 @@ if(BUILD_TESTING)
 
     add_executable(realmheart_command_tests tests/CommandTests.cpp src/core/Command.cpp)
     realmheart_register_test(realmheart_command_tests)
+
+    add_executable(
+        realmheart_auth_protocol_tests
+        tests/AuthPamTests.cpp
+        src/ui/lockscreen/AuthPam.cpp
+    )
+    target_link_libraries(realmheart_auth_protocol_tests PRIVATE PkgConfig::GIO)
+    realmheart_register_test(realmheart_auth_protocol_tests)
 
     add_executable(realmheart_task_executor_tests
         tests/TaskExecutorTests.cpp

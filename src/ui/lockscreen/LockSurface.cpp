@@ -31,12 +31,8 @@ constexpr double kLitPerChar = 0.083;
 constexpr size_t kMaxLitChars = 12;
 
 struct LockSurface::State {
-    struct Lifetime {
-        std::atomic<bool> alive{true};
-    };
-
     LockSurface* owner = nullptr;
-    std::shared_ptr<Lifetime> lifetime = std::make_shared<Lifetime>();
+    std::weak_ptr<State> self;
     GtkApplication* application = nullptr;
     GtkWindow* window = nullptr;
     GtkWidget* entry = nullptr;
@@ -82,17 +78,29 @@ struct LockSurface::State {
 
     void arm_closing_watchdog() noexcept {
         if (closing_watchdog_id != 0) return;
-        closing_watchdog_id = g_timeout_add(
+        auto* context = new std::weak_ptr<State>(self);
+        closing_watchdog_id = g_timeout_add_full(
+            G_PRIORITY_DEFAULT,
             2500,
             +[](gpointer data) -> gboolean {
-                auto* state = static_cast<State*>(data);
-                state->closing_watchdog_id = 0;
+                auto* weak_state = static_cast<std::weak_ptr<State>*>(data);
+                const auto state = weak_state->lock();
                 std::cerr << "[LockSurface] closing watchdog fired — forcing unlock\n";
-                if (state->owner != nullptr) state->owner->force_unlock();
+                if (state != nullptr) {
+                    state->closing_watchdog_id = 0;
+                    if (state->owner != nullptr) state->owner->force_unlock();
+                }
                 return G_SOURCE_REMOVE;
             },
-            this
+            context,
+            +[](gpointer data) {
+                delete static_cast<std::weak_ptr<State>*>(data);
+            }
         );
+        if (closing_watchdog_id == 0) {
+            // GLib did not take ownership of the callback context.
+            delete context;
+        }
     }
 
     void disarm_closing_watchdog() noexcept {
@@ -107,7 +115,8 @@ LockSurface::LockSurface(
     GtkApplication* app,
     int monitor_index,
     bool interactive
-) : state_(new State) {
+) : state_(std::make_shared<State>()) {
+    state_->self = state_;
     state_->owner = this;
     state_->application = app;
     state_->monitor_index = monitor_index;
@@ -164,7 +173,7 @@ LockSurface::LockSurface(
                 gtk_widget_grab_focus(state->entry);
             }
         }),
-        state_
+        state_.get()
     );
 
     setup_layout();
@@ -173,12 +182,11 @@ LockSurface::LockSurface(
 
 LockSurface::~LockSurface() {
     if (state_ == nullptr) return;
-    state_->lifetime->alive.store(false);
     state_->owner = nullptr;
     state_->disarm_closing_watchdog();
     state_->stop_tick();
     if (state_->window != nullptr) {
-        g_signal_handlers_disconnect_by_data(state_->window, state_);
+        g_signal_handlers_disconnect_by_data(state_->window, state_.get());
         gtk_window_destroy(state_->window);
         state_->window = nullptr;
     }
@@ -189,8 +197,7 @@ LockSurface::~LockSurface() {
     state_->shaders.reset();
     state_->machine.reset();
     state_->auth.reset();
-    delete state_;
-    state_ = nullptr;
+    state_.reset();
 }
 
 GtkWindow* LockSurface::window() const noexcept {
@@ -275,7 +282,7 @@ void LockSurface::setup_layout() {
             auto* state = static_cast<State*>(data);
             state->owner->submit_password();
         }),
-        state_
+        state_.get()
     );
     // Escape clears the entry (window-level key controller).
     GtkEventController* key_controller = gtk_event_controller_key_new();
@@ -290,7 +297,7 @@ void LockSurface::setup_layout() {
             }
             return GDK_EVENT_PROPAGATE;
         }),
-        state_
+        state_.get()
     );
     gtk_widget_add_controller(GTK_WIDGET(state_->window), key_controller);
 
@@ -302,7 +309,7 @@ void LockSurface::setup_layout() {
         G_CALLBACK(+[](GObject*, GParamSpec*, gpointer data) -> void {
             static_cast<LockSurface::State*>(data)->owner->sync_lit();
         }),
-        state_
+        state_.get()
     );
 }
 
@@ -333,9 +340,17 @@ void LockSurface::force_transparent_surface() {
     cairo_region_destroy(region);
 }
 
+void LockSurface::clear_password_entry() noexcept {
+    if (state_ != nullptr && state_->entry != nullptr) {
+        gtk_editable_set_text(GTK_EDITABLE(state_->entry), "");
+    }
+}
+
 void LockSurface::show() {
     if (state_ == nullptr) return;
     std::cerr << "[LockSurface] show() called" << '\n';
+
+    clear_password_entry();
 
     std::string error;
     if (!state_->scales->present(&error)) {
@@ -376,6 +391,8 @@ void LockSurface::show() {
 void LockSurface::hide() {
     if (state_ == nullptr || state_->closing) return;
     std::cerr << "[LockSurface] hide() — starting closing animation" << '\n';
+    clear_password_entry();
+    if (state_->entry != nullptr) gtk_widget_set_visible(state_->entry, FALSE);
     state_->closing = true;
     state_->machine->dismiss();
     // The member start_tick() self-guards: if the tick is already running it
@@ -388,6 +405,8 @@ void LockSurface::hide() {
 
 void LockSurface::hide_immediately() {
     if (state_ == nullptr) return;
+    if (state_->auth != nullptr) state_->auth->cancel();
+    clear_password_entry();
     state_->closing = false;
     state_->disarm_closing_watchdog();
     state_->machine->hide_immediately();
@@ -435,15 +454,28 @@ int LockSurface::monitor_index() const noexcept {
 void LockSurface::start_tick() {
     if (state_ == nullptr || state_->tick_running) return;
     state_->start_tick();
-    state_->tick_source_id = g_timeout_add(
+    auto* context = new std::weak_ptr<State>(state_);
+    state_->tick_source_id = g_timeout_add_full(
+        G_PRIORITY_DEFAULT,
         16,
         +[](gpointer data) -> gboolean {
-            auto* state = static_cast<State*>(data);
+            auto* weak_state = static_cast<std::weak_ptr<State>*>(data);
+            const auto state = weak_state->lock();
+            if (state == nullptr || state->owner == nullptr) {
+                return G_SOURCE_REMOVE;
+            }
             state->owner->advance_frame();
             return G_SOURCE_CONTINUE;
         },
-        state_
+        context,
+        +[](gpointer data) {
+            delete static_cast<std::weak_ptr<State>*>(data);
+        }
     );
+    if (state_->tick_source_id == 0) {
+        delete context;
+        state_->tick_running = false;
+    }
 }
 
 void LockSurface::stop_tick() {
@@ -483,14 +515,15 @@ void LockSurface::advance_frame() {
     if (state_->closing && hidden) {
         std::cerr << "[LockSurface] closing complete — hiding window, firing unlock callback" << '\n';
         state_->disarm_closing_watchdog();
-        // Unlock/dismiss completed: fire the callback, then hide.
-        if (state_->unlocked_callback) state_->unlocked_callback();
         state_->closing = false;
         state_->stop_tick();
         if (state_->scales != nullptr) state_->scales->finish();
         if (state_->window != nullptr) {
             gtk_widget_set_visible(GTK_WIDGET(state_->window), FALSE);
         }
+        // Finish local teardown before calling out: the callback may destroy
+        // this LockSurface while completing shell workspace restoration.
+        if (state_->unlocked_callback) state_->unlocked_callback();
         return;
     }
 
@@ -536,7 +569,8 @@ void LockSurface::push_frame() {
 }
 
 gboolean LockSurface::submit_password() {
-    if (state_ == nullptr || state_->entry == nullptr || state_->auth == nullptr) {
+    if (state_ == nullptr || state_->entry == nullptr || state_->auth == nullptr ||
+        state_->closing || state_->machine->phase() == ScalesPhase::Hidden) {
         return TRUE;
     }
 
@@ -546,8 +580,19 @@ gboolean LockSurface::submit_password() {
         return TRUE;
     }
 
-    // Copy the password for the async worker.
-    std::string password(text);
+    if (strlen(text) > AuthPam::kMaxPasswordBytes) {
+        std::cerr << "[Lockscreen] authentication failed: password is too long\n";
+        clear_password_entry();
+        state_->machine->fail();
+        start_tick();
+        return TRUE;
+    }
+
+    SecretBuffer password(text);
+    if (!password.valid() || password.empty()) {
+        clear_password_entry();
+        return TRUE;
+    }
     gtk_editable_set_text(GTK_EDITABLE(state_->entry), "");
     std::cerr << "[Lockscreen] submitted " << password.size()
               << " chars" << std::endl;
@@ -556,36 +601,37 @@ gboolean LockSurface::submit_password() {
     const char* user = g_get_user_name();
     std::string username = user != nullptr ? user : "";
 
-    const auto lifetime = state_->lifetime;
+    const std::weak_ptr<State> weak_state = state_;
     state_->auth->verify_async(
         std::move(username),
         std::move(password),
-        [this, lifetime](bool success) {
-            if (!lifetime->alive.load()) return;
+        [weak_state](bool success) {
+            const auto state = weak_state.lock();
+            if (state == nullptr || state->owner == nullptr) return;
+            LockSurface* owner = state->owner;
             if (!success) {
                 std::cerr << "[Lockscreen] authentication failed\n";
-                if (state_ == nullptr) return;
                 // Red flash + "seal remains", then refocus for another try.
-                state_->machine->fail();
-                start_tick();
-                if (state_->error_label != nullptr) {
-                    gtk_widget_set_visible(state_->error_label, TRUE);
+                state->machine->fail();
+                owner->start_tick();
+                if (state->error_label != nullptr) {
+                    gtk_widget_set_visible(state->error_label, TRUE);
                 }
-                if (state_->entry != nullptr) {
-                    gtk_widget_grab_focus(state_->entry);
+                if (state->entry != nullptr && !state->closing) {
+                    gtk_widget_set_visible(state->entry, TRUE);
+                    gtk_widget_grab_focus(state->entry);
                 }
                 return;
             }
             std::cout << "[Lockscreen] authentication succeeded\n";
-            if (state_ == nullptr) return;
             // Start every monitor's Broken Seal erosion together. The primary
             // surface still owns the completion callback and workspace restore.
-            if (state_->unlock_started_callback) {
-                state_->unlock_started_callback();
+            if (state->unlock_started_callback) {
+                state->unlock_started_callback();
             }
             // Erode the scales (Closing), then fire the callback only once
             // the interactive surface is hidden — choreography reverses underneath.
-            state_->owner->hide();
+            owner->hide();
         }
     );
     return TRUE;

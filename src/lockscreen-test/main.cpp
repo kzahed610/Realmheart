@@ -1,6 +1,7 @@
 // Standalone harness for the lockscreen surface.
 // Renders the input bar + scales on the live Wayland session without PAM or
-// input grab. Press Esc or close the window to exit.
+// input grab by default. Press Esc or close the window to exit. Pass
+// --interactive only when explicitly testing the real PAM/input path.
 // --auto-unlock N: after N seconds, fire the unlocked callback and hide the
 // surface (exercises the closing/erosion path without real auth).
 
@@ -10,6 +11,7 @@
 
 #include <gtk/gtk.h>
 
+#include <array>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -25,6 +27,7 @@ struct TestState {
     std::unique_ptr<realmheart::ui::lockscreen::LockSurface> surface;
     gboolean activate_fired = FALSE;
     int auto_unlock_after_seconds = 0;
+    bool interactive = false;
     bool unlocked = false;
 };
 
@@ -48,7 +51,9 @@ void on_activate(GtkApplication* app, gpointer data) {
 
     // Construct the surface inside activate so the GTK display exists before
     // the surface is presented.
-    state->surface = std::make_unique<realmheart::ui::lockscreen::LockSurface>(app);
+    state->surface = std::make_unique<realmheart::ui::lockscreen::LockSurface>(
+        app, -1, state->interactive
+    );
 
     // Same modular CSS the shell loads, so title/entry styling matches.
     {
@@ -138,6 +143,10 @@ int main(int argc, char** argv) {
             }
             continue;
         }
+        if (std::string_view(argv[i]) == "--interactive") {
+            state->interactive = true;
+            continue;
+        }
         out_argv[out_argc++] = argv[i];
     }
     g_signal_connect(application, "activate", G_CALLBACK(on_activate), state.get());
@@ -154,7 +163,7 @@ int main(int argc, char** argv) {
 
     const int status = g_application_run(G_APPLICATION(application), out_argc, out_argv);
     delete[] out_argv;
-    state.release();
+    state.reset();
     g_object_unref(application);
     return status;
 }

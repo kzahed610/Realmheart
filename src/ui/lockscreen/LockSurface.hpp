@@ -3,6 +3,7 @@
 #include <gtk/gtk.h>
 
 #include <functional>
+#include <memory>
 
 namespace realmheart::ui::lockscreen {
 
@@ -45,6 +46,7 @@ private:
     void setup_layout();
     void sync_lit();
     void force_transparent_surface();
+    void clear_password_entry() noexcept;
     gboolean submit_password();
     void start_tick();
     void stop_tick();
@@ -54,7 +56,7 @@ private:
     void force_unlock();
 
     struct State;
-    State* state_ = nullptr;
+    std::shared_ptr<State> state_;
 };
 
 } // namespace realmheart::ui::lockscreen
