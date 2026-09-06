@@ -1,6 +1,7 @@
 #include "ui/ShellApp.hpp"
 
 #include "core/ShellControl.hpp"
+#include "core/RestartHandshake.hpp"
 #include "core/TaskExecutor.hpp"
 #include "effects/core/EffectRegistry.hpp"
 #include "effects/core/TransitionTimeline.hpp"
@@ -42,23 +43,29 @@
 
 #include <gtk/gtk.h>
 #include <gtk4-layer-shell/gtk4-layer-shell.h>
+#include <glib-unix.h>
 
 #include <algorithm>
 #include <atomic>
 #include <array>
 #include <chrono>
+#include <csignal>
 #include <cerrno>
 #include <cstdint>
 #include <ctime>
 #include <cstring>
 #include <filesystem>
+#include <fcntl.h>
 #include <functional>
 #include <fstream>
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <poll.h>
 #include <string>
+#include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -368,12 +375,20 @@ private:
     };
 
 public:
+    struct RestartHandoff {
+        int fd = -1;
+        pid_t replacement_pid = -1;
+        std::string backend_name;
+    };
+
     ShellRuntime(
         GtkApplication* application,
-        wallpaper::WallpaperBackendType wallpaper_backend
+        wallpaper::WallpaperBackendType wallpaper_backend,
+        int restart_readiness_fd = -1
     )
         : application_(application),
           requested_wallpaper_backend_(wallpaper_backend),
+          restart_readiness_fd_(restart_readiness_fd),
           notification_server_(notification_history_),
           notification_daemon_(notification_server_, notification_history_),
           theme_service_(std::make_shared<services::ThemeService>()),
@@ -395,6 +410,37 @@ public:
         }
     }
 
+    void report_restart_startup_ready() {
+        if (restart_readiness_fd_ < 0) return;
+        const int fd = std::exchange(restart_readiness_fd_, -1);
+        static_cast<void>(core::restart_handshake::send_message(
+            fd,
+            core::restart_handshake::MessageType::ShellReady
+        ));
+        ::close(fd);
+    }
+
+    void report_restart_startup_failure(int error_code) {
+        if (restart_readiness_fd_ < 0) return;
+        const int fd = std::exchange(restart_readiness_fd_, -1);
+        if (error_code <= 0) error_code = EIO;
+        static_cast<void>(core::restart_handshake::send_message(
+            fd,
+            core::restart_handshake::MessageType::Failure,
+            error_code
+        ));
+        ::close(fd);
+    }
+
+    std::optional<RestartHandoff> take_restart_handoff() {
+        if (restart_handoff_fd_ < 0) return std::nullopt;
+        return RestartHandoff{
+            .fd = std::exchange(restart_handoff_fd_, -1),
+            .replacement_pid = std::exchange(restart_helper_pid_, -1),
+            .backend_name = std::move(restart_backend_name_),
+        };
+    }
+
     ~ShellRuntime() {
         power_menu_process_.close();
 
@@ -410,6 +456,10 @@ public:
         for (const auto& mirror : lock_mirror_surfaces_) {
             if (mirror != nullptr) mirror->hide_immediately();
         }
+        // The lock submap is compositor-global, so it must be restored before
+        // the surfaces that normally complete the unlock choreography vanish.
+        // This is idempotent and also covers normal quit/restart while locked.
+        services::HyprlandWorkspaces::set_submap("reset");
         ++lock_choreography_generation_;
         ++runtime_async_state_->volume_generation;
         ++runtime_async_state_->brightness_generation;
@@ -419,6 +469,14 @@ public:
         now_playing_subscription_.reset();
         notification_server_.set_notification_handler({});
         notification_daemon_.stop();
+        if (restart_readiness_fd_ >= 0) {
+            ::close(restart_readiness_fd_);
+            restart_readiness_fd_ = -1;
+        }
+        if (restart_handoff_fd_ >= 0) {
+            ::close(restart_handoff_fd_);
+            restart_handoff_fd_ = -1;
+        }
         audio_monitor_.reset();
 
         wallpaper_controller_.reset();
@@ -472,6 +530,7 @@ public:
             // Per-output selections are independent state. They must still be
             // restored when the legacy/global wallpaper state is absent.
             restore_monitor_wallpapers();
+            report_restart_startup_ready();
             return;
         }
         request_wallpaper(
@@ -484,6 +543,7 @@ public:
                 restore_monitor_wallpapers();
             }
         );
+        report_restart_startup_ready();
     }
 
     void toggle_character() {
@@ -1512,25 +1572,92 @@ public:
             wallpaper::wallpaper_backend_type_name(backend)
         );
 
+        int handoff_socket[2] = {-1, -1};
+        if (::socketpair(
+                AF_UNIX,
+                SOCK_STREAM | SOCK_CLOEXEC,
+                0,
+                handoff_socket
+            ) != 0) {
+            std::cerr << "Unable to restart Realmheart: socketpair failed: "
+                      << std::strerror(errno) << '\n';
+            return;
+        }
+
         const pid_t helper = ::fork();
         if (helper < 0) {
+            ::close(handoff_socket[0]);
+            ::close(handoff_socket[1]);
             std::cerr << "Unable to restart Realmheart: fork failed: "
                       << std::strerror(errno) << '\n';
             return;
         }
         if (helper == 0) {
+            ::close(handoff_socket[0]);
+            if (handoff_socket[1] != core::restart_handshake::kInheritedFd) {
+                if (::dup2(
+                        handoff_socket[1],
+                        core::restart_handshake::kInheritedFd
+                    ) < 0) {
+                    _exit(127);
+                }
+                ::close(handoff_socket[1]);
+            }
+            int descriptor_flags = ::fcntl(
+                core::restart_handshake::kInheritedFd,
+                F_GETFD
+            );
+            if (descriptor_flags < 0 || ::fcntl(
+                    core::restart_handshake::kInheritedFd,
+                    F_SETFD,
+                    descriptor_flags & ~FD_CLOEXEC
+                ) < 0) {
+                _exit(127);
+            }
             static_cast<void>(::setsid());
+            const std::string handoff_fd = std::to_string(
+                core::restart_handshake::kInheritedFd
+            );
             ::execl(
                 executable.c_str(),
                 executable.c_str(),
                 "--restart-helper",
                 old_pid.c_str(),
                 backend_name.c_str(),
+                handoff_fd.c_str(),
                 static_cast<char*>(nullptr)
             );
+            const int exec_error = errno;
+            static_cast<void>(core::restart_handshake::send_message(
+                core::restart_handshake::kInheritedFd,
+                core::restart_handshake::MessageType::Failure,
+                exec_error
+            ));
             _exit(127);
         }
 
+        ::close(handoff_socket[1]);
+        core::restart_handshake::Message helper_message;
+        if (!core::restart_handshake::wait_for_message(
+                handoff_socket[0],
+                helper_message,
+                1000
+            ) || helper_message.type !=
+                core::restart_handshake::MessageType::HelperReady) {
+            const int handshake_error = errno != 0 ? errno : EPROTO;
+            std::cerr << "Unable to start Realmheart restart helper: "
+                      << std::strerror(handshake_error) << '\n';
+            static_cast<void>(::kill(helper, SIGKILL));
+            int status = 0;
+            while (::waitpid(helper, &status, 0) < 0 && errno == EINTR) {
+            }
+            ::close(handoff_socket[0]);
+            return;
+        }
+
+        restart_handoff_fd_ = handoff_socket[0];
+        restart_helper_pid_ = helper;
+        restart_backend_name_ = backend_name;
         g_application_quit(G_APPLICATION(application_));
     }
 
@@ -2716,6 +2843,10 @@ private:
     GtkApplication* application_ = nullptr;
     wallpaper::WallpaperBackendType requested_wallpaper_backend_ =
         wallpaper::WallpaperBackendType::Gtk;
+    int restart_readiness_fd_ = -1;
+    int restart_handoff_fd_ = -1;
+    pid_t restart_helper_pid_ = -1;
+    std::string restart_backend_name_;
 
     services::NotificationHistory notification_history_;
     services::NotificationServer notification_server_;
@@ -2957,12 +3088,35 @@ constexpr GActionEntry kShellActions[] = {
 
 } // namespace
 
-int run_shell(wallpaper::WallpaperBackendType wallpaper_backend) {
+int run_shell(
+    wallpaper::WallpaperBackendType wallpaper_backend,
+    int restart_readiness_fd
+) {
     GtkApplication* application = gtk_application_new(
         realmheart::core::shell_application_id().data(),
         G_APPLICATION_DEFAULT_FLAGS
     );
-    auto runtime = std::make_unique<ShellRuntime>(application, wallpaper_backend);
+    const guint sigterm_source = g_unix_signal_add(
+        SIGTERM,
+        +[](gpointer data) -> gboolean {
+            g_application_quit(G_APPLICATION(data));
+            return G_SOURCE_CONTINUE;
+        },
+        application
+    );
+    const guint sigint_source = g_unix_signal_add(
+        SIGINT,
+        +[](gpointer data) -> gboolean {
+            g_application_quit(G_APPLICATION(data));
+            return G_SOURCE_CONTINUE;
+        },
+        application
+    );
+    auto runtime = std::make_unique<ShellRuntime>(
+        application,
+        wallpaper_backend,
+        restart_readiness_fd
+    );
 
     // Safety: a previous session that died while the lockscreen bind jail
     // was active would leave every compositor keybind dead. Reset the submap
@@ -2982,13 +3136,114 @@ int run_shell(wallpaper::WallpaperBackendType wallpaper_backend) {
         runtime.get()
     );
 
-    const int status = g_application_run(G_APPLICATION(application), 0, nullptr);
+    int status = g_application_run(G_APPLICATION(application), 0, nullptr);
+
+    // A replacement that registered but never reached activate() must report
+    // failure instead of silently letting the old shell assume readiness.
+    runtime->report_restart_startup_failure(
+        status != 0 ? EIO : EPROTO
+    );
+
+    auto restart_handoff = runtime->take_restart_handoff();
+    bool restart_recovery_reexec = false;
+    if (restart_handoff) {
+        // GTK's single-instance registration is released when
+        // g_application_run() returns. The runtime and process remain alive
+        // while the helper starts the replacement; a failure re-execs this
+        // same process so the old shell has an explicit rollback path rather
+        // than treating helper exec as readiness.
+
+        const bool release_sent = core::restart_handshake::send_message(
+            restart_handoff->fd,
+            core::restart_handshake::MessageType::ReleaseOld
+        );
+        core::restart_handshake::Message replacement_message;
+        const int release_error = release_sent ? 0 :
+            (errno != 0 ? errno : EIO);
+        const bool replacement_ready =
+            release_sent && core::restart_handshake::wait_for_message(
+                restart_handoff->fd,
+                replacement_message,
+                core::restart_handshake::kTimeoutMilliseconds
+            ) && replacement_message.type ==
+                core::restart_handshake::MessageType::ShellReady;
+        const int replacement_error =
+            replacement_ready
+                ? 0
+                : (replacement_message.type ==
+                        core::restart_handshake::MessageType::Failure
+                    ? replacement_message.code
+                    : (errno != 0 ? errno :
+                        (release_sent ? EPROTO : release_error)));
+        ::close(restart_handoff->fd);
+
+        if (!replacement_ready) {
+            if (restart_handoff->replacement_pid > 0) {
+                static_cast<void>(::kill(
+                    restart_handoff->replacement_pid,
+                    SIGTERM
+                ));
+                int child_status = 0;
+                for (int attempt = 0; attempt < 20; ++attempt) {
+                    const pid_t waited = ::waitpid(
+                        restart_handoff->replacement_pid,
+                        &child_status,
+                        WNOHANG
+                    );
+                    if (waited == restart_handoff->replacement_pid ||
+                        (waited < 0 && errno == ECHILD)) {
+                        break;
+                    }
+                    if (waited < 0 && errno != EINTR) break;
+                    static_cast<void>(::poll(nullptr, 0, 25));
+                }
+                if (::kill(restart_handoff->replacement_pid, 0) == 0) {
+                    static_cast<void>(::kill(
+                        restart_handoff->replacement_pid,
+                        SIGKILL
+                    ));
+                }
+                while (::waitpid(
+                           restart_handoff->replacement_pid,
+                           &child_status,
+                           0
+                       ) < 0 && errno == EINTR) {
+                }
+            }
+
+            const int logged_error = replacement_error > 0
+                ? replacement_error
+                : EPROTO;
+            std::cerr << "Realmheart restart replacement failed: "
+                      << std::strerror(logged_error)
+                      << "; restoring the current shell process\n";
+            restart_recovery_reexec = true;
+        }
+    }
+
+    if (sigterm_source != 0) g_source_remove(sigterm_source);
+    if (sigint_source != 0) g_source_remove(sigint_source);
 
     // Controllers own GTK windows and callbacks; destroy them while the
     // GtkApplication/display are still valid.
     runtime.reset();
     core::shared_task_executor().shutdown();
     g_object_unref(application);
+
+    if (restart_recovery_reexec && restart_handoff) {
+        const std::string executable = current_executable_path();
+        ::execl(
+            executable.c_str(),
+            executable.c_str(),
+            "--shell",
+            "--wallpaper-backend",
+            restart_handoff->backend_name.c_str(),
+            static_cast<char*>(nullptr)
+        );
+        std::cerr << "Unable to restore Realmheart after restart failure: "
+                  << std::strerror(errno) << '\n';
+        return 1;
+    }
     return status;
 }
 

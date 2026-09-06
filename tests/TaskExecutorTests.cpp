@@ -84,20 +84,17 @@ void test_coalescing_keeps_only_latest_queued_task() {
         release = true;
     }
     condition.notify_one();
-    for (int attempt = 0; attempt < 100 && runs.load() != 10; ++attempt) {
-        std::this_thread::sleep_for(1ms);
-    }
-    executor.shutdown();
+    executor.wait_for_idle();
     require(runs == 10, "coalescing must discard the obsolete queued task");
 }
 
-void test_cancelled_queued_task_is_not_run() {
+void test_owner_invalidation_cancels_queued_callback() {
     realmheart::core::TaskExecutor executor(1);
     std::mutex mutex;
     std::condition_variable condition;
     bool started = false;
     bool release = false;
-    std::atomic<bool> cancelled = true;
+    std::atomic<bool> owner_alive = true;
     std::atomic<bool> ran = false;
 
     require(executor.post([&] {
@@ -110,16 +107,75 @@ void test_cancelled_queued_task_is_not_run() {
         condition.wait(lock, [&] { return release; });
     }), "blocker should be accepted");
     wait_until_started(mutex, condition, started);
-    require(executor.post([&] { ran = true; }, {}, [&] { return cancelled.load(); }),
-            "cancelled task should be accepted before execution");
+    require(executor.post(
+                [&] { ran = true; }, {}, [&] { return !owner_alive.load(); }
+            ),
+            "owner-bound callback should be accepted before invalidation");
+
+    owner_alive = false;
 
     {
         std::lock_guard lock(mutex);
         release = true;
     }
     condition.notify_one();
+    executor.wait_for_idle();
+    require(!ran.load(), "owner-invalidated callback must not execute");
+}
+
+void test_wait_for_idle_waits_for_running_task() {
+    realmheart::core::TaskExecutor executor(1);
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool started = false;
+    bool release = false;
+    bool wait_started = false;
+    std::atomic<bool> wait_returned = false;
+
+    require(executor.post([&] {
+        {
+            std::lock_guard lock(mutex);
+            started = true;
+        }
+        condition.notify_one();
+        std::unique_lock lock(mutex);
+        condition.wait(lock, [&] { return release; });
+    }), "running task should be accepted");
+    wait_until_started(mutex, condition, started);
+
+    std::thread wait_thread([&] {
+        {
+            std::lock_guard lock(mutex);
+            wait_started = true;
+        }
+        condition.notify_one();
+        executor.wait_for_idle();
+        wait_returned = true;
+    });
+    wait_until_started(mutex, condition, wait_started);
+
+    require(!wait_returned.load(),
+            "wait_for_idle must wait while a task is still running");
+
+    {
+        std::lock_guard lock(mutex);
+        release = true;
+    }
+    condition.notify_one();
+    wait_thread.join();
+
+    require(wait_returned.load(), "wait_for_idle should complete after release");
+}
+
+void test_shutdown_rejects_work_after_quiescence() {
+    realmheart::core::TaskExecutor executor(1);
+    std::atomic<bool> ran = false;
+    require(executor.post([&] { ran = true; }), "task should be accepted");
+    executor.wait_for_idle();
+    require(ran.load(), "wait_for_idle must observe completed work");
+
     executor.shutdown();
-    require(!ran.load(), "cancelled queued task must not execute");
+    require(!executor.post([] {}), "shutdown must reject new work");
 }
 
 } // namespace
@@ -127,7 +183,9 @@ void test_cancelled_queued_task_is_not_run() {
 int main() {
     test_queue_is_bounded();
     test_coalescing_keeps_only_latest_queued_task();
-    test_cancelled_queued_task_is_not_run();
+    test_owner_invalidation_cancels_queued_callback();
+    test_wait_for_idle_waits_for_running_task();
+    test_shutdown_rejects_work_after_quiescence();
     std::cout << "TaskExecutor tests passed\n";
     return 0;
 }

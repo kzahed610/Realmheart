@@ -583,6 +583,12 @@ if(BUILD_TESTING)
     realmheart_register_test(realmheart_task_executor_tests)
 
     add_executable(
+        realmheart_restart_handshake_tests
+        tests/RestartHandshakeTests.cpp
+    )
+    realmheart_register_test(realmheart_restart_handshake_tests)
+
+    add_executable(
         realmheart_transition_timeline_tests
         tests/TransitionTimelineTests.cpp
         src/effects/core/TransitionTimeline.cpp

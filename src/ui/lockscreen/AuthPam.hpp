@@ -1,7 +1,9 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <string>
+#include <thread>
 
 namespace realmheart::ui::lockscreen {
 
@@ -29,7 +31,9 @@ public:
 
 private:
     struct State;
-    State* state_ = nullptr;
+    struct ResultContext;
+    std::shared_ptr<State> state_;
+    std::thread worker_;
 };
 
 } // namespace realmheart::ui::lockscreen

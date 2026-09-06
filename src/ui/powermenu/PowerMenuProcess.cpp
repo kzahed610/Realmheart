@@ -5,12 +5,14 @@
 #include <cerrno>
 #include <cmath>
 #include <csignal>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -66,11 +68,30 @@ PowerMenuProcess::~PowerMenuProcess() {
     }
 
     if (child_pid_ != 0) {
-        ::kill(child_pid_, SIGTERM);
+        const GPid child_pid = child_pid_;
         int status = 0;
-        while (::waitpid(child_pid_, &status, 0) < 0 && errno == EINTR) {
+        bool reaped = false;
+        const auto deadline = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(750);
+        while (std::chrono::steady_clock::now() < deadline) {
+            const pid_t waited = ::waitpid(child_pid, &status, WNOHANG);
+            if (waited == child_pid) {
+                reaped = true;
+                break;
+            }
+            if (waited < 0) {
+                if (errno == EINTR) continue;
+                if (errno == ECHILD) reaped = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        g_spawn_close_pid(child_pid_);
+        if (!reaped) {
+            static_cast<void>(::kill(child_pid, SIGKILL));
+            while (::waitpid(child_pid, &status, 0) < 0 && errno == EINTR) {
+            }
+        }
+        g_spawn_close_pid(child_pid);
         child_pid_ = 0;
     }
 }

@@ -255,6 +255,28 @@ ManaCoresSelector::~ManaCoresSelector() {
     }
     clear_pixbufs();
     clear_old_pixbufs();
+
+    // The selector is owned by ShellRuntime, while its GtkApplication window
+    // is owned by GTK. Tear down every callback edge before releasing this
+    // object; otherwise GTK can dispatch a draw/render/close event with a
+    // dangling ManaCoresSelector* during application teardown.
+    if (window_ != nullptr) {
+        g_signal_handlers_disconnect_by_data(window_, this);
+    }
+    if (gl_area_ != nullptr) {
+        g_signal_handlers_disconnect_by_data(gl_area_, this);
+    }
+    if (canvas_ != nullptr) {
+        gtk_drawing_area_set_draw_func(
+            GTK_DRAWING_AREA(canvas_), nullptr, nullptr, nullptr
+        );
+    }
+    if (window_ != nullptr) {
+        gtk_window_destroy(window_);
+        window_ = nullptr;
+        gl_area_ = nullptr;
+        canvas_ = nullptr;
+    }
 }
 
 void ManaCoresSelector::clear_pixbufs() {

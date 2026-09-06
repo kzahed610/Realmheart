@@ -31,7 +31,12 @@ constexpr double kLitPerChar = 0.083;
 constexpr size_t kMaxLitChars = 12;
 
 struct LockSurface::State {
+    struct Lifetime {
+        std::atomic<bool> alive{true};
+    };
+
     LockSurface* owner = nullptr;
+    std::shared_ptr<Lifetime> lifetime = std::make_shared<Lifetime>();
     GtkApplication* application = nullptr;
     GtkWindow* window = nullptr;
     GtkWidget* entry = nullptr;
@@ -168,16 +173,22 @@ LockSurface::LockSurface(
 
 LockSurface::~LockSurface() {
     if (state_ == nullptr) return;
+    state_->lifetime->alive.store(false);
+    state_->owner = nullptr;
+    state_->disarm_closing_watchdog();
     state_->stop_tick();
     if (state_->window != nullptr) {
         g_signal_handlers_disconnect_by_data(state_->window, state_);
         gtk_window_destroy(state_->window);
+        state_->window = nullptr;
     }
-    // GL/widget resources are intentionally leaked on process exit per the
-    // established renderer lifetime pattern (the GL context is gone by the
-    // time destructors run after g_application_run returns).
-    state_->scales.release();
-    state_->shaders.release();
+    // The window is gone while GTK/GL are still alive. Let the renderer and
+    // shader owners release their programs and widget references instead of
+    // leaking them during monitor-topology rebuilds.
+    state_->scales.reset();
+    state_->shaders.reset();
+    state_->machine.reset();
+    state_->auth.reset();
     delete state_;
     state_ = nullptr;
 }
@@ -378,6 +389,7 @@ void LockSurface::hide() {
 void LockSurface::hide_immediately() {
     if (state_ == nullptr) return;
     state_->closing = false;
+    state_->disarm_closing_watchdog();
     state_->machine->hide_immediately();
     state_->stop_tick();
     if (state_->scales != nullptr) state_->scales->finish();
@@ -544,10 +556,12 @@ gboolean LockSurface::submit_password() {
     const char* user = g_get_user_name();
     std::string username = user != nullptr ? user : "";
 
+    const auto lifetime = state_->lifetime;
     state_->auth->verify_async(
         std::move(username),
         std::move(password),
-        [this](bool success) {
+        [this, lifetime](bool success) {
+            if (!lifetime->alive.load()) return;
             if (!success) {
                 std::cerr << "[Lockscreen] authentication failed\n";
                 if (state_ == nullptr) return;

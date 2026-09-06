@@ -46,12 +46,20 @@ bool TaskExecutor::post(
     return true;
 }
 
+void TaskExecutor::wait_for_idle() {
+    std::unique_lock lock(mutex_);
+    idle_cv_.wait(lock, [this] {
+        return tasks_.empty() && active_tasks_ == 0;
+    });
+}
+
 void TaskExecutor::shutdown() {
     {
         std::lock_guard lock(mutex_);
         if (stopping_) return;
         stopping_ = true;
         tasks_.clear();
+        if (active_tasks_ == 0) idle_cv_.notify_all();
     }
     cv_.notify_all();
     for (auto& worker : workers_) {
@@ -71,17 +79,23 @@ void TaskExecutor::worker_loop() {
             if (stopping_) return;
             auto queued = std::move(tasks_.front());
             tasks_.pop_front();
+            ++active_tasks_;
             task = std::move(queued.task);
             cancelled = std::move(queued.cancelled);
         }
 
         try {
-            if (cancelled && cancelled()) continue;
-            task();
+            if (!cancelled || !cancelled()) task();
         } catch (const std::exception&) {
             // Individual jobs own their error reporting. One failed callback
             // must not terminate the shared worker pool.
         } catch (...) {
+        }
+
+        {
+            std::lock_guard lock(mutex_);
+            --active_tasks_;
+            if (tasks_.empty() && active_tasks_ == 0) idle_cv_.notify_all();
         }
     }
 }

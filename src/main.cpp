@@ -1,4 +1,5 @@
 #include "core/Diagnostics.hpp"
+#include "core/RestartHandshake.hpp"
 #include "core/ShellCommand.hpp"
 #include "core/ShellControl.hpp"
 #include "services/Audio.hpp"
@@ -129,61 +130,82 @@ int run_screenshot_helper_direct() {
 }
 
 int run_restart_helper(int argc, char** argv) {
-    if (argc != 4) {
+    if (argc != 5) {
         std::cerr << "Invalid internal restart-helper invocation\n";
         return 2;
     }
 
+    int handoff_fd = 0;
+    if (!parse_positive_int(argv[4], handoff_fd)) {
+        std::cerr << "Invalid restart-helper handoff FD\n";
+        return 2;
+    }
+    const auto fail = [handoff_fd](int error_code) {
+        static_cast<void>(realmheart::core::restart_handshake::send_message(
+            handoff_fd,
+            realmheart::core::restart_handshake::MessageType::Failure,
+            error_code > 0 ? error_code : EIO
+        ));
+        return 1;
+    };
+
     int old_pid_value = 0;
     if (!parse_positive_int(argv[2], old_pid_value)) {
         std::cerr << "Invalid restart-helper PID\n";
-        return 2;
+        return fail(EINVAL);
     }
+    static_cast<void>(old_pid_value);
 
     const auto backend = realmheart::ui::wallpaper::parse_wallpaper_backend_type(argv[3]);
     if (!backend) {
         std::cerr << "Invalid restart-helper wallpaper backend\n";
-        return 2;
+        return fail(EINVAL);
     }
 
     const std::string executable = current_executable_path();
     if (executable.empty()) {
         std::cerr << "Unable to resolve Realmheart executable for restart\n";
+        return fail(ENOENT);
+    }
+
+    if (!realmheart::core::restart_handshake::send_message(
+            handoff_fd,
+            realmheart::core::restart_handshake::MessageType::HelperReady
+        )) {
         return 1;
     }
 
-    const pid_t old_pid = static_cast<pid_t>(old_pid_value);
-    constexpr auto timeout = std::chrono::seconds(10);
-    constexpr auto interval = std::chrono::milliseconds(25);
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    bool old_process_terminated = false;
-
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (::kill(old_pid, 0) != 0 && errno == ESRCH) {
-            old_process_terminated = true;
-            break;
-        }
-        std::this_thread::sleep_for(interval);
-    }
-    if (!old_process_terminated) {
-        std::cerr << "Unable to confirm previous Realmheart process termination\n";
-        return 1;
+    realmheart::core::restart_handshake::Message release_message;
+    if (!realmheart::core::restart_handshake::wait_for_message(
+            handoff_fd,
+            release_message,
+            realmheart::core::restart_handshake::kTimeoutMilliseconds
+        ) || release_message.type !=
+            realmheart::core::restart_handshake::MessageType::ReleaseOld) {
+        const int wait_error = errno != 0 ? errno : EPROTO;
+        std::cerr << "Unable to receive old Realmheart release: "
+                  << std::strerror(wait_error) << '\n';
+        return fail(wait_error);
     }
 
     const std::string backend_name(
         realmheart::ui::wallpaper::wallpaper_backend_type_name(*backend)
     );
+    const std::string readiness_fd = std::to_string(handoff_fd);
     ::execl(
         executable.c_str(),
         executable.c_str(),
         "--shell",
         "--wallpaper-backend",
         backend_name.c_str(),
+        "--restart-readiness-fd",
+        readiness_fd.c_str(),
         static_cast<char*>(nullptr)
     );
 
-    std::cerr << "Unable to relaunch Realmheart: " << std::strerror(errno) << '\n';
-    return 1;
+    const int exec_error = errno;
+    std::cerr << "Unable to relaunch Realmheart: " << std::strerror(exec_error) << '\n';
+    return fail(exec_error);
 }
 
 int doctor() {
@@ -236,9 +258,20 @@ int main(int argc, char** argv) {
     if (command == "--shell") {
         auto wallpaper_backend =
             realmheart::ui::wallpaper::wallpaper_backend_from_environment();
+        int restart_readiness_fd = -1;
 
         for (int index = 2; index < argc; ++index) {
             const std::string_view argument = argv[index];
+            if (argument == "--restart-readiness-fd") {
+                if (index + 1 >= argc || !parse_positive_int(
+                        argv[++index],
+                        restart_readiness_fd
+                    )) {
+                    std::cerr << "Invalid --restart-readiness-fd value\n";
+                    return 2;
+                }
+                continue;
+            }
             if (argument != "--wallpaper-backend") {
                 std::cerr << "Unknown --shell argument: " << argument << '\n';
                 return 2;
@@ -259,7 +292,10 @@ int main(int argc, char** argv) {
             wallpaper_backend = *parsed;
         }
 
-        return realmheart::ui::run_shell(wallpaper_backend);
+        return realmheart::ui::run_shell(
+            wallpaper_backend,
+            restart_readiness_fd
+        );
     }
 
     if (command == "--command") {

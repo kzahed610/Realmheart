@@ -29,6 +29,7 @@ public:
         std::string coalesce_key = {},
         std::function<bool()> cancelled = {}
     );
+    void wait_for_idle();
     void shutdown();
 
 private:
@@ -42,8 +43,10 @@ private:
 
     std::mutex mutex_;
     std::condition_variable cv_;
+    std::condition_variable idle_cv_;
     std::deque<QueuedTask> tasks_;
     std::vector<std::thread> workers_;
+    std::size_t active_tasks_ = 0;
     bool stopping_ = false;
 };
 
