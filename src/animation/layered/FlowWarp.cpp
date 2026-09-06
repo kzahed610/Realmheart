@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <new>
+#include <stdexcept>
 #include <utility>
 
 namespace realmheart::animation::layered {
@@ -17,8 +19,16 @@ struct Pixel {
 };
 
 bool valid_view(const Argb32ImageView& view) {
-    return view.data != nullptr && view.width > 0 && view.height > 0 &&
-        view.stride >= view.width * 4;
+    if (view.data == nullptr || view.width <= 0 || view.height <= 0 || view.stride <= 0) {
+        return false;
+    }
+    constexpr std::size_t pixel_bytes = sizeof(std::uint32_t);
+    const auto width = static_cast<std::size_t>(view.width);
+    const auto height = static_cast<std::size_t>(view.height);
+    const auto stride = static_cast<std::size_t>(view.stride);
+    return width <= std::numeric_limits<std::size_t>::max() / pixel_bytes &&
+        stride >= width * pixel_bytes &&
+        height <= std::numeric_limits<std::size_t>::max() / stride;
 }
 
 std::uint32_t load_word(const Argb32ImageView& view, int x, int y) {
@@ -110,6 +120,7 @@ std::optional<std::vector<std::uint8_t>> warp_argb32(
     double displacement_pixels,
     std::string* error_message
 ) {
+    constexpr std::size_t max_output_bytes = 256U * 1024U * 1024U;
     const auto fail = [error_message](const char* message) {
         if (error_message != nullptr) *error_message = message;
         return std::optional<std::vector<std::uint8_t>>{};
@@ -125,13 +136,20 @@ std::optional<std::vector<std::uint8_t>> warp_argb32(
         return fail("Flow displacement is outside the accepted range");
     }
 
-    const int output_stride = source.width * 4;
-    const std::size_t byte_count = static_cast<std::size_t>(output_stride) *
-        static_cast<std::size_t>(source.height);
-    if (byte_count > std::numeric_limits<std::size_t>::max() / 2U) {
-        return fail("Flow output size overflowed");
+    const std::size_t output_stride = static_cast<std::size_t>(source.width) *
+        sizeof(std::uint32_t);
+    const std::size_t byte_count = output_stride * static_cast<std::size_t>(source.height);
+    if (byte_count > max_output_bytes) {
+        return fail("Flow output exceeds the supported size budget");
     }
-    std::vector<std::uint8_t> output(byte_count, 0U);
+    std::vector<std::uint8_t> output;
+    try {
+        output.assign(byte_count, 0U);
+    } catch (const std::bad_alloc&) {
+        return fail("Flow output allocation failed");
+    } catch (const std::length_error&) {
+        return fail("Flow output size is unsupported");
+    }
     for (int y = 0; y < source.height; ++y) {
         for (int x = 0; x < source.width; ++x) {
             const auto [direction_x, direction_y] = flow_vector(flow, x, y);

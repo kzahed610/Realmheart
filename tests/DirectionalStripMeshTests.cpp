@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -83,12 +84,63 @@ void weighted_translation_moves_both_edges_together() {
     assert(std::abs(pose.front().minimum_offset.y - 3.0) < 0.0001);
 }
 
+void one_pixel_axis_produces_one_safe_strip() {
+    constexpr int width = 2;
+    constexpr int height = 1;
+    constexpr int stride = width * 4;
+    std::vector<std::uint8_t> pixels(stride * height, 0U);
+    const auto mesh = DirectionalStripMesh::from_argb32(
+        pixels.data(), width, height, stride, 2, StripAxis::Rows,
+        AnchorPolicy::WeightedTranslate, {1.0, 0.0}
+    );
+
+    assert(mesh.has_value());
+    assert(mesh->strips().size() == 1U);
+    assert(mesh->strips().front().width == width);
+    assert(mesh->strips().front().height == height);
+}
+
+void large_strip_geometry_does_not_overflow_boundaries() {
+    constexpr int extent = 46342;
+    constexpr int stride = 4;
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(extent) * stride, 0U);
+    const auto mesh = DirectionalStripMesh::from_argb32(
+        pixels.data(), 1, extent, stride, extent, StripAxis::Rows,
+        AnchorPolicy::WeightedTranslate, {0.0, 1.0}
+    );
+
+    assert(mesh.has_value());
+    assert(mesh->strips().size() == static_cast<std::size_t>(extent));
+    assert(mesh->strips().back().y == extent - 1);
+    assert(mesh->strips().back().height == 1);
+}
+
+void extreme_pose_inputs_remain_finite() {
+    constexpr int stride = 4;
+    std::vector<std::uint8_t> pixels(stride, 0U);
+    write_mask(pixels, stride, 0, 0, 255U);
+    const auto mesh = DirectionalStripMesh::from_argb32(
+        pixels.data(), 1, 1, stride, 2, StripAxis::Rows,
+        AnchorPolicy::WeightedTranslate,
+        {std::numeric_limits<double>::max(), 0.0}
+    );
+
+    assert(mesh.has_value());
+    const auto pose = mesh->pose(2.0);
+    assert(pose.size() == 1U);
+    assert(std::isfinite(pose.front().minimum_offset.x));
+    assert(std::isfinite(pose.front().maximum_offset.x));
+}
+
 } // namespace
 
 int main() {
     rows_recover_visible_bounds_and_mask_weights();
     columns_support_minimum_edge_pinning();
     weighted_translation_moves_both_edges_together();
+    one_pixel_axis_produces_one_safe_strip();
+    large_strip_geometry_does_not_overflow_boundaries();
+    extreme_pose_inputs_remain_finite();
     std::cout << "Directional strip mesh tests passed\n";
     return 0;
 }

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -70,11 +71,46 @@ void directional_displacement_inverse_maps_pixels() {
     assert(read_pixel(*warped, 2) == 0xff00ff00U);
 }
 
+void oversized_output_is_rejected_before_allocation() {
+    std::uint8_t sentinel = 0U;
+    std::string error;
+    const auto warped = warp_argb32(
+        {&sentinel, 100000, 100000, 400000},
+        {&sentinel, 100000, 100000, 400000},
+        {&sentinel, 100000, 100000, 400000},
+        0.0,
+        &error
+    );
+
+    assert(!warped.has_value());
+    assert(!error.empty());
+}
+
+void overflowing_view_geometry_is_rejected() {
+    std::uint8_t sentinel = 0U;
+    std::string error;
+    const auto warped = warp_argb32(
+        {&sentinel, std::numeric_limits<int>::max(), 1,
+            std::numeric_limits<int>::max()},
+        {&sentinel, std::numeric_limits<int>::max(), 1,
+            std::numeric_limits<int>::max()},
+        {&sentinel, std::numeric_limits<int>::max(), 1,
+            std::numeric_limits<int>::max()},
+        0.0,
+        &error
+    );
+
+    assert(!warped.has_value());
+    assert(!error.empty());
+}
+
 } // namespace
 
 int main() {
     zero_displacement_preserves_source();
     directional_displacement_inverse_maps_pixels();
+    oversized_output_is_rejected_before_allocation();
+    overflowing_view_geometry_is_rejected();
     std::cout << "Layered flow warp tests passed\n";
     return 0;
 }
