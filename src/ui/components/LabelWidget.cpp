@@ -54,6 +54,11 @@ void LabelWidget::refresh() {
             value = reader();
         } catch (const std::exception&) {
             value = "Unavailable";
+        } catch (...) {
+            // Reader is caller-provided code. Keep the completion path intact
+            // even when it throws a non-standard exception; otherwise the
+            // in-flight guard would remain set for the widget's lifetime.
+            value = "Unavailable";
         }
 
         struct Result {

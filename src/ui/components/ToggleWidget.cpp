@@ -38,7 +38,11 @@ ToggleWidget::ToggleWidget(
 
             const auto state = self->state_;
             const std::uint64_t generation = state->generation.fetch_add(1) + 1;
-            realmheart::core::shared_task_executor().post([state, requested = requested != FALSE, generation] {
+            const bool requested_state = requested != FALSE;
+            const std::string coalesce_key =
+                "toggle:" + std::to_string(reinterpret_cast<std::uintptr_t>(state.get()));
+            const bool posted = realmheart::core::shared_task_executor().post(
+                [state, requested = requested_state, generation] {
                 bool succeeded = false;
                 {
                     // Serialize this toggle's mutations. Generation checks alone only
@@ -85,7 +89,26 @@ ToggleWidget::ToggleWidget(
                     new Result{state, generation, requested, succeeded},
                     +[](gpointer raw) { delete static_cast<Result*>(raw); }
                 );
-            });
+                },
+                coalesce_key,
+                [state] { return !state->alive.load(); }
+            );
+            if (!posted && state->alive.load() && state->switch_widget != nullptr) {
+                // `state-set` is emitted before GtkSwitch commits the new
+                // value. Returning TRUE below prevents that commit when the
+                // executor is stopping or its bounded queue is full.
+                if (state->signal_handler != 0) {
+                    g_signal_handler_block(state->switch_widget, state->signal_handler);
+                }
+                gtk_switch_set_active(
+                    GTK_SWITCH(state->switch_widget),
+                    !requested_state
+                );
+                if (state->signal_handler != 0) {
+                    g_signal_handler_unblock(state->switch_widget, state->signal_handler);
+                }
+                return TRUE;
+            }
             return FALSE;
         }),
         this

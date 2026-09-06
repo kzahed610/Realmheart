@@ -21,12 +21,18 @@ public:
     static std::string build_css(const services::Palette& palette);
 
 private:
+    struct CssProviderDeleter {
+        void operator()(GtkCssProvider* provider) const noexcept {
+            if (provider != nullptr) g_object_unref(provider);
+        }
+    };
+
     void apply(const services::Palette& palette);
 
     std::shared_ptr<services::ThemeService> theme_service_;
     services::ThemeService::Subscription subscription_;
     GdkDisplay* display_ = nullptr;
-    GtkCssProvider* provider_ = nullptr;
+    std::unique_ptr<GtkCssProvider, CssProviderDeleter> provider_;
     std::string component_css_;
 };
 

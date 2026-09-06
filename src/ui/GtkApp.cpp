@@ -53,17 +53,25 @@ void attach_escape_controller(GtkWidget* window, GtkApplication* application) {
     gtk_widget_add_controller(window, key_controller);
 }
 
-void add_css_provider(std::string_view css) {
-    GtkCssProvider* provider = gtk_css_provider_new();
-    gtk_css_provider_load_from_string(provider, std::string(css).c_str());
-    if (GdkDisplay* display = gdk_display_get_default(); display != nullptr) {
-        gtk_style_context_add_provider_for_display(display, GTK_STYLE_PROVIDER(provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+struct TestLayerCss {
+    GdkDisplay* display = nullptr;
+    GtkCssProvider* provider = nullptr;
+};
+
+void destroy_test_layer_css(gpointer raw) {
+    auto* css = static_cast<TestLayerCss*>(raw);
+    if (css->display != nullptr && css->provider != nullptr) {
+        gtk_style_context_remove_provider_for_display(
+            css->display,
+            GTK_STYLE_PROVIDER(css->provider)
+        );
     }
-    g_object_unref(provider);
+    if (css->provider != nullptr) g_object_unref(css->provider);
+    delete css;
 }
 
-void install_test_layer_css() {
-    add_css_provider(
+void install_test_layer_css(GtkApplication* application) {
+    constexpr char kCssData[] =
         ".realmheart-test-layer {"
         "  background: alpha(#1e1e2e, 0.88);"
         "  border: 1px solid alpha(#cba6f7, 0.75);"
@@ -72,7 +80,27 @@ void install_test_layer_css() {
         "}"
         ".realmheart-test-layer label {"
         "  color: #cdd6f4; font-weight: 700; letter-spacing: 0.02em;"
-        "}"
+        "}";
+
+    constexpr char kProviderData[] = "realmheart-test-layer-css";
+    if (g_object_get_data(G_OBJECT(application), kProviderData) != nullptr) return;
+
+    auto* css = new TestLayerCss;
+    css->display = gdk_display_get_default();
+    css->provider = gtk_css_provider_new();
+    gtk_css_provider_load_from_string(css->provider, kCssData);
+    if (css->display != nullptr) {
+        gtk_style_context_add_provider_for_display(
+            css->display,
+            GTK_STYLE_PROVIDER(css->provider),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION
+        );
+    }
+    g_object_set_data_full(
+        G_OBJECT(application),
+        kProviderData,
+        css,
+        destroy_test_layer_css
     );
 }
 
@@ -81,7 +109,7 @@ void install_test_layer_css() {
 void activate_test_layer(GtkApplication* app, gpointer data) {
     auto* state = static_cast<TimedLayerState*>(data);
     schedule_application_quit(state);
-    install_test_layer_css();
+    install_test_layer_css(app);
 
     GtkWidget* window = gtk_application_window_new(app);
     gtk_window_set_title(GTK_WINDOW(window), "Realmheart test layer");

@@ -45,21 +45,30 @@ bool palette_is_dark(std::string_view background) {
     return hex_luminance(background).value_or(0.0) < 0.42;
 }
 
+std::string fallback_component_css() {
+    // The generated palette and surface transparency rules are still applied
+    // when an optional component module is unavailable. Keep the fallback
+    // deliberately small: it must make the shell usable without pretending
+    // that a partially loaded module bundle is complete.
+    return R"CSS(
+        .realmheart-module-row,
+        .realmheart-notifications,
+        .realmheart-notifications-scroller {
+            color: @rh_text;
+        }
+        .realmheart-module-value,
+        .realmheart-notifications-count {
+            color: @rh_text_muted;
+        }
+    )CSS";
+}
+
 } // namespace
 
 ThemeStyles::ThemeStyles(std::shared_ptr<services::ThemeService> theme_service)
     : theme_service_(std::move(theme_service)),
-      display_(gdk_display_get_default()),
-      provider_(gtk_css_provider_new()) {
+      display_(gdk_display_get_default()) {
     if (!theme_service_) throw std::invalid_argument("ThemeStyles requires ThemeService");
-
-    if (display_ != nullptr) {
-        gtk_style_context_add_provider_for_display(
-            display_,
-            GTK_STYLE_PROVIDER(provider_),
-            kRealmheartStylePriority
-        );
-    }
 
     constexpr std::array<std::string_view, 7> component_modules{
         "taskbar/bar.css",
@@ -70,7 +79,15 @@ ThemeStyles::ThemeStyles(std::shared_ptr<services::ThemeService> theme_service)
         "launcher/command-receipt.css",
         "lockscreen/lockscreen.css",
     };
-    component_css_ = styles::load_css_modules(component_modules);
+    try {
+        component_css_ = styles::load_css_modules(component_modules);
+    } catch (const std::exception& error) {
+        g_warning("Realmheart component CSS unavailable: %s; using fallback", error.what());
+        component_css_ = fallback_component_css();
+    } catch (...) {
+        g_warning("Realmheart component CSS failed with an unknown error; using fallback");
+        component_css_ = fallback_component_css();
+    }
 
     // Hardcode ManaCores selector transparency rules globally to avoid adding
     // providers dynamically at runtime, which triggers a global style update that
@@ -116,10 +133,28 @@ ThemeStyles::ThemeStyles(std::shared_ptr<services::ThemeService> theme_service)
         }
     )CSS";
 
+    std::unique_ptr<GtkCssProvider, CssProviderDeleter> provider(gtk_css_provider_new());
+    if (!provider) throw std::runtime_error("Unable to create Realmheart CSS provider");
+
+    // Build and load the initial stylesheet before exposing the provider to
+    // the display. Any C++ allocation failure therefore leaves no global GTK
+    // provider behind for a later activation to inherit.
+    const auto initial_palette = theme_service_->get_palette();
+    std::string initial_css = build_css(initial_palette);
+    initial_css += component_css_;
+    gtk_css_provider_load_from_string(provider.get(), initial_css.c_str());
+
     subscription_ = theme_service_->subscribe([this](const services::Palette& palette) {
         apply(palette);
     });
-    apply(theme_service_->get_palette());
+    provider_ = std::move(provider);
+    if (display_ != nullptr) {
+        gtk_style_context_add_provider_for_display(
+            display_,
+            GTK_STYLE_PROVIDER(provider_.get()),
+            kRealmheartStylePriority
+        );
+    }
 }
 
 ThemeStyles::~ThemeStyles() {
@@ -127,19 +162,16 @@ ThemeStyles::~ThemeStyles() {
     if (display_ != nullptr && provider_ != nullptr) {
         gtk_style_context_remove_provider_for_display(
             display_,
-            GTK_STYLE_PROVIDER(provider_)
+            GTK_STYLE_PROVIDER(provider_.get())
         );
-    }
-    if (provider_ != nullptr) {
-        g_object_unref(provider_);
-        provider_ = nullptr;
     }
 }
 
 void ThemeStyles::apply(const services::Palette& palette) {
+    if (!provider_) return;
     std::string css = build_css(palette);
     css += component_css_;
-    gtk_css_provider_load_from_string(provider_, css.c_str());
+    gtk_css_provider_load_from_string(provider_.get(), css.c_str());
 }
 
 std::string ThemeStyles::build_css(const services::Palette& palette) {

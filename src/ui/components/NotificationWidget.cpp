@@ -158,11 +158,21 @@ NotificationWidget::NotificationWidget(services::NotificationHistory& history)
     gtk_widget_set_tooltip_text(clear_button_, "Clear notification history");
     gtk_widget_set_can_target(clear_button_, TRUE);
     gtk_widget_set_focusable(clear_button_, FALSE);
-    g_signal_connect(clear_button_, "clicked", G_CALLBACK(+[](
-        GtkButton*, gpointer data
-    ) {
-        static_cast<NotificationWidget*>(data)->clear_notifications();
-    }), this);
+    g_signal_connect_data(
+        clear_button_,
+        "clicked",
+        G_CALLBACK(+[](GtkButton*, gpointer data) {
+            auto& state = **static_cast<std::shared_ptr<LifetimeState>*>(data);
+            if (state.alive.load() && state.owner != nullptr) {
+                state.owner->clear_notifications();
+            }
+        }),
+        new std::shared_ptr<LifetimeState>(state_),
+        +[](gpointer data, GClosure*) {
+            delete static_cast<std::shared_ptr<LifetimeState>*>(data);
+        },
+        G_CONNECT_DEFAULT
+    );
     gtk_box_append(GTK_BOX(controls_), clear_button_);
     gtk_box_append(GTK_BOX(box_), controls_);
 
@@ -188,30 +198,66 @@ NotificationWidget::NotificationWidget(services::NotificationHistory& history)
     gtk_event_controller_set_propagation_phase(
         GTK_EVENT_CONTROLLER(drag), GTK_PHASE_BUBBLE
     );
-    g_signal_connect(drag, "drag-begin", G_CALLBACK(+[](
-        GtkGestureDrag* gesture, double start_x, double start_y, gpointer data
-    ) {
-        static_cast<NotificationWidget*>(data)->begin_drag_scroll(
-            gesture, start_x, start_y
-        );
-    }), this);
-    g_signal_connect(drag, "drag-update", G_CALLBACK(+[](
-        GtkGestureDrag* gesture, double offset_x, double offset_y, gpointer data
-    ) {
-        static_cast<NotificationWidget*>(data)->update_drag_scroll(
-            gesture, offset_x, offset_y
-        );
-    }), this);
-    g_signal_connect(drag, "drag-end", G_CALLBACK(+[](
-        GtkGestureDrag*, double, double, gpointer data
-    ) {
-        static_cast<NotificationWidget*>(data)->end_drag_scroll();
-    }), this);
-    g_signal_connect(drag, "cancel", G_CALLBACK(+[](
-        GtkGesture*, GdkEventSequence*, gpointer data
-    ) {
-        static_cast<NotificationWidget*>(data)->end_drag_scroll();
-    }), this);
+    g_signal_connect_data(
+        drag,
+        "drag-begin",
+        G_CALLBACK(+[](GtkGestureDrag* gesture, double start_x, double start_y, gpointer data) {
+            auto& state = **static_cast<std::shared_ptr<LifetimeState>*>(data);
+            if (state.alive.load() && state.owner != nullptr) {
+                state.owner->begin_drag_scroll(gesture, start_x, start_y);
+            }
+        }),
+        new std::shared_ptr<LifetimeState>(state_),
+        +[](gpointer data, GClosure*) {
+            delete static_cast<std::shared_ptr<LifetimeState>*>(data);
+        },
+        G_CONNECT_DEFAULT
+    );
+    g_signal_connect_data(
+        drag,
+        "drag-update",
+        G_CALLBACK(+[](GtkGestureDrag* gesture, double offset_x, double offset_y, gpointer data) {
+            auto& state = **static_cast<std::shared_ptr<LifetimeState>*>(data);
+            if (state.alive.load() && state.owner != nullptr) {
+                state.owner->update_drag_scroll(gesture, offset_x, offset_y);
+            }
+        }),
+        new std::shared_ptr<LifetimeState>(state_),
+        +[](gpointer data, GClosure*) {
+            delete static_cast<std::shared_ptr<LifetimeState>*>(data);
+        },
+        G_CONNECT_DEFAULT
+    );
+    g_signal_connect_data(
+        drag,
+        "drag-end",
+        G_CALLBACK(+[](GtkGestureDrag*, double, double, gpointer data) {
+            auto& state = **static_cast<std::shared_ptr<LifetimeState>*>(data);
+            if (state.alive.load() && state.owner != nullptr) {
+                state.owner->end_drag_scroll();
+            }
+        }),
+        new std::shared_ptr<LifetimeState>(state_),
+        +[](gpointer data, GClosure*) {
+            delete static_cast<std::shared_ptr<LifetimeState>*>(data);
+        },
+        G_CONNECT_DEFAULT
+    );
+    g_signal_connect_data(
+        drag,
+        "cancel",
+        G_CALLBACK(+[](GtkGesture*, GdkEventSequence*, gpointer data) {
+            auto& state = **static_cast<std::shared_ptr<LifetimeState>*>(data);
+            if (state.alive.load() && state.owner != nullptr) {
+                state.owner->end_drag_scroll();
+            }
+        }),
+        new std::shared_ptr<LifetimeState>(state_),
+        +[](gpointer data, GClosure*) {
+            delete static_cast<std::shared_ptr<LifetimeState>*>(data);
+        },
+        G_CONNECT_DEFAULT
+    );
     gtk_widget_add_controller(scroller_, GTK_EVENT_CONTROLLER(drag));
 
     // Horizontal swipe-to-dismiss on rows. Lives on the scroller so the
@@ -223,32 +269,66 @@ NotificationWidget::NotificationWidget(services::NotificationHistory& history)
     gtk_event_controller_set_propagation_phase(
         GTK_EVENT_CONTROLLER(swipe), GTK_PHASE_CAPTURE
     );
-    g_signal_connect(swipe, "drag-begin", G_CALLBACK(+[](
-        GtkGestureDrag* gesture, double start_x, double start_y, gpointer data
-    ) {
-        static_cast<NotificationWidget*>(data)->begin_row_swipe(
-            gesture, start_x, start_y
-        );
-    }), this);
-    g_signal_connect(swipe, "drag-update", G_CALLBACK(+[](
-        GtkGestureDrag* gesture, double offset_x, double offset_y, gpointer data
-    ) {
-        static_cast<NotificationWidget*>(data)->update_row_swipe(
-            gesture, offset_x, offset_y
-        );
-    }), this);
-    g_signal_connect(swipe, "drag-end", G_CALLBACK(+[](
-        GtkGestureDrag* gesture, double, double, gpointer data
-    ) {
-        static_cast<NotificationWidget*>(data)->end_row_swipe(gesture);
-    }), this);
-    g_signal_connect(swipe, "cancel", G_CALLBACK(+[](
-        GtkGesture* gesture, GdkEventSequence*, gpointer data
-    ) {
-        static_cast<NotificationWidget*>(data)->end_row_swipe(
-            GTK_GESTURE_DRAG(gesture)
-        );
-    }), this);
+    g_signal_connect_data(
+        swipe,
+        "drag-begin",
+        G_CALLBACK(+[](GtkGestureDrag* gesture, double start_x, double start_y, gpointer data) {
+            auto& state = **static_cast<std::shared_ptr<LifetimeState>*>(data);
+            if (state.alive.load() && state.owner != nullptr) {
+                state.owner->begin_row_swipe(gesture, start_x, start_y);
+            }
+        }),
+        new std::shared_ptr<LifetimeState>(state_),
+        +[](gpointer data, GClosure*) {
+            delete static_cast<std::shared_ptr<LifetimeState>*>(data);
+        },
+        G_CONNECT_DEFAULT
+    );
+    g_signal_connect_data(
+        swipe,
+        "drag-update",
+        G_CALLBACK(+[](GtkGestureDrag* gesture, double offset_x, double offset_y, gpointer data) {
+            auto& state = **static_cast<std::shared_ptr<LifetimeState>*>(data);
+            if (state.alive.load() && state.owner != nullptr) {
+                state.owner->update_row_swipe(gesture, offset_x, offset_y);
+            }
+        }),
+        new std::shared_ptr<LifetimeState>(state_),
+        +[](gpointer data, GClosure*) {
+            delete static_cast<std::shared_ptr<LifetimeState>*>(data);
+        },
+        G_CONNECT_DEFAULT
+    );
+    g_signal_connect_data(
+        swipe,
+        "drag-end",
+        G_CALLBACK(+[](GtkGestureDrag* gesture, double, double, gpointer data) {
+            auto& state = **static_cast<std::shared_ptr<LifetimeState>*>(data);
+            if (state.alive.load() && state.owner != nullptr) {
+                state.owner->end_row_swipe(gesture);
+            }
+        }),
+        new std::shared_ptr<LifetimeState>(state_),
+        +[](gpointer data, GClosure*) {
+            delete static_cast<std::shared_ptr<LifetimeState>*>(data);
+        },
+        G_CONNECT_DEFAULT
+    );
+    g_signal_connect_data(
+        swipe,
+        "cancel",
+        G_CALLBACK(+[](GtkGesture* gesture, GdkEventSequence*, gpointer data) {
+            auto& state = **static_cast<std::shared_ptr<LifetimeState>*>(data);
+            if (state.alive.load() && state.owner != nullptr) {
+                state.owner->end_row_swipe(GTK_GESTURE_DRAG(gesture));
+            }
+        }),
+        new std::shared_ptr<LifetimeState>(state_),
+        +[](gpointer data, GClosure*) {
+            delete static_cast<std::shared_ptr<LifetimeState>*>(data);
+        },
+        G_CONNECT_DEFAULT
+    );
     gtk_widget_add_controller(scroller_, GTK_EVENT_CONTROLLER(swipe));
 
     list_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, layout_.list_spacing);
@@ -490,14 +570,23 @@ void NotificationWidget::refresh() {
         g_object_set_data(
             G_OBJECT(dismiss), "realmheart-notification-id", GUINT_TO_POINTER(entry.id)
         );
-        g_signal_connect(dismiss, "clicked", G_CALLBACK(+[](
-            GtkButton* button, gpointer data
-        ) {
-            const auto id = GPOINTER_TO_UINT(g_object_get_data(
-                G_OBJECT(button), "realmheart-notification-id"
-            ));
-            static_cast<NotificationWidget*>(data)->dismiss_notification(id);
-        }), this);
+        g_signal_connect_data(
+            dismiss,
+            "clicked",
+            G_CALLBACK(+[](GtkButton* button, gpointer data) {
+                auto& state = **static_cast<std::shared_ptr<LifetimeState>*>(data);
+                if (!state.alive.load() || state.owner == nullptr) return;
+                const auto id = GPOINTER_TO_UINT(g_object_get_data(
+                    G_OBJECT(button), "realmheart-notification-id"
+                ));
+                state.owner->dismiss_notification(id);
+            }),
+            new std::shared_ptr<LifetimeState>(state_),
+            +[](gpointer data, GClosure*) {
+                delete static_cast<std::shared_ptr<LifetimeState>*>(data);
+            },
+            G_CONNECT_DEFAULT
+        );
         gtk_box_append(GTK_BOX(row), dismiss);
 
         // Wrap the row in a swipe bin: horizontal drags translate the bin
@@ -674,7 +763,12 @@ void NotificationWidget::animate_swipe_release(
     swipe_anim_start_us_ = g_get_monotonic_time();
     swipe_anim_dismiss_ = dismiss_after;
     swipe_tick_id_ = gtk_widget_add_tick_callback(
-        scroller_, &NotificationWidget::swipe_tick, this, nullptr
+        scroller_,
+        &NotificationWidget::swipe_tick,
+        new std::shared_ptr<LifetimeState>(state_),
+        +[](gpointer raw) {
+            delete static_cast<std::shared_ptr<LifetimeState>*>(raw);
+        }
     );
 }
 
@@ -683,7 +777,9 @@ gboolean NotificationWidget::swipe_tick(
     GdkFrameClock* frame_clock,
     gpointer data
 ) {
-    auto* self = static_cast<NotificationWidget*>(data);
+    auto& state = **static_cast<std::shared_ptr<LifetimeState>*>(data);
+    if (!state.alive.load() || state.owner == nullptr) return G_SOURCE_REMOVE;
+    auto* self = state.owner;
     self->swipe_tick_id_ = 0;
 
     const gint64 now = gdk_frame_clock_get_frame_time(frame_clock);
@@ -697,22 +793,26 @@ gboolean NotificationWidget::swipe_tick(
     if (linear < 1.0) {
         self->set_swipe_translate(value);
         self->swipe_tick_id_ = gtk_widget_add_tick_callback(
-            self->scroller_, &NotificationWidget::swipe_tick, self, nullptr
+            self->scroller_,
+            &NotificationWidget::swipe_tick,
+            new std::shared_ptr<LifetimeState>(self->state_),
+            +[](gpointer raw) {
+                delete static_cast<std::shared_ptr<LifetimeState>*>(raw);
+            }
         );
         return G_SOURCE_REMOVE;
     }
 
     GtkWidget* row = self->swipe_row_;
+    const bool dismiss = self->swipe_anim_dismiss_;
+    if (row != nullptr) self->set_swipe_translate(0.0);
     self->swipe_row_ = nullptr;
     self->swipe_offset_ = 0.0;
-    if (self->swipe_anim_dismiss_ && row != nullptr) {
+    if (dismiss && row != nullptr) {
         const auto id = GPOINTER_TO_UINT(g_object_get_data(
             G_OBJECT(row), "realmheart-notification-id"
         ));
-        self->set_swipe_translate(0.0);
         self->dismiss_notification(id);
-    } else {
-        self->set_swipe_translate(0.0);
     }
     return G_SOURCE_REMOVE;
 }

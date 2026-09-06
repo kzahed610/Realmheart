@@ -64,10 +64,10 @@ GdkMonitor* resolve_layer_surface_monitor(
     const guint count = g_list_model_get_n_items(monitors);
     if (count == 0) return nullptr;
 
-    const int configured = requested_index >= 0
-        ? requested_index
-        : configured_monitor_index();
-    const guint index = configured >= 0 && static_cast<guint>(configured) < count
+    const bool explicit_index = requested_index >= 0;
+    const int configured = explicit_index ? requested_index : configured_monitor_index();
+    if (explicit_index && static_cast<guint>(configured) >= count) return nullptr;
+    const guint index = static_cast<guint>(configured) < count
         ? static_cast<guint>(configured)
         : 0U;
     return GDK_MONITOR(g_list_model_get_item(monitors, index));
