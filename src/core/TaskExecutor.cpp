@@ -17,12 +17,30 @@ TaskExecutor::~TaskExecutor() {
     shutdown();
 }
 
-bool TaskExecutor::post(std::function<void()> task) {
+bool TaskExecutor::post(
+    std::function<void()> task,
+    std::string coalesce_key,
+    std::function<bool()> cancelled
+) {
     if (!task) return false;
     {
         std::lock_guard lock(mutex_);
         if (stopping_) return false;
-        tasks_.push(std::move(task));
+        if (!coalesce_key.empty()) {
+            for (auto& queued : tasks_) {
+                if (queued.coalesce_key == coalesce_key) {
+                    queued.task = std::move(task);
+                    queued.cancelled = std::move(cancelled);
+                    return true;
+                }
+            }
+        }
+        if (tasks_.size() >= kMaxQueuedTasks) return false;
+        tasks_.push_back({
+            std::move(task),
+            std::move(coalesce_key),
+            std::move(cancelled)
+        });
     }
     cv_.notify_one();
     return true;
@@ -33,6 +51,7 @@ void TaskExecutor::shutdown() {
         std::lock_guard lock(mutex_);
         if (stopping_) return;
         stopping_ = true;
+        tasks_.clear();
     }
     cv_.notify_all();
     for (auto& worker : workers_) {
@@ -40,25 +59,24 @@ void TaskExecutor::shutdown() {
     }
     workers_.clear();
 
-    std::queue<std::function<void()>> empty;
-    {
-        std::lock_guard lock(mutex_);
-        tasks_.swap(empty);
-    }
 }
 
 void TaskExecutor::worker_loop() {
     while (true) {
         std::function<void()> task;
+        std::function<bool()> cancelled;
         {
             std::unique_lock lock(mutex_);
             cv_.wait(lock, [this] { return stopping_ || !tasks_.empty(); });
-            if (stopping_ && tasks_.empty()) return;
-            task = std::move(tasks_.front());
-            tasks_.pop();
+            if (stopping_) return;
+            auto queued = std::move(tasks_.front());
+            tasks_.pop_front();
+            task = std::move(queued.task);
+            cancelled = std::move(queued.cancelled);
         }
 
         try {
+            if (cancelled && cancelled()) continue;
             task();
         } catch (const std::exception&) {
             // Individual jobs own their error reporting. One failed callback

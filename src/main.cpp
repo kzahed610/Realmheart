@@ -156,10 +156,18 @@ int run_restart_helper(int argc, char** argv) {
     constexpr auto timeout = std::chrono::seconds(10);
     constexpr auto interval = std::chrono::milliseconds(25);
     const auto deadline = std::chrono::steady_clock::now() + timeout;
+    bool old_process_terminated = false;
 
     while (std::chrono::steady_clock::now() < deadline) {
-        if (::kill(old_pid, 0) != 0 && errno == ESRCH) break;
+        if (::kill(old_pid, 0) != 0 && errno == ESRCH) {
+            old_process_terminated = true;
+            break;
+        }
         std::this_thread::sleep_for(interval);
+    }
+    if (!old_process_terminated) {
+        std::cerr << "Unable to confirm previous Realmheart process termination\n";
+        return 1;
     }
 
     const std::string backend_name(
@@ -298,6 +306,9 @@ int main(int argc, char** argv) {
         case realmheart::core::ShellControlResult::InvalidArgument:
             std::cerr << "Invalid or missing argument for command: " << argv[2] << '\n';
             return 2;
+        case realmheart::core::ShellControlResult::DeliveryFailed:
+            std::cerr << "Realmheart shell command could not be delivered\n";
+            return 5;
         }
     }
 

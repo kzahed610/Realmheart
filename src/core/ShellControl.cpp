@@ -87,18 +87,27 @@ ShellControlResult send_shell_command(ShellCommand command, std::string_view arg
     } else {
         g_action_group_activate_action(G_ACTION_GROUP(application), action_name.data(), nullptr);
     }
-    if (GDBusConnection* connection = g_application_get_dbus_connection(application)) {
-        GCancellable* cancellable = g_cancellable_new();
-        {
-            FlushDeadline deadline(cancellable);
-            GError* flush_error = nullptr;
-            static_cast<void>(g_dbus_connection_flush_sync(connection, cancellable, &flush_error));
-            g_clear_error(&flush_error);
-        }
-        g_object_unref(cancellable);
+    GDBusConnection* connection = g_application_get_dbus_connection(application);
+    if (connection == nullptr) {
+        g_object_unref(application);
+        return ShellControlResult::DeliveryFailed;
     }
+
+    GCancellable* cancellable = g_cancellable_new();
+    bool flushed = false;
+    {
+        FlushDeadline deadline(cancellable);
+        GError* flush_error = nullptr;
+        flushed = g_dbus_connection_flush_sync(connection, cancellable, &flush_error);
+        if (!flushed && flush_error != nullptr) {
+            std::cerr << "Unable to flush Realmheart shell command: "
+                      << flush_error->message << '\n';
+        }
+        g_clear_error(&flush_error);
+    }
+    g_object_unref(cancellable);
     g_object_unref(application);
-    return ShellControlResult::Delivered;
+    return flushed ? ShellControlResult::Delivered : ShellControlResult::DeliveryFailed;
 }
 
 } // namespace realmheart::core

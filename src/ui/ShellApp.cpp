@@ -1930,10 +1930,12 @@ private:
         const auto utilities = utilities_;
         const auto theme_service = theme_service_;
         const std::uint64_t generation = state->theme_generation.fetch_add(1) + 1;
-        const bool posted = core::shared_task_executor().post([
-            state, utilities, theme_service, path, generation
-        ] {
-            auto palette = utilities->generate_palette(path);
+        const bool posted = core::shared_task_executor().post(
+        [state, utilities, theme_service, path, generation] {
+            auto palette = utilities->generate_palette(path, [state, generation] {
+                return !state->alive.load() ||
+                       state->theme_generation.load() != generation;
+            });
 
             struct Payload {
                 std::shared_ptr<RuntimeAsyncState> state;
@@ -1962,6 +1964,11 @@ private:
                 new Payload{state, theme_service, generation, std::move(palette)},
                 +[](gpointer raw) { delete static_cast<Payload*>(raw); }
             );
+        },
+        "theme-generation",
+        [state, generation] {
+            return !state->alive.load() ||
+                   state->theme_generation.load() != generation;
         });
         if (!posted) {
             std::cerr << "[Theme] Worker queue unavailable; keeping the current palette\n";
@@ -2980,6 +2987,7 @@ int run_shell(wallpaper::WallpaperBackendType wallpaper_backend) {
     // Controllers own GTK windows and callbacks; destroy them while the
     // GtkApplication/display are still valid.
     runtime.reset();
+    core::shared_task_executor().shutdown();
     g_object_unref(application);
     return status;
 }
@@ -3053,6 +3061,7 @@ int run_shell_lifetime_stress(
     }
 
     std::filesystem::remove_all(config_root, filesystem_error);
+    core::shared_task_executor().shutdown();
     std::cout << "Realmheart lifetime stress passed " << iterations
               << " iterations\n";
     return 0;

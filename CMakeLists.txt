@@ -576,6 +576,12 @@ if(BUILD_TESTING)
     add_executable(realmheart_command_tests tests/CommandTests.cpp src/core/Command.cpp)
     realmheart_register_test(realmheart_command_tests)
 
+    add_executable(realmheart_task_executor_tests
+        tests/TaskExecutorTests.cpp
+        src/core/TaskExecutor.cpp
+    )
+    realmheart_register_test(realmheart_task_executor_tests)
+
     add_executable(
         realmheart_transition_timeline_tests
         tests/TransitionTimelineTests.cpp

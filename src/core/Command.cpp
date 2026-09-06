@@ -250,7 +250,11 @@ std::string command_failure_detail(
 std::optional<std::string> find_in_path(const std::string& name) {
     if (name.empty()) return std::nullopt;
     if (name.find('/') != std::string::npos) {
-        if (::access(name.c_str(), X_OK) == 0) return name;
+        std::error_code error;
+        if (std::filesystem::is_regular_file(name, error) &&
+            !error && ::access(name.c_str(), X_OK) == 0) {
+            return name;
+        }
         return std::nullopt;
     }
 
@@ -262,7 +266,11 @@ std::optional<std::string> find_in_path(const std::string& name) {
     while (std::getline(paths, dir, ':')) {
         if (dir.empty()) dir = ".";
         std::filesystem::path candidate = std::filesystem::path(dir) / name;
-        if (::access(candidate.c_str(), X_OK) == 0) return candidate.string();
+        std::error_code error;
+        if (std::filesystem::is_regular_file(candidate, error) &&
+            !error && ::access(candidate.c_str(), X_OK) == 0) {
+            return candidate.string();
+        }
     }
     return std::nullopt;
 }

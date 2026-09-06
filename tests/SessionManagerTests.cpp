@@ -43,9 +43,23 @@ void test_suspend_triggers_systemd_suspend() {
     bool result = session.suspend();
 
     if (!result) { std::cerr << "Suspend failed\n"; exit(1); }
-    if (mock_ptr->background_calls.size() != 1) { std::cerr << "Wrong call count\n"; exit(1); }
-    if (mock_ptr->background_calls[0] != std::vector<std::string>{"systemctl", "suspend"}) { std::cerr << "Wrong command\n"; exit(1); }
+    if (mock_ptr->capture_calls.size() != 1) { std::cerr << "Wrong call count\n"; exit(1); }
+    if (mock_ptr->capture_calls[0] != std::vector<std::string>{"systemctl", "suspend"}) { std::cerr << "Wrong command\n"; exit(1); }
     std::cout << "test_suspend_triggers_systemd_suspend PASSED\n";
+}
+
+void test_session_action_reports_post_exec_failure() {
+    auto mock = std::make_unique<MockCommandExecutor>();
+    auto* mock_ptr = mock.get();
+    mock_ptr->next_capture_result = false;
+    realmheart::services::SessionManager session(std::move(mock));
+
+    if (session.suspend()) { std::cerr << "Failed suspend must be reported\n"; exit(1); }
+    if (mock_ptr->capture_calls != std::vector<std::vector<std::string>>{{"systemctl", "suspend"}}) {
+        std::cerr << "Failed suspend must use the finite command path\n";
+        exit(1);
+    }
+    std::cout << "test_session_action_reports_post_exec_failure PASSED\n";
 }
 
 void test_logout_triggers_hyprland_exit() {
@@ -56,8 +70,8 @@ void test_logout_triggers_hyprland_exit() {
     bool result = session.logout();
 
     if (!result) { std::cerr << "Logout failed\n"; exit(1); }
-    if (mock_ptr->background_calls.size() != 1) { std::cerr << "Wrong call count\n"; exit(1); }
-    if (mock_ptr->background_calls[0] != std::vector<std::string>{"hyprctl", "dispatch", "exit"}) { std::cerr << "Wrong command\n"; exit(1); }
+    if (mock_ptr->capture_calls.size() != 1) { std::cerr << "Wrong call count\n"; exit(1); }
+    if (mock_ptr->capture_calls[0] != std::vector<std::string>{"hyprctl", "dispatch", "exit"}) { std::cerr << "Wrong command\n"; exit(1); }
     std::cout << "test_logout_triggers_hyprland_exit PASSED\n";
 }
 
@@ -69,8 +83,8 @@ void test_reboot_triggers_systemd_reboot() {
     bool result = session.reboot();
 
     if (!result) { std::cerr << "Reboot failed\n"; exit(1); }
-    if (mock_ptr->background_calls.size() != 1) { std::cerr << "Wrong call count\n"; exit(1); }
-    if (mock_ptr->background_calls[0] != std::vector<std::string>{"systemctl", "reboot"}) { std::cerr << "Wrong command\n"; exit(1); }
+    if (mock_ptr->capture_calls.size() != 1) { std::cerr << "Wrong call count\n"; exit(1); }
+    if (mock_ptr->capture_calls[0] != std::vector<std::string>{"systemctl", "reboot"}) { std::cerr << "Wrong command\n"; exit(1); }
     std::cout << "test_reboot_triggers_systemd_reboot PASSED\n";
 }
 
@@ -82,8 +96,8 @@ void test_power_off_triggers_systemd_poweroff() {
     bool result = session.power_off();
 
     if (!result) { std::cerr << "Power off failed\n"; exit(1); }
-    if (mock_ptr->background_calls.size() != 1) { std::cerr << "Wrong call count\n"; exit(1); }
-    if (mock_ptr->background_calls[0] != std::vector<std::string>{"systemctl", "poweroff"}) { std::cerr << "Wrong command\n"; exit(1); }
+    if (mock_ptr->capture_calls.size() != 1) { std::cerr << "Wrong call count\n"; exit(1); }
+    if (mock_ptr->capture_calls[0] != std::vector<std::string>{"systemctl", "poweroff"}) { std::cerr << "Wrong command\n"; exit(1); }
     std::cout << "test_power_off_triggers_systemd_poweroff PASSED\n";
 }
 
@@ -99,13 +113,14 @@ void test_is_locked_checks_pgrep() {
     if (session.is_locked()) { std::cerr << "Should be unlocked\n"; exit(1); }
 
     if (mock_ptr->capture_calls.size() != 2) { std::cerr << "Wrong call count\n"; exit(1); }
-    if (mock_ptr->capture_calls[0] != std::vector<std::string>{"pgrep", "hyprlock"}) { std::cerr << "Wrong command\n"; exit(1); }
+    if (mock_ptr->capture_calls[0] != std::vector<std::string>{"pgrep", "-x", "hyprlock"}) { std::cerr << "Wrong command\n"; exit(1); }
     std::cout << "test_is_locked_checks_pgrep PASSED\n";
 }
 
 int main() {
     test_lock_triggers_hyprlock();
     test_suspend_triggers_systemd_suspend();
+    test_session_action_reports_post_exec_failure();
     test_logout_triggers_hyprland_exit();
     test_reboot_triggers_systemd_reboot();
     test_power_off_triggers_systemd_poweroff();

@@ -6,7 +6,9 @@
 
 
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -59,7 +61,10 @@ public:
 
     bool set_wallpaper(const std::string& path);
     bool choose_wallpaper();
-    std::optional<services::Palette> generate_palette(const std::string& path);
+    std::optional<services::Palette> generate_palette(
+        const std::string& path,
+        std::function<bool()> cancelled = {}
+    );
     bool generate_colors(const std::string& path);
     std::string load_wallpaper_path();
 
@@ -78,6 +83,7 @@ private:
     std::filesystem::path proc_root_;
     std::unique_ptr<realmheart::services::WallpaperService> wallpaper_service_ = std::make_unique<realmheart::services::WallpaperService>();
     std::shared_ptr<services::ThemeService> theme_service_;
+    mutable std::mutex recorder_mutex_;
 
     bool recorder_identity_matches(int pid, const std::string& expected_start_time) const;
 };

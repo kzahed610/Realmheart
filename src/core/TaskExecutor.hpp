@@ -4,7 +4,8 @@
 #include <cstddef>
 #include <functional>
 #include <mutex>
-#include <queue>
+#include <deque>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -15,21 +16,33 @@ namespace realmheart::core {
 // ensuring subprocess/D-Bus work never blocks GTK's main loop.
 class TaskExecutor {
 public:
+    static constexpr std::size_t kMaxQueuedTasks = 64;
+
     explicit TaskExecutor(std::size_t worker_count = 2);
     ~TaskExecutor();
 
     TaskExecutor(const TaskExecutor&) = delete;
     TaskExecutor& operator=(const TaskExecutor&) = delete;
 
-    bool post(std::function<void()> task);
+    bool post(
+        std::function<void()> task,
+        std::string coalesce_key = {},
+        std::function<bool()> cancelled = {}
+    );
     void shutdown();
 
 private:
+    struct QueuedTask {
+        std::function<void()> task;
+        std::string coalesce_key;
+        std::function<bool()> cancelled;
+    };
+
     void worker_loop();
 
     std::mutex mutex_;
     std::condition_variable cv_;
-    std::queue<std::function<void()>> tasks_;
+    std::deque<QueuedTask> tasks_;
     std::vector<std::thread> workers_;
     bool stopping_ = false;
 };

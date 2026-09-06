@@ -10,6 +10,7 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <thread>
 #include <unistd.h>
 
 namespace realmheart::services {
@@ -30,6 +31,21 @@ bool ensure_parent_directory(const std::filesystem::path& path) {
     std::error_code error;
     std::filesystem::create_directories(parent, error);
     return !error;
+}
+
+bool read_recorder_pid(
+    const std::filesystem::path& path,
+    int& pid,
+    std::string& expected_start_time
+) {
+    std::ifstream pid_file(path);
+    long long parsed_pid = 0;
+    if (!(pid_file >> parsed_pid >> expected_start_time) ||
+        parsed_pid <= 0 || parsed_pid > std::numeric_limits<int>::max()) {
+        return false;
+    }
+    pid = static_cast<int>(parsed_pid);
+    return true;
 }
 
 std::string screenshot_helper_command() {
@@ -89,7 +105,10 @@ bool UtilityManager::choose_wallpaper() {
     return wallpaper_service_->choose_wallpaper();
 }
 
-std::optional<services::Palette> UtilityManager::generate_palette(const std::string& path) {
+std::optional<services::Palette> UtilityManager::generate_palette(
+    const std::string& path,
+    std::function<bool()> cancelled
+) {
     const std::filesystem::path image_path(path);
     std::error_code error;
     if (path.empty() || !std::filesystem::is_regular_file(image_path, error) || error) {
@@ -107,6 +126,7 @@ std::optional<services::Palette> UtilityManager::generate_palette(const std::str
     realmheart::core::CommandOptions options;
     options.deadline = std::chrono::seconds(10);
     options.max_output_bytes = 512 * 1024;
+    options.cancelled = std::move(cancelled);
 
     const auto result = executor_->run_capture({
         "matugen",
@@ -167,11 +187,23 @@ std::string UtilityManager::load_wallpaper_path() {
 }
 
 bool UtilityManager::start_recording(const std::string& path) {
+    std::lock_guard lock(recorder_mutex_);
     if (!ensure_parent_directory(path) || !ensure_parent_directory(recorder_pid_path_)) {
         return false;
     }
 
-    return executor_->run_background({
+    int existing_pid = 0;
+    std::string existing_start_time;
+    if (read_recorder_pid(recorder_pid_path_, existing_pid, existing_start_time) &&
+        recorder_identity_matches(existing_pid, existing_start_time)) {
+        return false;
+    }
+    {
+        std::error_code error;
+        std::filesystem::remove(recorder_pid_path_, error);
+    }
+
+    if (!executor_->run_background({
         "sh", "-c",
         "start=$(awk '{print $22}' /proc/$$/stat) || exit 1; "
         "printf '%s %s\\n' \"$$\" \"$start\" > \"$1\" || exit 1; "
@@ -179,21 +211,40 @@ bool UtilityManager::start_recording(const std::string& path) {
         "realmheart-recorder",
         recorder_pid_path_.string(),
         path
-    });
+    })) {
+        return false;
+    }
+
+    // run_background only confirms that the wrapper reached exec. Wait for
+    // the wrapper's PID file and for that PID to become wf-recorder before
+    // claiming ownership. This closes the immediate start/stop race and makes
+    // failed wf-recorder launches visible to the caller.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        int pid = 0;
+        std::string start_time;
+        if (read_recorder_pid(recorder_pid_path_, pid, start_time) &&
+            recorder_identity_matches(pid, start_time)) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    std::error_code error;
+    std::filesystem::remove(recorder_pid_path_, error);
+    return false;
 }
 
 bool UtilityManager::stop_recording() {
-    std::ifstream pid_file(recorder_pid_path_);
-    long long parsed_pid = 0;
+    std::lock_guard lock(recorder_mutex_);
+    int pid = 0;
     std::string expected_start_time;
-    if (!(pid_file >> parsed_pid >> expected_start_time) ||
-        parsed_pid <= 0 || parsed_pid > std::numeric_limits<int>::max()) {
+    if (!read_recorder_pid(recorder_pid_path_, pid, expected_start_time)) {
         std::error_code error;
         std::filesystem::remove(recorder_pid_path_, error);
         return false;
     }
 
-    const int pid = static_cast<int>(parsed_pid);
     if (!recorder_identity_matches(pid, expected_start_time)) {
         std::error_code error;
         std::filesystem::remove(recorder_pid_path_, error);

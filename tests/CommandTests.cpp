@@ -82,6 +82,20 @@ void test_spawn_failure_is_structured() {
     );
 }
 
+void test_find_in_path_rejects_executable_directories() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-command-path-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "hyprctl");
+
+    const char* previous_path = std::getenv("PATH");
+    const std::string saved_path = previous_path != nullptr ? previous_path : "";
+    ::setenv("PATH", root.c_str(), 1);
+    require(!realmheart::core::find_in_path("hyprctl").has_value(),
+            "find_in_path must reject executable directories");
+    ::setenv("PATH", saved_path.c_str(), 1);
+    std::filesystem::remove_all(root);
+}
+
 void test_cancellation_terminates_child() {
     realmheart::core::CommandOptions options;
     options.deadline = 5s;
@@ -176,6 +190,7 @@ int main() {
     test_timeout_escalates_and_returns_promptly();
     test_output_is_bounded_and_reported();
     test_spawn_failure_is_structured();
+    test_find_in_path_rejects_executable_directories();
     test_cancellation_terminates_child();
     test_failure_detail_is_terminal_safe_and_single_line();
     test_background_preserves_shell_script_as_one_argument();

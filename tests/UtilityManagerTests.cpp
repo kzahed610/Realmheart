@@ -6,6 +6,7 @@
 #include <string>
 #include <memory>
 #include <csignal>
+#include <functional>
 #include <utility>
 
 class MockUtilityExecutor : public realmheart::services::IUtilityExecutor {
@@ -17,9 +18,11 @@ public:
     bool next_background_result = true;
     bool next_signal_result = true;
     std::vector<std::pair<int, int>> signal_calls;
+    std::function<void(const std::vector<std::string>&)> background_hook;
 
     bool run_background(const std::vector<std::string>& argv) override {
         background_calls.push_back(argv);
+        if (background_hook) background_hook(argv);
         return next_background_result;
     }
     realmheart::core::CommandResult run_capture(
@@ -42,21 +45,18 @@ void test_screenshot_tool_launch() {
     realmheart::services::UtilityManager util(std::move(mock));
 
     if (!util.launch_screenshot_tool()) {
-        std::cerr << "Screenshot helper launch failed
-";
+        std::cerr << "Screenshot helper launch failed\n";
         exit(1);
     }
     if (mock_ptr->background_calls.size() != 1 ||
         mock_ptr->background_calls.front().size() != 1 ||
         std::filesystem::path(mock_ptr->background_calls.front().front()).filename() !=
             "realmheart-screenshot") {
-        std::cerr << "Screenshot action must launch realmheart-screenshot directly
-";
+        std::cerr << "Screenshot action must launch realmheart-screenshot directly\n";
         exit(1);
     }
 
-    std::cout << "test_screenshot_tool_launch PASSED
-";
+    std::cout << "test_screenshot_tool_launch PASSED\n";
 }
 
 void test_clipboard_copy() {
@@ -107,9 +107,20 @@ void test_recorder_uses_owned_pid() {
     const auto proc_root = root / "proc";
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(proc_root / "4242");
+    std::ofstream(proc_root / "4242/comm") << "wf-recorder\n";
+    std::ofstream stat(proc_root / "4242/stat");
+    stat << "4242 (wf-recorder) S";
+    for (int field = 4; field <= 21; ++field) stat << " 0";
+    stat << " 98765\n";
+    stat.close();
 
     auto mock = std::make_unique<MockUtilityExecutor>();
     auto* mock_ptr = mock.get();
+    mock->background_hook = [pid_file](const std::vector<std::string>& argv) {
+        if (argv.size() == 6 && argv[0] == "sh") {
+            std::ofstream(pid_file) << "4242 98765\n";
+        }
+    };
     realmheart::services::UtilityManager util(std::move(mock), pid_file, proc_root);
 
     if (!util.start_recording("/tmp/owned recording.mp4")) {
@@ -122,14 +133,6 @@ void test_recorder_uses_owned_pid() {
         std::cerr << "Recorder start must write an ownership PID file with argv-safe parameters\n";
         exit(1);
     }
-
-    std::ofstream(proc_root / "4242/comm") << "wf-recorder\n";
-    std::ofstream stat(proc_root / "4242/stat");
-    stat << "4242 (wf-recorder) S";
-    for (int field = 4; field <= 21; ++field) stat << " 0";
-    stat << " 98765\n";
-    stat.close();
-    std::ofstream(pid_file) << "4242 98765\n";
 
     if (!util.stop_recording()) {
         std::cerr << "Owned recorder stop failed\n";
@@ -177,6 +180,36 @@ void test_recorder_rejects_stale_pid_file() {
     }
     std::filesystem::remove_all(root);
     std::cout << "test_recorder_rejects_stale_pid_file PASSED\n";
+}
+
+void test_recorder_rejects_duplicate_start() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-recorder-duplicate-test";
+    const auto pid_file = root / "wf-recorder.pid";
+    const auto proc_root = root / "proc";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(proc_root / "4242");
+    std::ofstream(proc_root / "4242/comm") << "wf-recorder\n";
+    std::ofstream stat(proc_root / "4242/stat");
+    stat << "4242 (wf-recorder) S";
+    for (int field = 4; field <= 21; ++field) stat << " 0";
+    stat << " 33333\n";
+    stat.close();
+    std::ofstream(pid_file) << "4242 33333\n";
+
+    auto mock = std::make_unique<MockUtilityExecutor>();
+    auto* mock_ptr = mock.get();
+    realmheart::services::UtilityManager util(std::move(mock), pid_file, proc_root);
+    if (util.start_recording("/tmp/duplicate recording.mp4")) {
+        std::cerr << "Duplicate recorder start must fail\n";
+        exit(1);
+    }
+    if (!mock_ptr->background_calls.empty()) {
+        std::cerr << "Duplicate recorder start must not launch another process\n";
+        exit(1);
+    }
+
+    std::filesystem::remove_all(root);
+    std::cout << "test_recorder_rejects_duplicate_start PASSED\n";
 }
 
 void test_generate_colors_uses_new_wallpaper_and_updates_theme() {
@@ -251,6 +284,7 @@ int main() {
     test_generate_colors_uses_new_wallpaper_and_updates_theme();
     test_recorder_uses_owned_pid();
     test_recorder_rejects_stale_pid_file();
+    test_recorder_rejects_duplicate_start();
     std::cout << "All UtilityManager tests PASSED (MOCKED)\n";
     return 0;
 }
