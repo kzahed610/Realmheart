@@ -857,6 +857,7 @@ LauncherOverlay::~LauncherOverlay() {
     }
     if (centre_shader_renderer_ != nullptr) {
         centre_shader_renderer_->finish();
+        centre_shader_renderer_.reset();
     }
     if (central_tick_id_ != 0 && root_ != nullptr) {
         gtk_widget_remove_tick_callback(root_, central_tick_id_);
@@ -5358,22 +5359,25 @@ bool LauncherOverlay::begin_central_shader(
         return false;
     }
 
-    std::string begin_error;
-    const bool started = centre_shader_renderer_->begin(
+    if (centre_shader_renderer_->source_loading()) return true;
+
+    const bool started = centre_shader_renderer_->begin_async(
         centre_shader_host_,
         centre_effect_view_,
         kLauncherSurfaceEffect,
         opening,
         0.0, // GTK capture alpha already contains the exact launcher silhouette.
         effects::shell::ShaderPalette{},
-        &begin_error
+        [this](bool succeeded, std::string error) {
+            if (!succeeded) central_shader_prepare_error_ = std::move(error);
+        }
     );
     if (!started) {
         if (error != nullptr) {
-            *error = std::move(begin_error);
+            *error = "unable to queue Realmheart Void shader load";
         } else {
             std::cerr << "Unable to begin Realmheart Void: "
-                      << begin_error << '\n';
+                      << "unable to queue Realmheart Void shader load" << '\n';
         }
     } else if (error != nullptr) {
         error->clear();
@@ -5398,6 +5402,24 @@ void LauncherOverlay::schedule_central_shader_open() {
                 overlay->central_shader_prepare_attempts_ = 0;
                 overlay->central_shader_preparing_ = false;
                 overlay->finish_central_shader();
+                return G_SOURCE_REMOVE;
+            }
+
+            if (!overlay->central_shader_prepare_error_.empty()) {
+                const std::string error = std::exchange(
+                    overlay->central_shader_prepare_error_,
+                    {}
+                );
+                overlay->central_shader_prepare_tick_id_ = 0;
+                overlay->central_shader_prepare_attempts_ = 0;
+                overlay->central_shader_preparing_ = false;
+                overlay->central_shader_fallback_ = true;
+                overlay->finish_central_shader();
+                gtk_widget_set_opacity(overlay->centre_shader_host_, 1.0);
+                std::cerr << "Unable to begin Realmheart Void open: "
+                          << error << '\n';
+                overlay->apply_central_motion();
+                overlay->schedule_central_frame();
                 return G_SOURCE_REMOVE;
             }
 
@@ -5441,13 +5463,36 @@ void LauncherOverlay::schedule_central_shader_open() {
                 return G_SOURCE_REMOVE;
             }
 
+            if (overlay->centre_shader_renderer_ != nullptr &&
+                overlay->centre_shader_renderer_->source_loading()) {
+                ++overlay->central_shader_prepare_attempts_;
+                if (overlay->central_shader_prepare_attempts_ <
+                    kMaximumFirstFrameWaits) {
+                    return G_SOURCE_CONTINUE;
+                }
+
+                overlay->central_shader_prepare_tick_id_ = 0;
+                overlay->central_shader_prepare_attempts_ = 0;
+                overlay->central_shader_preparing_ = false;
+                overlay->central_shader_fallback_ = true;
+                overlay->finish_central_shader();
+                gtk_widget_set_opacity(overlay->centre_shader_host_, 1.0);
+                std::cerr << "Unable to begin Realmheart Void open: "
+                          << "shader source load timed out" << '\n';
+                overlay->apply_central_motion();
+                overlay->schedule_central_frame();
+                return G_SOURCE_REMOVE;
+            }
+
             ++overlay->central_shader_prepare_attempts_;
             std::string error;
             if (overlay->begin_central_shader(true, &error)) {
                 // The source is captured now. Expose the host so its pre-created
                 // GtkGLArea participates in GTK drawing, but keep the timeline
                 // frozen until frame_ready() is observed on a later frame.
-                overlay->central_shader_prepare_attempts_ = 0;
+                // Keep the preparation-attempt budget across render failures.
+                // begin() may succeed before the first GL frame is compiled;
+                // resetting here would let a render-time failure retry forever.
                 gtk_widget_set_opacity(overlay->centre_shader_host_, 1.0);
                 overlay->apply_central_final_geometry();
                 overlay->centre_shader_renderer_->update(0.0, true);
@@ -5581,6 +5626,7 @@ void LauncherOverlay::show() {
     if (!already_presented) {
         finish_central_shader();
         central_shader_fallback_ = false;
+        central_shader_prepare_error_.clear();
         central_transition_.snap_hidden();
         central_last_frame_time_ = 0;
         constellation_target_visible_ = false;

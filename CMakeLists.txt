@@ -651,6 +651,29 @@ if(BUILD_TESTING)
     realmheart_register_test(realmheart_shell_effect_view_tests)
 
     add_executable(
+        realmheart_shell_shader_renderer_tests
+        tests/ShellShaderRendererTests.cpp
+        src/effects/shell/ShellShaderRenderer.cpp
+        src/effects/core/EffectRegistry.cpp
+        src/effects/core/ShaderPlayback.cpp
+        src/effects/core/ShaderSource.cpp
+        src/core/TaskExecutor.cpp
+    )
+    target_compile_definitions(realmheart_shell_shader_renderer_tests PRIVATE
+        REALMHEART_INSTALL_EFFECT_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/effects"
+        REALMHEART_SOURCE_EFFECT_DIR="${CMAKE_SOURCE_DIR}/effects"
+    )
+    target_link_libraries(
+        realmheart_shell_shader_renderer_tests
+        PRIVATE
+        PkgConfig::GTK4
+        PkgConfig::EPOXY
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_shell_shader_renderer_tests)
+
+    add_executable(
         realmheart_effect_registry_tests
         tests/EffectRegistryTests.cpp
         src/effects/core/EffectRegistry.cpp
@@ -717,6 +740,7 @@ if(BUILD_TESTING)
         realmheart_shader_source_tests
         tests/ShaderSourceTests.cpp
         src/effects/core/ShaderSource.cpp
+        src/core/TaskExecutor.cpp
     )
     target_compile_definitions(realmheart_shader_source_tests PRIVATE
         REALMHEART_INSTALL_EFFECT_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/effects"
@@ -724,7 +748,7 @@ if(BUILD_TESTING)
     )
     target_link_libraries(
         realmheart_shader_source_tests
-        PRIVATE GTest::gtest GTest::gtest_main
+        PRIVATE PkgConfig::GTK4 GTest::gtest GTest::gtest_main
     )
     realmheart_register_test(realmheart_shader_source_tests)
 
@@ -1214,7 +1238,7 @@ if(BUILD_TESTING)
     target_link_libraries(realmheart_wallpaper_service_tests PRIVATE GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_wallpaper_service_tests)
 
-    add_executable(realmheart_mana_cores_selector_tests tests/ManaCoresSelectorTests.cpp src/mana_core/ThumbnailCache.cpp src/mana_core/ManaCoresSelector.cpp src/mana_core/ManaCoresLayout.cpp src/mana_core/WallpaperLibrary.cpp src/ui/LayerSurface.cpp src/effects/core/ShaderSource.cpp)
+    add_executable(realmheart_mana_cores_selector_tests tests/ManaCoresSelectorTests.cpp src/mana_core/ThumbnailCache.cpp src/mana_core/ManaCoresSelector.cpp src/mana_core/ManaCoresLayout.cpp src/mana_core/WallpaperLibrary.cpp src/ui/LayerSurface.cpp src/effects/core/ShaderSource.cpp src/core/TaskExecutor.cpp)
     target_link_libraries(realmheart_mana_cores_selector_tests PRIVATE PkgConfig::GTK4 PkgConfig::GTK4_LAYER_SHELL PkgConfig::GDK_PIXBUF PkgConfig::EPOXY GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_mana_cores_selector_tests)
 

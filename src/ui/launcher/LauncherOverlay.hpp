@@ -361,6 +361,7 @@ private:
     gint64 central_last_frame_time_ = 0;
     bool central_shader_preparing_ = false;
     bool central_shader_fallback_ = false;
+    std::string central_shader_prepare_error_;
     std::unique_ptr<effects::shell::ShellShaderRenderer> centre_shader_renderer_;
     effects::TransitionTimeline central_transition_{{0.18, 0.12}};
     bool constellation_layout_loaded_ = false;

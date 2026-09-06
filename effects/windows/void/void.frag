@@ -120,7 +120,10 @@ void main() {
     vec3  ovC = (nebC * smoke + starC) * fade * ends;
 
     float a   = clamp(ovA + windowColor.a * (1.0 - ovA), 0.0, 1.0);
-    vec3  rgb = ovC + windowColor.rgb * windowColor.a * (1.0 - ovA);
+    // gdk_texture_download() provides premultiplied RGB. Keep that
+    // representation through the premultiplied blend equation; multiplying
+    // by alpha again would darken anti-aliased and translucent edges.
+    vec3  rgb = ovC + windowColor.rgb * (1.0 - ovA);
     // Clip the complete composed effect, including procedural smoke and stars,
     // to Hyprland's rounded window silhouette.
     fragColor = vec4(min(rgb, vec3(1.5)), a) * shapeMask;

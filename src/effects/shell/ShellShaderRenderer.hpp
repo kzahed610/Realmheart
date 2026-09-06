@@ -5,6 +5,7 @@
 #include <gtk/gtk.h>
 
 #include <array>
+#include <functional>
 #include <string>
 
 namespace realmheart::effects::shell {
@@ -24,6 +25,8 @@ struct ShaderPalette {
 // pass zero and let the source texture's alpha define the exact target shape.
 class ShellShaderRenderer {
 public:
+    using BeginCallback = std::function<void(bool, std::string)>;
+
     ShellShaderRenderer();
     ~ShellShaderRenderer();
 
@@ -33,6 +36,7 @@ public:
     [[nodiscard]] GtkWidget* widget() const noexcept;
     [[nodiscard]] bool active() const noexcept;
     [[nodiscard]] bool frame_ready() const noexcept;
+    [[nodiscard]] bool source_loading() const noexcept;
 
     [[nodiscard]] bool begin(
         GtkWidget* capture_parent,
@@ -42,6 +46,19 @@ public:
         double corner_radius,
         const ShaderPalette& palette,
         std::string* error = nullptr
+    );
+
+    // Captures the GTK source on the main thread only after the bounded shader
+    // file read completes on the shared worker pool. The callback is delivered
+    // on the GTK main context and is not invoked after finish() or destruction.
+    [[nodiscard]] bool begin_async(
+        GtkWidget* capture_parent,
+        GtkWidget* source_child,
+        EffectId effect,
+        bool opening,
+        double corner_radius,
+        const ShaderPalette& palette,
+        BeginCallback callback
     );
 
     void update(double timeline_progress, bool opening) noexcept;

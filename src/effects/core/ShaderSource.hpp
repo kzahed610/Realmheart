@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -13,6 +14,11 @@ struct ShaderSource {
     std::string text;
 };
 
+using ShaderSourceCallback = std::function<void(
+    std::optional<ShaderSource>,
+    std::string
+)>;
+
 [[nodiscard]] bool is_safe_shader_asset_path(
     std::string_view asset_path
 ) noexcept;
@@ -22,6 +28,14 @@ struct ShaderSource {
 [[nodiscard]] std::optional<ShaderSource> load_shader_source(
     std::string_view asset_path,
     std::string* error = nullptr
+);
+
+// Loads a shader on the shared worker pool and delivers the result on the GTK
+// main context. The callback is not invoked when the task cannot be queued.
+[[nodiscard]] bool load_shader_source_async(
+    std::string asset_path,
+    ShaderSourceCallback callback,
+    std::string coalesce_key = {}
 );
 
 [[nodiscard]] bool validate_shell_shader_contract(

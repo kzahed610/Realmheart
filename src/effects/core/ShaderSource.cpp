@@ -1,12 +1,21 @@
 #include "effects/core/ShaderSource.hpp"
 
+#include "core/TaskExecutor.hpp"
+
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdlib>
+#include <cstdint>
+#include <exception>
 #include <fstream>
 #include <iterator>
 #include <limits.h>
+#include <memory>
+#include <utility>
 #include <unistd.h>
+
+#include <glib.h>
 
 #ifndef REALMHEART_INSTALL_EFFECT_DIR
 #define REALMHEART_INSTALL_EFFECT_DIR ""
@@ -23,8 +32,64 @@ void set_error(std::string* error, std::string message) {
     if (error != nullptr) *error = std::move(message);
 }
 
-bool contains_symbol(std::string_view source, std::string_view symbol) noexcept {
-    return source.find(symbol) != std::string_view::npos;
+std::vector<std::string> tokenize_glsl(std::string_view source) {
+    std::vector<std::string> tokens;
+    tokens.reserve(source.size() / 8);
+
+    for (std::size_t index = 0; index < source.size();) {
+        if (source[index] == '/' && index + 1 < source.size() &&
+            source[index + 1] == '/') {
+            index += 2;
+            while (index < source.size() && source[index] != '\n') ++index;
+            continue;
+        }
+        if (source[index] == '/' && index + 1 < source.size() &&
+            source[index + 1] == '*') {
+            index += 2;
+            while (index + 1 < source.size() &&
+                   !(source[index] == '*' && source[index + 1] == '/')) {
+                ++index;
+            }
+            index = std::min(index + 2, source.size());
+            continue;
+        }
+
+        const unsigned char character =
+            static_cast<unsigned char>(source[index]);
+        if (std::isalnum(character) != 0 || source[index] == '_') {
+            const std::size_t start = index++;
+            while (index < source.size()) {
+                const unsigned char next =
+                    static_cast<unsigned char>(source[index]);
+                if (std::isalnum(next) == 0 && source[index] != '_') break;
+                ++index;
+            }
+            tokens.emplace_back(source.substr(start, index - start));
+            continue;
+        }
+
+        if (std::isspace(character) == 0) {
+            tokens.emplace_back(1, source[index]);
+        }
+        ++index;
+    }
+    return tokens;
+}
+
+bool contains_symbol(
+    const std::vector<std::string>& source_tokens,
+    std::string_view symbol
+) noexcept {
+    const auto symbol_tokens = tokenize_glsl(symbol);
+    if (symbol_tokens.empty() || symbol_tokens.size() > source_tokens.size()) {
+        return false;
+    }
+    return std::search(
+        source_tokens.begin(),
+        source_tokens.end(),
+        symbol_tokens.begin(),
+        symbol_tokens.end()
+    ) != source_tokens.end();
 }
 
 // Resolves the current executable's own directory via /proc/self/exe. Returns
@@ -116,13 +181,43 @@ std::optional<ShaderSource> load_shader_source(
     const std::filesystem::path relative{asset_path};
     for (const auto& root : shader_search_roots()) {
         const auto candidate = root / relative;
-        std::ifstream stream(candidate, std::ios::binary);
-        if (!stream) continue;
+        std::error_code filesystem_error;
+        if (!std::filesystem::is_regular_file(candidate, filesystem_error) ||
+            filesystem_error) {
+            continue;
+        }
 
-        std::string text{
-            std::istreambuf_iterator<char>{stream},
-            std::istreambuf_iterator<char>{}
-        };
+        constexpr std::uintmax_t kMaximumShaderBytes = 1U << 20;
+        const std::uintmax_t file_size =
+            std::filesystem::file_size(candidate, filesystem_error);
+        if (filesystem_error) continue;
+        if (file_size > kMaximumShaderBytes) {
+            set_error(error, "shader source exceeds the 1 MiB limit: " + candidate.string());
+            return std::nullopt;
+        }
+
+        std::ifstream stream(candidate, std::ios::binary);
+        if (!stream) {
+            set_error(error, "unable to open shader source: " + candidate.string());
+            return std::nullopt;
+        }
+
+        std::string text(static_cast<std::size_t>(file_size), '\0');
+        stream.read(text.data(), static_cast<std::streamsize>(text.size()));
+        if (stream.gcount() != static_cast<std::streamsize>(text.size())) {
+            set_error(error, "unable to read shader source: " + candidate.string());
+            return std::nullopt;
+        }
+
+        char extra = '\0';
+        if (stream.get(extra)) {
+            set_error(error, "shader source exceeds the 1 MiB limit: " + candidate.string());
+            return std::nullopt;
+        }
+        if (!stream.eof() && stream.fail()) {
+            set_error(error, "unable to finish reading shader source: " + candidate.string());
+            return std::nullopt;
+        }
         if (text.empty()) {
             set_error(error, "shader source is empty: " + candidate.string());
             return std::nullopt;
@@ -137,6 +232,53 @@ std::optional<ShaderSource> load_shader_source(
 
     set_error(error, "shader asset not found: " + std::string{asset_path});
     return std::nullopt;
+}
+
+bool load_shader_source_async(
+    std::string asset_path,
+    ShaderSourceCallback callback,
+    std::string coalesce_key
+) {
+    if (!callback) return false;
+
+    struct Completion {
+        ShaderSourceCallback callback;
+        std::optional<ShaderSource> source;
+        std::string error;
+    };
+
+    return core::shared_task_executor().post(
+        [asset_path = std::move(asset_path), callback = std::move(callback)] {
+            std::string error;
+            std::optional<ShaderSource> source;
+            try {
+                source = load_shader_source(asset_path, &error);
+            } catch (const std::exception& exception) {
+                error = "shader source load failed: ";
+                error += exception.what();
+            } catch (...) {
+                error = "shader source load failed with an unknown exception";
+            }
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,
+                +[](gpointer raw) -> gboolean {
+                    auto* completion = static_cast<Completion*>(raw);
+                    completion->callback(
+                        std::move(completion->source),
+                        std::move(completion->error)
+                    );
+                    return G_SOURCE_REMOVE;
+                },
+                new Completion{
+                    .callback = std::move(callback),
+                    .source = std::move(source),
+                    .error = std::move(error),
+                },
+                +[](gpointer raw) { delete static_cast<Completion*>(raw); }
+            );
+        },
+        std::move(coalesce_key)
+    );
 }
 
 bool validate_shell_shader_contract(
@@ -156,8 +298,9 @@ bool validate_shell_shader_contract(
         "out vec4 fragColor",
     }};
 
+    const auto source_tokens = tokenize_glsl(source);
     for (const auto symbol : kRequiredSymbols) {
-        if (!contains_symbol(source, symbol)) {
+        if (!contains_symbol(source_tokens, symbol)) {
             if (missing_symbol != nullptr) *missing_symbol = std::string{symbol};
             return false;
         }
@@ -183,8 +326,9 @@ bool validate_power_menu_ripple_shader_contract(
         "out vec4 fragColor",
     }};
 
+    const auto source_tokens = tokenize_glsl(source);
     for (const auto symbol : kRequiredSymbols) {
-        if (!contains_symbol(source, symbol)) {
+        if (!contains_symbol(source_tokens, symbol)) {
             if (missing_symbol != nullptr) *missing_symbol = std::string{symbol};
             return false;
         }
@@ -217,8 +361,9 @@ bool validate_workspace_morph_shader_contract(
         "out vec4 fragColor",
     }};
 
+    const auto source_tokens = tokenize_glsl(source);
     for (const auto symbol : kRequiredSymbols) {
-        if (!contains_symbol(source, symbol)) {
+        if (!contains_symbol(source_tokens, symbol)) {
             if (missing_symbol != nullptr) *missing_symbol = std::string{symbol};
             return false;
         }
@@ -249,8 +394,9 @@ bool validate_lockscreen_shader_contract(
         "out vec4 fragColor",
     }};
 
+    const auto source_tokens = tokenize_glsl(source);
     for (const auto symbol : kRequiredSymbols) {
-        if (!contains_symbol(source, symbol)) {
+        if (!contains_symbol(source_tokens, symbol)) {
             if (missing_symbol != nullptr) *missing_symbol = std::string{symbol};
             return false;
         }

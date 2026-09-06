@@ -8,8 +8,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
+#include <memory>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -34,6 +38,45 @@ void main() {
 
 void set_error(std::string* error, std::string message) {
     if (error != nullptr) *error = std::move(message);
+}
+
+constexpr float kMaximumCornerRadius = 16'384.0F;
+
+float sanitize_colour_component(float value, float fallback) noexcept {
+    if (!std::isfinite(value)) return fallback;
+    return std::clamp(value, 0.0F, 1.0F);
+}
+
+ShaderPalette sanitize_palette(const ShaderPalette& palette) noexcept {
+    ShaderPalette sanitized;
+    for (std::size_t index = 0; index < 3; ++index) {
+        sanitized.gold[index] = sanitize_colour_component(
+            palette.gold[index],
+            sanitized.gold[index]
+        );
+        sanitized.starlight[index] = sanitize_colour_component(
+            palette.starlight[index],
+            sanitized.starlight[index]
+        );
+        sanitized.astral[index] = sanitize_colour_component(
+            palette.astral[index],
+            sanitized.astral[index]
+        );
+        sanitized.void_colour[index] = sanitize_colour_component(
+            palette.void_colour[index],
+            sanitized.void_colour[index]
+        );
+    }
+    return sanitized;
+}
+
+float sanitize_corner_radius(double value) noexcept {
+    if (!std::isfinite(value)) return 0.0F;
+    return static_cast<float>(std::clamp(
+        value,
+        0.0,
+        static_cast<double>(kMaximumCornerRadius)
+    ));
 }
 
 GLuint compile_shader(
@@ -129,12 +172,19 @@ void convert_argb32_to_rgba(std::vector<std::uint8_t>& pixels) {
 } // namespace
 
 struct ShellShaderRenderer::State {
+    struct AsyncState {
+        std::atomic<bool> alive{true};
+        std::atomic<std::uint64_t> generation{0};
+        std::atomic<State*> owner{nullptr};
+    };
+
     GtkWidget* gl_area = nullptr;
     GtkWidget* capture_parent = nullptr;
     GtkWidget* source_child = nullptr;
 
     bool active = false;
     bool frame_ready = false;
+    bool source_loading = false;
     bool opening = true;
     float timeline_progress = 0.0F;
     float corner_radius = 0.0F;
@@ -154,6 +204,42 @@ struct ShellShaderRenderer::State {
     GLuint program = 0;
     GLuint vertex_array = 0;
     GLuint source_texture = 0;
+    std::shared_ptr<AsyncState> async_state = std::make_shared<AsyncState>();
+
+    void cancel_async_source_load() noexcept {
+        source_loading = false;
+        async_state->generation.fetch_add(1, std::memory_order_acq_rel);
+    }
+
+    void detach_widget_refs() noexcept {
+        if (capture_parent != nullptr) {
+            g_object_remove_weak_pointer(
+                G_OBJECT(capture_parent),
+                reinterpret_cast<gpointer*>(&capture_parent)
+            );
+        }
+        if (source_child != nullptr) {
+            g_object_remove_weak_pointer(
+                G_OBJECT(source_child),
+                reinterpret_cast<gpointer*>(&source_child)
+            );
+        }
+        capture_parent = nullptr;
+        source_child = nullptr;
+    }
+
+    void attach_widget_refs(GtkWidget* parent, GtkWidget* child) noexcept {
+        capture_parent = parent;
+        source_child = child;
+        g_object_add_weak_pointer(
+            G_OBJECT(capture_parent),
+            reinterpret_cast<gpointer*>(&capture_parent)
+        );
+        g_object_add_weak_pointer(
+            G_OBJECT(source_child),
+            reinterpret_cast<gpointer*>(&source_child)
+        );
+    }
 
     void release_texture() noexcept {
         if (source_texture == 0) return;
@@ -167,24 +253,24 @@ struct ShellShaderRenderer::State {
     }
 
     void release_gl_resources() noexcept {
-        if (gl_area == nullptr || !gtk_widget_get_realized(gl_area)) {
-            source_texture = 0;
-            vertex_array = 0;
-            program = 0;
-            compiled_asset.clear();
-            return;
+        bool can_delete = gl_area != nullptr && gtk_widget_get_realized(gl_area);
+        if (can_delete) {
+            gtk_gl_area_make_current(GTK_GL_AREA(gl_area));
+            can_delete = gtk_gl_area_get_error(GTK_GL_AREA(gl_area)) == nullptr;
         }
 
-        gtk_gl_area_make_current(GTK_GL_AREA(gl_area));
-        if (gtk_gl_area_get_error(GTK_GL_AREA(gl_area)) != nullptr) return;
-
-        if (source_texture != 0) glDeleteTextures(1, &source_texture);
-        if (vertex_array != 0) glDeleteVertexArrays(1, &vertex_array);
-        if (program != 0) glDeleteProgram(program);
+        if (can_delete) {
+            if (source_texture != 0) glDeleteTextures(1, &source_texture);
+            if (vertex_array != 0) glDeleteVertexArrays(1, &vertex_array);
+            if (program != 0) glDeleteProgram(program);
+        }
         source_texture = 0;
         vertex_array = 0;
         program = 0;
         compiled_asset.clear();
+        frame_ready = false;
+        source_upload_pending = !source_pixels.empty() &&
+            source_width > 0 && source_height > 0;
     }
 
     void restore_live_child() noexcept {
@@ -201,8 +287,8 @@ struct ShellShaderRenderer::State {
                   << message << '\n';
         active = false;
         frame_ready = false;
+        release_gl_resources();
         source_upload_pending = false;
-        release_texture();
         source_pixels.clear();
         source_pixels.shrink_to_fit();
         source_width = 0;
@@ -227,6 +313,34 @@ struct ShellShaderRenderer::State {
 
         program = link_program(fragment_source, error);
         if (program == 0) return false;
+
+        constexpr std::array<const char*, 9> kRequiredUniforms{{
+            "progress",
+            "resolution",
+            "tex",
+            "radius",
+            "reverse",
+            "uGold",
+            "uStarlight",
+            "uAstral",
+            "uVoid",
+        }};
+        for (const char* uniform : kRequiredUniforms) {
+            if (glGetUniformLocation(program, uniform) >= 0) continue;
+            set_error(error, "linked shader is missing active uniform: " +
+                std::string{uniform});
+            glDeleteProgram(program);
+            program = 0;
+            compiled_asset.clear();
+            return false;
+        }
+        if (glGetFragDataLocation(program, "fragColor") < 0) {
+            set_error(error, "linked shader is missing active fragment output: fragColor");
+            glDeleteProgram(program);
+            program = 0;
+            compiled_asset.clear();
+            return false;
+        }
         compiled_asset = fragment_asset;
         return true;
     }
@@ -471,6 +585,7 @@ struct ShellShaderRenderer::State {
 
 ShellShaderRenderer::ShellShaderRenderer()
     : state_(new State) {
+    state_->async_state->owner.store(state_, std::memory_order_release);
     state_->gl_area = gtk_gl_area_new();
     g_object_ref_sink(state_->gl_area);
     // A shader frame represents one captured allocation. It must never expand
@@ -513,10 +628,24 @@ ShellShaderRenderer::ShellShaderRenderer()
         }),
         state_
     );
+    g_signal_connect(
+        state_->gl_area,
+        "realize",
+        G_CALLBACK(+[](GtkWidget*, gpointer data) {
+            auto* state = static_cast<State*>(data);
+            if (state->active) {
+                gtk_gl_area_queue_render(GTK_GL_AREA(state->gl_area));
+            }
+        }),
+        state_
+    );
 }
 
 ShellShaderRenderer::~ShellShaderRenderer() {
     if (state_ == nullptr) return;
+    state_->async_state->alive.store(false, std::memory_order_release);
+    state_->async_state->owner.store(nullptr, std::memory_order_release);
+    state_->cancel_async_source_load();
     finish();
     state_->release_gl_resources();
     if (state_->gl_area != nullptr) {
@@ -538,6 +667,10 @@ bool ShellShaderRenderer::active() const noexcept {
 
 bool ShellShaderRenderer::frame_ready() const noexcept {
     return state_ != nullptr && state_->active && state_->frame_ready;
+}
+
+bool ShellShaderRenderer::source_loading() const noexcept {
+    return state_ != nullptr && state_->source_loading;
 }
 
 bool ShellShaderRenderer::begin(
@@ -578,14 +711,13 @@ bool ShellShaderRenderer::begin(
     }
 
     finish();
-    state_->capture_parent = capture_parent;
-    state_->source_child = source_child;
+    state_->attach_widget_refs(capture_parent, source_child);
     state_->fragment_asset = std::string{spec->fragment_shader_asset};
     state_->fragment_source = source->text;
     state_->opening = opening;
     state_->timeline_progress = opening ? 0.0F : 1.0F;
-    state_->corner_radius = static_cast<float>(std::max(corner_radius, 0.0));
-    state_->palette = palette;
+    state_->corner_radius = sanitize_corner_radius(corner_radius);
+    state_->palette = sanitize_palette(palette);
 
     std::string capture_error;
     if (!state_->capture(&capture_error)) {
@@ -611,6 +743,107 @@ bool ShellShaderRenderer::begin(
     return true;
 }
 
+bool ShellShaderRenderer::begin_async(
+    GtkWidget* capture_parent,
+    GtkWidget* source_child,
+    EffectId effect,
+    bool opening,
+    double corner_radius,
+    const ShaderPalette& palette,
+    BeginCallback callback
+) {
+    if (state_ == nullptr || capture_parent == nullptr || source_child == nullptr) {
+        return false;
+    }
+
+    const EffectSpec* spec = find_effect(effect);
+    if (spec == nullptr || spec->backend != EffectBackend::Shader ||
+        spec->fragment_shader_asset.empty() || !callback) {
+        return false;
+    }
+
+    finish();
+    state_->attach_widget_refs(capture_parent, source_child);
+    state_->fragment_asset = std::string{spec->fragment_shader_asset};
+    state_->fragment_source.clear();
+    state_->opening = opening;
+    state_->timeline_progress = opening ? 0.0F : 1.0F;
+    state_->corner_radius = sanitize_corner_radius(corner_radius);
+    state_->palette = sanitize_palette(palette);
+    state_->source_loading = true;
+
+    const auto async_state = state_->async_state;
+    const auto generation = async_state->generation.fetch_add(
+        1,
+        std::memory_order_acq_rel
+    ) + 1;
+    State* const owner = state_;
+    ShellShaderRenderer* const renderer = this;
+    const bool queued = load_shader_source_async(
+        state_->fragment_asset,
+        [async_state, owner, renderer, generation, opening,
+            callback = std::move(callback)](
+            std::optional<ShaderSource> source,
+            std::string load_error
+        ) mutable {
+            if (!async_state->alive.load(std::memory_order_acquire) ||
+                async_state->owner.load(std::memory_order_acquire) != owner ||
+                async_state->generation.load(std::memory_order_acquire) != generation) {
+                return;
+            }
+
+            owner->source_loading = false;
+            if (!source) {
+                renderer->finish();
+                callback(false, std::move(load_error));
+                return;
+            }
+
+            std::string missing_symbol;
+            if (!validate_shell_shader_contract(source->text, &missing_symbol)) {
+                renderer->finish();
+                callback(
+                    false,
+                    "shader contract is missing: " + missing_symbol
+                );
+                return;
+            }
+
+            owner->fragment_source = std::move(source->text);
+            std::string capture_error;
+            if (!owner->capture(&capture_error)) {
+                renderer->finish();
+                callback(false, std::move(capture_error));
+                return;
+            }
+
+            owner->active = true;
+            owner->frame_ready = false;
+            gtk_widget_set_visible(owner->gl_area, TRUE);
+            gtk_widget_set_opacity(owner->gl_area, 1.0);
+            if (owner->source_child != nullptr) {
+                gtk_widget_set_visible(owner->source_child, TRUE);
+                gtk_widget_set_opacity(
+                    owner->source_child,
+                    opening ? 0.0 : 1.0
+                );
+            }
+            gtk_gl_area_queue_render(GTK_GL_AREA(owner->gl_area));
+            if (owner->capture_parent != nullptr) {
+                gtk_widget_queue_draw(owner->capture_parent);
+            }
+            callback(true, {});
+        },
+        "shell-shader:" + std::to_string(
+            reinterpret_cast<std::uintptr_t>(state_)
+        )
+    );
+    if (queued) return true;
+
+    finish();
+    return false;
+}
+
 void ShellShaderRenderer::update(
     double timeline_progress,
     bool opening
@@ -628,6 +861,7 @@ void ShellShaderRenderer::update(
 
 void ShellShaderRenderer::finish() noexcept {
     if (state_ == nullptr) return;
+    state_->cancel_async_source_load();
     state_->active = false;
     state_->frame_ready = false;
     state_->source_upload_pending = false;
@@ -644,6 +878,7 @@ void ShellShaderRenderer::finish() noexcept {
         gtk_widget_set_visible(state_->gl_area, FALSE);
     }
     state_->restore_live_child();
+    state_->detach_widget_refs();
 }
 
 } // namespace realmheart::effects::shell

@@ -497,8 +497,10 @@ public:
         osd_.reset();
         now_playing_.reset();
 
-        if (sidebar_tick_id_ != 0 && sidebar_ != nullptr) {
-            gtk_widget_remove_tick_callback(sidebar_->get_window(), sidebar_tick_id_);
+        if (sidebar_tick_id_ != 0) {
+            if (sidebar_ != nullptr) {
+                gtk_widget_remove_tick_callback(sidebar_->get_window(), sidebar_tick_id_);
+            }
             sidebar_tick_id_ = 0;
             sidebar_last_frame_time_ = 0;
         }
@@ -578,6 +580,14 @@ public:
             }
             state_.set_right_sidebar_visible(false);
             sidebar_transition_.snap_hidden();
+            if (sidebar_tick_id_ != 0) {
+                gtk_widget_remove_tick_callback(
+                    sidebar_->get_window(),
+                    sidebar_tick_id_
+                );
+                sidebar_tick_id_ = 0;
+                sidebar_last_frame_time_ = 0;
+            }
             sidebar_.reset();
             if (sidebar_backdrop_ != nullptr) {
                 gtk_window_destroy(sidebar_backdrop_);
@@ -2594,8 +2604,10 @@ private:
         // A topology change can arrive mid-sidebar transition.  Remove the
         // frame callback before destroying/recreating the monitor-bound
         // surface so a stale tick can never dereference the previous sidebar.
-        if (sidebar_tick_id_ != 0 && sidebar_ != nullptr) {
-            gtk_widget_remove_tick_callback(sidebar_->get_window(), sidebar_tick_id_);
+        if (sidebar_tick_id_ != 0) {
+            if (sidebar_ != nullptr) {
+                gtk_widget_remove_tick_callback(sidebar_->get_window(), sidebar_tick_id_);
+            }
             sidebar_tick_id_ = 0;
             sidebar_last_frame_time_ = 0;
         }
