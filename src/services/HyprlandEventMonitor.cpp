@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <poll.h>
@@ -75,7 +76,8 @@ bool HyprlandEventMonitor::is_workspace_event(std::string_view line) {
         "createworkspace>>", "createworkspacev2>>",
         "destroyworkspace>>", "destroyworkspacev2>>",
         "moveworkspace>>", "moveworkspacev2>>",
-        "focusedmon>>",
+        "focusedmon>>", "focusedmonv2>>",
+        "renameworkspace>>",
         "openwindow>>", "closewindow>>",
         "movewindow>>", "movewindowv2>>",
         "windowtitle>>", "windowtitlev2>>",
@@ -100,6 +102,11 @@ void HyprlandEventMonitor::run(std::stop_token stop_token) {
             continue;
         }
 
+        // A successful connection is also a reconciliation boundary. The
+        // consumer must reread authoritative state because events may have
+        // been lost while Hyprland was restarting or the socket was down.
+        if (callback_) callback_();
+
         pending.clear();
         std::array<char, 4096> buffer{};
         while (!stop_token.stop_requested()) {
@@ -110,7 +117,13 @@ void HyprlandEventMonitor::run(std::stop_token stop_token) {
                 break;
             }
             if (ready == 0) continue;
-            if ((descriptor.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) break;
+            if ((descriptor.revents & POLLNVAL) != 0) break;
+            const bool disconnected =
+                (descriptor.revents & (POLLHUP | POLLERR)) != 0;
+            if ((descriptor.revents & POLLIN) == 0) {
+                if (disconnected) break;
+                continue;
+            }
 
             const ssize_t bytes = ::read(socket_fd, buffer.data(), buffer.size());
             if (bytes <= 0) break;
@@ -123,6 +136,7 @@ void HyprlandEventMonitor::run(std::stop_token stop_token) {
                 if (is_workspace_event(line) && callback_) callback_();
             }
             if (pending.size() > 64 * 1024) pending.clear();
+            if (disconnected) break;
         }
         ::close(socket_fd);
     }

@@ -25,6 +25,7 @@ struct WorkspaceState {
 
 struct WorkspaceSnapshot {
     bool available = false;
+    bool partial = false;
     int active_id = 1;
     std::string error;
     std::vector<WorkspaceState> workspaces;

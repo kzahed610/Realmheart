@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string>
 
 namespace {
@@ -65,6 +66,12 @@ void test_portrait_classification_is_independent_of_density() {
             "rotated 1080p must preserve the 1080p layout tier");
 }
 
+void test_non_finite_scale_is_invalid() {
+    realmheart::core::MonitorContext context;
+    context.scale = std::numeric_limits<double>::infinity();
+    require(!context.valid(), "infinite monitor scales must be invalid");
+}
+
 } // namespace
 
 int main() {
@@ -73,6 +80,7 @@ int main() {
     test_mixed_dpi_splits_layout_and_asset_tiers();
     test_fractional_scale_selects_crisp_assets_without_inflating_layout();
     test_portrait_classification_is_independent_of_density();
+    test_non_finite_scale_is_invalid();
     std::cout << "Monitor context tests passed\n";
     return 0;
 }

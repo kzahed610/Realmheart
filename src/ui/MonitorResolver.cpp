@@ -1,13 +1,19 @@
 #include "ui/MonitorResolver.hpp"
 
+#include "core/Command.hpp"
+#include "core/TaskExecutor.hpp"
+#include "nlohmann_json/json.hpp"
 #include "ui/LayerSurface.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 
 namespace realmheart::ui {
 namespace {
@@ -25,147 +31,104 @@ int configured_monitor_index() noexcept {
     return static_cast<int>(parsed);
 }
 
-double hyprland_scale_for_connector(std::string_view connector) {
-    if (connector.empty()) return 0.0;
+struct MonitorCache {
+    std::mutex mutex;
+    std::unordered_map<std::string, double> scales;
+    std::string focused_connector;
+    std::string signature;
+    bool refresh_in_flight = false;
+};
 
-    GError* error = nullptr;
-    gchar* stdout_buf = nullptr;
-    gchar* stderr_buf = nullptr;
-    gint exit_status = 0;
-    const gboolean spawned = g_spawn_command_line_sync(
-        "hyprctl monitors -j",
-        &stdout_buf,
-        &stderr_buf,
-        &exit_status,
-        &error
-    );
+MonitorCache& monitor_cache() {
+    static MonitorCache cache;
+    return cache;
+}
 
-    double result = 0.0;
-    if (spawned && error == nullptr && exit_status == 0 && stdout_buf != nullptr) {
-        const std::string json(stdout_buf);
-        std::size_t cursor = 0;
-        while (cursor < json.size()) {
-            const auto object_start = json.find('{', cursor);
-            if (object_start == std::string::npos) break;
+std::string hyprland_signature() {
+    const char* signature = std::getenv("HYPRLAND_INSTANCE_SIGNATURE");
+    return signature != nullptr ? signature : "";
+}
 
-            int depth = 0;
-            std::size_t object_end = object_start;
-            for (; object_end < json.size(); ++object_end) {
-                if (json[object_end] == '{') ++depth;
-                else if (json[object_end] == '}') {
-                    --depth;
-                    if (depth == 0) break;
-                }
-            }
-            if (object_end >= json.size()) break;
+void invalidate_cache_for_instance_change(MonitorCache& cache) {
+    const std::string signature = hyprland_signature();
+    if (cache.signature == signature) return;
+    cache.signature = signature;
+    cache.scales.clear();
+    cache.focused_connector.clear();
+}
 
-            const std::string_view object(
-                json.data() + object_start,
-                object_end - object_start + 1
-            );
-            const auto name_key = object.find("\"name\"");
-            const auto colon = name_key == std::string_view::npos
-                ? std::string_view::npos
-                : object.find(':', name_key);
-            const auto quote = colon == std::string_view::npos
-                ? std::string_view::npos
-                : object.find('"', colon + 1);
-            const auto end_quote = quote == std::string_view::npos
-                ? std::string_view::npos
-                : object.find('"', quote + 1);
-            if (quote != std::string_view::npos &&
-                end_quote != std::string_view::npos &&
-                object.substr(quote + 1, end_quote - quote - 1) == connector) {
-                const auto scale_key = object.find("\"scale\"");
-                const auto scale_colon = scale_key == std::string_view::npos
-                    ? std::string_view::npos
-                    : object.find(':', scale_key);
-                if (scale_colon != std::string_view::npos) {
-                    const char* start = object.data() + scale_colon + 1;
-                    char* end = nullptr;
-                    const double parsed = g_ascii_strtod(start, &end);
-                    if (end != start && std::isfinite(parsed) && parsed > 0.0) {
-                        result = parsed;
+void refresh_monitor_cache() {
+    core::CommandOptions options;
+    options.deadline = std::chrono::milliseconds(300);
+    options.max_output_bytes = 128 * 1024;
+    const auto result = core::run_capture({"hyprctl", "monitors", "-j"}, options);
+
+    std::unordered_map<std::string, double> scales;
+    std::string focused_connector;
+    bool valid = result.succeeded() && !result.output.empty() && !result.truncated;
+    if (valid) {
+        try {
+            const auto monitors = nlohmann::json::parse(result.output);
+            valid = monitors.is_array();
+            if (valid) {
+                for (const auto& monitor : monitors) {
+                    if (!monitor.is_object()) continue;
+                    const std::string name = monitor.value("name", std::string{});
+                    const double scale = monitor.value("scale", 0.0);
+                    if (!name.empty() && std::isfinite(scale) && scale > 0.0) {
+                        scales[name] = scale;
+                    }
+                    if (focused_connector.empty() &&
+                        monitor.value("focused", false) && !name.empty()) {
+                        focused_connector = name;
                     }
                 }
-                break;
             }
-            cursor = object_end + 1;
+        } catch (const nlohmann::json::exception&) {
+            valid = false;
         }
     }
 
-    if (error != nullptr) g_error_free(error);
-    if (stdout_buf != nullptr) g_free(stdout_buf);
-    if (stderr_buf != nullptr) g_free(stderr_buf);
-    return result;
+    auto& cache = monitor_cache();
+    std::lock_guard lock(cache.mutex);
+    invalidate_cache_for_instance_change(cache);
+    if (valid) {
+        cache.scales = std::move(scales);
+        cache.focused_connector = std::move(focused_connector);
+    }
+    cache.refresh_in_flight = false;
+}
+
+void request_monitor_cache_refresh() {
+    auto& cache = monitor_cache();
+    {
+        std::lock_guard lock(cache.mutex);
+        invalidate_cache_for_instance_change(cache);
+        if (cache.refresh_in_flight) return;
+        cache.refresh_in_flight = true;
+    }
+    if (!core::shared_task_executor().post(
+            refresh_monitor_cache,
+            "hyprland-monitor-state"
+        )) {
+        std::lock_guard lock(cache.mutex);
+        cache.refresh_in_flight = false;
+    }
+}
+
+double hyprland_scale_for_connector(std::string_view connector) {
+    request_monitor_cache_refresh();
+    auto& cache = monitor_cache();
+    std::lock_guard lock(cache.mutex);
+    const auto found = cache.scales.find(std::string(connector));
+    return found == cache.scales.end() ? 0.0 : found->second;
 }
 
 std::string focused_connector_from_hyprland() {
-    GError* error = nullptr;
-    gchar* stdout_buf = nullptr;
-    gchar* stderr_buf = nullptr;
-    gint exit_status = 0;
-
-    const gboolean spawned = g_spawn_command_line_sync(
-        "hyprctl monitors -j",
-        &stdout_buf,
-        &stderr_buf,
-        &exit_status,
-        &error
-    );
-    std::string connector;
-    if (spawned && error == nullptr && exit_status == 0 && stdout_buf != nullptr) {
-        const std::string json(stdout_buf);
-        std::size_t cursor = 0;
-        while (cursor < json.size()) {
-            const auto object_start = json.find('{', cursor);
-            if (object_start == std::string::npos) break;
-
-            int depth = 0;
-            std::size_t object_end = object_start;
-            for (; object_end < json.size(); ++object_end) {
-                if (json[object_end] == '{') ++depth;
-                else if (json[object_end] == '}') {
-                    --depth;
-                    if (depth == 0) break;
-                }
-            }
-            if (object_end >= json.size()) break;
-
-            const std::string_view object(
-                json.data() + object_start,
-                object_end - object_start + 1
-            );
-            const bool focused =
-                object.find("\"focused\": true") != std::string_view::npos ||
-                object.find("\"focused\":true") != std::string_view::npos;
-            if (focused) {
-                const auto name_key = object.find("\"name\"");
-                if (name_key != std::string_view::npos) {
-                    const auto colon = object.find(':', name_key);
-                    const auto quote = colon == std::string_view::npos
-                        ? std::string_view::npos
-                        : object.find('"', colon + 1);
-                    const auto end_quote = quote == std::string_view::npos
-                        ? std::string_view::npos
-                        : object.find('"', quote + 1);
-                    if (quote != std::string_view::npos &&
-                        end_quote != std::string_view::npos) {
-                        connector.assign(
-                            object.substr(quote + 1, end_quote - quote - 1)
-                        );
-                    }
-                }
-                break;
-            }
-            cursor = object_end + 1;
-        }
-    }
-
-    if (error != nullptr) g_error_free(error);
-    if (stdout_buf != nullptr) g_free(stdout_buf);
-    if (stderr_buf != nullptr) g_free(stderr_buf);
-    return connector;
+    request_monitor_cache_refresh();
+    auto& cache = monitor_cache();
+    std::lock_guard lock(cache.mutex);
+    return cache.focused_connector;
 }
 
 } // namespace

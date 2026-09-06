@@ -22,8 +22,9 @@ namespace realmheart::ui {
 );
 
 // Resolves Hyprland's focused output back to GDK's monitor model by connector
-// name. Falls back to REALMHEART_MONITOR_INDEX / monitor 0 when focus metadata
-// is unavailable.
+// name. The compositor snapshot is refreshed on the shared bounded worker and
+// this accessor returns the last known value immediately. Falls back to
+// REALMHEART_MONITOR_INDEX / monitor 0 when focus metadata is unavailable.
 [[nodiscard]] int focused_monitor_index(GdkDisplay* display);
 
 [[nodiscard]] std::string monitor_connector_for_index(

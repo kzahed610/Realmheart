@@ -374,6 +374,11 @@ private:
         int workspace_id = 0;
     };
 
+    struct MonitorWorkspaceSnapshot {
+        std::string connector;
+        services::WorkspaceSnapshot snapshot;
+    };
+
 public:
     struct RestartHandoff {
         int fd = -1;
@@ -459,7 +464,9 @@ public:
         // The lock submap is compositor-global, so it must be restored before
         // the surfaces that normally complete the unlock choreography vanish.
         // This is idempotent and also covers normal quit/restart while locked.
-        services::HyprlandWorkspaces::set_submap("reset");
+        if (!services::HyprlandWorkspaces::set_submap("reset")) {
+            std::cerr << "[Lockscreen] unable to restore the compositor bind map during shutdown\n";
+        }
         ++lock_choreography_generation_;
         ++runtime_async_state_->volume_generation;
         ++runtime_async_state_->brightness_generation;
@@ -727,12 +734,20 @@ public:
     [[nodiscard]] const services::WorkspaceSnapshot& workspace_snapshot_for_monitor(
         int monitor_index
     ) const {
-        if (monitor_index >= 0 &&
-            static_cast<std::size_t>(monitor_index) < monitor_workspace_snapshots_.size() &&
-            monitor_workspace_snapshots_[static_cast<std::size_t>(monitor_index)].available) {
-            return monitor_workspace_snapshots_[static_cast<std::size_t>(monitor_index)];
+        if (monitor_index < 0 || static_cast<std::size_t>(monitor_index) >=
+                monitor_workspace_snapshots_.size()) {
+            return empty_workspace_snapshot_;
         }
-        return workspace_snapshot_;
+        const std::string connector = monitor_connector_for_index(
+            gdk_display_get_default(), monitor_index
+        );
+        const auto& entry = monitor_workspace_snapshots_[
+            static_cast<std::size_t>(monitor_index)
+        ];
+        if (connector.empty() || entry.connector != connector) {
+            return empty_workspace_snapshot_;
+        }
+        return entry.snapshot;
     }
 
     void apply_workspace_snapshot(
@@ -744,11 +759,15 @@ public:
             if (monitor_workspace_snapshots_.size() <= index) {
                 monitor_workspace_snapshots_.resize(index + 1);
             }
-            monitor_workspace_snapshots_[index] = snapshot;
+            monitor_workspace_snapshots_[index].connector = monitor_connector_for_index(
+                gdk_display_get_default(), monitor_index
+            );
+            monitor_workspace_snapshots_[index].snapshot = std::move(snapshot);
         }
-        workspace_snapshot_ = snapshot;
         if (workspace_overview_ && overview_monitor_index_ == monitor_index) {
-            workspace_overview_->set_workspace_snapshot(snapshot);
+            workspace_overview_->set_workspace_snapshot(
+                workspace_snapshot_for_monitor(monitor_index)
+            );
         }
     }
 
@@ -789,6 +808,12 @@ public:
                     : services::HyprlandWorkspaces::switch_to_on_monitor(
                           workspace_id, monitor
                       );
+                if (!workspace_activated) {
+                    std::cerr
+                        << "[WorkspaceOverview] unable to activate workspace "
+                        << workspace_id << " before focusing window " << address << '\n';
+                    return;
+                }
                 if (services::HyprlandSession::focus_window(address)) return;
 
                 std::cerr
@@ -1345,7 +1370,10 @@ public:
         // Jail compositor binds BEFORE anything else: from this instant,
         // SUPER+num and friends cannot move focus to a workspace with real
         // windows. The interactive layer-shell surface receives password input.
-        services::HyprlandWorkspaces::set_submap(kLockSubmapName);
+        if (!services::HyprlandWorkspaces::set_submap(kLockSubmapName)) {
+            fallback_to_hyprlock("unable to activate compositor lock submap");
+            return;
+        }
         lock_choreography_bar_was_visible_ =
             bar_ != nullptr && state_.bar_visible();
         if (lock_choreography_bar_was_visible_) hide_all_bars();
@@ -1497,7 +1525,15 @@ public:
         for (const auto& mirror : lock_mirror_surfaces_) {
             if (mirror != nullptr) mirror->hide_immediately();
         }
-        services::HyprlandWorkspaces::set_submap("reset");
+        if (!services::HyprlandWorkspaces::set_submap("reset")) {
+            // Never restore normal workspaces while the compositor remains in
+            // the lock submap. Re-lock with hyprlock and retry the reset only
+            // after the compositor accepts the command.
+            std::cerr << "[Lockscreen] unable to restore compositor binds after unlock\n";
+            lock_hyprlock_fallback_active_ = false;
+            fallback_to_hyprlock("compositor bind-map reset failed after unlock");
+            return;
+        }
 
         // Restore every monitor for which we captured an original workspace.
         // This is intentionally independent of the aggregate `switched` flag:
@@ -2597,7 +2633,10 @@ private:
         now_playing_monitor_index_ = -1;
         system_osd_visible_ = false;
         active_monitor_index_ = std::clamp(active_monitor_index_, 0, count - 1);
-        monitor_workspace_snapshots_.resize(static_cast<std::size_t>(count));
+        monitor_workspace_snapshots_.assign(
+            static_cast<std::size_t>(count),
+            MonitorWorkspaceSnapshot{}
+        );
 
         destroy_monitor_hotspots();
         secondary_bars_.clear();
@@ -2911,8 +2950,8 @@ private:
     std::uint64_t lock_choreography_generation_ = 0;
     bool lock_topology_dirty_ = false;
     bool lock_hyprlock_fallback_active_ = false;
-    services::WorkspaceSnapshot workspace_snapshot_;
-    std::vector<services::WorkspaceSnapshot> monitor_workspace_snapshots_;
+    services::WorkspaceSnapshot empty_workspace_snapshot_;
+    std::vector<MonitorWorkspaceSnapshot> monitor_workspace_snapshots_;
     powermenu::PowerMenuProcess power_menu_process_;
     std::unique_ptr<realmheart::mana_core::ManaCoresSelector> mana_cores_selector_;
     bool mana_cores_launch_pending_ = false;
@@ -3121,7 +3160,12 @@ int run_shell(
     // Safety: a previous session that died while the lockscreen bind jail
     // was active would leave every compositor keybind dead. Reset the submap
     // unconditionally at startup.
-    services::HyprlandWorkspaces::set_submap("reset");
+    if (!services::HyprlandWorkspaces::set_submap("reset")) {
+        std::cerr << "[Lockscreen] refusing to start while compositor bind-map reset failed\n";
+        runtime.reset();
+        g_object_unref(application);
+        return 1;
+    }
 
     g_action_map_add_action_entries(
         G_ACTION_MAP(application),

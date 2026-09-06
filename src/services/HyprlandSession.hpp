@@ -20,6 +20,7 @@ struct HyprlandSessionWindow {
 
 struct HyprlandSessionSnapshot {
     bool available = false;
+    bool partial = false;
     std::string error;
     std::vector<HyprlandSessionWindow> windows;
 };

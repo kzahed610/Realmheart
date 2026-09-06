@@ -13,6 +13,7 @@ enum class HyprlandApplicationEventKind {
     Opened,
     Focused,
     ContextChanged,
+    Reconnected,
 };
 
 struct HyprlandApplicationEvent {

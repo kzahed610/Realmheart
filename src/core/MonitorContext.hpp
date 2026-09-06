@@ -2,6 +2,7 @@
 
 #include "core/DisplayTier.hpp"
 
+#include <cmath>
 #include <string_view>
 
 namespace realmheart::core {
@@ -25,7 +26,8 @@ struct MonitorContext {
     MonitorAspectClass aspect = MonitorAspectClass::Standard;
 
     [[nodiscard]] bool valid() const noexcept {
-        return logical_width > 0 && logical_height > 0 && scale > 0.0;
+        return logical_width > 0 && logical_height > 0 &&
+            std::isfinite(scale) && scale > 0.0;
     }
 
     [[nodiscard]] int physical_width_hint() const noexcept;

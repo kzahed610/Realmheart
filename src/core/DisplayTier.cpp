@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace realmheart::core {
 namespace {
@@ -79,6 +80,10 @@ int scale_dimension(int dimension, double scale) noexcept {
     if (!std::isfinite(scaled)) {
         return 0;
     }
+
+    constexpr double max_dimension =
+        static_cast<double>(std::numeric_limits<int>::max());
+    if (scaled >= max_dimension) return std::numeric_limits<int>::max();
 
     return static_cast<int>(std::lround(scaled));
 }

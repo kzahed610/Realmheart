@@ -58,12 +58,20 @@ HyprlandSessionSnapshot HyprlandSession::read(
         {"hyprctl", "activewindow", "-j"},
         options
     );
-    const std::string_view active_json =
-        active.succeeded() && !active.output.empty() && !active.truncated
-            ? std::string_view(active.output)
-            : std::string_view("{}");
-
-    return parse(clients.output, active_json);
+    const bool active_available =
+        active.succeeded() && !active.output.empty() && !active.truncated;
+    HyprlandSessionSnapshot snapshot = parse(
+        clients.output,
+        active_available ? std::string_view(active.output) : std::string_view("{}")
+    );
+    if (snapshot.available && !active_available) {
+        snapshot.partial = true;
+        snapshot.error = realmheart::core::command_failure_detail(
+            active,
+            "hyprctl activewindow failed"
+        );
+    }
+    return snapshot;
 }
 
 HyprlandSessionSnapshot HyprlandSession::parse(

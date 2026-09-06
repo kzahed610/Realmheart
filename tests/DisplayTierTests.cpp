@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string>
 
 namespace {
@@ -102,6 +103,9 @@ void test_raster_dimension_rounding_is_deterministic() {
             "1440p dimensions must use round-half-away-from-zero");
     require(scale_dimension(548, 2.0) == 1096,
             "4K dimensions must double exactly");
+    require(scale_dimension(std::numeric_limits<int>::max(), 2.0) ==
+                std::numeric_limits<int>::max(),
+            "oversized raster hints must clamp to the integer range");
 }
 
 } // namespace

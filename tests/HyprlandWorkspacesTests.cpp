@@ -88,9 +88,12 @@ void test_switch_to_rejects_lua_dispatch_errors() {
     ::setenv("PATH", test_path.c_str(), 1);
 
     const bool switched = realmheart::services::HyprlandWorkspaces::switch_to(4);
+    const bool submap_set = realmheart::services::HyprlandWorkspaces::set_submap(
+        "realmheart-locked"
+    );
 
     ::setenv("PATH", old_path.c_str(), 1);
-    require(!switched,
+    require(!switched && !submap_set,
             "Hyprland Lua dispatch parser errors must not be treated as successful workspace switches");
     std::filesystem::remove_all(root);
 }
@@ -251,13 +254,9 @@ void test_switch_to_on_monitor_focuses_output_before_workspace() {
     require(switched, "monitor-specific workspace dispatch must report success");
     std::ifstream recorded(output);
     std::string first;
-    std::string second;
     std::getline(recorded, first);
-    std::getline(recorded, second);
-    require(first == "dispatch hl.dsp.focus({ monitor = \"DP-1\" })",
-            "monitor-specific switch must focus the exact connector first");
-    require(second == "dispatch hl.dsp.focus({ workspace = 6, on_current_monitor = true })",
-            "monitor-specific switch must then select the requested workspace");
+    require(first == "dispatch hl.dsp.focus({ monitor = \"DP-1\", workspace = 6 })",
+            "monitor-specific switch must target connector and workspace atomically");
 
     std::filesystem::remove_all(root);
 }
@@ -300,13 +299,9 @@ void test_switch_to_named_on_monitor_focuses_output_before_named_workspace() {
     require(switched, "monitor-specific named workspace dispatch must report success");
     std::ifstream recorded(output);
     std::string first;
-    std::string second;
     std::getline(recorded, first);
-    std::getline(recorded, second);
-    require(first == "dispatch hl.dsp.focus({ monitor = \"HDMI-A-1\" })",
-            "named workspace switch must focus the exact connector first");
-    require(second == "dispatch hl.dsp.focus({ workspace = \"name:realmheart-mana-cores\", on_current_monitor = true })",
-            "named workspace switch must then select the named workspace");
+    require(first == "dispatch hl.dsp.focus({ monitor = \"HDMI-A-1\", workspace = \"name:realmheart-mana-cores\" })",
+            "named workspace switch must target connector and workspace atomically");
 
     std::filesystem::remove_all(root);
 }
@@ -318,6 +313,42 @@ void test_malformed_clients_fixture_is_unavailable() {
         "not-json"
     );
     require(!snapshot.available, "malformed client data must fail deterministically");
+}
+
+void test_failed_clients_query_is_marked_partial() {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("realmheart-workspace-partial-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    const auto executable = root / "hyprctl";
+    {
+        std::ofstream script(executable);
+        script << "#!/bin/sh\n"
+               << "case \"$1\" in\n"
+               << "  activeworkspace) printf '%s\\n' '{\"id\":1}' ;;\n"
+               << "  workspaces) printf '%s\\n' '[{\"id\":1,\"windows\":1}]' ;;\n"
+               << "  clients) exit 1 ;;\n"
+               << "esac\n";
+    }
+    std::filesystem::permissions(
+        executable,
+        std::filesystem::perms::owner_read |
+            std::filesystem::perms::owner_write |
+            std::filesystem::perms::owner_exec,
+        std::filesystem::perm_options::replace
+    );
+
+    const char* old_path_value = std::getenv("PATH");
+    const std::string old_path = old_path_value == nullptr ? std::string{} : old_path_value;
+    const std::string test_path = root.string() + (old_path.empty() ? "" : ":" + old_path);
+    ::setenv("PATH", test_path.c_str(), 1);
+    const auto snapshot = realmheart::services::HyprlandWorkspaces::read();
+    ::setenv("PATH", old_path.c_str(), 1);
+
+    require(snapshot.available, "workspace state remains usable when client metadata fails");
+    require(snapshot.partial, "failed client metadata must be marked partial");
+    require(!snapshot.error.empty(), "partial workspace state must carry an error");
+    std::filesystem::remove_all(root);
 }
 
 } // namespace
@@ -334,6 +365,7 @@ int main() {
     test_switch_to_on_monitor_focuses_output_before_workspace();
     test_switch_to_named_on_monitor_focuses_output_before_named_workspace();
     test_malformed_clients_fixture_is_unavailable();
+    test_failed_clients_query_is_marked_partial();
     std::cout << "Workspace parser tests passed\n";
     return 0;
 }

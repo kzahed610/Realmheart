@@ -128,6 +128,22 @@ TEST(HyprlandSessionTest, RejectsInvalidWorkspaceMoveRequests) {
     EXPECT_FALSE(HyprlandSession::move_window_to_workspace("0xabc", 0));
 }
 
+TEST(HyprlandSessionTest, MarksActiveWindowFailureAsPartialState) {
+    TemporaryHyprctl hyprctl(
+        "case \"$1\" in\n"
+        "  clients) printf '%s\\n' '[{\"address\":\"0xabc\",\"class\":\"kitty\"}]' ;;\n"
+        "  activewindow) exit 1 ;;\n"
+        "esac\n"
+    );
+
+    const auto snapshot = HyprlandSession::read();
+    ASSERT_TRUE(snapshot.available);
+    EXPECT_TRUE(snapshot.partial);
+    EXPECT_FALSE(snapshot.windows.empty());
+    EXPECT_FALSE(snapshot.windows.front().active);
+    EXPECT_FALSE(snapshot.error.empty());
+}
+
 
 TEST(HyprlandSessionTest, MovesExactWindowWithLuaDispatcher) {
     TemporaryHyprctl hyprctl(

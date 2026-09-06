@@ -36,6 +36,13 @@ TEST(HyprlandApplicationMonitorTest, ReportsSessionContextChanges) {
     EXPECT_EQ(title->kind, HyprlandApplicationEventKind::ContextChanged);
 }
 
+TEST(HyprlandApplicationMonitorTest, HasExplicitReconnectBoundary) {
+    EXPECT_NE(
+        HyprlandApplicationEventKind::Reconnected,
+        HyprlandApplicationEventKind::ContextChanged
+    );
+}
+
 TEST(HyprlandApplicationMonitorTest, IgnoresEventsWithoutUsefulContext) {
     EXPECT_FALSE(parse_hyprland_application_event("activewindow>>,Desktop").has_value());
     EXPECT_FALSE(parse_hyprland_application_event("workspace>>3").has_value());

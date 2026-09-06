@@ -128,11 +128,14 @@ VerticalBar::VerticalBar(
     });
 
     workspace_monitor_ = std::make_unique<services::HyprlandEventMonitor>([state] {
-        if (!state->alive.load()) return;
+        if (!state->alive.load() || state->workspace_refresh_queued.exchange(true)) {
+            return;
+        }
         g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,
             +[](gpointer raw) -> gboolean {
                 auto* shared = static_cast<std::shared_ptr<AsyncState>*>(raw);
+                (*shared)->workspace_refresh_queued = false;
                 if ((*shared)->alive.load() && (*shared)->owner != nullptr) {
                     (*shared)->owner->request_workspace_refresh();
                 }
