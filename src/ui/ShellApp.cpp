@@ -1520,6 +1520,11 @@ public:
     }
 
     void finish_lock_unlock() {
+        // Invalidate the post-map visibility watchdog before restoring the
+        // desktop. Otherwise a fast native unlock can leave that stale timer
+        // observing hidden lock surfaces and relock the now-unlocked session.
+        ++lock_choreography_generation_;
+
         // Reverse choreography: mirrors disappear first, binds return, then
         // each monitor goes back to the workspace it owned before locking.
         for (const auto& mirror : lock_mirror_surfaces_) {
