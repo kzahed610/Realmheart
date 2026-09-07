@@ -28,6 +28,7 @@ struct BluetoothDevice {
 
 struct BluetoothDeviceMutationResult {
     bool success = false;
+    bool partial = false;
     std::optional<BluetoothDevice> device;
     std::string error;
 };

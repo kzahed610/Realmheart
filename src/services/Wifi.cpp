@@ -100,6 +100,7 @@ WifiMutationResult failed_mutation(
 
 struct ActiveNetwork {
     std::string ssid;
+    std::string display_ssid;
     std::optional<int> signal_percent;
 };
 
@@ -122,7 +123,8 @@ ActiveNetwork active_network(const realmheart::core::CommandOptions& options) {
             if (!active) continue;
 
             ActiveNetwork network;
-            network.ssid = realmheart::core::sanitize_command_detail(fields[1], 96);
+            network.ssid = fields[1];
+            network.display_ssid = realmheart::core::sanitize_command_detail(network.ssid, 96);
             if (fields.size() >= 3) network.signal_percent = parse_signal(fields[2]);
             return network;
         }
@@ -146,7 +148,8 @@ ActiveNetwork active_network(const realmheart::core::CommandOptions& options) {
         if (fields[2] != "connected" && fields[2] != "connecting") continue;
         if (fields[3].empty() || fields[3] == "--") continue;
         return {
-            .ssid = realmheart::core::sanitize_command_detail(fields[3], 96),
+            .ssid = fields[3],
+            .display_ssid = realmheart::core::sanitize_command_detail(fields[3], 96),
             .signal_percent = std::nullopt,
         };
     }
@@ -166,6 +169,7 @@ std::optional<WifiState> Wifi::read(const realmheart::core::CommandOptions& opti
         state.enabled = true;
         const auto active = active_network(options);
         state.ssid = active.ssid;
+        state.display_ssid = active.display_ssid;
         state.signal_percent = active.signal_percent;
     } else if (radio.output != "disabled") {
         return std::nullopt;
@@ -229,7 +233,8 @@ std::vector<WifiNetwork> Wifi::scan(
 
         WifiNetwork network;
         network.active = fields[0] == "*" || fields[0] == "yes";
-        network.ssid = realmheart::core::sanitize_command_detail(fields[1], 96);
+        network.ssid = fields[1];
+        network.display_ssid = realmheart::core::sanitize_command_detail(network.ssid, 96);
         network.bssid = realmheart::core::sanitize_command_detail(fields[2], 32);
         network.signal_percent = parse_signal(fields[3]).value_or(0);
         network.security = realmheart::core::sanitize_command_detail(fields[4], 48);
@@ -273,19 +278,21 @@ WifiMutationResult Wifi::connect(
         mutation.error = "WiFi network name is empty";
         return mutation;
     }
+    if (password && password->size() > 4095) {
+        mutation.error = "WiFi password is too long";
+        return mutation;
+    }
 
     std::vector<std::string> command;
     if (!connection_uuid.empty()) {
         command = {"nmcli", "connection", "up", "uuid", connection_uuid};
     } else {
-        command = {"nmcli", "device", "wifi", "connect", ssid};
-        if (password && !password->empty()) {
-            command.emplace_back("password");
-            command.push_back(*password);
-        }
+        command = {"nmcli", "--ask", "device", "wifi", "connect", ssid};
     }
 
-    const auto write = realmheart::core::run_capture(command, options);
+    auto command_options = options;
+    if (password && !password->empty()) command_options.stdin_data = *password + "\n";
+    const auto write = realmheart::core::run_capture(command, command_options);
     if (!write.succeeded()) return failed_mutation(write, "WiFi connection failed");
 
     const auto readback = read(options);

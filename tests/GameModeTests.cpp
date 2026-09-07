@@ -106,6 +106,17 @@ raise SystemExit(64)
 
     bool marker_exists() const { return std::filesystem::exists(marker_state_); }
 
+    void write_marker(const std::string& contents) const {
+        std::ofstream marker(marker_state_, std::ios::trunc);
+        marker << contents;
+        ::chmod(marker_state_.c_str(), 0600);
+    }
+
+    void clear_marker() const {
+        std::error_code error;
+        std::filesystem::remove(marker_state_, error);
+    }
+
 private:
     std::filesystem::path directory_;
     std::filesystem::path compositor_state_;
@@ -149,6 +160,15 @@ int main() {
         require(user_disabled_animations && !user_disabled_animations->enabled,
                 "Animations disabled by the user must not imply Realmheart Gamemode ownership");
         fake.write_compositor_state(true);
+
+        fake.write_marker(R"({"version":1,"token":7,"options":{"animations:enabled":"0; keyword general:gaps_in 99"}})" );
+        require(!realmheart::services::GameMode::set_enabled(false).success,
+                "malformed restoration values must be rejected before batch construction");
+        fake.clear_marker();
+        fake.write_marker(std::string(17000, 'x'));
+        const auto oversized = realmheart::services::GameMode::read();
+        require(oversized && !oversized->enabled, "oversized restoration files must be ignored");
+        fake.clear_marker();
 
         fake.ignore_writes();
         const auto mismatch = realmheart::services::GameMode::set_enabled(true);

@@ -1,5 +1,6 @@
 #include "services/Wifi.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -31,13 +32,13 @@ public:
                << "  'radio wifi on') if [ \"$REALMHEART_WIFI_IGNORE_WRITES\" != 1 ]; then printf enabled > \"$REALMHEART_WIFI_TEST_STATE\"; fi ;;\n"
                << "  'radio wifi off') if [ \"$REALMHEART_WIFI_IGNORE_WRITES\" != 1 ]; then printf disabled > \"$REALMHEART_WIFI_TEST_STATE\"; fi ;;\n"
                << "  '-t -f IN-USE,SSID,SIGNAL device wifi list --rescan no') IFS= read -r active < \"$REALMHEART_WIFI_TEST_ACTIVE\"; if [ \"$REALMHEART_WIFI_HIDE_IN_USE\" = 1 ]; then exit 0; fi; case \"$active\" in 'Realm:Net') printf '*:Realm\\:Net:67\\n' ;; OpenNet) printf '*:OpenNet:81\\n' ;; SecretNet) printf '*:SecretNet:74\\n' ;; esac ;;\n"
-               << "  '-t -f IN-USE,SSID,BSSID,SIGNAL,SECURITY device wifi list --rescan yes'|'-t -f IN-USE,SSID,BSSID,SIGNAL,SECURITY device wifi list --rescan no') IFS= read -r active < \"$REALMHEART_WIFI_TEST_ACTIVE\"; if [ -n \"$active\" ]; then printf '*:Realm\\:Net:AA\\:BB\\:CC\\:DD\\:EE\\:01:67:WPA2\\n'; else printf ':Realm\\:Net:AA\\:BB\\:CC\\:DD\\:EE\\:01:67:WPA2\\n'; fi; printf ':Realm\\:Net:AA\\:BB\\:CC\\:DD\\:EE\\:02:41:WPA2\\n:OpenNet:AA\\:BB\\:CC\\:DD\\:EE\\:03:81:--\\n:SecretNet:AA\\:BB\\:CC\\:DD\\:EE\\:04:74:WPA2\\n' ;;\n"
+               << "  '-t -f IN-USE,SSID,BSSID,SIGNAL,SECURITY device wifi list --rescan yes'|'-t -f IN-USE,SSID,BSSID,SIGNAL,SECURITY device wifi list --rescan no') IFS= read -r active < \"$REALMHEART_WIFI_TEST_ACTIVE\"; if [ -n \"$active\" ]; then printf '*:Realm\\:Net:AA\\:BB\\:CC\\:DD\\:EE\\:01:67:WPA2\\n'; else printf ':Realm\\:Net:AA\\:BB\\:CC\\:DD\\:EE\\:01:67:WPA2\\n'; fi; printf ':Realm\\:Net:AA\\:BB\\:CC\\:DD\\:EE\\:02:41:WPA2\\n:OpenNet:AA\\:BB\\:CC\\:DD\\:EE\\:03:81:--\\n:SecretNet:AA\\:BB\\:CC\\:DD\\:EE\\:04:74:WPA2\\n'; printf ':  Spaced  :AA\\:BB\\:CC\\:DD\\:EE\\:05:55:WPA2\\n' ;;\n"
                << "  '-t -f NAME,UUID,TYPE connection show') printf 'Realm\\:Net:uuid-realm:802-11-wireless\\n' ;;\n"
                << "  '-t -f DEVICE,TYPE,STATE device') IFS= read -r active < \"$REALMHEART_WIFI_TEST_ACTIVE\"; if [ -n \"$active\" ]; then printf 'wlan0:wifi:connected\\n'; else printf 'wlan0:wifi:disconnected\\n'; fi ;;\n"
                << "  '-t -f DEVICE,TYPE,STATE,CONNECTION device status') IFS= read -r active < \"$REALMHEART_WIFI_TEST_ACTIVE\"; case \"$active\" in 'Realm:Net') printf 'wlan0:wifi:connected:Realm\\:Net\\n' ;; OpenNet) printf 'wlan0:wifi:connected:OpenNet\\n' ;; SecretNet) printf 'wlan0:wifi:connected:SecretNet\\n' ;; *) printf 'wlan0:wifi:disconnected:--\\n' ;; esac ;;\n"
                << "  'connection up uuid uuid-realm') printf 'Realm:Net' > \"$REALMHEART_WIFI_TEST_ACTIVE\" ;;\n"
-               << "  'device wifi connect OpenNet') printf 'OpenNet' > \"$REALMHEART_WIFI_TEST_ACTIVE\" ;;\n"
-               << "  'device wifi connect SecretNet password aether-key') printf 'SecretNet' > \"$REALMHEART_WIFI_TEST_ACTIVE\" ;;\n"
+               << "  '--ask device wifi connect OpenNet') printf 'OpenNet' > \"$REALMHEART_WIFI_TEST_ACTIVE\" ;;\n"
+               << "  '--ask device wifi connect SecretNet') IFS= read -r password; [ \"$password\" = aether-key ] || exit 65; printf 'SecretNet' > \"$REALMHEART_WIFI_TEST_ACTIVE\" ;;\n"
                << "  'device disconnect wlan0') printf '' > \"$REALMHEART_WIFI_TEST_ACTIVE\" ;;\n"
                << "  'connection delete uuid uuid-realm') : ;;\n"
                << "  *) printf 'unexpected arguments: %s\\n' \"$*\"; exit 64 ;;\n"
@@ -109,11 +110,16 @@ int main() {
         fake.hide_in_use_marker(false);
 
         const auto networks = realmheart::services::Wifi::scan();
-        require(networks.size() == 3, "duplicate BSSIDs should collapse by SSID");
+        require(networks.size() == 4, "duplicate BSSIDs should collapse by SSID");
         require(networks.front().ssid == "Realm:Net", "active network should sort first");
         require(networks.front().active, "active network should be marked connected");
         require(networks.front().saved, "known connection profile should be marked saved");
         require(networks.front().connection_uuid == "uuid-realm", "saved UUID should be retained");
+        const auto spaced = std::find_if(networks.begin(), networks.end(), [](const auto& network) {
+            return network.ssid == "  Spaced  ";
+        });
+        require(spaced != networks.end() && spaced->display_ssid == "Spaced",
+                "WiFi protocol SSIDs must remain exact while display text is sanitized");
 
         const auto disconnected = realmheart::services::Wifi::disconnect();
         require(disconnected.success, "disconnecting the active WiFi device should succeed");

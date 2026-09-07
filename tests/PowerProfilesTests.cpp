@@ -90,6 +90,11 @@ int main() {
 
         fake.ignore_writes();
         require(!realmheart::services::PowerProfiles::cycle(), "cycle must fail when readback does not change");
+        const auto uncertain = realmheart::services::PowerProfiles::cycle_result();
+        require(
+            uncertain.status == realmheart::services::PowerProfileMutationStatus::Unknown,
+            "a successful write without confirmation must be reported as unknown"
+        );
     } catch (const std::exception& error) {
         std::cerr << "PowerProfilesTests failed: " << error.what() << '\n';
         return 1;

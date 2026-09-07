@@ -1,5 +1,6 @@
 #include "services/Bluetooth.hpp"
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -32,8 +33,9 @@ public:
                << "  'power off') if [ \"$REALMHEART_BLUETOOTH_IGNORE_WRITES\" != 1 ]; then printf no > \"$REALMHEART_BLUETOOTH_TEST_STATE\"; fi ;;\n"
                << "  '--timeout 5 scan on') printf 'Discovery started\\n' ;;\n"
                << "  devices) printf 'Device AA:BB:CC:DD:EE:01 Aether Headset\\nDevice AA:BB:CC:DD:EE:02 Sylvie Speaker\\n' ;;\n"
-               << "  'info AA:BB:CC:DD:EE:01') IFS= read -r connected < \"$REALMHEART_BLUETOOTH_TEST_CONNECTED\"; printf 'Device AA:BB:CC:DD:EE:01\\n\\tName: Aether Headset\\n\\tPaired: yes\\n\\tTrusted: yes\\n\\tConnected: %s\\n' \"$connected\" ;;\n"
+               << "  'info AA:BB:CC:DD:EE:01') if [ \"$REALMHEART_BLUETOOTH_SLOW_INFO\" = 1 ]; then sleep 1; fi; IFS= read -r connected < \"$REALMHEART_BLUETOOTH_TEST_CONNECTED\"; trusted=yes; [ \"$REALMHEART_BLUETOOTH_FAIL_TRUST\" = 1 ] && trusted=no; printf 'Device AA:BB:CC:DD:EE:01\\n\\tName: Aether Headset\\n\\tPaired: yes\\n\\tTrusted: %s\\n\\tConnected: %s\\n' \"$trusted\" \"$connected\" ;;\n"
                << "  'info AA:BB:CC:DD:EE:02') printf 'Device AA:BB:CC:DD:EE:02\\n\\tName: Sylvie Speaker\\n\\tPaired: no\\n\\tTrusted: no\\n\\tConnected: no\\n' ;;\n"
+               << "  'trust AA:BB:CC:DD:EE:01') [ \"$REALMHEART_BLUETOOTH_FAIL_TRUST\" != 1 ] || exit 65 ;;\n"
                << "  'connect AA:BB:CC:DD:EE:01') printf yes > \"$REALMHEART_BLUETOOTH_TEST_CONNECTED\" ;;\n"
                << "  'disconnect AA:BB:CC:DD:EE:01') printf no > \"$REALMHEART_BLUETOOTH_TEST_CONNECTED\" ;;\n"
                << "  'remove AA:BB:CC:DD:EE:01') : ;;\n"
@@ -48,6 +50,8 @@ public:
         ::setenv("REALMHEART_BLUETOOTH_TEST_STATE", state_file_.c_str(), 1);
         ::setenv("REALMHEART_BLUETOOTH_TEST_CONNECTED", connected_file_.c_str(), 1);
         ::unsetenv("REALMHEART_BLUETOOTH_IGNORE_WRITES");
+        ::unsetenv("REALMHEART_BLUETOOTH_FAIL_TRUST");
+        ::unsetenv("REALMHEART_BLUETOOTH_SLOW_INFO");
     }
 
     ~TemporaryFakeBluetoothctl() {
@@ -55,12 +59,22 @@ public:
         ::unsetenv("REALMHEART_BLUETOOTH_TEST_STATE");
         ::unsetenv("REALMHEART_BLUETOOTH_TEST_CONNECTED");
         ::unsetenv("REALMHEART_BLUETOOTH_IGNORE_WRITES");
+        ::unsetenv("REALMHEART_BLUETOOTH_FAIL_TRUST");
+        ::unsetenv("REALMHEART_BLUETOOTH_SLOW_INFO");
         std::error_code error;
         std::filesystem::remove_all(directory_, error);
     }
 
     void ignore_writes() {
         ::setenv("REALMHEART_BLUETOOTH_IGNORE_WRITES", "1", 1);
+    }
+
+    void fail_trust() {
+        ::setenv("REALMHEART_BLUETOOTH_FAIL_TRUST", "1", 1);
+    }
+
+    void slow_info() {
+        ::setenv("REALMHEART_BLUETOOTH_SLOW_INFO", "1", 1);
     }
 
 private:
@@ -94,6 +108,23 @@ int main() {
         );
         require(connected.success, "paired Bluetooth device should connect");
         require(connected.device && connected.device->connected, "connect readback should be connected");
+
+        fake.fail_trust();
+        const auto trust_failure = realmheart::services::Bluetooth::connect(
+            "AA:BB:CC:DD:EE:01"
+        );
+        require(!trust_failure.success && trust_failure.partial,
+                "trust failure must not be hidden by connected readback");
+
+        fake.slow_info();
+        realmheart::core::CommandOptions bounded_options;
+        bounded_options.deadline = std::chrono::milliseconds(100);
+        const auto started = std::chrono::steady_clock::now();
+        const auto bounded_devices = realmheart::services::Bluetooth::devices(false, bounded_options);
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        require(bounded_devices.size() <= 64, "Bluetooth enumeration must cap device work");
+        require(elapsed < std::chrono::milliseconds(700),
+                "Bluetooth enumeration must honor one aggregate deadline");
 
         const auto disconnected = realmheart::services::Bluetooth::disconnect(
             "AA:BB:CC:DD:EE:01"

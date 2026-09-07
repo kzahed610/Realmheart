@@ -67,7 +67,7 @@ std::string bluetooth_detail(const services::BluetoothDevice& device) {
 }
 
 std::string wifi_display_name(const services::WifiNetwork& network) {
-    if (!network.ssid.empty()) return network.ssid;
+    if (!network.display_ssid.empty()) return network.display_ssid;
     return network.bssid.empty()
         ? "Hidden network"
         : "Hidden network  •  " + network.bssid;
@@ -339,7 +339,7 @@ void WifiManagerPopover::render(
         return;
     }
 
-    if (!state->ssid.empty()) set_status("Connected to " + state->ssid);
+    if (!state->display_ssid.empty()) set_status("Connected to " + state->display_ssid);
     else set_status("Select a network to connect");
     if (networks.empty()) {
         GtkWidget* empty = make_text_label("No networks found", "realmheart-manager-empty");
@@ -432,7 +432,7 @@ void WifiManagerPopover::on_row_action(GtkButton*, gpointer data) {
 void WifiManagerPopover::show_password_prompt(const services::WifiNetwork& network) {
     pending_network_ = network;
     gtk_label_set_text(
-        GTK_LABEL(password_title_), ("Connect to “" + network.ssid + "”").c_str()
+        GTK_LABEL(password_title_), ("Connect to “" + wifi_display_name(network) + "”").c_str()
     );
     gtk_editable_set_text(GTK_EDITABLE(password_entry_), "");
     gtk_revealer_set_reveal_child(GTK_REVEALER(password_revealer_), TRUE);
@@ -450,7 +450,7 @@ void WifiManagerPopover::connect_network(
     std::optional<std::string> password
 ) {
     hide_password_prompt();
-    run_action("Connecting to " + network.ssid + "…", [network, password = std::move(password)] {
+    run_action("Connecting to " + wifi_display_name(network) + "…", [network, password = std::move(password)] {
         const auto mutation = services::Wifi::connect(
             network.ssid, password, network.connection_uuid, network_options()
         );
@@ -466,7 +466,7 @@ void WifiManagerPopover::disconnect_network() {
 }
 
 void WifiManagerPopover::forget_network(const services::WifiNetwork& network) {
-    run_action("Forgetting " + network.ssid + "…", [network] {
+    run_action("Forgetting " + wifi_display_name(network) + "…", [network] {
         const auto mutation = services::Wifi::forget(
             network.ssid, network.connection_uuid, network_options()
         );

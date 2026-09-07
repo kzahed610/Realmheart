@@ -283,6 +283,94 @@ bool CommandResult::succeeded() const noexcept {
     return status == CommandStatus::Exited && exit_code == 0;
 }
 
+bool BackgroundProcess::stop(std::chrono::milliseconds timeout) noexcept {
+    if (pid <= 0) return true;
+    const pid_t child = pid;
+    const auto bounded_timeout = std::max(timeout, std::chrono::milliseconds::zero());
+    static_cast<void>(::kill(-child, SIGTERM));
+    const auto deadline = Clock::now() + bounded_timeout;
+    int status = 0;
+    for (;;) {
+        const pid_t waited = ::waitpid(child, &status, WNOHANG);
+        if (waited == child || (waited < 0 && errno == ECHILD)) {
+            pid = -1;
+            return true;
+        }
+        if (waited < 0 && errno != EINTR) break;
+        if (Clock::now() >= deadline) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    static_cast<void>(::kill(-child, SIGKILL));
+    const auto reap_deadline = Clock::now() + std::chrono::milliseconds(250);
+    for (;;) {
+        const pid_t waited = ::waitpid(child, &status, WNOHANG);
+        if (waited == child || (waited < 0 && errno == ECHILD)) {
+            pid = -1;
+            return true;
+        }
+        if (waited < 0 && errno != EINTR) break;
+        if (Clock::now() >= reap_deadline) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    static_cast<void>(::kill(-child, SIGKILL));
+    child_reaper().adopt(child);
+    pid = -1;
+    return false;
+}
+
+std::optional<BackgroundProcess> run_background_tracked(const std::vector<std::string>& argv) {
+    if (argv.empty() || argv.front().empty()) return std::nullopt;
+
+    std::vector<char*> exec_argv;
+    exec_argv.reserve(argv.size() + 1);
+    for (const auto& argument : argv) exec_argv.push_back(const_cast<char*>(argument.c_str()));
+    exec_argv.push_back(nullptr);
+
+    int status_pipe[2] = {-1, -1};
+    if (::pipe2(status_pipe, O_CLOEXEC | O_NONBLOCK) != 0) return std::nullopt;
+    const pid_t child = ::fork();
+    if (child < 0) {
+        ::close(status_pipe[0]);
+        ::close(status_pipe[1]);
+        return std::nullopt;
+    }
+    if (child == 0) {
+        ::close(status_pipe[0]);
+        if (::setsid() < 0) {
+            const int child_errno = errno;
+            static_cast<void>(::write(status_pipe[1], &child_errno, sizeof(child_errno)));
+            _exit(127);
+        }
+        ::execvp(exec_argv[0], exec_argv.data());
+        const int child_errno = errno;
+        static_cast<void>(::write(status_pipe[1], &child_errno, sizeof(child_errno)));
+        _exit(127);
+    }
+
+    ::close(status_pipe[1]);
+    pollfd descriptor{status_pipe[0], static_cast<short>(POLLIN | POLLHUP), 0};
+    int poll_result = -1;
+    do {
+        poll_result = ::poll(&descriptor, 1, 500);
+    } while (poll_result < 0 && errno == EINTR);
+    int child_errno = 0;
+    ssize_t read_bytes = -1;
+    if (poll_result > 0) {
+        do {
+            read_bytes = ::read(status_pipe[0], &child_errno, sizeof(child_errno));
+        } while (read_bytes < 0 && errno == EINTR);
+    }
+    ::close(status_pipe[0]);
+    if (poll_result <= 0 || read_bytes != 0) {
+        BackgroundProcess process(child);
+        process.stop(std::chrono::milliseconds::zero());
+        return std::nullopt;
+    }
+    return BackgroundProcess(child);
+}
+
 bool run_background(const std::vector<std::string>& argv) {
     if (argv.empty() || argv.front().empty()) return false;
 
@@ -364,6 +452,12 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
     if (options.cancelled && options.cancelled()) {
         return error_result(CommandStatus::Cancelled, "command cancelled before spawn");
     }
+    if (options.deadline_at && Clock::now() >= *options.deadline_at) {
+        return error_result(CommandStatus::TimedOut, "command deadline expired before spawn");
+    }
+    if (options.stdin_data && options.stdin_data->size() > 4096) {
+        return error_result(CommandStatus::InvalidArguments, "stdin payload exceeds command limit");
+    }
 
     std::vector<char*> exec_argv;
     exec_argv.reserve(argv.size() + 1);
@@ -372,6 +466,7 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
 
     int output_pipe[2] = {-1, -1};
     int exec_pipe[2] = {-1, -1};
+    int input_pipe[2] = {-1, -1};
     if (::pipe2(output_pipe, O_CLOEXEC) != 0) {
         return error_result(CommandStatus::SystemError, std::string("pipe2 failed: ") + std::strerror(errno));
     }
@@ -379,6 +474,14 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
         const auto error = std::string("exec pipe2 failed: ") + std::strerror(errno);
         ::close(output_pipe[0]);
         ::close(output_pipe[1]);
+        return error_result(CommandStatus::SystemError, error);
+    }
+    if (options.stdin_data && ::pipe2(input_pipe, O_CLOEXEC) != 0) {
+        const auto error = std::string("stdin pipe2 failed: ") + std::strerror(errno);
+        ::close(output_pipe[0]);
+        ::close(output_pipe[1]);
+        ::close(exec_pipe[0]);
+        ::close(exec_pipe[1]);
         return error_result(CommandStatus::SystemError, error);
     }
 
@@ -389,12 +492,23 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
         ::close(output_pipe[1]);
         ::close(exec_pipe[0]);
         ::close(exec_pipe[1]);
+        close_fd(input_pipe[0]);
+        close_fd(input_pipe[1]);
         return error_result(CommandStatus::SpawnFailed, error);
     }
 
     if (child == 0) {
         ::close(output_pipe[0]);
         ::close(exec_pipe[0]);
+        if (options.stdin_data) {
+            ::close(input_pipe[1]);
+            if (::dup2(input_pipe[0], STDIN_FILENO) < 0) {
+                const int child_errno = errno;
+                static_cast<void>(::write(exec_pipe[1], &child_errno, sizeof(child_errno)));
+                _exit(127);
+            }
+            ::close(input_pipe[0]);
+        }
         ::setpgid(0, 0);
 
         if (::dup2(output_pipe[1], STDOUT_FILENO) < 0 || ::dup2(output_pipe[1], STDERR_FILENO) < 0) {
@@ -414,6 +528,22 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
     output_pipe[1] = -1;
     ::close(exec_pipe[1]);
     exec_pipe[1] = -1;
+    if (options.stdin_data) {
+        ::close(input_pipe[0]);
+        input_pipe[0] = -1;
+        const auto& input = *options.stdin_data;
+        std::size_t written = 0;
+        while (written < input.size()) {
+            const ssize_t count = ::write(input_pipe[1], input.data() + written, input.size() - written);
+            if (count > 0) {
+                written += static_cast<std::size_t>(count);
+                continue;
+            }
+            if (count < 0 && errno == EINTR) continue;
+            break;
+        }
+        close_fd(input_pipe[1]);
+    }
     static_cast<void>(::setpgid(child, child));
 
     CommandResult result;
@@ -428,7 +558,10 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
     }
 
     const auto started = Clock::now();
-    const auto deadline = started + options.deadline;
+    const auto relative_deadline = started + options.deadline;
+    const auto deadline = options.deadline_at
+        ? std::min(relative_deadline, *options.deadline_at)
+        : relative_deadline;
     const auto grace = std::max(options.terminate_grace, std::chrono::milliseconds::zero());
     auto escalation_at = deadline;
     auto final_wait_at = deadline;

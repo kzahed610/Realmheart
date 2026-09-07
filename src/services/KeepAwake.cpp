@@ -108,8 +108,25 @@ void KeepAwake::stop_inhibitor_locked() {
     }
 
     static_cast<void>(::kill(-child_pid_, SIGKILL));
-    while (::waitpid(child_pid_, nullptr, 0) < 0 && errno == EINTR) {
+    const pid_t child = child_pid_;
+    const auto reap_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    for (;;) {
+        const pid_t waited = ::waitpid(child, nullptr, WNOHANG);
+        if (waited == child || (waited < 0 && errno == ECHILD)) {
+            child_pid_ = -1;
+            return;
+        }
+        if (waited < 0 && errno != EINTR) break;
+        if (std::chrono::steady_clock::now() >= reap_deadline) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+
+    // Never block a UI/destructor path on a child that ignored both signals.
+    // A detached waiter retains reaping ownership without retaining this object.
+    std::thread([child] {
+        while (::waitpid(child, nullptr, 0) < 0 && errno == EINTR) {
+        }
+    }).detach();
     child_pid_ = -1;
 }
 

@@ -29,6 +29,7 @@ public:
                << "if [ \"$running\" != yes ]; then printf 'not running\\n'; exit 1; fi\n"
                << "if [ \"$REALMHEART_NIGHT_FAIL_WRITES\" = 1 ]; then printf 'forced failure\\n'; exit 1; fi\n"
                << "case \"$*\" in\n"
+               << "  'monitors -j') printf '[]' ;;\n"
                << "  'hyprsunset identity') printf 'off\\n' > \"$REALMHEART_NIGHT_TEST_APPLIED\"; printf 'ok\\n' ;;\n"
                << "  'hyprsunset temperature '*) printf '%s\\n' \"$3\" > \"$REALMHEART_NIGHT_TEST_APPLIED\"; printf 'ok\\n' ;;\n"
                << "  *) exit 64 ;;\n"
@@ -76,6 +77,16 @@ public:
         ::setenv("REALMHEART_NIGHT_FAIL_WRITES", "1", 1);
     }
 
+    void allow_writes() {
+        ::unsetenv("REALMHEART_NIGHT_FAIL_WRITES");
+    }
+
+    void block_persistence() {
+        std::error_code error;
+        std::filesystem::remove(directory_ / "realmheart-night-light.state", error);
+        std::filesystem::create_directory(directory_ / "realmheart-night-light.state", error);
+    }
+
     [[nodiscard]] std::string applied() const {
         std::ifstream input(applied_file_);
         std::string value;
@@ -103,11 +114,7 @@ int main() {
         TemporaryFakeHyprsunset fake;
 
         const auto initial = realmheart::services::NightLight::read();
-        require(
-            initial && !initial->enabled &&
-                initial->temperature == realmheart::services::NightLight::kDefaultTemperature,
-            "Night Light should begin available and off"
-        );
+        require(!initial, "Night Light must report unavailable before a live daemon session exists");
 
         const auto enabled = realmheart::services::NightLight::set_enabled(true);
         require(enabled.success && enabled.state.enabled, "Night Light enable should succeed");
@@ -145,6 +152,12 @@ int main() {
         fake.fail_writes();
         const auto failed = realmheart::services::NightLight::set_enabled(true);
         require(!failed.success, "failed IPC writes must be reported");
+
+        fake.allow_writes();
+        fake.block_persistence();
+        const auto persistence_failure = realmheart::services::NightLight::set_enabled(true);
+        require(!persistence_failure.success && persistence_failure.partial,
+                "successful IPC with failed persistence must be observable");
     } catch (const std::exception& error) {
         std::cerr << "NightLightTests failed: " << error.what() << '\n';
         return 1;

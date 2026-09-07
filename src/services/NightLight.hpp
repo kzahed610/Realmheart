@@ -14,6 +14,7 @@ struct NightLightState {
 
 struct NightLightMutationResult {
     bool success = false;
+    bool partial = false;
     NightLightState state;
     std::string error;
 };

@@ -4,12 +4,25 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <sstream>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace realmheart::services {
 namespace {
+
+realmheart::core::CommandOptions aggregate_options(
+    const realmheart::core::CommandOptions& options
+) {
+    auto bounded = options;
+    const auto requested_deadline = std::chrono::steady_clock::now() + options.deadline;
+    if (!bounded.deadline_at || requested_deadline < *bounded.deadline_at) {
+        bounded.deadline_at = requested_deadline;
+    }
+    return bounded;
+}
 
 std::optional<BluetoothDevice> read_device(
     const std::string& address,
@@ -118,26 +131,31 @@ std::vector<BluetoothDevice> Bluetooth::devices(
     const realmheart::core::CommandOptions& options
 ) {
     if (!realmheart::core::command_exists("bluetoothctl")) return {};
-    const auto state = read(options);
+    const auto bounded = aggregate_options(options);
+    const auto state = read(bounded);
     if (!state || !state->powered) return {};
 
     if (scan_for_new_devices) {
         static_cast<void>(realmheart::core::run_capture(
-            {"bluetoothctl", "--timeout", "5", "scan", "on"}, options
+            {"bluetoothctl", "--timeout", "5", "scan", "on"}, bounded
         ));
     }
 
-    const auto listing = realmheart::core::run_capture({"bluetoothctl", "devices"}, options);
+    const auto listing = realmheart::core::run_capture({"bluetoothctl", "devices"}, bounded);
     if (!listing.succeeded() || listing.truncated) return {};
 
     std::vector<BluetoothDevice> result;
+    std::unordered_set<std::string> seen_addresses;
+    constexpr std::size_t kMaximumDevices = 64;
     std::stringstream lines(listing.output);
     std::string line;
     while (std::getline(lines, line)) {
         if (!line.starts_with("Device ") || line.size() < 24) continue;
         const std::string address = line.substr(7, 17);
         if (!valid_address(address)) continue;
-        auto device = read_device(address, options);
+        if (!seen_addresses.insert(address).second) continue;
+        if (seen_addresses.size() > kMaximumDevices) break;
+        auto device = read_device(address, bounded);
         if (!device) {
             BluetoothDevice fallback;
             fallback.address = address;
@@ -181,11 +199,33 @@ BluetoothDeviceMutationResult Bluetooth::connect(
             {"bluetoothctl", "--timeout", "15", "pair", address}, options
         );
         if (!pair.succeeded()) return command_failure(pair, "Bluetooth pairing failed");
+        device = read_device(address, options);
+        if (!device) {
+            mutation.partial = true;
+            mutation.error = "Bluetooth pairing succeeded but device state is unavailable";
+            return mutation;
+        }
     }
     if (!device->trusted) {
-        static_cast<void>(realmheart::core::run_capture(
+        const auto trust = realmheart::core::run_capture(
             {"bluetoothctl", "trust", address}, options
-        ));
+        );
+        if (!trust.succeeded()) {
+            mutation.device = read_device(address, options);
+            mutation.partial = true;
+            mutation.error = realmheart::core::command_failure_detail(
+                trust,
+                "Bluetooth trust setup failed"
+            );
+            return mutation;
+        }
+        device = read_device(address, options);
+        if (!device || !device->trusted) {
+            mutation.device = std::move(device);
+            mutation.partial = true;
+            mutation.error = "Bluetooth trust state did not confirm";
+            return mutation;
+        }
     }
 
     const auto connect = realmheart::core::run_capture(

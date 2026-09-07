@@ -11,6 +11,7 @@ namespace realmheart::services {
 struct WifiState {
     bool enabled = false;
     std::string ssid;
+    std::string display_ssid;
     std::optional<int> signal_percent;
 };
 
@@ -22,6 +23,7 @@ struct WifiMutationResult {
 
 struct WifiNetwork {
     std::string ssid;
+    std::string display_ssid;
     std::string bssid;
     std::string security;
     std::string connection_uuid;
