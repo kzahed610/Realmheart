@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Command.hpp"
+#include "services/Notifications.hpp"
 
 #include <string>
 #include <vector>
@@ -15,7 +16,10 @@ struct ServiceStatus {
 
 class RightSidebarServices {
 public:
-    explicit RightSidebarServices(realmheart::core::CommandOptions command_options = {});
+    explicit RightSidebarServices(
+        realmheart::core::CommandOptions command_options = {},
+        const NotificationHistory* notification_history = nullptr
+    );
     std::vector<ServiceStatus> getBarStatus() const;
     std::vector<ServiceStatus> getReport() const;
     void printReport() const;
@@ -32,6 +36,7 @@ public:
     ServiceStatus getGamemodeStatus() const;
 
     realmheart::core::CommandOptions command_options_;
+    const NotificationHistory* notification_history_ = nullptr;
 };
 
 } // namespace realmheart::services

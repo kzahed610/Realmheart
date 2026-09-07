@@ -5,6 +5,7 @@
 #include "animation/character/CharacterCompositor.hpp"
 #include "ui/sidebar/ConnectivityPanel.hpp"
 #include "ui/sidebar/NightLightPanel.hpp"
+#include "ui/sidebar/SidebarPreferences.hpp"
 #include "ui/sidebar/SidebarFrame.hpp"
 
 #include "core/TaskExecutor.hpp"
@@ -27,7 +28,6 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
-#include <filesystem>
 #include <fstream>
 #include <iostream>
 #if defined(__GLIBC__)
@@ -43,25 +43,12 @@ namespace {
 
 constexpr int kSidebarRightMargin = 2;
 
-std::filesystem::path character_enabled_preference_path() {
-    if (const char* config_home = std::getenv("XDG_CONFIG_HOME");
-        config_home != nullptr && *config_home != '\0') {
-        return std::filesystem::path(config_home) /
-            "realmheart/features/sidebar-character.enabled";
-    }
-    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
-        return std::filesystem::path(home) /
-            ".config/realmheart/features/sidebar-character.enabled";
-    }
-    return std::filesystem::temp_directory_path() /
-        "realmheart-sidebar-character.enabled";
-}
-
 bool load_character_enabled_preference() {
-    std::ifstream input(character_enabled_preference_path());
-    if (!input) return true;
+    const auto stored = read_sidebar_preference("sidebar-character.enabled");
+    if (!stored) return true;
 
     std::string value;
+    std::istringstream input(*stored);
     input >> value;
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
         return static_cast<char>(std::tolower(ch));
@@ -80,27 +67,14 @@ bool load_character_enabled_preference() {
     return true;
 }
 
-std::filesystem::path character_hair_mode_preference_path() {
-    if (const char* config_home = std::getenv("XDG_CONFIG_HOME");
-        config_home != nullptr && *config_home != '\0') {
-        return std::filesystem::path(config_home) /
-            "realmheart/features/sidebar-character.hair-mode";
-    }
-    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
-        return std::filesystem::path(home) /
-            ".config/realmheart/features/sidebar-character.hair-mode";
-    }
-    return std::filesystem::temp_directory_path() /
-        "realmheart-sidebar-character.hair-mode";
-}
-
 realmheart::animation::character::CharacterHairMode
 load_character_hair_mode_preference() {
     using realmheart::animation::character::CharacterHairMode;
-    std::ifstream input(character_hair_mode_preference_path());
-    if (!input) return CharacterHairMode::Mesh;
+    const auto stored = read_sidebar_preference("sidebar-character.hair-mode");
+    if (!stored) return CharacterHairMode::Mesh;
 
     std::string value;
+    std::istringstream input(*stored);
     input >> value;
     if (const auto mode =
             realmheart::animation::character::parse_character_hair_mode(value)) {
@@ -113,81 +87,19 @@ load_character_hair_mode_preference() {
 bool persist_character_hair_mode_preference(
     realmheart::animation::character::CharacterHairMode mode
 ) {
-    const auto path = character_hair_mode_preference_path();
-    std::error_code error;
-    std::filesystem::create_directories(path.parent_path(), error);
-    if (error) {
-        std::cerr << "Unable to create character hair-mode preference directory: "
-                  << error.message() << '\n';
-        return false;
-    }
-
-    auto temporary = path;
-    temporary += ".tmp";
-    {
-        std::ofstream output(temporary, std::ios::trunc);
-        if (!output) return false;
-        output << realmheart::animation::character::character_hair_mode_name(mode)
-               << '\n';
-        output.flush();
-        if (!output) return false;
-    }
-    std::filesystem::rename(temporary, path, error);
-    if (error) {
-        std::error_code remove_error;
-        std::filesystem::remove(path, remove_error);
-        error.clear();
-        std::filesystem::rename(temporary, path, error);
-    }
-    if (error) {
-        std::filesystem::remove(temporary, error);
-        return false;
-    }
-    return true;
+    return write_sidebar_preference(
+        "sidebar-character.hair-mode",
+        std::string(
+            realmheart::animation::character::character_hair_mode_name(mode)
+        ) + '\n'
+    );
 }
 
 bool persist_character_enabled_preference(bool enabled) {
-    const auto path = character_enabled_preference_path();
-    std::error_code error;
-    std::filesystem::create_directories(path.parent_path(), error);
-    if (error) {
-        std::cerr << "Unable to create Realmheart feature preference directory: "
-                  << error.message() << '\n';
-        return false;
-    }
-
-    auto temporary = path;
-    temporary += ".tmp";
-    {
-        std::ofstream output(temporary, std::ios::trunc);
-        if (!output) {
-            std::cerr << "Unable to write sidebar character preference: "
-                      << temporary << '\n';
-            return false;
-        }
-        output << (enabled ? "enabled\n" : "disabled\n");
-        output.flush();
-        if (!output) {
-            std::cerr << "Unable to flush sidebar character preference: "
-                      << temporary << '\n';
-            return false;
-        }
-    }
-
-    std::filesystem::rename(temporary, path, error);
-    if (error) {
-        std::error_code remove_error;
-        std::filesystem::remove(path, remove_error);
-        error.clear();
-        std::filesystem::rename(temporary, path, error);
-    }
-    if (error) {
-        std::cerr << "Unable to publish sidebar character preference: "
-                  << error.message() << '\n';
-        std::filesystem::remove(temporary, error);
-        return false;
-    }
-    return true;
+    return write_sidebar_preference(
+        "sidebar-character.enabled",
+        enabled ? "enabled\n" : "disabled\n"
+    );
 }
 
 GtkWidget* themed_icon(const char* path, int pixels, const char* css_class = nullptr) {

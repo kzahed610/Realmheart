@@ -40,6 +40,7 @@ private:
     void run_mutation(std::function<services::NightLightMutationResult()> mutation);
     void update_strength_copy(int strength);
     void set_busy(bool busy);
+    void set_available(bool available);
     void set_status(const std::string& message, bool error = false);
 
     GtkWidget* overlay_host_ = nullptr;
@@ -54,6 +55,7 @@ private:
     bool updating_ = false;
     bool requested_visible_ = false;
     bool enabled_ = false;
+    bool available_ = false;
     int pending_strength_ = 57;
     guint debounce_source_ = 0;
     std::function<void()> state_changed_;

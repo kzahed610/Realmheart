@@ -208,6 +208,7 @@ add_library(realmheart_ui STATIC
     src/ui/sidebar/ConnectivityPanel.cpp
     src/ui/sidebar/NightLightPanel.cpp
     src/ui/sidebar/RightSidebar.cpp
+    src/ui/sidebar/SidebarPreferences.cpp
     src/ui/sidebar/SidebarGeometry.cpp
     src/ui/sidebar/SidebarFrame.cpp
     src/ui/NotificationToast.cpp
@@ -1171,6 +1172,25 @@ if(BUILD_TESTING)
     add_executable(realmheart_notification_daemon_tests tests/NotificationDaemonTests.cpp src/services/NotificationServer.cpp src/services/Notifications.cpp src/services/NotificationDaemon.cpp)
     target_link_libraries(realmheart_notification_daemon_tests PRIVATE PkgConfig::GIO)
     realmheart_register_dbus_test(realmheart_notification_daemon_tests)
+
+    add_executable(
+        realmheart_right_sidebar_integration_tests
+        tests/RightSidebarIntegrationTests.cpp
+        src/ui/sidebar/SidebarPreferences.cpp
+        src/services/RightSidebarServices.cpp
+        src/services/Audio.cpp
+        src/services/Bluetooth.cpp
+        src/services/Brightness.cpp
+        src/services/GameMode.cpp
+        src/services/KeepAwake.cpp
+        src/services/NightLight.cpp
+        src/services/Notifications.cpp
+        src/services/PowerProfiles.cpp
+        src/services/Wifi.cpp
+        src/core/Command.cpp
+    )
+    target_link_libraries(realmheart_right_sidebar_integration_tests PRIVATE PkgConfig::GIO)
+    realmheart_register_test(realmheart_right_sidebar_integration_tests)
 
     add_executable(realmheart_power_profiles_tests tests/PowerProfilesTests.cpp src/core/Command.cpp src/services/PowerProfiles.cpp)
     realmheart_register_test(realmheart_power_profiles_tests)

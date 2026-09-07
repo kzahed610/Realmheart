@@ -47,6 +47,7 @@ private:
     void set_powered(bool enabled);
     void run_action(std::string progress, std::function<std::string()> action);
     void set_busy(bool busy, const std::string& message = {});
+    void set_available(bool available);
     void set_status(const std::string& message, bool error = false);
 
     static void on_row_action(GtkButton* button, gpointer data);
@@ -57,6 +58,7 @@ private:
     GtkWidget* list_ = nullptr;
     GtkWidget* status_ = nullptr;
     GtkWidget* spinner_ = nullptr;
+    GtkWidget* refresh_button_ = nullptr;
     GtkWidget* power_button_ = nullptr;
     GtkWidget* password_revealer_ = nullptr;
     GtkWidget* password_title_ = nullptr;
@@ -65,6 +67,7 @@ private:
     std::function<void()> state_changed_;
     std::shared_ptr<LifetimeState> lifetime_;
     bool requested_visible_ = false;
+    bool available_ = false;
 };
 
 class BluetoothManagerPopover {
@@ -97,6 +100,7 @@ private:
     void set_powered(bool powered);
     void run_action(std::string progress, std::function<std::string()> action);
     void set_busy(bool busy, const std::string& message = {});
+    void set_available(bool available);
     void set_status(const std::string& message, bool error = false);
 
     static void on_row_action(GtkButton* button, gpointer data);
@@ -107,10 +111,12 @@ private:
     GtkWidget* list_ = nullptr;
     GtkWidget* status_ = nullptr;
     GtkWidget* spinner_ = nullptr;
+    GtkWidget* refresh_button_ = nullptr;
     GtkWidget* power_button_ = nullptr;
     std::function<void()> state_changed_;
     std::shared_ptr<LifetimeState> lifetime_;
     bool requested_visible_ = false;
+    bool available_ = false;
 };
 
 } // namespace realmheart::ui::sidebar

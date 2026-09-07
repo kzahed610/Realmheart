@@ -39,8 +39,12 @@ std::string format_percent(double percent) {
 
 } // namespace
 
-RightSidebarServices::RightSidebarServices(realmheart::core::CommandOptions command_options)
-    : command_options_(std::move(command_options)) {}
+RightSidebarServices::RightSidebarServices(
+    realmheart::core::CommandOptions command_options,
+    const NotificationHistory* notification_history
+)
+    : command_options_(std::move(command_options)),
+      notification_history_(notification_history) {}
 
 ServiceStatus RightSidebarServices::getWifiStatus() const {
     const auto wifi = Wifi::read(command_options_);
@@ -115,7 +119,19 @@ ServiceStatus RightSidebarServices::getVolumeStatus() const {
 }
 
 ServiceStatus RightSidebarServices::getNotificationsStatus() const {
-    return {"Notifications", unavailable("notification history pending; confirmed right-sidebar scope"), false};
+    if (notification_history_ == nullptr) {
+        return {"Notifications", unavailable("notification history is not connected"), false};
+    }
+    const auto snapshot = notification_history_->snapshot();
+    if (!snapshot.capture_active) {
+        return {"Notifications", unavailable("notification daemon is inactive"), false};
+    }
+    return {
+        "Notifications",
+        "Capturing (" + std::to_string(snapshot.unread_count) +
+            " unread, " + std::to_string(snapshot.entries.size()) + " stored)",
+        true
+    };
 }
 
 std::vector<ServiceStatus> RightSidebarServices::getBarStatus() const {

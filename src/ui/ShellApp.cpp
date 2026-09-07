@@ -370,6 +370,16 @@ private:
         GtkWidget* commit_pixel = nullptr;
     };
 
+    struct MonitorPropertyWatch {
+        GdkMonitor* monitor = nullptr;
+        gulong signal_id = 0;
+    };
+
+    struct SidebarFrameTick {
+        ShellRuntime* runtime = nullptr;
+        std::uint64_t generation = 0;
+    };
+
     struct LockRestorePoint {
         std::string connector;
         int workspace_id = 0;
@@ -515,13 +525,7 @@ public:
         osd_.reset();
         now_playing_.reset();
 
-        if (sidebar_tick_id_ != 0) {
-            if (sidebar_ != nullptr) {
-                gtk_widget_remove_tick_callback(sidebar_->get_window(), sidebar_tick_id_);
-            }
-            sidebar_tick_id_ = 0;
-            sidebar_last_frame_time_ = 0;
-        }
+        cancel_right_sidebar_frame();
         sidebar_.reset();
         secondary_bars_.clear();
         bar_.reset();
@@ -536,6 +540,11 @@ public:
             g_source_remove(monitor_rebuild_idle_id_);
             monitor_rebuild_idle_id_ = 0;
         }
+        if (monitor_geometry_refresh_idle_id_ != 0) {
+            g_source_remove(monitor_geometry_refresh_idle_id_);
+            monitor_geometry_refresh_idle_id_ = 0;
+        }
+        clear_monitor_property_watchers();
         if (monitor_model_ != nullptr && monitor_model_signal_id_ != 0) {
             g_signal_handler_disconnect(monitor_model_, monitor_model_signal_id_);
             monitor_model_signal_id_ = 0;
@@ -601,14 +610,7 @@ public:
             }
             state_.set_right_sidebar_visible(false);
             sidebar_transition_.snap_hidden();
-            if (sidebar_tick_id_ != 0) {
-                gtk_widget_remove_tick_callback(
-                    sidebar_->get_window(),
-                    sidebar_tick_id_
-                );
-                sidebar_tick_id_ = 0;
-                sidebar_last_frame_time_ = 0;
-            }
+            cancel_right_sidebar_frame();
             sidebar_.reset();
             if (sidebar_backdrop_ != nullptr) {
                 gtk_window_destroy(sidebar_backdrop_);
@@ -2435,11 +2437,7 @@ private:
     void ensure_sidebar_initialized(int monitor_index) {
         ensure_core_initialized();
         if (sidebar_ != nullptr && sidebar_monitor_index_ != monitor_index) {
-            if (sidebar_tick_id_ != 0) {
-                gtk_widget_remove_tick_callback(sidebar_->get_window(), sidebar_tick_id_);
-                sidebar_tick_id_ = 0;
-                sidebar_last_frame_time_ = 0;
-            }
+            cancel_right_sidebar_frame();
             sidebar_.reset();
             if (sidebar_backdrop_ != nullptr) {
                 gtk_window_destroy(sidebar_backdrop_);
@@ -2760,6 +2758,7 @@ private:
     }
 
     void rebuild_monitor_surfaces() {
+        clear_monitor_property_watchers();
         GdkDisplay* display = gdk_display_get_default();
         const int count = std::max(monitor_count(display), 1);
 
@@ -2788,16 +2787,7 @@ private:
             lock_topology_dirty_ = false;
         }
 
-        // A topology change can arrive mid-sidebar transition.  Remove the
-        // frame callback before destroying/recreating the monitor-bound
-        // surface so a stale tick can never dereference the previous sidebar.
-        if (sidebar_tick_id_ != 0) {
-            if (sidebar_ != nullptr) {
-                gtk_widget_remove_tick_callback(sidebar_->get_window(), sidebar_tick_id_);
-            }
-            sidebar_tick_id_ = 0;
-            sidebar_last_frame_time_ = 0;
-        }
+        cancel_right_sidebar_frame();
 
         // Short-lived fullscreen/transient surfaces cannot retain a removed
         // wl_output. Close them before recreating monitor-owned shell chrome.
@@ -2882,6 +2872,7 @@ private:
             create_monitor_hotspot(index);
         }
         apply_bar_visibility();
+        bind_monitor_property_watchers();
     }
 
     void schedule_monitor_surface_rebuild() {
@@ -2899,6 +2890,76 @@ private:
         );
     }
 
+    void clear_monitor_property_watchers() {
+        for (const auto& watch : monitor_property_watches_) {
+            if (watch.monitor != nullptr && watch.signal_id != 0) {
+                g_signal_handler_disconnect(watch.monitor, watch.signal_id);
+            }
+            if (watch.monitor != nullptr) g_object_unref(watch.monitor);
+        }
+        monitor_property_watches_.clear();
+    }
+
+    void refresh_monitor_geometry() {
+        if (sidebar_ != nullptr && sidebar_monitor_index_ >= 0) {
+            sidebar_->apply_geometry();
+            if (sidebar_backdrop_ != nullptr) {
+                const auto placement = sidebar::sidebar_placement_for(
+                    GTK_WIDGET(sidebar_backdrop_),
+                    sidebar_monitor_index_
+                );
+                BackdropInputSetup setup;
+                setup.sidebar_top_margin = placement.top_margin;
+                setup.sidebar_height = placement.height;
+                setup.sidebar_width = placement.frame_layout.surface_width();
+                setup.sidebar_right_margin = placement.frame_layout.right_margin;
+                setup.hotspot_hit_width = placement.frame_layout.hotspot_hit_width;
+                apply_sidebar_backdrop_input_region(
+                    GTK_WIDGET(sidebar_backdrop_),
+                    setup
+                );
+            }
+        }
+        for (const auto& hotspot : hotspots_) {
+            apply_hotspot_geometry(hotspot.window);
+        }
+    }
+
+    void schedule_monitor_geometry_refresh() {
+        if (monitor_geometry_refresh_idle_id_ != 0) return;
+        monitor_geometry_refresh_idle_id_ = g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            +[](gpointer data) -> gboolean {
+                auto* runtime = static_cast<ShellRuntime*>(data);
+                runtime->monitor_geometry_refresh_idle_id_ = 0;
+                runtime->refresh_monitor_geometry();
+                return G_SOURCE_REMOVE;
+            },
+            this,
+            nullptr
+        );
+    }
+
+    void bind_monitor_property_watchers() {
+        if (monitor_model_ == nullptr) return;
+        const guint count = g_list_model_get_n_items(monitor_model_);
+        for (guint index = 0; index < count; ++index) {
+            auto* monitor = GDK_MONITOR(
+                g_list_model_get_item(monitor_model_, index)
+            );
+            if (monitor == nullptr) continue;
+            const gulong signal_id = g_signal_connect(
+                monitor,
+                "notify",
+                G_CALLBACK(+[](GObject*, GParamSpec*, gpointer data) {
+                    static_cast<ShellRuntime*>(data)->schedule_monitor_geometry_refresh();
+                }),
+                this
+            );
+            monitor_property_watches_.push_back({monitor, signal_id});
+        }
+    }
+
     void ensure_monitor_watch() {
         if (monitor_model_ != nullptr) return;
         GdkDisplay* display = gdk_display_get_default();
@@ -2912,6 +2973,7 @@ private:
                 GListModel*, guint, guint, guint, gpointer data
             ) {
                 auto* runtime = static_cast<ShellRuntime*>(data);
+                runtime->clear_monitor_property_watchers();
                 ++runtime->monitor_topology_generation_;
                 runtime->schedule_monitor_surface_rebuild();
             }),
@@ -2997,16 +3059,38 @@ private:
         return still_running;
     }
 
+    void cancel_right_sidebar_frame() {
+        ++sidebar_frame_generation_;
+        if (sidebar_tick_id_ != 0 && sidebar_ != nullptr) {
+            gtk_widget_remove_tick_callback(
+                sidebar_->get_window(),
+                sidebar_tick_id_
+            );
+        }
+        sidebar_tick_id_ = 0;
+        sidebar_last_frame_time_ = 0;
+    }
+
     void schedule_right_sidebar_frame() {
         if (sidebar_ == nullptr || sidebar_tick_id_ != 0 ||
             !sidebar_transition_.active()) {
             return;
         }
 
+        auto* tick = new SidebarFrameTick{
+            .runtime = this,
+            .generation = sidebar_frame_generation_,
+        };
         sidebar_tick_id_ = gtk_widget_add_tick_callback(
             sidebar_->get_window(),
             +[](GtkWidget*, GdkFrameClock* frame_clock, gpointer data) -> gboolean {
-                auto* runtime = static_cast<ShellRuntime*>(data);
+                auto* tick = static_cast<SidebarFrameTick*>(data);
+                auto* runtime = tick != nullptr ? tick->runtime : nullptr;
+                if (runtime == nullptr || runtime->sidebar_ == nullptr ||
+                    runtime->sidebar_tick_id_ == 0 ||
+                    runtime->sidebar_frame_generation_ != tick->generation) {
+                    return G_SOURCE_REMOVE;
+                }
                 if (runtime->advance_right_sidebar_frame(frame_clock)) {
                     return G_SOURCE_CONTINUE;
                 }
@@ -3014,13 +3098,13 @@ private:
                 runtime->sidebar_last_frame_time_ = 0;
                 return G_SOURCE_REMOVE;
             },
-            this,
-            nullptr
+            tick,
+            +[](gpointer data) { delete static_cast<SidebarFrameTick*>(data); }
         );
     }
 
     void finish_right_sidebar_hide_if_ready() {
-        if (state_.right_sidebar_visible() ||
+        if (sidebar_ == nullptr || state_.right_sidebar_visible() ||
             sidebar_transition_.state() != effects::TransitionState::Hidden ||
             !sidebar_character_exit_complete_) {
             return;
@@ -3129,9 +3213,11 @@ private:
     std::unique_ptr<bar::VerticalBar> bar_;
     std::vector<std::unique_ptr<bar::VerticalBar>> secondary_bars_;
     std::vector<MonitorHotspot> hotspots_;
+    std::vector<MonitorPropertyWatch> monitor_property_watches_;
     GListModel* monitor_model_ = nullptr;
     gulong monitor_model_signal_id_ = 0;
     guint monitor_rebuild_idle_id_ = 0;
+    guint monitor_geometry_refresh_idle_id_ = 0;
     std::uint64_t monitor_topology_generation_ = 0;
     int active_monitor_index_ = 0;
     GtkWindow* sidebar_backdrop_ = nullptr;
@@ -3141,6 +3227,7 @@ private:
     effects::TransitionTimeline sidebar_transition_{{0.22, 0.16}};
     guint sidebar_tick_id_ = 0;
     gint64 sidebar_last_frame_time_ = 0;
+    std::uint64_t sidebar_frame_generation_ = 0;
     bool sidebar_character_exit_complete_ = true;
     std::unique_ptr<CommandReceiptOverlay> command_receipts_;
     std::unique_ptr<LauncherOverlay> launcher_overlay_;

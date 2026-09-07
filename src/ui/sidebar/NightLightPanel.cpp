@@ -216,7 +216,10 @@ void NightLightPanel::build() {
     gtk_box_append(GTK_BOX(footer), status_);
     gtk_box_append(GTK_BOX(content_), footer);
 
-    render(services::NightLightState{});
+    set_available(false);
+    set_busy(false);
+    update_strength_copy(pending_strength_);
+    set_status("Night Light status unavailable", true);
 }
 
 void NightLightPanel::show() {
@@ -278,6 +281,7 @@ void NightLightPanel::refresh() {
                     if (result->state) {
                         lifetime.owner->render(*result->state);
                     } else {
+                        lifetime.owner->set_available(false);
                         lifetime.owner->set_busy(false);
                         lifetime.owner->set_status("hyprsunset is unavailable", true);
                     }
@@ -291,6 +295,7 @@ void NightLightPanel::refresh() {
 }
 
 void NightLightPanel::render(const services::NightLightState& state) {
+    set_available(true);
     enabled_ = state.enabled;
     pending_strength_ = services::NightLight::temperature_to_strength(
         state.temperature
@@ -408,10 +413,24 @@ void NightLightPanel::update_strength_copy(int strength) {
 }
 
 void NightLightPanel::set_busy(bool busy) {
-    gtk_widget_set_sensitive(toggle_, !busy);
-    gtk_widget_set_sensitive(scale_, !busy && enabled_);
+    gtk_widget_set_sensitive(toggle_, !busy && available_);
+    gtk_widget_set_sensitive(scale_, !busy && enabled_ && available_);
     if (busy) gtk_spinner_start(GTK_SPINNER(spinner_));
     else gtk_spinner_stop(GTK_SPINNER(spinner_));
+}
+
+void NightLightPanel::set_available(bool available) {
+    available_ = available;
+    if (!available_) {
+        enabled_ = false;
+        updating_ = true;
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(toggle_), FALSE);
+        gtk_button_set_label(GTK_BUTTON(toggle_), "OFF");
+        gtk_widget_remove_css_class(toggle_, "active");
+        updating_ = false;
+    }
+    gtk_widget_set_sensitive(toggle_, available_);
+    gtk_widget_set_sensitive(scale_, available_ && enabled_);
 }
 
 void NightLightPanel::set_status(const std::string& message, bool error) {

@@ -6,7 +6,9 @@
 #include "ui/bar/widgets/ThemedSvgIcon.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <exception>
+#include <string_view>
 #include <utility>
 
 namespace realmheart::ui::sidebar {
@@ -78,11 +80,21 @@ std::string bluetooth_display_name(const services::BluetoothDevice& device) {
     return device.address.empty() ? "Unnamed device" : device.address;
 }
 
+template <typename State>
+std::string refresh_key(std::string_view prefix, const std::shared_ptr<State>& state) {
+    return std::string(prefix) + ":" + std::to_string(
+        reinterpret_cast<std::uintptr_t>(state.get())
+    );
+}
+
 } // namespace
 
 struct WifiManagerPopover::LifetimeState {
     std::atomic<bool> alive{true};
     std::atomic<std::uint64_t> generation{0};
+    std::atomic<bool> refresh_in_flight{false};
+    std::atomic<bool> refresh_pending{false};
+    std::atomic<bool> refresh_pending_rescan{false};
     std::mutex operation_mutex;
     WifiManagerPopover* owner = nullptr; // GTK main thread only
 };
@@ -165,7 +177,8 @@ void WifiManagerPopover::build() {
     gtk_widget_set_visible(spinner_, FALSE);
     gtk_box_append(GTK_BOX(toolbar), spinner_);
 
-    GtkWidget* refresh_button = gtk_button_new_with_label("Refresh");
+    refresh_button_ = gtk_button_new_with_label("Refresh");
+    GtkWidget* refresh_button = refresh_button_;
     gtk_widget_add_css_class(refresh_button, "realmheart-manager-quiet-button");
     g_signal_connect(refresh_button, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
         static_cast<WifiManagerPopover*>(data)->refresh(true);
@@ -274,43 +287,76 @@ void WifiManagerPopover::toggle() {
 
 void WifiManagerPopover::refresh(bool rescan) {
     const auto lifetime = lifetime_;
-    const std::uint64_t generation = lifetime->generation.fetch_add(1) + 1;
     set_busy(true, rescan ? "Scanning for nearby networks…" : "Refreshing network state…");
-    realmheart::core::shared_task_executor().post([lifetime, generation, rescan] {
+    if (lifetime->refresh_in_flight.exchange(true)) {
+        lifetime->refresh_pending.store(true);
+        if (rescan) lifetime->refresh_pending_rescan.store(true);
+        return;
+    }
+
+    const std::uint64_t generation = lifetime->generation.fetch_add(1) + 1;
+    struct Result {
+        std::shared_ptr<LifetimeState> lifetime;
+        std::uint64_t generation;
         std::optional<services::WifiState> state;
         std::vector<services::WifiNetwork> networks;
-        {
-            std::lock_guard lock(lifetime->operation_mutex);
-            if (!lifetime->alive.load() || lifetime->generation.load() != generation) return;
-            const auto options = network_options();
-            state = services::Wifi::read(options);
-            if (state && state->enabled) {
-                networks = services::Wifi::scan(rescan, options);
-            }
-        }
-
-        struct Result {
-            std::shared_ptr<LifetimeState> lifetime;
-            std::uint64_t generation;
-            std::optional<services::WifiState> state;
-            std::vector<services::WifiNetwork> networks;
-        };
+    };
+    auto post_result = [lifetime, generation](
+        std::optional<services::WifiState> state,
+        std::vector<services::WifiNetwork> networks
+    ) {
         g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,
             +[](gpointer raw) -> gboolean {
                 auto* result = static_cast<Result*>(raw);
                 auto& lifetime = *result->lifetime;
-                if (lifetime.alive.load() && lifetime.owner != nullptr &&
+                auto* owner = lifetime.owner;
+                const bool schedule_pending = lifetime.refresh_pending.exchange(false);
+                const bool pending_rescan = lifetime.refresh_pending_rescan.exchange(false);
+                lifetime.refresh_in_flight.store(false);
+                if (lifetime.alive.load() && owner != nullptr &&
                     lifetime.generation.load() == result->generation) {
-                    lifetime.owner->render(result->state, result->networks);
-                    lifetime.owner->set_busy(false);
+                    owner->render(result->state, result->networks);
+                    owner->set_busy(false);
+                }
+                if (schedule_pending && lifetime.alive.load() && owner != nullptr) {
+                    owner->refresh(pending_rescan);
                 }
                 return G_SOURCE_REMOVE;
             },
             new Result{lifetime, generation, std::move(state), std::move(networks)},
             +[](gpointer raw) { delete static_cast<Result*>(raw); }
         );
-    });
+    };
+
+    const bool queued = realmheart::core::shared_task_executor().post(
+        [lifetime, generation, rescan, post_result] {
+            if (!lifetime->alive.load()) return;
+            std::optional<services::WifiState> state;
+            std::vector<services::WifiNetwork> networks;
+            {
+                std::lock_guard lock(lifetime->operation_mutex);
+                if (!lifetime->alive.load()) return;
+                if (lifetime->generation.load() != generation) {
+                    post_result(std::nullopt, {});
+                    return;
+                }
+                const auto options = network_options();
+                state = services::Wifi::read(options);
+                if (state && state->enabled) {
+                    networks = services::Wifi::scan(rescan, options);
+                }
+            }
+            post_result(std::move(state), std::move(networks));
+        },
+        refresh_key("sidebar-wifi-refresh", lifetime),
+        [lifetime] { return !lifetime->alive.load(); }
+    );
+    if (!queued) {
+        lifetime->refresh_in_flight.store(false);
+        set_busy(false);
+        set_status("Refresh queue is unavailable", true);
+    }
 }
 
 void WifiManagerPopover::render(
@@ -318,11 +364,13 @@ void WifiManagerPopover::render(
     const std::vector<services::WifiNetwork>& networks
 ) {
     clear_box(list_);
+    set_available(state.has_value());
     const bool powered = state.has_value() && state->enabled;
     g_object_set_data(
         G_OBJECT(power_button_), "realmheart-power-state", GINT_TO_POINTER(powered ? 1 : 0)
     );
     gtk_button_set_label(GTK_BUTTON(power_button_), powered ? "Turn off" : "Turn on");
+    if (!available_) gtk_button_set_label(GTK_BUTTON(power_button_), "Unavailable");
 
     if (!state) {
         set_status("NetworkManager is unavailable", true);
@@ -531,11 +579,18 @@ void WifiManagerPopover::run_action(
 
 void WifiManagerPopover::set_busy(bool busy, const std::string& message) {
     gtk_widget_set_sensitive(list_, !busy);
-    gtk_widget_set_sensitive(power_button_, !busy);
+    gtk_widget_set_sensitive(power_button_, !busy && available_);
+    gtk_widget_set_sensitive(refresh_button_, !busy);
     gtk_widget_set_visible(spinner_, busy);
     if (busy) gtk_spinner_start(GTK_SPINNER(spinner_));
     else gtk_spinner_stop(GTK_SPINNER(spinner_));
     if (!message.empty()) set_status(message);
+}
+
+void WifiManagerPopover::set_available(bool available) {
+    available_ = available;
+    gtk_widget_set_sensitive(power_button_, available_);
+    if (!available_) gtk_button_set_label(GTK_BUTTON(power_button_), "Unavailable");
 }
 
 void WifiManagerPopover::set_status(const std::string& message, bool error) {
@@ -546,6 +601,9 @@ void WifiManagerPopover::set_status(const std::string& message, bool error) {
 struct BluetoothManagerPopover::LifetimeState {
     std::atomic<bool> alive{true};
     std::atomic<std::uint64_t> generation{0};
+    std::atomic<bool> refresh_in_flight{false};
+    std::atomic<bool> refresh_pending{false};
+    std::atomic<bool> refresh_pending_scan{false};
     std::mutex operation_mutex;
     BluetoothManagerPopover* owner = nullptr; // GTK main thread only
 };
@@ -628,7 +686,8 @@ void BluetoothManagerPopover::build() {
     gtk_widget_set_visible(spinner_, FALSE);
     gtk_box_append(GTK_BOX(toolbar), spinner_);
 
-    GtkWidget* refresh_button = gtk_button_new_with_label("Scan");
+    refresh_button_ = gtk_button_new_with_label("Scan");
+    GtkWidget* refresh_button = refresh_button_;
     gtk_widget_add_css_class(refresh_button, "realmheart-manager-quiet-button");
     g_signal_connect(refresh_button, "clicked", G_CALLBACK(+[](GtkButton*, gpointer data) {
         static_cast<BluetoothManagerPopover*>(data)->refresh(true);
@@ -694,44 +753,76 @@ void BluetoothManagerPopover::toggle() {
 
 void BluetoothManagerPopover::refresh(bool scan_for_new_devices) {
     const auto lifetime = lifetime_;
-    const std::uint64_t generation = lifetime->generation.fetch_add(1) + 1;
     set_busy(true, scan_for_new_devices ? "Scanning for nearby devices…" : "Refreshing devices…");
-    realmheart::core::shared_task_executor().post([
-        lifetime, generation, scan_for_new_devices
-    ] {
+    if (lifetime->refresh_in_flight.exchange(true)) {
+        lifetime->refresh_pending.store(true);
+        if (scan_for_new_devices) lifetime->refresh_pending_scan.store(true);
+        return;
+    }
+
+    const std::uint64_t generation = lifetime->generation.fetch_add(1) + 1;
+    struct Result {
+        std::shared_ptr<LifetimeState> lifetime;
+        std::uint64_t generation;
         std::optional<services::BluetoothState> state;
         std::vector<services::BluetoothDevice> devices;
-        {
-            std::lock_guard lock(lifetime->operation_mutex);
-            if (!lifetime->alive.load() || lifetime->generation.load() != generation) return;
-            const auto options = network_options();
-            state = services::Bluetooth::read(options);
-            if (state && state->powered) {
-                devices = services::Bluetooth::devices(scan_for_new_devices, options);
-            }
-        }
-        struct Result {
-            std::shared_ptr<LifetimeState> lifetime;
-            std::uint64_t generation;
-            std::optional<services::BluetoothState> state;
-            std::vector<services::BluetoothDevice> devices;
-        };
+    };
+    auto post_result = [lifetime, generation](
+        std::optional<services::BluetoothState> state,
+        std::vector<services::BluetoothDevice> devices
+    ) {
         g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,
             +[](gpointer raw) -> gboolean {
                 auto* result = static_cast<Result*>(raw);
                 auto& lifetime = *result->lifetime;
-                if (lifetime.alive.load() && lifetime.owner != nullptr &&
+                auto* owner = lifetime.owner;
+                const bool schedule_pending = lifetime.refresh_pending.exchange(false);
+                const bool pending_scan = lifetime.refresh_pending_scan.exchange(false);
+                lifetime.refresh_in_flight.store(false);
+                if (lifetime.alive.load() && owner != nullptr &&
                     lifetime.generation.load() == result->generation) {
-                    lifetime.owner->render(result->state, result->devices);
-                    lifetime.owner->set_busy(false);
+                    owner->render(result->state, result->devices);
+                    owner->set_busy(false);
+                }
+                if (schedule_pending && lifetime.alive.load() && owner != nullptr) {
+                    owner->refresh(pending_scan);
                 }
                 return G_SOURCE_REMOVE;
             },
             new Result{lifetime, generation, std::move(state), std::move(devices)},
             +[](gpointer raw) { delete static_cast<Result*>(raw); }
         );
-    });
+    };
+
+    const bool queued = realmheart::core::shared_task_executor().post(
+        [lifetime, generation, scan_for_new_devices, post_result] {
+            if (!lifetime->alive.load()) return;
+            std::optional<services::BluetoothState> state;
+            std::vector<services::BluetoothDevice> devices;
+            {
+                std::lock_guard lock(lifetime->operation_mutex);
+                if (!lifetime->alive.load()) return;
+                if (lifetime->generation.load() != generation) {
+                    post_result(std::nullopt, {});
+                    return;
+                }
+                const auto options = network_options();
+                state = services::Bluetooth::read(options);
+                if (state && state->powered) {
+                    devices = services::Bluetooth::devices(scan_for_new_devices, options);
+                }
+            }
+            post_result(std::move(state), std::move(devices));
+        },
+        refresh_key("sidebar-bluetooth-refresh", lifetime),
+        [lifetime] { return !lifetime->alive.load(); }
+    );
+    if (!queued) {
+        lifetime->refresh_in_flight.store(false);
+        set_busy(false);
+        set_status("Refresh queue is unavailable", true);
+    }
 }
 
 void BluetoothManagerPopover::render(
@@ -739,11 +830,13 @@ void BluetoothManagerPopover::render(
     const std::vector<services::BluetoothDevice>& devices
 ) {
     clear_box(list_);
+    set_available(state.has_value());
     const bool powered = state.has_value() && state->powered;
     g_object_set_data(
         G_OBJECT(power_button_), "realmheart-power-state", GINT_TO_POINTER(powered ? 1 : 0)
     );
     gtk_button_set_label(GTK_BUTTON(power_button_), powered ? "Turn off" : "Turn on");
+    if (!available_) gtk_button_set_label(GTK_BUTTON(power_button_), "Unavailable");
 
     if (!state) {
         set_status("Bluetooth is unavailable", true);
@@ -921,11 +1014,18 @@ void BluetoothManagerPopover::run_action(
 
 void BluetoothManagerPopover::set_busy(bool busy, const std::string& message) {
     gtk_widget_set_sensitive(list_, !busy);
-    gtk_widget_set_sensitive(power_button_, !busy);
+    gtk_widget_set_sensitive(power_button_, !busy && available_);
+    gtk_widget_set_sensitive(refresh_button_, !busy);
     gtk_widget_set_visible(spinner_, busy);
     if (busy) gtk_spinner_start(GTK_SPINNER(spinner_));
     else gtk_spinner_stop(GTK_SPINNER(spinner_));
     if (!message.empty()) set_status(message);
+}
+
+void BluetoothManagerPopover::set_available(bool available) {
+    available_ = available;
+    gtk_widget_set_sensitive(power_button_, available_);
+    if (!available_) gtk_button_set_label(GTK_BUTTON(power_button_), "Unavailable");
 }
 
 void BluetoothManagerPopover::set_status(const std::string& message, bool error) {
