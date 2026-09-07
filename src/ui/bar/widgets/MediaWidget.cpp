@@ -756,13 +756,19 @@ void MediaWidget::close() {
 }
 
 void MediaWidget::invoke_control(const char* method) {
+    const auto state = async_state_;
     auto* service = &media_service_;
     const std::string action(method != nullptr ? method : "");
-    static_cast<void>(realmheart::core::shared_task_executor().post([service, action] {
-        if (action == "previous") static_cast<void>(service->previous());
-        else if (action == "next") static_cast<void>(service->next());
-        else static_cast<void>(service->play_pause());
-    }));
+    static_cast<void>(realmheart::core::shared_task_executor().post(
+        [state, service, action] {
+            if (!state->alive.load()) return;
+            if (action == "previous") static_cast<void>(service->previous());
+            else if (action == "next") static_cast<void>(service->next());
+            else static_cast<void>(service->play_pause());
+        },
+        {},
+        [state] { return !state->alive.load(); }
+    ));
 }
 
 void MediaWidget::start_position_refresh() {
@@ -887,18 +893,25 @@ void MediaWidget::commit_pending_seek() {
     info_->position_us = target_us;
     refresh_seek_ui();
 
+    const auto state = async_state_;
     auto* service = &media_service_;
     static_cast<void>(realmheart::core::shared_task_executor().post(
-        [service, player_bus_name, track_id, current_us, target_us] {
+        [state, service, player_bus_name, track_id, current_us, target_us] {
+            if (!state->alive.load()) return;
             static_cast<void>(service->seek_to(
                 player_bus_name, track_id, current_us, target_us
             ));
-        }
+        },
+        {},
+        [state] { return !state->alive.load(); }
     ));
 }
 
 void MediaWidget::update_art(const std::string& art_url) {
-    if (art_url == requested_art_url_ && art_request_complete_) return;
+    // Position and playback signals may repeat the same metadata while a
+    // remote download is pending. Keep the existing request alive instead of
+    // generating another queued worker for the same identity.
+    if (art_url == requested_art_url_) return;
 
     requested_art_url_ = art_url;
     art_request_complete_ = art_url.empty();
@@ -909,6 +922,9 @@ void MediaWidget::update_art(const std::string& art_url) {
 
     const auto state = async_state_;
     const std::string requested_url = art_url;
+    const std::string task_key = "media-art-" + std::to_string(
+        reinterpret_cast<std::uintptr_t>(state.get())
+    );
     const bool posted = realmheart::core::shared_task_executor().post(
         [state, requested_url, generation] {
             const auto cancelled = [state, generation] {
@@ -961,6 +977,10 @@ void MediaWidget::update_art(const std::string& art_url) {
                 new Payload{state, requested_url, generation, pixbuf},
                 +[](gpointer raw) { delete static_cast<Payload*>(raw); }
             );
+        },
+        task_key,
+        [state, generation] {
+            return !state->alive.load() || state->art_generation.load() != generation;
         }
     );
 

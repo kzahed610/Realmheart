@@ -257,7 +257,11 @@ void event_line_ready(GObject* source, GAsyncResult* result, gpointer raw) {
 
     if (!state->running.load() || cancelled) return;
 
+    const bool failed_subscription = state->process == nullptr ||
+        !g_subprocess_get_if_exited(state->process) ||
+        g_subprocess_get_exit_status(state->process) != 0;
     clear_event_stream(state, false);
+    if (failed_subscription) start_fallback_poll(state);
     schedule_restart(state);
 }
 
@@ -304,6 +308,11 @@ void start_event_stream(const std::shared_ptr<AudioMonitor::State>& state) {
         return;
     }
 
+    if (state->fallback_poll_id != 0) {
+        g_source_remove(state->fallback_poll_id);
+        state->fallback_poll_id = 0;
+    }
+
     state->cancellable = g_cancellable_new();
     state->stream = G_DATA_INPUT_STREAM(g_data_input_stream_new(
         g_subprocess_get_stdout_pipe(state->process)
@@ -340,8 +349,6 @@ void AudioMonitor::start() {
 
 void AudioMonitor::stop() {
     if (!state_ || !state_->running.exchange(false)) return;
-
-    state_->callback = {};
 
     if (state_->debounce_id != 0) {
         g_source_remove(state_->debounce_id);

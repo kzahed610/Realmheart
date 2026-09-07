@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <limits>
 #include <optional>
 #include <string_view>
@@ -16,6 +17,23 @@ namespace {
 constexpr const char* kObjectPath = "/org/mpris/MediaPlayer2";
 constexpr const char* kPlayerInterface = "org.mpris.MediaPlayer2.Player";
 constexpr int kDbusTimeoutMs = 750;
+constexpr guint kSignalReconnectDelayMs = 1000;
+constexpr unsigned int kMaxSignalReconnectAttempts = 5;
+constexpr std::size_t kMaxPlayers = 16;
+constexpr auto kDiscoveryBudget = std::chrono::milliseconds(1500);
+constexpr std::size_t kMaxTitleBytes = 512;
+constexpr std::size_t kMaxArtistBytes = 512;
+constexpr std::size_t kMaxAlbumBytes = 512;
+constexpr std::size_t kMaxArtUrlBytes = 2048;
+constexpr std::size_t kMaxTrackIdBytes = 512;
+constexpr std::size_t kMaxBusNameBytes = 256;
+constexpr gint64 kMaxMediaDurationUs = 7LL * 24LL * 60LL * 60LL * 1'000'000LL;
+
+std::string bounded_string(const char* value, std::size_t maximum) {
+    if (value == nullptr) return {};
+    const std::string_view text(value);
+    return text.size() <= maximum ? std::string(text) : std::string{};
+}
 
 std::optional<gint64> variant_integer(GVariant* value) {
     if (value == nullptr) return std::nullopt;
@@ -62,7 +80,11 @@ std::optional<gint64> lookup_integer(GVariant* dictionary, const char* key) {
     return result;
 }
 
-std::string lookup_string_like(GVariant* dictionary, const char* key) {
+std::string lookup_string_like(
+    GVariant* dictionary,
+    const char* key,
+    std::size_t maximum
+) {
     if (dictionary == nullptr || key == nullptr) return {};
     GVariant* value = g_variant_lookup_value(dictionary, key, nullptr);
     if (value == nullptr) return {};
@@ -76,7 +98,7 @@ std::string lookup_string_like(GVariant* dictionary, const char* key) {
     std::string result;
     if (g_variant_is_of_type(value, G_VARIANT_TYPE_STRING) ||
         g_variant_is_of_type(value, G_VARIANT_TYPE_OBJECT_PATH)) {
-        result = g_variant_get_string(value, nullptr);
+        result = bounded_string(g_variant_get_string(value, nullptr), maximum);
     }
     g_variant_unref(value);
     return result;
@@ -87,9 +109,16 @@ struct PlayerState {
     MediaInfo info;
 };
 
-std::vector<std::string> list_players(GDBusConnection* connection) {
+std::vector<std::string> list_players(
+    GDBusConnection* connection,
+    std::chrono::steady_clock::time_point deadline
+) {
     std::vector<std::string> players;
     GError* error = nullptr;
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now()
+    ).count();
+    if (remaining <= 0) return players;
     GVariant* reply = g_dbus_connection_call_sync(
         connection,
         "org.freedesktop.DBus",
@@ -99,7 +128,7 @@ std::vector<std::string> list_players(GDBusConnection* connection) {
         nullptr,
         G_VARIANT_TYPE("(as)"),
         G_DBUS_CALL_FLAGS_NONE,
-        kDbusTimeoutMs,
+        static_cast<gint>(std::min<std::int64_t>(kDbusTimeoutMs, remaining)),
         nullptr,
         &error
     );
@@ -115,7 +144,9 @@ std::vector<std::string> list_players(GDBusConnection* connection) {
     g_variant_iter_init(&iterator, names);
     while (g_variant_iter_next(&iterator, "&s", &name)) {
         constexpr std::string_view prefix = "org.mpris.MediaPlayer2.";
-        if (name != nullptr && std::string_view(name).starts_with(prefix)) {
+        if (name != nullptr && std::string_view(name).starts_with(prefix) &&
+            std::string_view(name).size() <= kMaxBusNameBytes &&
+            players.size() < kMaxPlayers) {
             players.emplace_back(name);
         }
     }
@@ -132,12 +163,27 @@ std::string first_artist(GVariant* metadata) {
     GVariantIter iterator;
     const gchar* value = nullptr;
     g_variant_iter_init(&iterator, artists);
-    if (g_variant_iter_next(&iterator, "&s", &value) && value != nullptr) artist = value;
+    if (g_variant_iter_next(&iterator, "&s", &value) && value != nullptr) {
+        artist = bounded_string(value, kMaxArtistBytes);
+    }
     g_variant_unref(artists);
     return artist;
 }
 
-std::optional<PlayerState> read_player(GDBusConnection* connection, const std::string& bus_name) {
+std::optional<PlayerState> read_player(
+    GDBusConnection* connection,
+    const std::string& bus_name,
+    std::chrono::steady_clock::time_point deadline
+) {
+    if (bus_name.size() > kMaxBusNameBytes ||
+        std::chrono::steady_clock::now() >= deadline) {
+        return std::nullopt;
+    }
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now()
+    ).count();
+    if (remaining <= 0) return std::nullopt;
+
     GError* error = nullptr;
     GVariant* reply = g_dbus_connection_call_sync(
         connection,
@@ -148,7 +194,7 @@ std::optional<PlayerState> read_player(GDBusConnection* connection, const std::s
         g_variant_new("(s)", kPlayerInterface),
         G_VARIANT_TYPE("(a{sv})"),
         G_DBUS_CALL_FLAGS_NONE,
-        kDbusTimeoutMs,
+        static_cast<gint>(std::min<std::int64_t>(kDbusTimeoutMs, remaining)),
         nullptr,
         &error
     );
@@ -162,7 +208,7 @@ std::optional<PlayerState> read_player(GDBusConnection* connection, const std::s
 
     PlayerState state;
     state.bus_name = bus_name;
-    state.info.player_bus_name = bus_name;
+    state.info.player_bus_name = bounded_string(bus_name.c_str(), kMaxBusNameBytes);
     const gchar* playback = nullptr;
     if (g_variant_lookup(properties, "PlaybackStatus", "&s", &playback) && playback != nullptr) {
         if (std::string_view(playback) == "Playing") state.info.playback_status = 1;
@@ -175,7 +221,11 @@ std::optional<PlayerState> read_player(GDBusConnection* connection, const std::s
     }
 
     if (const auto position_us = lookup_integer(properties, "Position")) {
-        state.info.position_us = std::max<gint64>(0, *position_us);
+        state.info.position_us = std::clamp<gint64>(
+            *position_us,
+            0,
+            kMaxMediaDurationUs
+        );
     }
 
     GVariant* metadata = g_variant_lookup_value(properties, "Metadata", G_VARIANT_TYPE("a{sv}"));
@@ -184,20 +234,28 @@ std::optional<PlayerState> read_player(GDBusConnection* connection, const std::s
         const gchar* album = nullptr;
         const gchar* art_url = nullptr;
         if (g_variant_lookup(metadata, "xesam:title", "&s", &title) && title != nullptr) {
-            state.info.title = title;
+            state.info.title = bounded_string(title, kMaxTitleBytes);
         }
         if (g_variant_lookup(metadata, "xesam:album", "&s", &album) && album != nullptr) {
-            state.info.album = album;
+            state.info.album = bounded_string(album, kMaxAlbumBytes);
         }
         if (g_variant_lookup(metadata, "mpris:artUrl", "&s", &art_url) && art_url != nullptr) {
-            state.info.art_url = art_url;
+            state.info.art_url = bounded_string(art_url, kMaxArtUrlBytes);
         }
 
         if (const auto length_us = lookup_integer(metadata, "mpris:length")) {
-            state.info.length_us = std::max<gint64>(0, *length_us);
+            state.info.length_us = std::clamp<gint64>(
+                *length_us,
+                0,
+                kMaxMediaDurationUs
+            );
         }
 
-        state.info.track_id = lookup_string_like(metadata, "mpris:trackid");
+        state.info.track_id = lookup_string_like(
+            metadata,
+            "mpris:trackid",
+            kMaxTrackIdBytes
+        );
 
         state.info.artist = first_artist(metadata);
         g_variant_unref(metadata);
@@ -209,9 +267,11 @@ std::optional<PlayerState> read_player(GDBusConnection* connection, const std::s
 }
 
 std::optional<PlayerState> select_player(GDBusConnection* connection) {
+    const auto deadline = std::chrono::steady_clock::now() + kDiscoveryBudget;
     std::optional<PlayerState> fallback;
-    for (const auto& name : list_players(connection)) {
-        auto player = read_player(connection, name);
+    for (const auto& name : list_players(connection, deadline)) {
+        if (std::chrono::steady_clock::now() >= deadline) break;
+        auto player = read_player(connection, name, deadline);
         if (!player) continue;
         if (player->info.playback_status == 1) return player;
         if (!fallback || (fallback->info.playback_status == 0 && player->info.playback_status == 2)) {
@@ -300,22 +360,72 @@ void MediaService::Subscription::reset() {
     id_ = 0;
 }
 
-MediaService::~MediaService() {
-    if (signal_connection_ != nullptr) {
-        if (properties_subscription_id_ != 0) {
-            g_dbus_connection_signal_unsubscribe(signal_connection_, properties_subscription_id_);
-        }
-        if (names_subscription_id_ != 0) {
-            g_dbus_connection_signal_unsubscribe(signal_connection_, names_subscription_id_);
-        }
-        g_object_unref(signal_connection_);
-        signal_connection_ = nullptr;
+void MediaService::reset_signal_monitor() {
+    auto* connection = signal_connection_;
+    if (connection == nullptr) {
+        signal_closed_handler_id_ = 0;
+        properties_subscription_id_ = 0;
+        names_subscription_id_ = 0;
+        return;
     }
+
+    if (signal_closed_handler_id_ != 0) {
+        g_signal_handler_disconnect(connection, signal_closed_handler_id_);
+        signal_closed_handler_id_ = 0;
+    }
+    if (properties_subscription_id_ != 0) {
+        g_dbus_connection_signal_unsubscribe(connection, properties_subscription_id_);
+    }
+    if (names_subscription_id_ != 0) {
+        g_dbus_connection_signal_unsubscribe(connection, names_subscription_id_);
+    }
+    signal_connection_ = nullptr;
+    properties_subscription_id_ = 0;
+    names_subscription_id_ = 0;
+    g_object_unref(connection);
+}
+
+void MediaService::schedule_signal_reconnect() {
+    if (signal_reconnect_id_ != 0 ||
+        signal_reconnect_attempts_ >= kMaxSignalReconnectAttempts) {
+        return;
+    }
+    signal_reconnect_id_ = g_timeout_add_full(
+        G_PRIORITY_DEFAULT,
+        kSignalReconnectDelayMs,
+        +[](gpointer raw) -> gboolean {
+            auto* self = static_cast<MediaService*>(raw);
+            self->signal_reconnect_id_ = 0;
+            if (self->ensure_signal_monitor()) {
+                self->signal_reconnect_attempts_ = 0;
+                return G_SOURCE_REMOVE;
+            }
+            ++self->signal_reconnect_attempts_;
+            self->schedule_signal_reconnect();
+            return G_SOURCE_REMOVE;
+        },
+        this,
+        nullptr
+    );
+}
+
+MediaService::~MediaService() {
+    if (signal_reconnect_id_ != 0) {
+        g_source_remove(signal_reconnect_id_);
+        signal_reconnect_id_ = 0;
+    }
+    reset_signal_monitor();
 }
 
 bool MediaService::ensure_signal_monitor() {
-    if (signal_connection_ != nullptr && properties_subscription_id_ != 0 && names_subscription_id_ != 0) {
+    if (signal_connection_ != nullptr &&
+        !g_dbus_connection_is_closed(signal_connection_) &&
+        properties_subscription_id_ != 0 &&
+        names_subscription_id_ != 0) {
         return true;
+    }
+    if (signal_connection_ != nullptr && g_dbus_connection_is_closed(signal_connection_)) {
+        reset_signal_monitor();
     }
     if (signal_connection_ != nullptr) {
         if (properties_subscription_id_ != 0) {
@@ -334,8 +444,23 @@ bool MediaService::ensure_signal_monitor() {
     signal_connection_ = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
     if (signal_connection_ == nullptr) {
         g_clear_error(&error);
+        schedule_signal_reconnect();
         return false;
     }
+    g_dbus_connection_set_exit_on_close(signal_connection_, FALSE);
+    signal_closed_handler_id_ = g_signal_connect(
+        signal_connection_,
+        "closed",
+        G_CALLBACK(+[](GDBusConnection* connection, gboolean, GError*, gpointer data) {
+            auto* self = static_cast<MediaService*>(data);
+            if (self->signal_connection_ != connection) return;
+            self->reset_signal_monitor();
+            self->clear_cached_player();
+            self->notify_changed();
+            self->schedule_signal_reconnect();
+        }),
+        this
+    );
 
     properties_subscription_id_ = g_dbus_connection_signal_subscribe(
         signal_connection_,
@@ -389,7 +514,10 @@ bool MediaService::ensure_signal_monitor() {
         this,
         nullptr
     );
-    if (properties_subscription_id_ != 0 && names_subscription_id_ != 0) return true;
+    if (properties_subscription_id_ != 0 && names_subscription_id_ != 0) {
+        signal_reconnect_attempts_ = 0;
+        return true;
+    }
 
     if (properties_subscription_id_ != 0) {
         g_dbus_connection_signal_unsubscribe(signal_connection_, properties_subscription_id_);
@@ -397,10 +525,15 @@ bool MediaService::ensure_signal_monitor() {
     if (names_subscription_id_ != 0) {
         g_dbus_connection_signal_unsubscribe(signal_connection_, names_subscription_id_);
     }
+    if (signal_closed_handler_id_ != 0) {
+        g_signal_handler_disconnect(signal_connection_, signal_closed_handler_id_);
+        signal_closed_handler_id_ = 0;
+    }
     g_object_unref(signal_connection_);
     signal_connection_ = nullptr;
     properties_subscription_id_ = 0;
     names_subscription_id_ = 0;
+    schedule_signal_reconnect();
     return false;
 }
 

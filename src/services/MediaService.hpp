@@ -88,12 +88,17 @@ private:
     bool call_mpris_method(const std::string& method);
     std::optional<std::string> current_player_name();
     bool ensure_signal_monitor();
+    void reset_signal_monitor();
+    void schedule_signal_reconnect();
     void notify_changed();
     void clear_cached_player();
 
     std::mutex mutex_;
     std::string last_player_;
     GDBusConnection* signal_connection_ = nullptr;
+    unsigned long signal_closed_handler_id_ = 0;
+    unsigned int signal_reconnect_id_ = 0;
+    unsigned int signal_reconnect_attempts_ = 0;
     unsigned int properties_subscription_id_ = 0;
     unsigned int names_subscription_id_ = 0;
     std::shared_ptr<SubscriberRegistry> subscribers_ = std::make_shared<SubscriberRegistry>();

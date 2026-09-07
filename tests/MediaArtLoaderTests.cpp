@@ -1,6 +1,7 @@
 #include "ui/bar/MediaArtLoader.hpp"
 
 #include <cstdlib>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -81,11 +82,25 @@ void test_local_and_file_uri_artwork() {
 
 void test_remote_artwork_is_bounded_and_cached() {
     TemporaryEnvironment environment;
+    const auto cache = environment.root() / "cache" / "realmheart" / "media-art";
+    std::filesystem::create_directories(cache);
+    const auto stale_partial = cache / "deadbeef.part-old";
+    std::ofstream(stale_partial) << "stale";
+    std::error_code time_error;
+    std::filesystem::last_write_time(
+        stale_partial,
+        std::filesystem::file_time_type::clock::now() - std::chrono::hours(48),
+        time_error
+    );
+    require(!time_error, "test must be able to age a partial artwork file");
+
     const std::string url = "https://example.invalid/cover.jpg";
     const auto first = realmheart::ui::bar::MediaArtLoader::resolve(url);
     require(first.has_value(), "optional curl path must populate remote artwork cache");
     require(std::filesystem::file_size(*first) == 16,
             "downloaded artwork must be the bounded cached file");
+    require(!std::filesystem::exists(stale_partial),
+            "stale partial artwork must be pruned before a new download");
 
     ::setenv("PATH", "/definitely/missing", 1);
     const auto cached = realmheart::ui::bar::MediaArtLoader::resolve(url);

@@ -1,11 +1,30 @@
 #include "services/BatteryService.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <optional>
+#include <string_view>
 #include <system_error>
 
 namespace realmheart::services {
+
+namespace {
+
+std::optional<double> parse_finite_rate(std::string_view value) {
+    try {
+        std::size_t consumed = 0;
+        const double parsed = std::stod(std::string(value), &consumed);
+        if (consumed != value.size() || !std::isfinite(parsed) || parsed < 0.0) {
+            return std::nullopt;
+        }
+        return parsed;
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+} // namespace
 
 std::string BatteryService::read_sysfs_file(const std::filesystem::path& path) {
     std::ifstream file(path);
@@ -48,24 +67,18 @@ std::optional<BatteryStatus> BatteryService::read() {
 
         std::optional<double> rate_watts;
         const std::string power_now = read_sysfs_file(battery_dir / "power_now");
-        if (!power_now.empty()) {
-            std::size_t consumed = 0;
-            const double microwatts = std::stod(power_now, &consumed);
-            if (consumed == power_now.size() && microwatts >= 0.0) {
-                rate_watts = microwatts / 1'000'000.0;
-            }
+        if (const auto microwatts = parse_finite_rate(power_now)) {
+            rate_watts = *microwatts / 1'000'000.0;
         } else {
-            const std::string current_now = read_sysfs_file(battery_dir / "current_now");
-            const std::string voltage_now = read_sysfs_file(battery_dir / "voltage_now");
-            if (!current_now.empty() && !voltage_now.empty()) {
-                std::size_t current_consumed = 0;
-                std::size_t voltage_consumed = 0;
-                const double microamps = std::stod(current_now, &current_consumed);
-                const double microvolts = std::stod(voltage_now, &voltage_consumed);
-                if (current_consumed == current_now.size() && voltage_consumed == voltage_now.size() &&
-                    microamps >= 0.0 && microvolts >= 0.0) {
-                    rate_watts = microamps * microvolts / 1'000'000'000'000.0;
-                }
+            const auto current_now = parse_finite_rate(
+                read_sysfs_file(battery_dir / "current_now")
+            );
+            const auto voltage_now = parse_finite_rate(
+                read_sysfs_file(battery_dir / "voltage_now")
+            );
+            if (current_now && voltage_now) {
+                const double watts = *current_now * *voltage_now / 1'000'000'000'000.0;
+                if (std::isfinite(watts)) rate_watts = watts;
             }
         }
 

@@ -16,6 +16,8 @@
 #include <string>
 #include <system_error>
 #include <vector>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace realmheart::ui::bar {
@@ -23,6 +25,8 @@ namespace {
 
 constexpr std::uintmax_t kMaximumArtBytes = 8U * 1024U * 1024U;
 constexpr std::size_t kMaximumCachedArtwork = 64;
+constexpr std::size_t kMaximumPartialArtwork = 16;
+constexpr auto kPartialArtworkMaxAge = std::chrono::hours(24);
 
 int hex_value(char character) {
     if (character >= '0' && character <= '9') return character - '0';
@@ -109,18 +113,53 @@ void prune_cache(const std::filesystem::path& root) {
     };
 
     std::vector<CachedEntry> entries;
+    std::vector<CachedEntry> partials;
     std::error_code error;
     for (std::filesystem::directory_iterator iterator(root, error), end;
          !error && iterator != end;
          iterator.increment(error)) {
-        if (iterator->path().extension() != ".art") continue;
-        const auto modified = std::filesystem::last_write_time(iterator->path(), error);
+        const auto path = iterator->path();
+        if (path.filename().string().find(".part-") != std::string::npos) {
+            const auto modified = std::filesystem::last_write_time(path, error);
+            if (error) {
+                error.clear();
+                continue;
+            }
+            const auto size = std::filesystem::file_size(path, error);
+            if (error) {
+                error.clear();
+                continue;
+            }
+            const auto now = std::filesystem::file_time_type::clock::now();
+            if (size > kMaximumArtBytes ||
+                (now > modified && now - modified > kPartialArtworkMaxAge)) {
+                std::filesystem::remove(path, error);
+                error.clear();
+                continue;
+            }
+            partials.push_back({path, modified});
+            continue;
+        }
+        if (path.extension() != ".art") continue;
+        const auto modified = std::filesystem::last_write_time(path, error);
         if (error) {
             error.clear();
             continue;
         }
-        entries.push_back({iterator->path(), modified});
+        entries.push_back({path, modified});
     }
+
+    if (partials.size() > kMaximumPartialArtwork) {
+        std::sort(partials.begin(), partials.end(), [](const auto& left, const auto& right) {
+            return left.modified < right.modified;
+        });
+        const auto remove_count = partials.size() - kMaximumPartialArtwork;
+        for (std::size_t index = 0; index < remove_count; ++index) {
+            std::filesystem::remove(partials[index].path, error);
+            error.clear();
+        }
+    }
+
     if (entries.size() <= kMaximumCachedArtwork) return;
 
     std::sort(entries.begin(), entries.end(), [](const auto& left, const auto& right) {
@@ -133,6 +172,30 @@ void prune_cache(const std::filesystem::path& root) {
     }
 }
 
+bool validate_cache_root(const std::filesystem::path& root) {
+    struct stat status{};
+    if (::stat(root.c_str(), &status) != 0 || !S_ISDIR(status.st_mode)) return false;
+    return status.st_uid == ::getuid() && (status.st_mode & 0022) == 0;
+}
+
+bool create_secure_temporary(const std::filesystem::path& path) {
+    const int fd = ::open(
+        path.c_str(),
+        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+        0600
+    );
+    if (fd < 0) return false;
+    struct stat status{};
+    const bool secure = ::fstat(fd, &status) == 0 &&
+        S_ISREG(status.st_mode) && status.st_uid == ::getuid();
+    ::close(fd);
+    if (!secure) {
+        std::error_code error;
+        std::filesystem::remove(path, error);
+    }
+    return secure;
+}
+
 std::optional<std::filesystem::path> fetch_remote(
     std::string_view url,
     const std::function<bool()>& cancelled
@@ -142,7 +205,8 @@ std::optional<std::filesystem::path> fetch_remote(
     std::error_code error;
     const auto root = cache_root();
     std::filesystem::create_directories(root, error);
-    if (error) return std::nullopt;
+    if (error || !validate_cache_root(root)) return std::nullopt;
+    prune_cache(root);
 
     const auto target = root / (cache_key(url) + ".art");
     if (usable_cached_file(target)) return target;
@@ -152,8 +216,7 @@ std::optional<std::filesystem::path> fetch_remote(
     const auto temporary = root /
         (cache_key(url) + ".part-" + std::to_string(static_cast<long long>(::getpid())) +
          "-" + std::to_string(++temporary_counter));
-    std::filesystem::remove(temporary, error);
-    error.clear();
+    if (!create_secure_temporary(temporary)) return std::nullopt;
 
     realmheart::core::CommandOptions options;
     options.deadline = std::chrono::seconds(7);

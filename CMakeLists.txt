@@ -989,6 +989,17 @@ if(BUILD_TESTING)
     add_executable(realmheart_audio_tests tests/AudioTests.cpp src/core/Command.cpp src/services/Audio.cpp)
     realmheart_register_test(realmheart_audio_tests)
 
+    add_executable(
+        realmheart_audio_monitor_tests
+        tests/AudioMonitorTests.cpp
+        src/core/Command.cpp
+        src/core/TaskExecutor.cpp
+        src/services/Audio.cpp
+        src/services/AudioMonitor.cpp
+    )
+    target_link_libraries(realmheart_audio_monitor_tests PRIVATE PkgConfig::GIO)
+    realmheart_register_test(realmheart_audio_monitor_tests)
+
     add_executable(realmheart_bar_services_tests tests/BarServicesTests.cpp src/services/BatteryService.cpp src/services/MediaService.cpp)
     target_link_libraries(realmheart_bar_services_tests PRIVATE PkgConfig::GIO)
     realmheart_register_dbus_test(realmheart_bar_services_tests)

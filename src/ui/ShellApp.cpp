@@ -456,6 +456,10 @@ public:
         // Stop callbacks that capture this before tearing down UI/controllers.
         runtime_async_state_->alive.store(false);
         runtime_async_state_->owner.store(nullptr);
+        // Cancellation prevents queued work from starting, but a worker may
+        // already have passed its cancellation check. Drain the shared pool
+        // while media_ and battery_ are still alive before member teardown.
+        core::shared_task_executor().wait_for_idle();
         if (lock_surface_ != nullptr) {
             lock_surface_->hide_immediately();
         }

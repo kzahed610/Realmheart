@@ -178,6 +178,10 @@ VerticalBar::~VerticalBar() {
     async_state_->alive = false;
     workspace_monitor_.reset();
     async_state_->owner = nullptr;
+    // The service references below are non-owning by design. Drain every
+    // worker that could still touch them before destroying the child widgets
+    // and returning control to ShellRuntime's service teardown.
+    realmheart::core::shared_task_executor().wait_for_idle();
     g_weak_ref_clear(&active_popover_ref_);
 
     bottom_action_button_.reset();
@@ -823,6 +827,7 @@ void VerticalBar::request_media_refresh() {
     const auto state = async_state_;
     auto* service = &media_service_;
     if (!realmheart::core::shared_task_executor().post([state, service] {
+        if (!state->alive.load()) return;
         auto info = service->get_current_media();
         struct Payload {
             std::shared_ptr<AsyncState> state;
@@ -844,7 +849,7 @@ void VerticalBar::request_media_refresh() {
             new Payload{state, std::move(info)},
             +[](gpointer raw) { delete static_cast<Payload*>(raw); }
         );
-    })) {
+    }, {}, [state] { return !state->alive.load(); })) {
         state->media_in_flight = false;
     }
 }
@@ -854,6 +859,7 @@ void VerticalBar::request_battery_refresh() {
     const auto state = async_state_;
     auto* service = &battery_service_;
     if (!realmheart::core::shared_task_executor().post([state, service] {
+        if (!state->alive.load()) return;
         auto status = service->read();
         struct Payload {
             std::shared_ptr<AsyncState> state;
@@ -872,7 +878,7 @@ void VerticalBar::request_battery_refresh() {
             new Payload{state, std::move(status)},
             +[](gpointer raw) { delete static_cast<Payload*>(raw); }
         );
-    })) {
+    }, {}, [state] { return !state->alive.load(); })) {
         state->battery_in_flight = false;
     }
 }

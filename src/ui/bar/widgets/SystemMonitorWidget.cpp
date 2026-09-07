@@ -476,12 +476,20 @@ void SystemMonitorWidget::request_sample() {
     if (async_state_->in_flight.exchange(true)) return;
     const auto state = async_state_;
     if (!realmheart::core::shared_task_executor().post([state] {
-        auto snapshot = services::SystemMonitorService::read();
+        std::optional<services::SystemUsageSnapshot> snapshot;
+        try {
+            snapshot = services::SystemMonitorService::read();
+        } catch (...) {
+            // The worker boundary must always complete the sampling state even
+            // if a platform-specific filesystem implementation throws.
+            snapshot.reset();
+        }
         struct Payload {
             std::shared_ptr<AsyncState> state;
             std::optional<services::SystemUsageSnapshot> snapshot;
         };
-        g_idle_add_full(
+        auto* payload = new Payload{state, std::move(snapshot)};
+        const guint source_id = g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,
             +[](gpointer raw) -> gboolean {
                 auto* payload = static_cast<Payload*>(raw);
@@ -491,10 +499,14 @@ void SystemMonitorWidget::request_sample() {
                 }
                 return G_SOURCE_REMOVE;
             },
-            new Payload{state, std::move(snapshot)},
+            payload,
             +[](gpointer raw) { delete static_cast<Payload*>(raw); }
         );
-    })) {
+        if (source_id == 0) {
+            state->in_flight = false;
+            delete payload;
+        }
+    }, {}, [state] { return !state->alive.load(); })) {
         async_state_->in_flight = false;
     }
 }

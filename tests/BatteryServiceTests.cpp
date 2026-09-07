@@ -82,6 +82,26 @@ void test_current_voltage_rate_fallback_is_read() {
     std::filesystem::remove_all(root);
 }
 
+void test_invalid_power_rate_falls_back_to_current_voltage() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-battery-invalid-power";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "BAT0");
+    std::ofstream(root / "BAT0/capacity") << "40\n";
+    std::ofstream(root / "BAT0/status") << "Discharging\n";
+    std::ofstream(root / "BAT0/power_now") << "inf\n";
+    std::ofstream(root / "BAT0/current_now") << "2000000\n";
+    std::ofstream(root / "BAT0/voltage_now") << "11000000\n";
+
+    realmheart::services::BatteryService battery(root);
+    const auto status = battery.read();
+    require(status.has_value(), "invalid preferred power source must not hide battery");
+    require(status->rate_watts.has_value(), "valid current and voltage must be used as fallback");
+    require(std::isfinite(*status->rate_watts), "battery rate must remain finite");
+    require(std::abs(*status->rate_watts - 22.0) < 0.001,
+            "fallback rate must use current and voltage");
+    std::filesystem::remove_all(root);
+}
+
 } // namespace
 
 int main() {
@@ -90,6 +110,7 @@ int main() {
     test_valid_battery_is_read();
     test_power_rate_is_read_without_extra_processes();
     test_current_voltage_rate_fallback_is_read();
+    test_invalid_power_rate_falls_back_to_current_voltage();
     std::cout << "BatteryService tests PASSED\n";
     return 0;
 }
