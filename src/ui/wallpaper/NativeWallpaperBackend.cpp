@@ -253,13 +253,17 @@ void NativeWallpaperBackend::handle_process_exit(GSubprocess* source) noexcept {
 bool NativeWallpaperBackend::replay_last_committed_locked(
     std::string* error_message
 ) {
-    if (last_replay_kind_ == ReplayKind::None || last_committed_path_.empty()) {
+    if (last_replay_kind_ == ReplayKind::None ||
+        (last_committed_owned_bytes_ == nullptr && last_committed_path_.empty())) {
         set_error(error_message, "native wallpaper renderer has no safe replay state");
         return false;
     }
     if (!initialize_locked(error_message)) return false;
 
     if (last_replay_kind_ == ReplayKind::Global) {
+        if (last_committed_owned_bytes_ != nullptr) {
+            return set_owned_wallpaper_locked(last_committed_owned_bytes_, error_message);
+        }
         return set_wallpaper_locked(last_committed_path_, error_message);
     }
 
@@ -269,25 +273,29 @@ bool NativeWallpaperBackend::replay_last_committed_locked(
         set_error(error_message, "native wallpaper replay target is unavailable");
         return false;
     }
-    return prepare_wallpaper_for_output_locked(
-               last_committed_path_, target, error_message
-           ) &&
-           commit_prepared_wallpaper_locked(error_message);
+    const bool prepared = last_committed_owned_bytes_ != nullptr
+        ? prepare_owned_wallpaper_for_output_locked(
+              last_committed_owned_bytes_, target, error_message
+          )
+        : prepare_wallpaper_for_output_locked(
+              last_committed_path_, target, error_message
+          );
+    return prepared && commit_prepared_wallpaper_locked(error_message);
 }
 
 bool NativeWallpaperBackend::set_wallpaper(
     const WallpaperSource& source,
     std::string* error_message
 ) {
+    std::lock_guard lock(operation_mutex_);
+    if (source.is_owned()) {
+        return set_owned_wallpaper_locked(source.owned_bytes_handle(), error_message);
+    }
     const auto path = source.external_path();
     if (!path) {
-        set_error(
-            error_message,
-            "native wallpaper helper cannot consume owned bytes; Stage B protocol residual"
-        );
+        set_error(error_message, "native wallpaper source is empty or invalid");
         return false;
     }
-    std::lock_guard lock(operation_mutex_);
     return set_wallpaper_locked(*path, error_message);
 }
 
@@ -295,15 +303,15 @@ bool NativeWallpaperBackend::prepare_wallpaper(
     const WallpaperSource& source,
     std::string* error_message
 ) {
+    std::lock_guard lock(operation_mutex_);
+    if (source.is_owned()) {
+        return prepare_owned_wallpaper_locked(source.owned_bytes_handle(), error_message);
+    }
     const auto path = source.external_path();
     if (!path) {
-        set_error(
-            error_message,
-            "native wallpaper helper cannot consume owned bytes; Stage B protocol residual"
-        );
+        set_error(error_message, "native wallpaper source is empty or invalid");
         return false;
     }
-    std::lock_guard lock(operation_mutex_);
     return prepare_wallpaper_locked(*path, error_message);
 }
 
@@ -312,15 +320,17 @@ bool NativeWallpaperBackend::prepare_wallpaper_for_output(
     const WallpaperOutputTarget& target,
     std::string* error_message
 ) {
+    std::lock_guard lock(operation_mutex_);
+    if (source.is_owned()) {
+        return prepare_owned_wallpaper_for_output_locked(
+            source.owned_bytes_handle(), target, error_message
+        );
+    }
     const auto path = source.external_path();
     if (!path) {
-        set_error(
-            error_message,
-            "native wallpaper helper cannot consume owned bytes; Stage B protocol residual"
-        );
+        set_error(error_message, "native wallpaper source is empty or invalid");
         return false;
     }
-    std::lock_guard lock(operation_mutex_);
     return prepare_wallpaper_for_output_locked(*path, target, error_message);
 }
 
@@ -333,18 +343,23 @@ bool NativeWallpaperBackend::commit_prepared_wallpaper(
 
 void NativeWallpaperBackend::discard_prepared_wallpaper() noexcept {
     std::lock_guard lock(operation_mutex_);
-    if (!initialized_) return;
+    const auto clear_state = [this] {
+        prepared_replay_kind_ = ReplayKind::None;
+        prepared_path_.clear();
+        prepared_owned_bytes_.reset();
+        prepared_output_connector_.clear();
+    };
+    if (!initialized_) {
+        clear_state();
+        return;
+    }
     std::string ignored;
     if (!send_line("DISCARD\n", &ignored) || !read_response("OK", &ignored)) {
         stop_locked();
-        prepared_replay_kind_ = ReplayKind::None;
-        prepared_path_.clear();
-        prepared_output_connector_.clear();
+        clear_state();
         return;
     }
-    prepared_replay_kind_ = ReplayKind::None;
-    prepared_path_.clear();
-    prepared_output_connector_.clear();
+    clear_state();
 }
 
 bool NativeWallpaperBackend::set_wallpaper_locked(
@@ -363,6 +378,33 @@ bool NativeWallpaperBackend::set_wallpaper_locked(
     }
     last_replay_kind_ = ReplayKind::Global;
     last_committed_path_ = path;
+    last_committed_owned_bytes_.reset();
+    last_committed_output_connector_.clear();
+    if (!recovering_) recovery_attempts_ = 0;
+    return true;
+}
+
+bool NativeWallpaperBackend::set_owned_wallpaper_locked(
+    const std::shared_ptr<const std::string>& bytes,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (bytes == nullptr || bytes->empty() ||
+        bytes->size() > realmheart::wallpaper_native::kNativeMaxSourceBytes) {
+        set_error(error_message, "owned wallpaper bytes exceed the decode budget or are empty");
+        return false;
+    }
+    if (!initialized_ && !initialize_locked(error_message)) return false;
+    if (!send_owned_bytes(
+            realmheart::wallpaper_native::NativeBinaryCommand::Set,
+            {}, *bytes, error_message
+        ) || !read_response("OK", error_message)) {
+        stop_locked();
+        return false;
+    }
+    last_replay_kind_ = ReplayKind::Global;
+    last_committed_path_.clear();
+    last_committed_owned_bytes_ = bytes;
     last_committed_output_connector_.clear();
     if (!recovering_) recovery_attempts_ = 0;
     return true;
@@ -384,6 +426,32 @@ bool NativeWallpaperBackend::prepare_wallpaper_locked(
     }
     prepared_replay_kind_ = ReplayKind::Global;
     prepared_path_ = path;
+    prepared_owned_bytes_.reset();
+    prepared_output_connector_.clear();
+    return true;
+}
+
+bool NativeWallpaperBackend::prepare_owned_wallpaper_locked(
+    const std::shared_ptr<const std::string>& bytes,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (bytes == nullptr || bytes->empty() ||
+        bytes->size() > realmheart::wallpaper_native::kNativeMaxSourceBytes) {
+        set_error(error_message, "owned wallpaper bytes exceed the decode budget or are empty");
+        return false;
+    }
+    if (!initialized_ && !initialize_locked(error_message)) return false;
+    if (!send_owned_bytes(
+            realmheart::wallpaper_native::NativeBinaryCommand::Prepare,
+            {}, *bytes, error_message
+        ) || !read_response("PREPARED", error_message)) {
+        stop_locked();
+        return false;
+    }
+    prepared_replay_kind_ = ReplayKind::Global;
+    prepared_path_.clear();
+    prepared_owned_bytes_ = bytes;
     prepared_output_connector_.clear();
     return true;
 }
@@ -414,6 +482,41 @@ bool NativeWallpaperBackend::prepare_wallpaper_for_output_locked(
     }
     prepared_replay_kind_ = ReplayKind::Output;
     prepared_path_ = path;
+    prepared_owned_bytes_.reset();
+    prepared_output_connector_ = target.connector;
+    return true;
+}
+
+bool NativeWallpaperBackend::prepare_owned_wallpaper_for_output_locked(
+    const std::shared_ptr<const std::string>& bytes,
+    const WallpaperOutputTarget& target,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!target.valid() || target.connector.empty()) {
+        set_error(
+            error_message,
+            "native per-output wallpaper apply requires a monitor connector"
+        );
+        return false;
+    }
+    if (bytes == nullptr || bytes->empty() ||
+        bytes->size() > realmheart::wallpaper_native::kNativeMaxSourceBytes) {
+        set_error(error_message, "owned wallpaper bytes exceed the decode budget or are empty");
+        return false;
+    }
+    if (!initialized_ && !initialize_locked(error_message)) return false;
+    const std::string encoded_connector = base64_token(target.connector);
+    if (encoded_connector.empty() || !send_owned_bytes(
+            realmheart::wallpaper_native::NativeBinaryCommand::PrepareOutput,
+            encoded_connector, *bytes, error_message
+        ) || !read_response("PREPARED", error_message)) {
+        stop_locked();
+        return false;
+    }
+    prepared_replay_kind_ = ReplayKind::Output;
+    prepared_path_.clear();
+    prepared_owned_bytes_ = bytes;
     prepared_output_connector_ = target.connector;
     return true;
 }
@@ -433,9 +536,11 @@ bool NativeWallpaperBackend::commit_prepared_wallpaper_locked(
     }
     last_replay_kind_ = prepared_replay_kind_;
     last_committed_path_ = prepared_path_;
+    last_committed_owned_bytes_ = std::move(prepared_owned_bytes_);
     last_committed_output_connector_ = prepared_output_connector_;
     prepared_replay_kind_ = ReplayKind::None;
     prepared_path_.clear();
+    prepared_owned_bytes_.reset();
     prepared_output_connector_.clear();
     if (!recovering_) recovery_attempts_ = 0;
     return true;
@@ -511,6 +616,79 @@ bool NativeWallpaperBackend::send_line(
         return false;
     }
 
+    g_clear_error(&error);
+    g_object_unref(cancellable);
+    return true;
+}
+
+bool NativeWallpaperBackend::send_owned_bytes(
+    realmheart::wallpaper_native::NativeBinaryCommand command,
+    std::string_view encoded_output_token,
+    const std::string& bytes,
+    std::string* error_message
+) {
+    if (process_ == nullptr || command_stream_ == nullptr) {
+        set_error(error_message, "native wallpaper renderer is not running");
+        return false;
+    }
+    std::string header_error;
+    const auto header = realmheart::wallpaper_native::encode_native_binary_header(
+        command,
+        encoded_output_token,
+        bytes.size(),
+        &header_error
+    );
+    if (!header) {
+        set_error(error_message, header_error);
+        return false;
+    }
+
+    GError* error = nullptr;
+    GCancellable* cancellable = g_cancellable_new();
+    gsize header_written = 0;
+    gsize payload_written = 0;
+    gboolean header_ok = FALSE;
+    gboolean payload_ok = FALSE;
+    gboolean flush_ok = FALSE;
+    {
+        CancellationDeadline deadline(
+            cancellable,
+            initialized_ ? kCommandTimeout : kStartupTimeout
+        );
+        header_ok = g_output_stream_write_all(
+            command_stream_,
+            header->data(),
+            header->size(),
+            &header_written,
+            cancellable,
+            &error
+        );
+        if (header_ok && header_written == header->size()) {
+            payload_ok = g_output_stream_write_all(
+                command_stream_,
+                bytes.data(),
+                bytes.size(),
+                &payload_written,
+                cancellable,
+                &error
+            );
+        }
+        if (payload_ok && payload_written == bytes.size()) {
+            flush_ok = g_output_stream_flush(command_stream_, cancellable, &error);
+        }
+    }
+
+    if (!header_ok || header_written != header->size() ||
+        !payload_ok || payload_written != bytes.size() || !flush_ok) {
+        set_error(
+            error_message,
+            error != nullptr ? error->message
+                             : "unable to send owned wallpaper bytes to native renderer"
+        );
+        g_clear_error(&error);
+        g_object_unref(cancellable);
+        return false;
+    }
     g_clear_error(&error);
     g_object_unref(cancellable);
     return true;
@@ -598,6 +776,10 @@ void NativeWallpaperBackend::stop_locked() noexcept {
     }
 
     initialized_ = false;
+    prepared_replay_kind_ = ReplayKind::None;
+    prepared_path_.clear();
+    prepared_owned_bytes_.reset();
+    prepared_output_connector_.clear();
 }
 
 } // namespace realmheart::ui::wallpaper

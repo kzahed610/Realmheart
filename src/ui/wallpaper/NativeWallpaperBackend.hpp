@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ui/wallpaper/WallpaperBackend.hpp"
+#include "wallpaper-native/NativeWallpaperContracts.hpp"
 
 #include <gio/gio.h>
 
@@ -9,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace realmheart::ui::wallpaper {
 
@@ -48,12 +50,25 @@ private:
         const std::filesystem::path& path,
         std::string* error_message = nullptr
     );
+    [[nodiscard]] bool set_owned_wallpaper_locked(
+        const std::shared_ptr<const std::string>& bytes,
+        std::string* error_message = nullptr
+    );
     [[nodiscard]] bool prepare_wallpaper_locked(
         const std::filesystem::path& path,
         std::string* error_message = nullptr
     );
+    [[nodiscard]] bool prepare_owned_wallpaper_locked(
+        const std::shared_ptr<const std::string>& bytes,
+        std::string* error_message = nullptr
+    );
     [[nodiscard]] bool prepare_wallpaper_for_output_locked(
         const std::filesystem::path& path,
+        const WallpaperOutputTarget& target,
+        std::string* error_message = nullptr
+    );
+    [[nodiscard]] bool prepare_owned_wallpaper_for_output_locked(
+        const std::shared_ptr<const std::string>& bytes,
         const WallpaperOutputTarget& target,
         std::string* error_message = nullptr
     );
@@ -63,6 +78,12 @@ private:
     [[nodiscard]] std::string find_renderer_executable() const;
     [[nodiscard]] bool send_line(
         const std::string& line,
+        std::string* error_message = nullptr
+    );
+    [[nodiscard]] bool send_owned_bytes(
+        realmheart::wallpaper_native::NativeBinaryCommand command,
+        std::string_view encoded_output_token,
+        const std::string& bytes,
         std::string* error_message = nullptr
     );
     [[nodiscard]] bool read_response(
@@ -93,9 +114,11 @@ private:
 
     ReplayKind last_replay_kind_ = ReplayKind::None;
     std::filesystem::path last_committed_path_;
+    std::shared_ptr<const std::string> last_committed_owned_bytes_;
     std::string last_committed_output_connector_;
     ReplayKind prepared_replay_kind_ = ReplayKind::None;
     std::filesystem::path prepared_path_;
+    std::shared_ptr<const std::string> prepared_owned_bytes_;
     std::string prepared_output_connector_;
 };
 

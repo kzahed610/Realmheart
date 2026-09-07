@@ -74,7 +74,6 @@ constexpr zwlr_layer_surface_v1_listener kLayerSurfaceListener{
     &NativeWallpaperRenderer::layer_surface_closed,
 };
 
-constexpr std::uintmax_t kMaxSourceFileBytes = 128ULL * 1024ULL * 1024ULL;
 constexpr std::uintmax_t kMaxDecodedPixels = 64'000'000;
 
 void set_error(std::string* destination, const std::string& message) {
@@ -327,6 +326,7 @@ bool NativeWallpaperRenderer::set_wallpaper(
         clear_output_overrides();
         current_texture_ = candidate;
         current_source_path_ = path;
+        current_source_bytes_.reset();
         if (!draw_all(error_message)) {
             destroy_texture(current_texture_);
             current_source_path_.clear();
@@ -342,6 +342,7 @@ bool NativeWallpaperRenderer::set_wallpaper(
     destroy_texture(next_texture_);
     next_texture_ = candidate;
     next_source_path_ = path;
+    next_source_bytes_.reset();
     decoded_required_width_ = 0;
     decoded_required_height_ = 0;
     active_transition_duration_ = transition_duration_;
@@ -349,6 +350,61 @@ bool NativeWallpaperRenderer::set_wallpaper(
     animating_ = true;
     if (!draw_all(error_message)) {
         destroy_texture(next_texture_);
+        next_source_path_.clear();
+        next_source_bytes_.reset();
+        animating_ = false;
+        set_error(error_message, "native wallpaper failed to render the transition frame");
+        return false;
+    }
+    return true;
+}
+
+bool NativeWallpaperRenderer::set_wallpaper_bytes(
+    std::shared_ptr<const std::string> bytes,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!bytes || bytes->empty() || bytes->size() > kNativeMaxSourceBytes) {
+        set_error(error_message, "owned wallpaper bytes exceed the decode budget or are empty");
+        return false;
+    }
+    if (!initialized_) {
+        set_error(error_message, "native wallpaper renderer is not initialized");
+        return false;
+    }
+    if (!discard_prepared_wallpaper(error_message)) return false;
+
+    Texture candidate;
+    if (!upload_texture_bytes(*bytes, candidate, error_message)) return false;
+    if (current_texture_.id == 0) {
+        clear_output_overrides();
+        current_texture_ = candidate;
+        current_source_path_.clear();
+        current_source_bytes_ = std::move(bytes);
+        if (!draw_all(error_message)) {
+            destroy_texture(current_texture_);
+            current_source_bytes_.reset();
+            set_error(error_message, "native wallpaper failed to render the first frame");
+            return false;
+        }
+        const auto required = required_output_dimensions();
+        decoded_required_width_ = required.first;
+        decoded_required_height_ = required.second;
+        return true;
+    }
+
+    destroy_texture(next_texture_);
+    next_texture_ = candidate;
+    next_source_path_.clear();
+    next_source_bytes_ = std::move(bytes);
+    decoded_required_width_ = 0;
+    decoded_required_height_ = 0;
+    active_transition_duration_ = transition_duration_;
+    animation_started_ = std::chrono::steady_clock::now();
+    animating_ = true;
+    if (!draw_all(error_message)) {
+        destroy_texture(next_texture_);
+        next_source_bytes_.reset();
         animating_ = false;
         set_error(error_message, "native wallpaper failed to render the transition frame");
         return false;
@@ -378,6 +434,34 @@ bool NativeWallpaperRenderer::prepare_wallpaper(
     prepared_texture_ = candidate;
     prepared_output_name_.clear();
     prepared_source_path_ = path;
+    prepared_source_bytes_.reset();
+    return true;
+}
+
+bool NativeWallpaperRenderer::prepare_wallpaper_bytes(
+    std::shared_ptr<const std::string> bytes,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!bytes || bytes->empty() || bytes->size() > kNativeMaxSourceBytes) {
+        set_error(error_message, "owned wallpaper bytes exceed the decode budget or are empty");
+        return false;
+    }
+    if (!initialized_) {
+        set_error(error_message, "native wallpaper renderer is not initialized");
+        return false;
+    }
+    if (animating_) {
+        set_error(error_message, "native wallpaper renderer is still transitioning");
+        return false;
+    }
+    if (!discard_prepared_wallpaper(error_message)) return false;
+    Texture candidate;
+    if (!upload_texture_bytes(*bytes, candidate, error_message)) return false;
+    prepared_texture_ = candidate;
+    prepared_output_name_.clear();
+    prepared_source_path_.clear();
+    prepared_source_bytes_ = std::move(bytes);
     return true;
 }
 
@@ -409,6 +493,43 @@ bool NativeWallpaperRenderer::prepare_wallpaper_for_output(
     prepared_texture_ = candidate;
     prepared_output_name_ = output_name;
     prepared_source_path_ = path;
+    prepared_source_bytes_.reset();
+    return true;
+}
+
+bool NativeWallpaperRenderer::prepare_wallpaper_for_output_bytes(
+    std::shared_ptr<const std::string> bytes,
+    const std::string& output_name,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!bytes || bytes->empty() || bytes->size() > kNativeMaxSourceBytes) {
+        set_error(error_message, "owned wallpaper bytes exceed the decode budget or are empty");
+        return false;
+    }
+    if (!initialized_) {
+        set_error(error_message, "native wallpaper renderer is not initialized");
+        return false;
+    }
+    if (animating_) {
+        set_error(error_message, "native wallpaper renderer is still transitioning");
+        return false;
+    }
+    if (output_name.empty() || find_output_by_name(output_name) == nullptr) {
+        set_error(
+            error_message,
+            "native wallpaper output is unavailable: " + output_name
+        );
+        return false;
+    }
+
+    if (!discard_prepared_wallpaper(error_message)) return false;
+    Texture candidate;
+    if (!upload_texture_bytes(*bytes, candidate, error_message, output_name)) return false;
+    prepared_texture_ = candidate;
+    prepared_output_name_ = output_name;
+    prepared_source_path_.clear();
+    prepared_source_bytes_ = std::move(bytes);
     return true;
 }
 
@@ -453,12 +574,14 @@ bool NativeWallpaperRenderer::commit_prepared_wallpaper(
         }
         destroy_texture(previous);
         output->override_source_path = prepared_source_path_;
+        output->override_source_bytes = prepared_source_bytes_;
         const auto required = required_output_dimensions(output->name);
         output->decoded_required_width = required.first;
         output->decoded_required_height = required.second;
         prepared_texture_ = {};
         prepared_output_name_.clear();
         prepared_source_path_.clear();
+        prepared_source_bytes_.reset();
         return true;
     }
 
@@ -466,10 +589,14 @@ bool NativeWallpaperRenderer::commit_prepared_wallpaper(
         clear_output_overrides();
         current_texture_ = prepared_texture_;
         current_source_path_ = prepared_source_path_;
+        current_source_bytes_ = prepared_source_bytes_;
         prepared_texture_ = {};
         prepared_source_path_.clear();
+        prepared_source_bytes_.reset();
         if (!draw_all(error_message)) {
             destroy_texture(current_texture_);
+            current_source_path_.clear();
+            current_source_bytes_.reset();
             set_error(error_message, "native wallpaper failed to render the prepared frame");
             return false;
         }
@@ -482,15 +609,19 @@ bool NativeWallpaperRenderer::commit_prepared_wallpaper(
     destroy_texture(next_texture_);
     next_texture_ = prepared_texture_;
     next_source_path_ = prepared_source_path_;
+    next_source_bytes_ = prepared_source_bytes_;
     decoded_required_width_ = 0;
     decoded_required_height_ = 0;
     prepared_texture_ = {};
     prepared_source_path_.clear();
+    prepared_source_bytes_.reset();
     active_transition_duration_ = transition_duration_;
     animation_started_ = std::chrono::steady_clock::now();
     animating_ = true;
     if (!draw_all(error_message)) {
         destroy_texture(next_texture_);
+        next_source_path_.clear();
+        next_source_bytes_.reset();
         animating_ = false;
         set_error(error_message, "native wallpaper failed to render the prepared transition");
         return false;
@@ -503,6 +634,7 @@ bool NativeWallpaperRenderer::discard_prepared_wallpaper(
 ) noexcept {
     prepared_output_name_.clear();
     prepared_source_path_.clear();
+    prepared_source_bytes_.reset();
     if (!initialized_ || prepared_texture_.id == 0) return true;
     if (!make_pbuffer_current(error_message)) {
         mark_fatal(error_message != nullptr ? *error_message : "");
@@ -538,11 +670,8 @@ int NativeWallpaperRenderer::run_stdio() {
             process_closed_outputs();
         }
 
-        if ((descriptors[1].revents & POLLIN) != 0) {
+        if ((descriptors[1].revents & (POLLIN | POLLHUP)) != 0) {
             process_stdin_bytes();
-        }
-        if ((descriptors[1].revents & POLLHUP) != 0) {
-            running_ = false;
         }
 
         if (animating_) advance_animation();
@@ -833,7 +962,7 @@ bool NativeWallpaperRenderer::upload_texture(
 
     std::error_code file_error;
     const auto file_size = std::filesystem::file_size(path, file_error);
-    if (file_error || file_size > kMaxSourceFileBytes) {
+    if (file_error || file_size > kNativeMaxSourceBytes) {
         set_error(error_message, "wallpaper file exceeds the decode budget");
         return false;
     }
@@ -1026,6 +1155,134 @@ bool NativeWallpaperRenderer::upload_texture(
         return false;
     }
 
+    return true;
+}
+
+bool NativeWallpaperRenderer::upload_texture_bytes(
+    const std::string& bytes,
+    Texture& texture,
+    std::string* error_message,
+    std::string_view /*target_output*/
+) {
+    if (!make_pbuffer_current(error_message)) return false;
+    if (bytes.empty() || bytes.size() > kNativeMaxSourceBytes) {
+        set_error(error_message, "owned wallpaper bytes exceed the decode budget or are empty");
+        return false;
+    }
+
+    GdkPixbufLoader* loader = gdk_pixbuf_loader_new();
+    if (loader == nullptr) {
+        set_error(error_message, "unable to create the wallpaper byte decoder");
+        return false;
+    }
+
+    GError* error = nullptr;
+    const gboolean write_ok = gdk_pixbuf_loader_write(
+        loader,
+        reinterpret_cast<const guchar*>(bytes.data()),
+        bytes.size(),
+        &error
+    );
+    const gboolean close_ok = write_ok && gdk_pixbuf_loader_close(loader, &error);
+    GdkPixbuf* pixbuf = nullptr;
+    if (close_ok) {
+        pixbuf = gdk_pixbuf_loader_get_pixbuf(loader);
+        if (pixbuf != nullptr) g_object_ref(pixbuf);
+    }
+    g_object_unref(loader);
+
+    if (!write_ok || !close_ok || pixbuf == nullptr) {
+        set_error(
+            error_message,
+            error != nullptr ? error->message : "unable to decode owned wallpaper bytes"
+        );
+        g_clear_error(&error);
+        if (pixbuf != nullptr) g_object_unref(pixbuf);
+        return false;
+    }
+    g_clear_error(&error);
+
+    const int width = gdk_pixbuf_get_width(pixbuf);
+    const int height = gdk_pixbuf_get_height(pixbuf);
+    const int channels = gdk_pixbuf_get_n_channels(pixbuf);
+    const int row_stride = gdk_pixbuf_get_rowstride(pixbuf);
+    const guchar* source = gdk_pixbuf_read_pixels(pixbuf);
+    if (width <= 0 || height <= 0 || source == nullptr ||
+        static_cast<std::uintmax_t>(width) >
+            kMaxDecodedPixels / static_cast<std::uintmax_t>(height) ||
+        (channels != 3 && channels != 4)) {
+        g_object_unref(pixbuf);
+        set_error(error_message, "decoded wallpaper exceeds the decode budget or has an unsupported pixel layout");
+        return false;
+    }
+
+    const std::size_t tight_stride = static_cast<std::size_t>(width) * channels;
+    const GLenum format = channels == 4 ? GL_RGBA : GL_RGB;
+    while (glGetError() != GL_NO_ERROR) {}
+
+    glGenTextures(1, &texture.id);
+    if (texture.id == 0) {
+        g_object_unref(pixbuf);
+        set_error(error_message, "OpenGL failed to allocate a wallpaper texture");
+        return false;
+    }
+
+    texture.width = width;
+    texture.height = height;
+    glBindTexture(GL_TEXTURE_2D, texture.id);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    if (static_cast<std::size_t>(row_stride) == tight_stride) {
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            static_cast<GLint>(format),
+            width,
+            height,
+            0,
+            format,
+            GL_UNSIGNED_BYTE,
+            source
+        );
+    } else {
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            static_cast<GLint>(format),
+            width,
+            height,
+            0,
+            format,
+            GL_UNSIGNED_BYTE,
+            nullptr
+        );
+        for (int row = 0; row < height; ++row) {
+            glTexSubImage2D(
+                GL_TEXTURE_2D,
+                0,
+                0,
+                row,
+                width,
+                1,
+                format,
+                GL_UNSIGNED_BYTE,
+                source + static_cast<std::size_t>(row) * row_stride
+            );
+        }
+    }
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    const GLenum gl_error = glGetError();
+    g_object_unref(pixbuf);
+    if (gl_error != GL_NO_ERROR) {
+        destroy_texture(texture);
+        set_error(error_message, "OpenGL failed while uploading the owned wallpaper texture");
+        return false;
+    }
     return true;
 }
 
@@ -1249,6 +1506,7 @@ void NativeWallpaperRenderer::clear_output_overrides() noexcept {
         if (output != nullptr) {
             destroy_texture(output->override_texture);
             output->override_source_path.clear();
+            output->override_source_bytes.reset();
             output->decoded_required_width = 0;
             output->decoded_required_height = 0;
         }
@@ -1283,6 +1541,7 @@ void NativeWallpaperRenderer::advance_animation() {
     next_texture_ = {};
     current_source_path_ = next_source_path_;
     next_source_path_.clear();
+    current_source_bytes_ = std::move(next_source_bytes_);
     decoded_required_width_ = 0;
     decoded_required_height_ = 0;
     animating_ = false;
@@ -1362,7 +1621,10 @@ bool NativeWallpaperRenderer::redecode_for_topology(
         topology_redecode_pending_ = true;
         return true;
     }
-    if (current_source_path_.empty() || current_texture_.id == 0) return true;
+    if (current_texture_.id == 0 ||
+        (current_source_path_.empty() && current_source_bytes_ == nullptr)) {
+        return true;
+    }
 
     const auto required = required_output_dimensions();
     const int required_width = required.first;
@@ -1374,7 +1636,10 @@ bool NativeWallpaperRenderer::redecode_for_topology(
             required_height
         )) {
         Texture candidate;
-        if (!upload_texture(current_source_path_, candidate, error_message)) {
+        const bool uploaded = current_source_bytes_ != nullptr
+            ? upload_texture_bytes(*current_source_bytes_, candidate, error_message)
+            : upload_texture(current_source_path_, candidate, error_message);
+        if (!uploaded) {
             mark_fatal(error_message != nullptr ? *error_message : "");
             return false;
         }
@@ -1391,7 +1656,8 @@ bool NativeWallpaperRenderer::redecode_for_topology(
     }
 
     for (const auto& output : outputs_) {
-        if (output == nullptr || output->override_source_path.empty() ||
+        if (output == nullptr ||
+            (output->override_source_path.empty() && output->override_source_bytes == nullptr) ||
             output->override_texture.id == 0 || !output->configured ||
             output->closed) {
             continue;
@@ -1407,12 +1673,20 @@ bool NativeWallpaperRenderer::redecode_for_topology(
             continue;
         }
         Texture override_candidate;
-        if (!upload_texture(
-                output->override_source_path,
-                override_candidate,
-                error_message,
-                output->name
-            )) {
+        const bool uploaded = output->override_source_bytes != nullptr
+            ? upload_texture_bytes(
+                  *output->override_source_bytes,
+                  override_candidate,
+                  error_message,
+                  output->name
+              )
+            : upload_texture(
+                  output->override_source_path,
+                  override_candidate,
+                  error_message,
+                  output->name
+              );
+        if (!uploaded) {
             mark_fatal(error_message != nullptr ? *error_message : "");
             return false;
         }
@@ -1520,24 +1794,98 @@ void NativeWallpaperRenderer::process_stdin_bytes() {
     for (;;) {
         const ssize_t count = read(STDIN_FILENO, buffer.data(), buffer.size());
         if (count > 0) {
-            stdin_buffer_.append(buffer.data(), static_cast<std::size_t>(count));
+            std::vector<NativeWallpaperInput> inputs;
+            std::string error;
+            if (!stdin_decoder_.feed(
+                    std::string_view(buffer.data(), static_cast<std::size_t>(count)),
+                    &inputs,
+                    &error
+                )) {
+                send_error(error);
+                mark_fatal(error);
+                break;
+            }
+            for (auto& input : inputs) {
+                if (input.kind == NativeWallpaperInput::Kind::BinaryFrame) {
+                    process_binary_frame(std::move(input.binary_frame));
+                } else {
+                    process_command(input.legacy_command);
+                }
+                if (!running_) break;
+            }
             continue;
         }
         if (count == 0) {
+            std::string error;
+            if (!stdin_decoder_.finish(&error)) {
+                send_error(error);
+                mark_fatal(error);
+            }
             running_ = false;
             break;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
         if (errno == EINTR) continue;
-        running_ = false;
+        const std::string error = "native wallpaper renderer failed to read its command stream";
+        send_error(error);
+        mark_fatal(error);
         break;
     }
+}
 
-    std::size_t newline = 0;
-    while ((newline = stdin_buffer_.find('\n')) != std::string::npos) {
-        std::string command = stdin_buffer_.substr(0, newline);
-        stdin_buffer_.erase(0, newline + 1);
-        process_command(command);
+void NativeWallpaperRenderer::process_binary_frame(NativeBinaryFrame frame) {
+    const auto decode_token = [](std::string_view encoded)
+        -> std::optional<std::string> {
+        gsize decoded_size = 0;
+        guchar* decoded = g_base64_decode(
+            std::string(encoded).c_str(), &decoded_size
+        );
+        if (decoded == nullptr || decoded_size == 0) {
+            if (decoded != nullptr) g_free(decoded);
+            return std::nullopt;
+        }
+        std::string value(
+            reinterpret_cast<const char*>(decoded),
+            static_cast<std::size_t>(decoded_size)
+        );
+        g_free(decoded);
+        return value;
+    };
+
+    auto bytes = std::make_shared<const std::string>(std::move(frame.payload));
+    std::string error;
+    bool succeeded = false;
+    switch (frame.command) {
+        case NativeBinaryCommand::Set:
+            succeeded = set_wallpaper_bytes(std::move(bytes), &error);
+            break;
+        case NativeBinaryCommand::Prepare:
+            succeeded = prepare_wallpaper_bytes(std::move(bytes), &error);
+            break;
+        case NativeBinaryCommand::PrepareOutput: {
+            const auto output_name = decode_token(frame.encoded_output_token);
+            if (!output_name) {
+                send_error("invalid encoded output-targeted wallpaper transaction");
+                return;
+            }
+            succeeded = prepare_wallpaper_for_output_bytes(
+                std::move(bytes), *output_name, &error
+            );
+            break;
+        }
+    }
+    if (!succeeded) {
+        send_error(error);
+        return;
+    }
+    if (frame.command == NativeBinaryCommand::Set) {
+        if (animating_) {
+            set_response_pending_ = true;
+        } else {
+            send_ok();
+        }
+    } else {
+        std::cout << "PREPARED\n" << std::flush;
     }
 }
 
@@ -1778,10 +2126,13 @@ void NativeWallpaperRenderer::cleanup() noexcept {
     set_response_pending_ = false;
     topology_redecode_pending_ = false;
     current_source_path_.clear();
+    current_source_bytes_.reset();
     next_source_path_.clear();
+    next_source_bytes_.reset();
     decoded_required_width_ = 0;
     decoded_required_height_ = 0;
     prepared_source_path_.clear();
+    prepared_source_bytes_.reset();
     fatal_error_.clear();
     closed_output_registry_names_.clear();
 }

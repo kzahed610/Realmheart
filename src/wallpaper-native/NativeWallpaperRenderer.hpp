@@ -1,5 +1,7 @@
 #pragma once
 
+#include "wallpaper-native/NativeWallpaperContracts.hpp"
+
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 #include <wayland-client.h>
@@ -33,12 +35,25 @@ public:
         const std::string& path,
         std::string* error_message = nullptr
     );
+    [[nodiscard]] bool set_wallpaper_bytes(
+        std::shared_ptr<const std::string> bytes,
+        std::string* error_message = nullptr
+    );
     [[nodiscard]] bool prepare_wallpaper(
         const std::string& path,
         std::string* error_message = nullptr
     );
+    [[nodiscard]] bool prepare_wallpaper_bytes(
+        std::shared_ptr<const std::string> bytes,
+        std::string* error_message = nullptr
+    );
     [[nodiscard]] bool prepare_wallpaper_for_output(
         const std::string& path,
+        const std::string& output_name,
+        std::string* error_message = nullptr
+    );
+    [[nodiscard]] bool prepare_wallpaper_for_output_bytes(
+        std::shared_ptr<const std::string> bytes,
         const std::string& output_name,
         std::string* error_message = nullptr
     );
@@ -73,6 +88,7 @@ private:
         bool configured = false;
         bool closed = false;
         std::string override_source_path;
+        std::shared_ptr<const std::string> override_source_bytes;
         int decoded_required_width = 0;
         int decoded_required_height = 0;
     };
@@ -150,6 +166,12 @@ private:
         std::string* error_message,
         std::string_view target_output = {}
     );
+    [[nodiscard]] bool upload_texture_bytes(
+        const std::string& bytes,
+        Texture& texture,
+        std::string* error_message,
+        std::string_view target_output = {}
+    );
     [[nodiscard]] GLuint compile_shader(
         GLenum type,
         const char* source,
@@ -180,6 +202,7 @@ private:
     void mark_fatal(const std::string& message) noexcept;
     void process_stdin_bytes();
     void process_command(const std::string& command);
+    void process_binary_frame(NativeBinaryFrame frame);
     void send_ok() const;
     void send_error(const std::string& message) const;
     void cleanup() noexcept;
@@ -212,11 +235,14 @@ private:
     Texture next_texture_;
     Texture prepared_texture_;
     std::string current_source_path_;
+    std::shared_ptr<const std::string> current_source_bytes_;
     std::string next_source_path_;
+    std::shared_ptr<const std::string> next_source_bytes_;
     int decoded_required_width_ = 0;
     int decoded_required_height_ = 0;
     std::string prepared_output_name_;
     std::string prepared_source_path_;
+    std::shared_ptr<const std::string> prepared_source_bytes_;
     std::vector<std::uint32_t> closed_output_registry_names_;
     bool animating_ = false;
     std::chrono::steady_clock::time_point animation_started_{};
@@ -227,7 +253,7 @@ private:
     bool set_response_pending_ = false;
     bool topology_redecode_pending_ = false;
     std::string fatal_error_;
-    std::string stdin_buffer_;
+    NativeWallpaperProtocolDecoder stdin_decoder_;
 };
 
 } // namespace realmheart::wallpaper_native

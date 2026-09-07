@@ -1276,13 +1276,43 @@ if(BUILD_TESTING)
     add_executable(
         realmheart_native_wallpaper_lifecycle_tests
         tests/NativeWallpaperLifecycleTests.cpp
+        src/ui/wallpaper/NativeWallpaperBackend.cpp
+    )
+    add_executable(
+        realmheart_native_wallpaper_test_renderer
+        tests/FakeNativeWallpaperRenderer.cpp
+    )
+    target_include_directories(
+        realmheart_native_wallpaper_test_renderer
+        PRIVATE
+        src
+    )
+    target_compile_options(
+        realmheart_native_wallpaper_test_renderer
+        PRIVATE
+        ${REALMHEART_WARNING_FLAGS}
     )
     target_include_directories(
         realmheart_native_wallpaper_lifecycle_tests
         PRIVATE
         src
     )
-    target_link_libraries(realmheart_native_wallpaper_lifecycle_tests PRIVATE GTest::gtest GTest::gtest_main)
+    target_compile_definitions(
+        realmheart_native_wallpaper_lifecycle_tests
+        PRIVATE
+        REALMHEART_TEST_NATIVE_WALLPAPER_RENDERER="$<TARGET_FILE:realmheart_native_wallpaper_test_renderer>"
+    )
+    target_link_libraries(
+        realmheart_native_wallpaper_lifecycle_tests
+        PRIVATE
+        PkgConfig::GIO
+        GTest::gtest
+        GTest::gtest_main
+    )
+    add_dependencies(
+        realmheart_native_wallpaper_lifecycle_tests
+        realmheart_native_wallpaper_test_renderer
+    )
     realmheart_register_test(realmheart_native_wallpaper_lifecycle_tests)
 
     add_executable(
