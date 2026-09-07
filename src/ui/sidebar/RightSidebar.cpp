@@ -715,9 +715,16 @@ void RightSidebar::initialize_character_compositor() {
     }
 
     std::string character_error;
-    const auto character_rig = resolve_project_asset("characters/tessia/rig.json");
+    const auto character_rig = open_project_asset("characters/tessia/rig.json");
     if (!character_rig) {
         std::cerr << "Unable to locate sidebar character rig\n";
+        return;
+    }
+    const auto rig_contents = character_rig->read_all(
+        realmheart::animation::character::CharacterResourceBudget::kMaxManifestFileBytes
+    );
+    if (!rig_contents) {
+        std::cerr << "Unable to read sidebar character rig through its asset descriptor\n";
         return;
     }
 
@@ -725,7 +732,7 @@ void RightSidebar::initialize_character_compositor() {
         realmheart::animation::character::CharacterCompositor::create(
             frame_->back_art_layer(),
             frame_->front_art_layer(),
-            character_rig->parent_path(),
+            character_rig->path().parent_path(),
             asset_tier_,
             display_tier_,
             {
@@ -737,7 +744,8 @@ void RightSidebar::initialize_character_compositor() {
                 .surface_height = sidebar_height_,
             },
             &character_error,
-            character_hair_mode_
+            character_hair_mode_,
+            *rig_contents
         );
     if (!character_compositor_) {
         std::cerr << "Unable to initialize sidebar character composition: "

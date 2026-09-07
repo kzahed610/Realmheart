@@ -1,12 +1,13 @@
 #pragma once
 
+#include "ui/AssetResolver.hpp"
 #include "ui/powermenu/PowerMenuVideoState.hpp"
 
 #include <gtk/gtk.h>
 
-#include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace realmheart::ui::powermenu::animation {
@@ -74,8 +75,8 @@ private:
     GdkTexture* poster_texture_ = nullptr;
     GtkMediaStream* media_stream_ = nullptr;
     std::unique_ptr<animation::PowerMenuRippleRenderer> ripple_renderer_;
-    std::filesystem::path video_path_;
-    std::filesystem::path poster_path_;
+    std::optional<ui::ProjectAsset> video_asset_;
+    std::optional<ui::ProjectAsset> poster_asset_;
     std::string error_message_;
     PowerMenuVideoState state_;
     std::function<void()> on_hidden_;

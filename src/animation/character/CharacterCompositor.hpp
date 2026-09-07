@@ -39,7 +39,8 @@ public:
         core::DisplayTier layout_tier,
         CharacterHostGeometry host_geometry,
         std::string* error_message = nullptr,
-        CharacterHairMode initial_hair_mode = CharacterHairMode::Mesh
+        CharacterHairMode initial_hair_mode = CharacterHairMode::Mesh,
+        std::string opened_rig_contents = {}
     );
 
     ~CharacterCompositor();

@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -66,6 +67,59 @@ void test_project_asset_resolver_allows_safe_nested_realmheart_assets() {
     ), "nested resolver must reject traversal after a valid prefix");
     require(!realmheart::ui::resolve_project_asset("/tmp/battery-charging-50.svg"),
             "nested resolver must reject absolute paths");
+}
+
+void test_project_asset_handle_rejects_links_and_consumes_same_open_file() {
+    std::string pattern = (std::filesystem::temp_directory_path() /
+                           "realmheart-asset-handle-XXXXXX").string();
+    char* created = ::mkdtemp(pattern.data());
+    require(created != nullptr, "asset handle test directory could not be created");
+
+    const auto root = std::filesystem::path(created);
+    const auto safe_path = root / "safe.txt";
+    {
+        std::ofstream output(safe_path);
+        output << "safe-content";
+    }
+    std::filesystem::create_directory(root / "directory");
+    std::error_code symlink_error;
+    std::filesystem::create_symlink(safe_path, root / "link.txt", symlink_error);
+    require(!symlink_error, "asset handle test symlink could not be created");
+
+    const char* previous = std::getenv("REALMHEART_ASSET_DIR");
+    const std::string previous_value = previous == nullptr ? std::string{} : previous;
+    const bool had_previous = previous != nullptr;
+    require(::setenv("REALMHEART_ASSET_DIR", root.c_str(), 1) == 0,
+            "asset handle test could not configure its asset root");
+
+    const auto asset = realmheart::ui::open_project_asset("safe.txt");
+    require(asset.has_value() && asset->descriptor() >= 0,
+            "safe project asset must return an open descriptor");
+    require(asset->read_all(1024) == std::optional<std::string>("safe-content"),
+            "descriptor-backed asset must read its original content");
+    require(!realmheart::ui::open_project_asset("link.txt"),
+            "descriptor-backed resolver must reject symlink assets");
+    require(!realmheart::ui::open_project_asset("directory"),
+            "descriptor-backed resolver must reject non-regular assets");
+    require(!realmheart::ui::open_project_asset("../safe.txt"),
+            "descriptor-backed resolver must reject root traversal");
+
+    std::filesystem::rename(safe_path, root / "moved.txt");
+    {
+        std::ofstream output(safe_path);
+        output << "replacement-content";
+    }
+    require(asset->read_all(1024) == std::optional<std::string>("safe-content"),
+            "descriptor-backed asset must remain bound to the opened file");
+
+    if (had_previous) {
+        require(::setenv("REALMHEART_ASSET_DIR", previous_value.c_str(), 1) == 0,
+                "asset handle test could not restore its asset root");
+    } else {
+        require(::unsetenv("REALMHEART_ASSET_DIR") == 0,
+                "asset handle test could not clear its asset root");
+    }
+    std::filesystem::remove_all(root);
 }
 
 void test_style_resolver_uses_dedicated_roots_and_rejects_escape_paths() {
@@ -257,6 +311,7 @@ void test_image_file_filter_model_owns_exactly_one_valid_filter() {
 int main() {
     test_asset_resolver_accepts_known_icons_and_rejects_escape_paths();
     test_project_asset_resolver_allows_safe_nested_realmheart_assets();
+    test_project_asset_handle_rejects_links_and_consumes_same_open_file();
     test_style_resolver_uses_dedicated_roots_and_rejects_escape_paths();
     test_taskbar_native_nodes_clear_inherited_theme_layers();
     test_theme_css_rejects_untrusted_values_and_normalizes_luminance();

@@ -113,7 +113,8 @@ public:
     static std::optional<CharacterManifest> load(
         const std::filesystem::path& character_root,
         core::DisplayTier display_tier,
-        std::string* error_message = nullptr
+        std::string* error_message = nullptr,
+        std::string_view opened_rig_contents = {}
     );
 
     [[nodiscard]] const CharacterAsset* find_asset(std::string_view id) const;

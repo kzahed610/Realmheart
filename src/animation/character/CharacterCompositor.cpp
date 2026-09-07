@@ -307,7 +307,8 @@ std::unique_ptr<CharacterCompositor> CharacterCompositor::create(
     core::DisplayTier layout_tier,
     CharacterHostGeometry host_geometry,
     std::string* error_message,
-    CharacterHairMode initial_hair_mode
+    CharacterHairMode initial_hair_mode,
+    std::string opened_rig_contents
 ) {
     if (back_host == nullptr || front_host == nullptr ||
         !GTK_IS_FIXED(back_host) || !GTK_IS_FIXED(front_host) ||
@@ -319,7 +320,10 @@ std::unique_ptr<CharacterCompositor> CharacterCompositor::create(
     }
 
     auto manifest = CharacterManifest::load(
-        character_root, asset_tier, error_message
+        character_root,
+        asset_tier,
+        error_message,
+        opened_rig_contents
     );
     if (!manifest) return nullptr;
 

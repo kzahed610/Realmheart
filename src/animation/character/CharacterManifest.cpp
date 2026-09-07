@@ -94,6 +94,26 @@ std::optional<Json> read_json(
     }
 }
 
+std::optional<Json> parse_opened_json(
+    std::string_view contents,
+    const std::filesystem::path& path,
+    std::string* error_message
+) {
+    if (contents.size() > CharacterResourceBudget::kMaxManifestFileBytes) {
+        set_error(error_message, "Character manifest exceeds its file-size resource budget: " + path.string());
+        return std::nullopt;
+    }
+    try {
+        return Json::parse(contents);
+    } catch (const std::exception& error) {
+        set_error(
+            error_message,
+            "Unable to parse character manifest " + path.string() + ": " + error.what()
+        );
+        return std::nullopt;
+    }
+}
+
 std::optional<CharacterPoint> read_point(
     const Json& parent,
     std::string_view key,
@@ -244,7 +264,8 @@ CharacterPoint host_layer_offset_for_display_tier(
 std::optional<CharacterManifest> CharacterManifest::load(
     const std::filesystem::path& character_root,
     core::DisplayTier display_tier,
-    std::string* error_message
+    std::string* error_message,
+    std::string_view opened_rig_contents
 ) {
     std::error_code error;
     const auto canonical_root = std::filesystem::weakly_canonical(character_root, error);
@@ -253,7 +274,10 @@ std::optional<CharacterManifest> CharacterManifest::load(
         return std::nullopt;
     }
 
-    const auto rig_json = read_json(canonical_root / "rig.json", error_message);
+    const auto rig_path = canonical_root / "rig.json";
+    const auto rig_json = opened_rig_contents.empty()
+        ? read_json(rig_path, error_message)
+        : parse_opened_json(opened_rig_contents, rig_path, error_message);
     if (!rig_json) return std::nullopt;
 
     const auto selected_manifest_path = display_manifest_path(canonical_root, display_tier);

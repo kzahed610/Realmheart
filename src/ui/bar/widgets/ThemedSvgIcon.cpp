@@ -7,9 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <gdk-pixbuf/gdk-pixbuf.h>
-#include <iterator>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -77,13 +75,9 @@ std::string resolve_tokens(std::string source, const ColorKey& colors) {
     return source;
 }
 
-std::string read_file(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input) return {};
-    return std::string(
-        std::istreambuf_iterator<char>(input),
-        std::istreambuf_iterator<char>()
-    );
+std::string read_file(const realmheart::ui::ProjectAsset& asset) {
+    const auto content = asset.read_all(8U * 1024U * 1024U);
+    return content.value_or(std::string{});
 }
 
 } // namespace
@@ -290,8 +284,9 @@ bool ThemedSvgIcon::set_icon(std::string relative_path) {
     state_->source.clear();
     state_->cache_valid = false;
 
-    const auto resolved = realmheart::ui::resolve_project_asset(state_->relative_path);
-    if (resolved) state_->source = read_file(*resolved);
+    if (const auto asset = realmheart::ui::open_project_asset(state_->relative_path)) {
+        state_->source = read_file(*asset);
+    }
     gtk_widget_queue_draw(state_->drawing_area);
     return !state_->source.empty();
 }

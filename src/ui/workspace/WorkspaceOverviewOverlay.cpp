@@ -1062,16 +1062,22 @@ std::vector<std::string> basic_icon_candidates(std::string_view requested) {
 }
 
 [[nodiscard]] GdkTexture* load_texture(
-    const std::filesystem::path& path,
+    const realmheart::ui::ProjectAsset& asset,
     std::string& error_message
 ) {
     GError* texture_error = nullptr;
-    GdkTexture* texture = gdk_texture_new_from_filename(
-        path.c_str(),
-        &texture_error
-    );
+    GFile* file = asset.descriptor() < 0
+        ? nullptr
+        : g_file_new_for_path(
+            (std::filesystem::path("/proc/self/fd") /
+             std::to_string(asset.descriptor())).c_str()
+        );
+    GdkTexture* texture = file == nullptr
+        ? nullptr
+        : gdk_texture_new_from_file(file, &texture_error);
+    g_clear_object(&file);
     if (texture == nullptr) {
-        error_message = "Unable to load " + path.filename().string();
+        error_message = "Unable to load " + asset.path().filename().string();
         if (texture_error != nullptr && texture_error->message != nullptr) {
             error_message += ": ";
             error_message += texture_error->message;
@@ -4842,21 +4848,21 @@ bool WorkspaceOverviewOverlay::ensure_assets() {
     assets_attempted_ = true;
 
     for (std::size_t index = 0; index < kRealms.size(); ++index) {
-        const auto background_path = resolve_project_asset(
+        const auto background_asset = open_project_asset(
             workspace_overview_asset_path(
                 "backgrounds",
                 kRealms[index].background_stem,
                 asset_tier_
             )
         );
-        const auto character_path = resolve_project_asset(
+        const auto character_asset = open_project_asset(
             workspace_overview_asset_path(
                 "characters",
                 kRealms[index].character_stem,
                 asset_tier_
             )
         );
-        if (!background_path || !character_path) {
+        if (!background_asset || !character_asset) {
             asset_error_ = "Unable to resolve workspace overview assets";
             std::cerr << "[WorkspaceOverview] " << asset_error_ << '\n';
             release_assets();
@@ -4864,12 +4870,12 @@ bool WorkspaceOverviewOverlay::ensure_assets() {
         }
 
         assets_[index].background = load_texture(
-            *background_path,
+            *background_asset,
             asset_error_
         );
         if (assets_[index].background != nullptr) {
             assets_[index].character = load_texture(
-                *character_path,
+                *character_asset,
                 asset_error_
             );
         }

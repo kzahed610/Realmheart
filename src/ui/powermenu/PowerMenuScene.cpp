@@ -30,6 +30,14 @@ double sanitize_origin(double value, double fallback) noexcept {
     return std::clamp(value, 0.0, 1.0);
 }
 
+GFile* gfile_for_asset(const ProjectAsset& asset) {
+    if (asset.descriptor() < 0) return nullptr;
+    return g_file_new_for_path(
+        (std::filesystem::path("/proc/self/fd") /
+         std::to_string(asset.descriptor())).c_str()
+    );
+}
+
 } // namespace
 
 PowerMenuScene::PowerMenuScene() {
@@ -95,15 +103,15 @@ PowerMenuScene::PowerMenuScene() {
         g_object_unref(provider);
     }
 
-    const auto resolved_video = resolve_project_asset(kVideoAsset);
-    const auto resolved_poster = resolve_project_asset(kPosterAsset);
-    if (!resolved_video || !resolved_poster) {
+    auto video_asset = open_project_asset(kVideoAsset);
+    auto poster_asset = open_project_asset(kPosterAsset);
+    if (!video_asset || !poster_asset) {
         error_message_ = "Unable to resolve power-menu media assets";
         std::cerr << "[PowerMenuScene] " << error_message_ << '\n';
         return;
     }
-    video_path_ = *resolved_video;
-    poster_path_ = *resolved_poster;
+    video_asset_ = std::move(*video_asset);
+    poster_asset_ = std::move(*poster_asset);
 }
 
 PowerMenuScene::~PowerMenuScene() {
@@ -126,7 +134,7 @@ PowerMenuScene::~PowerMenuScene() {
 GtkWidget* PowerMenuScene::widget() const { return widget_; }
 
 bool PowerMenuScene::ready() const {
-    return !video_path_.empty() && !poster_path_.empty();
+    return video_asset_.has_value() && poster_asset_.has_value();
 }
 
 const std::string& PowerMenuScene::error_message() const { return error_message_; }
@@ -247,16 +255,17 @@ void PowerMenuScene::stream_notify_callback(
 
 bool PowerMenuScene::ensure_poster() {
     if (poster_texture_ != nullptr) return true;
-    if (poster_path_.empty()) {
+    if (!poster_asset_) {
         error_message_ = "Power-menu poster path is unavailable";
         return false;
     }
 
     GError* error = nullptr;
-    poster_texture_ = gdk_texture_new_from_filename(
-        poster_path_.c_str(),
-        &error
-    );
+    GFile* file = gfile_for_asset(*poster_asset_);
+    poster_texture_ = file == nullptr
+        ? nullptr
+        : gdk_texture_new_from_file(file, &error);
+    g_clear_object(&file);
     if (poster_texture_ == nullptr) {
         error_message_ = "Unable to load power-menu poster";
         if (error != nullptr && error->message != nullptr) {
@@ -272,7 +281,7 @@ bool PowerMenuScene::ensure_poster() {
     );
     apply_media_geometry();
     std::cerr << "[PowerMenuScene] static poster loaded lazily: "
-              << poster_path_.filename().string() << '\n';
+              << poster_asset_->path().filename().string() << '\n';
     return true;
 }
 
@@ -330,13 +339,16 @@ void PowerMenuScene::acquire_media() {
     }
 
     if (!media_source_loaded_) {
-        gtk_media_file_set_filename(
-            GTK_MEDIA_FILE(media_stream_),
-            video_path_.c_str()
-        );
+        GFile* file = video_asset_ ? gfile_for_asset(*video_asset_) : nullptr;
+        if (file == nullptr) {
+            error_message_ = "Power-menu video descriptor is unavailable";
+            return;
+        }
+        gtk_media_file_set_file(GTK_MEDIA_FILE(media_stream_), file);
+        g_clear_object(&file);
         media_source_loaded_ = true;
         std::cerr << "[PowerMenuScene] video pipeline created once: "
-                  << video_path_.filename().string() << '\n';
+                  << video_asset_->path().filename().string() << '\n';
     }
 
     // release_media() detaches the paintable while hidden so GTK has no reason
