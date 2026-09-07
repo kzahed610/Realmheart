@@ -10,25 +10,31 @@ namespace {
 
 using json = nlohmann::json;
 
-std::optional<std::string> color_from_node(const json& node) {
+struct ColorReadResult {
+    std::optional<std::string> value;
+    bool present = false;
+    bool invalid = false;
+};
+
+ColorReadResult color_from_node(const json& node) {
     if (node.is_string()) {
         const auto value = node.get<std::string>();
-        if (!value.empty()) return value;
-        return std::nullopt;
+        if (is_valid_palette_color(value)) return {value, true, false};
+        return {std::nullopt, true, true};
     }
 
-    if (!node.is_object()) return std::nullopt;
+    if (!node.is_object()) return {std::nullopt, true, true};
 
     for (const std::string_view key : {"color", "hex", "default"}) {
         const auto it = node.find(std::string(key));
         if (it != node.end()) {
-            if (auto value = color_from_node(*it)) return value;
+            return color_from_node(*it);
         }
     }
-    return std::nullopt;
+    return {};
 }
 
-std::optional<std::string> read_color(
+ColorReadResult read_color(
     const json& colors,
     std::string_view role,
     std::string_view mode
@@ -41,7 +47,7 @@ std::optional<std::string> read_color(
     if (const auto mode_it = colors.find(mode_key);
         mode_it != colors.end() && mode_it->is_object()) {
         if (const auto role_it = mode_it->find(role_key); role_it != mode_it->end()) {
-            if (auto value = color_from_node(*role_it)) return value;
+            return color_from_node(*role_it);
         }
     }
 
@@ -50,31 +56,34 @@ std::optional<std::string> read_color(
     if (const auto role_it = colors.find(role_key); role_it != colors.end()) {
         if (role_it->is_object()) {
             if (const auto mode_it = role_it->find(mode_key); mode_it != role_it->end()) {
-                if (auto value = color_from_node(*mode_it)) return value;
+                const auto result = color_from_node(*mode_it);
+                if (result.present) return result;
             }
             if (const auto default_it = role_it->find("default"); default_it != role_it->end()) {
-                if (auto value = color_from_node(*default_it)) return value;
+                const auto result = color_from_node(*default_it);
+                if (result.present) return result;
             }
         }
-        if (auto value = color_from_node(*role_it)) return value;
+        return color_from_node(*role_it);
     }
 
-    return std::nullopt;
+    return {};
 }
 
-std::optional<std::string> first_role(
+ColorReadResult first_role(
     const json& colors,
     std::string_view mode,
     std::initializer_list<std::string_view> roles
 ) {
     for (const auto role : roles) {
-        if (auto value = read_color(colors, role, mode)) return value;
+        const auto result = read_color(colors, role, mode);
+        if (result.invalid || result.value) return result;
     }
-    return std::nullopt;
+    return {};
 }
 
-void put_if(Palette& palette, std::string key, const std::optional<std::string>& value) {
-    if (value && !value->empty()) palette.colors.emplace(std::move(key), *value);
+void put_if(Palette& palette, std::string key, const ColorReadResult& value) {
+    if (value.value) palette.colors.emplace(std::move(key), *value.value);
 }
 
 } // namespace
@@ -105,6 +114,19 @@ std::optional<Palette> MatugenParser::parse(const std::string& json_string, Them
         const json& colors = *colors_it;
         Palette palette;
 
+        constexpr std::array<std::string_view, 14> declared_roles{
+            "primary", "source_color", "secondary", "tertiary", "background",
+            "surface", "surface_container", "surface_variant", "surface_container_low",
+            "on_surface", "on_background", "on_surface_variant", "outline",
+            "outline_variant"
+        };
+        for (const auto role : declared_roles) {
+            if (read_color(colors, role, mode_key).invalid) {
+                std::cerr << "[MatugenParser] Invalid color role: " << role << std::endl;
+                return std::nullopt;
+            }
+        }
+
         const auto primary = first_role(colors, mode_key, {"primary", "source_color"});
         const auto secondary = first_role(colors, mode_key, {"secondary", "primary"});
         const auto tertiary = first_role(colors, mode_key, {"tertiary", "secondary", "primary"});
@@ -118,7 +140,7 @@ std::optional<Palette> MatugenParser::parse(const std::string& json_string, Them
         const auto text = first_role(colors, mode_key, {"on_surface", "on_background"});
         const auto text_muted = first_role(colors, mode_key, {"on_surface_variant", "outline", "on_surface"});
         const auto outline = first_role(colors, mode_key, {"outline", "outline_variant"});
-        const auto error = first_role(colors, mode_key, {"error", "primary"});
+        const auto error = first_role(colors, mode_key, {"error"});
 
         put_if(palette, "primary", primary);
         put_if(palette, "accent", primary);
@@ -134,20 +156,34 @@ std::optional<Palette> MatugenParser::parse(const std::string& json_string, Them
         put_if(palette, "red", error);
         put_if(palette, "blue", secondary);
 
+        if (!error.value) {
+            std::cerr << "[MatugenParser] Missing required semantic error color role" << std::endl;
+            return std::nullopt;
+        }
+
         constexpr std::array<std::string_view, 4> required{
             "primary", "background", "surface", "text"
         };
         for (const auto key : required) {
             if (!palette.colors.contains(std::string(key))) {
-                std::cerr << "[MatugenParser] Missing required color role: " << key << '\n';
+                std::cerr << "[MatugenParser] Missing required color role: " << key << std::endl;
                 return std::nullopt;
             }
+        }
+
+        if (!palette_is_valid(palette)) {
+            std::cerr << "[MatugenParser] Palette failed color validation" << std::endl;
+            return std::nullopt;
         }
 
         return palette;
     } catch (const json::exception& error) {
         std::cerr << "[MatugenParser] Unable to parse Matugen JSON: "
-                  << error.what() << '\n';
+                  << error.what() << std::endl;
+        return std::nullopt;
+    } catch (const std::exception& error) {
+        std::cerr << "[MatugenParser] Unable to construct palette: "
+                  << error.what() << std::endl;
         return std::nullopt;
     }
 }

@@ -1208,7 +1208,9 @@ if(BUILD_TESTING)
         src/ui/AssetResolver.cpp
         src/ui/ImageFileFilters.cpp
         src/ui/LayerSurface.cpp
+        src/ui/ThemeStyles.cpp
         src/ui/styles/CssModuleLoader.cpp
+        src/services/ThemeService.cpp
     )
     target_compile_definitions(realmheart_ui_foundation_tests PRIVATE
         REALMHEART_TEST_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets/Realmheart-Icons"
@@ -1227,6 +1229,11 @@ if(BUILD_TESTING)
         src/services/WallpaperService.cpp
         src/services/ThemeService.cpp
         src/services/MatugenParser.cpp
+        src/ui/AssetResolver.cpp
+    )
+    target_compile_definitions(realmheart_utility_manager_tests PRIVATE
+        REALMHEART_INSTALL_ASSET_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/assets"
+        REALMHEART_SOURCE_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
     )
     realmheart_register_test(realmheart_utility_manager_tests)
 
@@ -1267,7 +1274,17 @@ if(BUILD_TESTING)
     target_link_libraries(realmheart_native_wallpaper_lifecycle_tests PRIVATE GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_native_wallpaper_lifecycle_tests)
 
-    add_executable(realmheart_wallpaper_service_tests tests/WallpaperServiceTests.cpp src/services/WallpaperService.cpp src/core/Command.cpp)
+    add_executable(
+        realmheart_wallpaper_service_tests
+        tests/WallpaperServiceTests.cpp
+        src/services/WallpaperService.cpp
+        src/core/Command.cpp
+        src/ui/AssetResolver.cpp
+    )
+    target_compile_definitions(realmheart_wallpaper_service_tests PRIVATE
+        REALMHEART_INSTALL_ASSET_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/assets"
+        REALMHEART_SOURCE_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
+    )
     target_link_libraries(realmheart_wallpaper_service_tests PRIVATE GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_wallpaper_service_tests)
 

@@ -1,14 +1,17 @@
 #include "ui/AssetResolver.hpp"
 #include "ui/LayerSurface.hpp"
 #include "ui/ImageFileFilters.hpp"
+#include "ui/ThemeStyles.hpp"
 #include "ui/styles/CssModuleLoader.hpp"
 
 #include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <unistd.h>
 
 namespace {
 
@@ -104,6 +107,69 @@ void test_taskbar_native_nodes_clear_inherited_theme_layers() {
     );
 }
 
+void test_theme_css_rejects_untrusted_values_and_normalizes_luminance() {
+    realmheart::services::Palette palette;
+    palette.colors = {
+        {"primary", "#123456; color: red"},
+        {"secondary", "#abcdef"},
+        {"background", "#fff"},
+        {"surface", "#111213"},
+        {"surface_variant", "#222324"},
+        {"text", "#000000"},
+        {"text_muted", "#333333"},
+        {"outline", "#444444"},
+        {"error", "#ff3344"}
+    };
+    const std::string css = realmheart::ui::ThemeStyles::build_css(palette);
+    require(css.find("@define-color rh_primary #cba6f7;") != std::string::npos,
+            "invalid CSS color must be replaced with a safe fallback");
+    require(css.find("@define-color rh_background #fff;") != std::string::npos,
+            "valid short background color must be preserved");
+    require(css.find("@define-color rh_icon_primary #17141D;") != std::string::npos,
+            "light short background must select the light icon palette");
+    require(css.find("color: red") == std::string::npos,
+            "CSS injection text must never reach the generated stylesheet");
+}
+
+void test_missing_css_module_is_reported_without_partial_read() {
+    constexpr std::array<std::string_view, 1> modules = {"missing/taskbar.css"};
+    bool rejected = false;
+    try {
+        static_cast<void>(realmheart::ui::styles::load_css_modules(modules));
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    require(rejected, "missing CSS module must produce a bounded loader failure");
+}
+
+void test_theme_provider_reloads_from_live_palette_updates() {
+    std::string pattern = (std::filesystem::temp_directory_path() /
+                           "realmheart-ui-theme-XXXXXX").string();
+    char* created = ::mkdtemp(pattern.data());
+    require(created != nullptr, "theme provider test directory could not be created");
+
+    auto service = std::make_shared<realmheart::services::ThemeService>(
+        std::filesystem::path(created) / "palette.tsv"
+    );
+    bool constructed = false;
+    try {
+        realmheart::ui::ThemeStyles styles(service);
+        constructed = true;
+        auto palette = service->get_palette();
+        palette.colors["primary"] = "#ffffff";
+        require(service->update_palette(std::move(palette)),
+                "valid live palette update was rejected by provider test");
+        service->wait_for_persistence();
+    } catch (const std::exception& error) {
+        std::cerr << "FAIL: theme provider reload threw: " << error.what() << '\n';
+        std::exit(1);
+    }
+    require(constructed, "theme provider did not construct");
+
+    std::error_code cleanup_error;
+    std::filesystem::remove_all(created, cleanup_error);
+}
+
 void test_bar_surface_spec_is_reusable_and_reserves_its_width() {
     const auto spec = realmheart::ui::make_bar_surface_spec(72);
     require(spec.surface_namespace == "realmheart-bar", "bar namespace must remain stable");
@@ -193,6 +259,9 @@ int main() {
     test_project_asset_resolver_allows_safe_nested_realmheart_assets();
     test_style_resolver_uses_dedicated_roots_and_rejects_escape_paths();
     test_taskbar_native_nodes_clear_inherited_theme_layers();
+    test_theme_css_rejects_untrusted_values_and_normalizes_luminance();
+    test_missing_css_module_is_reported_without_partial_read();
+    test_theme_provider_reloads_from_live_palette_updates();
     test_bar_surface_spec_is_reusable_and_reserves_its_width();
     test_wallpaper_surface_spec_is_fullscreen_background_and_noninteractive();
     test_test_surface_spec_is_nonexclusive();

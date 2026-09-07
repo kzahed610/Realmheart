@@ -17,32 +17,52 @@ namespace {
 constexpr guint kRealmheartStylePriority = GTK_STYLE_PROVIDER_PRIORITY_USER + 1;
 
 std::optional<double> hex_luminance(std::string_view color) {
-    if (color.size() != 7 || color.front() != '#') return std::nullopt;
+    if (!services::is_valid_palette_color(color)) return std::nullopt;
     const auto hex = [](char value) -> int {
         if (value >= '0' && value <= '9') return value - '0';
         if (value >= 'a' && value <= 'f') return value - 'a' + 10;
         if (value >= 'A' && value <= 'F') return value - 'A' + 10;
         return -1;
     };
-    const auto channel = [&](std::size_t index) -> std::optional<double> {
-        const int high = hex(color[index]);
+    const std::size_t digits = color.size() - 1;
+    const auto component = [&](std::size_t index) -> std::optional<int> {
+        const int value = hex(color[index]);
+        if (value < 0) return std::nullopt;
+        if (digits == 3 || digits == 4) return value * 17;
         const int low = hex(color[index + 1]);
-        if (high < 0 || low < 0) return std::nullopt;
-        const double srgb = static_cast<double>((high << 4) | low) / 255.0;
+        if (low < 0) return std::nullopt;
+        return (value << 4) | low;
+    };
+    const auto channel = [&](std::size_t index) -> std::optional<double> {
+        const auto value = component(index);
+        if (!value) return std::nullopt;
+        const double srgb = static_cast<double>(*value) / 255.0;
         return srgb <= 0.04045
             ? srgb / 12.92
             : std::pow((srgb + 0.055) / 1.055, 2.4);
     };
 
     const auto red = channel(1);
-    const auto green = channel(3);
-    const auto blue = channel(5);
+    const auto green = channel(digits == 3 || digits == 4 ? 2 : 3);
+    const auto blue = channel(digits == 3 || digits == 4 ? 3 : 5);
     if (!red || !green || !blue) return std::nullopt;
     return (0.2126 * *red) + (0.7152 * *green) + (0.0722 * *blue);
 }
 
 bool palette_is_dark(std::string_view background) {
     return hex_luminance(background).value_or(0.0) < 0.42;
+}
+
+std::string safe_color(
+    const services::Palette& palette,
+    std::string_view role,
+    std::string_view fallback
+) {
+    const auto it = palette.colors.find(std::string(role));
+    if (it != palette.colors.end() && services::is_valid_palette_color(it->second)) {
+        return it->second;
+    }
+    return std::string(fallback);
 }
 
 std::string fallback_component_css() {
@@ -175,15 +195,15 @@ void ThemeStyles::apply(const services::Palette& palette) {
 }
 
 std::string ThemeStyles::build_css(const services::Palette& palette) {
-    const auto primary = palette.get("primary", "#cba6f7");
-    const auto secondary = palette.get("secondary", "#89b4fa");
-    const auto background = palette.get("background", "#11111b");
-    const auto surface = palette.get("surface", "#1e1e2e");
-    const auto surface_variant = palette.get("surface_variant", "#313244");
-    const auto text = palette.get("text", "#cdd6f4");
-    const auto text_muted = palette.get("text_muted", "#a6adc8");
-    const auto outline = palette.get("outline", "#45475a");
-    const auto error = palette.get("error", "#f38ba8");
+    const auto primary = safe_color(palette, "primary", "#cba6f7");
+    const auto secondary = safe_color(palette, "secondary", "#89b4fa");
+    const auto background = safe_color(palette, "background", "#11111b");
+    const auto surface = safe_color(palette, "surface", "#1e1e2e");
+    const auto surface_variant = safe_color(palette, "surface_variant", "#313244");
+    const auto text = safe_color(palette, "text", "#cdd6f4");
+    const auto text_muted = safe_color(palette, "text_muted", "#a6adc8");
+    const auto outline = safe_color(palette, "outline", "#45475a");
+    const auto error = safe_color(palette, "error", "#f38ba8");
     const bool dark = palette_is_dark(background);
     const std::string icon_primary = dark ? "#F5F2EA" : "#17141D";
     const std::string icon_accent = dark ? "#FFD66B" : "#6D42D8";

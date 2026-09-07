@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <cstdint>
 #include <cstdlib>
-#include <fstream>
-#include <sstream>
+#include <fcntl.h>
 #include <stdexcept>
 #include <system_error>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -48,6 +50,46 @@ std::vector<std::filesystem::path> style_roots() {
     return roots;
 }
 
+std::string read_module_contents(const std::filesystem::path& path) {
+    constexpr std::size_t kMaxModuleBytes = 512 * 1024;
+    const int file_descriptor = ::open(
+        path.c_str(),
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+    );
+    if (file_descriptor < 0) {
+        throw std::runtime_error("Unable to read Realmheart CSS module: " + path.string());
+    }
+
+    struct CloseDescriptor {
+        int value;
+        ~CloseDescriptor() { if (value >= 0) ::close(value); }
+    } descriptor{file_descriptor};
+
+    struct stat metadata{};
+    if (::fstat(file_descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
+        metadata.st_size < 0 || static_cast<std::uintmax_t>(metadata.st_size) > kMaxModuleBytes) {
+        throw std::runtime_error("Realmheart CSS module is not a bounded regular file: " + path.string());
+    }
+
+    std::string contents;
+    contents.reserve(static_cast<std::size_t>(metadata.st_size));
+    std::array<char, 4096> buffer{};
+    while (true) {
+        const ssize_t count = ::read(file_descriptor, buffer.data(), buffer.size());
+        if (count > 0) {
+            contents.append(buffer.data(), static_cast<std::size_t>(count));
+            if (contents.size() > kMaxModuleBytes) {
+                throw std::runtime_error("Realmheart CSS module grew beyond its bound: " + path.string());
+            }
+            continue;
+        }
+        if (count == 0) break;
+        if (errno == EINTR) continue;
+        throw std::runtime_error("Unable to read Realmheart CSS module: " + path.string());
+    }
+    return contents;
+}
+
 } // namespace
 
 std::optional<std::filesystem::path> resolve_style_module(std::string_view relative_path) {
@@ -85,17 +127,8 @@ std::string load_css_modules(std::span<const std::string_view> module_paths) {
             );
         }
 
-        std::ifstream input(*resolved, std::ios::binary);
-        if (!input) {
-            throw std::runtime_error(
-                "Unable to read Realmheart CSS module: " + resolved->string()
-            );
-        }
-
-        std::ostringstream contents;
-        contents << input.rdbuf();
         combined += "\n/* module: " + std::string(module_path) + " */\n";
-        combined += contents.str();
+        combined += read_module_contents(*resolved);
         if (combined.empty() || combined.back() != '\n') combined.push_back('\n');
     }
 

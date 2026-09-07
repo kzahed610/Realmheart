@@ -94,6 +94,62 @@ void rejects_incomplete_json() {
     require(!palette.has_value(), "incomplete palette must be rejected");
 }
 
+void rejects_invalid_and_css_injection_colors() {
+    const std::string json = R"json({
+        "colors": {"dark": {
+            "primary": "#123456; color: red",
+            "background": "#010203",
+            "surface": "#111213",
+            "on_surface": "#fafafa",
+            "error": "#ff3344"
+        }}
+    })json";
+    require(!realmheart::services::MatugenParser::parse(json),
+            "invalid CSS color data must reject the complete palette");
+}
+
+void rejects_empty_and_missing_error_colors() {
+    const std::string empty_error = R"json({
+        "colors": {"dark": {
+            "primary": "#123456",
+            "background": "#010203",
+            "surface": "#111213",
+            "on_surface": "#fafafa",
+            "error": ""
+        }}
+    })json";
+    require(!realmheart::services::MatugenParser::parse(empty_error),
+            "empty error color must reject the palette");
+
+    const std::string missing_error = R"json({
+        "colors": {"dark": {
+            "primary": "#123456",
+            "background": "#010203",
+            "surface": "#111213",
+            "on_surface": "#fafafa"
+        }}
+    })json";
+    require(!realmheart::services::MatugenParser::parse(missing_error),
+            "missing error color must not derive red from primary");
+}
+
+void accepts_normalized_short_light_colors() {
+    const std::string json = R"json({
+        "colors": {"light": {
+            "primary": "#abc",
+            "background": "#fff",
+            "surface": "#ffff",
+            "on_surface": "#000000ff",
+            "error": "#f88"
+        }}
+    })json";
+    const auto palette = realmheart::services::MatugenParser::parse(
+        json, realmheart::services::ThemeMode::Light
+    );
+    require(palette.has_value(), "valid short light colors should parse");
+    require(palette->get("background") == "#fff", "short light background was changed");
+}
+
 } // namespace
 
 int main() {
@@ -101,6 +157,9 @@ int main() {
     parses_template_shaped_json();
     parses_json_surrounded_by_harmless_output();
     rejects_incomplete_json();
+    rejects_invalid_and_css_injection_colors();
+    rejects_empty_and_missing_error_colors();
+    accepts_normalized_short_light_colors();
     std::cout << "MatugenParserTests passed\n";
     return 0;
 }

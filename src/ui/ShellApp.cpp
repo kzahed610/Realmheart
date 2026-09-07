@@ -543,6 +543,9 @@ public:
         if (current_path.empty()) {
             // Per-output selections are independent state. They must still be
             // restored when the legacy/global wallpaper state is absent.
+            // Keep cached colors when valid, but explicitly repair any malformed
+            // or semantically incomplete palette before activating the shell.
+            theme_service_->ensure_safe_palette();
             restore_monitor_wallpapers();
             report_restart_startup_ready();
             return;

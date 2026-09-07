@@ -1,4 +1,5 @@
 #include "services/WallpaperService.hpp"
+#include "ui/AssetResolver.hpp"
 
 #include <gtest/gtest.h>
 
@@ -72,14 +73,18 @@ TEST_F(WallpaperServiceTest, PersistedPathRoundTrips) {
     EXPECT_EQ(service.load_path(), std::optional<std::filesystem::path>{image});
 }
 
-TEST_F(WallpaperServiceTest, EmptyPersistedStateReturnsNoWallpaper) {
+TEST_F(WallpaperServiceTest, EmptyPersistedStateResolvesBundledDefault) {
     std::filesystem::create_directories(state_file_.parent_path());
     {
         std::ofstream empty_state(state_file_);
     }
     realmheart::services::WallpaperService service(state_file_);
 
-    EXPECT_EQ(service.load_path(), std::nullopt);
+    const auto expected = realmheart::ui::resolve_project_asset(
+        "Showcase/Wallpapers/Arthur_Leywin_Void.png"
+    );
+    ASSERT_TRUE(expected.has_value());
+    EXPECT_EQ(service.load_path(), expected);
 }
 
 TEST_F(WallpaperServiceTest, InvalidPersistedStateReturnsNoWallpaper) {
