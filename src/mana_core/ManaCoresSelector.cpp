@@ -17,6 +17,7 @@
 #include "effects/core/ShaderSource.hpp"
 #include "mana_core/ThumbnailCache.hpp"
 #include "ui/LayerSurface.hpp"
+#include "core/TaskExecutor.hpp"
 
 namespace realmheart::mana_core {
 namespace {
@@ -241,9 +242,23 @@ void append_annular_sector_path(
 
 } // namespace
 
-ManaCoresSelector::ManaCoresSelector() = default;
+ManaCoresSelector::ManaCoresSelector() {
+    async_state_->owner.store(this);
+}
 
 ManaCoresSelector::~ManaCoresSelector() {
+    async_state_->alive.store(false);
+    async_state_->owner.store(nullptr);
+    async_state_->generation.fetch_add(1);
+
+    // Disconnect signal edges before destroying the GL area. GTK may emit
+    // unrealize synchronously from gtk_window_destroy().
+    if (window_ != nullptr) {
+        g_signal_handlers_disconnect_by_data(window_, this);
+    }
+    if (gl_area_ != nullptr) {
+        g_signal_handlers_disconnect_by_data(gl_area_, this);
+    }
     cleanup_gl_resources();
     if (tick_callback_id_ != 0 && canvas_ != nullptr) {
         gtk_widget_remove_tick_callback(canvas_, tick_callback_id_);
@@ -256,16 +271,7 @@ ManaCoresSelector::~ManaCoresSelector() {
     clear_pixbufs();
     clear_old_pixbufs();
 
-    // The selector is owned by ShellRuntime, while its GtkApplication window
-    // is owned by GTK. Tear down every callback edge before releasing this
-    // object; otherwise GTK can dispatch a draw/render/close event with a
-    // dangling ManaCoresSelector* during application teardown.
-    if (window_ != nullptr) {
-        g_signal_handlers_disconnect_by_data(window_, this);
-    }
-    if (gl_area_ != nullptr) {
-        g_signal_handlers_disconnect_by_data(gl_area_, this);
-    }
+
     if (canvas_ != nullptr) {
         gtk_drawing_area_set_draw_func(
             GTK_DRAWING_AREA(canvas_), nullptr, nullptr, nullptr
@@ -588,55 +594,193 @@ void ManaCoresSelector::set_next_wallpapers(std::array<GdkPixbuf*, 3> pixbufs) {
 }
 
 void ManaCoresSelector::load_wallpapers_from_library(const std::filesystem::path& current_path) {
-    WallpaperLibrary library;
-    auto discovery = library.discover();
-    all_wallpaper_paths_ = discovery.paths;
-
+    const auto state = async_state_;
+    const std::uint64_t generation = state->generation.fetch_add(1) + 1;
+    all_wallpaper_paths_.clear();
+    wallpaper_decode_ready_.clear();
     current_wallpaper_index_ = 0;
-    for (size_t i = 0; i < all_wallpaper_paths_.size(); ++i) {
-        if (all_wallpaper_paths_[i] == current_path) {
-            current_wallpaper_index_ = static_cast<int>(i);
-            break;
-        }
-    }
+    hovered_radial_ = -1;
+    clear_pixbufs();
+    clear_old_pixbufs();
+    queue_redraw();
 
-    reload_pixbufs();
+    struct Payload {
+        std::shared_ptr<AsyncState> state;
+        std::uint64_t generation = 0;
+        int wallpaper_index = 0;
+        std::vector<std::filesystem::path> paths;
+        std::array<GdkPixbuf*, 4> pixbufs = {nullptr, nullptr, nullptr, nullptr};
+    };
+
+    const bool posted = core::shared_task_executor().post([
+        state,
+        generation,
+        current_path
+    ] {
+        auto* payload = new Payload;
+        payload->state = state;
+        payload->generation = generation;
+        WallpaperLibrary library;
+        payload->paths = library.discover().paths;
+
+        std::error_code current_error;
+        const auto current_canonical = std::filesystem::weakly_canonical(current_path, current_error);
+        for (std::size_t index = 0; index < payload->paths.size(); ++index) {
+            std::error_code path_error;
+            const auto canonical = std::filesystem::weakly_canonical(payload->paths[index], path_error);
+            if ((!current_path.empty() && payload->paths[index] == current_path) ||
+                (!current_error && !path_error && canonical == current_canonical)) {
+                payload->wallpaper_index = static_cast<int>(index);
+                break;
+            }
+        }
+
+        if (!payload->paths.empty()) {
+            const int total = static_cast<int>(payload->paths.size());
+            const std::array<int, 4> indices = {
+                payload->wallpaper_index,
+                (payload->wallpaper_index + 1) % total,
+                (payload->wallpaper_index + 2) % total,
+                (payload->wallpaper_index + 3) % total
+            };
+            for (std::size_t slot = 0; slot < indices.size(); ++slot) {
+                payload->pixbufs[slot] = ThumbnailCache::load_or_create(
+                    payload->paths[static_cast<std::size_t>(indices[slot])],
+                    slot == 0 ? 480 : 360,
+                    nullptr
+                );
+            }
+        }
+
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            +[](gpointer raw) -> gboolean {
+                auto* payload = static_cast<Payload*>(raw);
+                auto* owner = payload->state->owner.load();
+                if (payload->state->alive.load() && owner != nullptr &&
+                    payload->state->generation.load() == payload->generation) {
+                    owner->all_wallpaper_paths_ = std::move(payload->paths);
+                    owner->current_wallpaper_index_ = payload->wallpaper_index;
+                    owner->wallpaper_decode_ready_.assign(
+                        owner->all_wallpaper_paths_.size(), false
+                    );
+                    owner->apply_preview_load(
+                        payload->generation,
+                        payload->wallpaper_index,
+                        payload->pixbufs
+                    );
+                    payload->pixbufs.fill(nullptr);
+                }
+                return G_SOURCE_REMOVE;
+            },
+            payload,
+            +[](gpointer raw) {
+                auto* payload = static_cast<Payload*>(raw);
+                for (auto* pixbuf : payload->pixbufs) {
+                    if (pixbuf != nullptr) g_object_unref(pixbuf);
+                }
+                delete payload;
+            }
+        );
+    }, "mana-core-wallpaper-load", [state, generation] {
+        return !state->alive.load() || state->generation.load() != generation;
+    });
+    if (!posted) {
+        all_wallpaper_paths_.clear();
+        wallpaper_decode_ready_.clear();
+    }
 }
 
 void ManaCoresSelector::reload_pixbufs() {
-    if (all_wallpaper_paths_.empty()) return;
-
-    clear_pixbufs();
-
-    const int total = static_cast<int>(all_wallpaper_paths_.size());
-    const int core_target_dim = 480;
-    const int slice_target_dim = 360;
-
-    // 1. Current Core Wallpaper from ThumbnailCache (fast, non-blocking)
-    {
-        const auto& path = all_wallpaper_paths_[current_wallpaper_index_];
-        std::string error;
-        current_core_pixbuf_ = ThumbnailCache::load_or_create(
-            path, core_target_dim, &error
-        );
+    if (all_wallpaper_paths_.empty()) {
+        clear_pixbufs();
+        wallpaper_decode_ready_.clear();
+        hovered_radial_ = -1;
+        return;
     }
+    request_preview_load(async_state_->generation.fetch_add(1) + 1);
+}
 
-    // 2. Three Slices from ThumbnailCache:
-    const std::array<int, 3> slice_indices = {
-        (current_wallpaper_index_ + 1) % total,
-        (current_wallpaper_index_ + 2) % total,
-        (current_wallpaper_index_ + 3) % total
+void ManaCoresSelector::request_preview_load(std::uint64_t generation) {
+    const auto state = async_state_;
+    const auto paths = all_wallpaper_paths_;
+    const int wallpaper_index = current_wallpaper_index_;
+    struct Payload {
+        std::shared_ptr<AsyncState> state;
+        std::uint64_t generation = 0;
+        int wallpaper_index = 0;
+        std::array<GdkPixbuf*, 4> pixbufs = {nullptr, nullptr, nullptr, nullptr};
     };
-
-    for (size_t i = 0; i < 3; ++i) {
-        int idx = slice_indices[i];
-        if (idx >= 0 && idx < total) {
-            const auto& path = all_wallpaper_paths_[idx];
-            slice_pixbufs_[i] = ThumbnailCache::load_or_create(
-                path, slice_target_dim, nullptr
-            );
+    const bool posted = core::shared_task_executor().post([
+        state, generation, paths, wallpaper_index
+    ] {
+        auto* payload = new Payload{state, generation, wallpaper_index};
+        const int total = static_cast<int>(paths.size());
+        if (total > 0 && wallpaper_index >= 0 && wallpaper_index < total) {
+            const std::array<int, 4> indices = {
+                wallpaper_index,
+                (wallpaper_index + 1) % total,
+                (wallpaper_index + 2) % total,
+                (wallpaper_index + 3) % total
+            };
+            for (std::size_t slot = 0; slot < indices.size(); ++slot) {
+                payload->pixbufs[slot] = ThumbnailCache::load_or_create(
+                    paths[static_cast<std::size_t>(indices[slot])],
+                    slot == 0 ? 480 : 360,
+                    nullptr
+                );
+            }
         }
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            +[](gpointer raw) -> gboolean {
+                auto* payload = static_cast<Payload*>(raw);
+                auto* owner = payload->state->owner.load();
+                if (payload->state->alive.load() && owner != nullptr &&
+                    payload->state->generation.load() == payload->generation) {
+                    owner->apply_preview_load(
+                        payload->generation,
+                        payload->wallpaper_index,
+                        payload->pixbufs
+                    );
+                    payload->pixbufs.fill(nullptr);
+                }
+                return G_SOURCE_REMOVE;
+            },
+            payload,
+            +[](gpointer raw) {
+                auto* payload = static_cast<Payload*>(raw);
+                for (auto* pixbuf : payload->pixbufs) {
+                    if (pixbuf != nullptr) g_object_unref(pixbuf);
+                }
+                delete payload;
+            }
+        );
+    }, "mana-core-preview-load", [state, generation] {
+        return !state->alive.load() || state->generation.load() != generation;
+    });
+    if (!posted) clear_pixbufs();
+}
+
+void ManaCoresSelector::apply_preview_load(
+    std::uint64_t generation,
+    int wallpaper_index,
+    std::array<GdkPixbuf*, 4> pixbufs
+) {
+    if (generation != async_state_->generation.load() ||
+        wallpaper_index != current_wallpaper_index_ || all_wallpaper_paths_.empty()) {
+        return;
     }
+    clear_pixbufs();
+    current_core_pixbuf_ = pixbufs[0];
+    pixbufs[0] = nullptr;
+    for (std::size_t index = 0; index < 3; ++index) {
+        slice_pixbufs_[index] = pixbufs[index + 1];
+        pixbufs[index + 1] = nullptr;
+    }
+    wallpaper_decode_ready_[static_cast<std::size_t>(wallpaper_index)] =
+        current_core_pixbuf_ != nullptr;
+    queue_redraw();
 }
 
 void ManaCoresSelector::cycle_wallpaper(int direction) {
@@ -658,6 +802,8 @@ void ManaCoresSelector::cycle_wallpaper(int direction) {
 
     const int total = static_cast<int>(all_wallpaper_paths_.size());
     current_wallpaper_index_ = (current_wallpaper_index_ + direction + total) % total;
+    wallpaper_decode_ready_[static_cast<std::size_t>(current_wallpaper_index_)] = false;
+    clear_pixbufs();
 
     reload_pixbufs();
 
@@ -1759,6 +1905,12 @@ void ManaCoresSelector::start_idle_animation() {
 
 void ManaCoresSelector::request_apply() {
     if (state_ != State::Idle) return;
+    if (all_wallpaper_paths_.empty() || current_core_pixbuf_ == nullptr ||
+        current_wallpaper_index_ < 0 ||
+        current_wallpaper_index_ >= static_cast<int>(wallpaper_decode_ready_.size()) ||
+        !wallpaper_decode_ready_[static_cast<std::size_t>(current_wallpaper_index_)]) {
+        return;
+    }
     begin_apply();
 }
 
@@ -1767,7 +1919,11 @@ void ManaCoresSelector::force_apply(const std::string& wallpaper_path) {
     for (size_t i = 0; i < all_wallpaper_paths_.size(); ++i) {
         if (all_wallpaper_paths_[i] == wallpaper_path) {
             current_wallpaper_index_ = static_cast<int>(i);
-            reload_pixbufs();
+            if (i >= wallpaper_decode_ready_.size() ||
+                !wallpaper_decode_ready_[i] || current_core_pixbuf_ == nullptr) {
+                reload_pixbufs();
+                return;
+            }
             break;
         }
     }
@@ -1775,6 +1931,12 @@ void ManaCoresSelector::force_apply(const std::string& wallpaper_path) {
 }
 
 void ManaCoresSelector::begin_apply() {
+    if (all_wallpaper_paths_.empty() || current_core_pixbuf_ == nullptr ||
+        current_wallpaper_index_ < 0 ||
+        current_wallpaper_index_ >= static_cast<int>(wallpaper_decode_ready_.size()) ||
+        !wallpaper_decode_ready_[static_cast<std::size_t>(current_wallpaper_index_)]) {
+        return;
+    }
     state_ = State::Applying;
     if (nav_transitioning_) {
         nav_transitioning_ = false;
@@ -1785,17 +1947,18 @@ void ManaCoresSelector::begin_apply() {
     apply_callback_fired_ = false;
     apply_mask_radius_ = std::hypot(layout_.canvas_width, layout_.canvas_height);
 
-    // Lazily load the full high-resolution image only when the user applies
+    // The validated preview is intentionally reused for the reveal. Full-size
+    // decoding here would put an unbounded image allocation back on GTK's main
+    // loop after the thumbnail worker had already done the safe validation.
     if (!all_wallpaper_paths_.empty() && current_wallpaper_index_ >= 0 &&
         current_wallpaper_index_ < static_cast<int>(all_wallpaper_paths_.size())) {
         if (apply_fullscreen_pixbuf_ != nullptr) {
             g_object_unref(apply_fullscreen_pixbuf_);
             apply_fullscreen_pixbuf_ = nullptr;
         }
-        const auto& path = all_wallpaper_paths_[current_wallpaper_index_];
-        apply_fullscreen_pixbuf_ = gdk_pixbuf_new_from_file_at_scale(
-            path.c_str(), static_cast<int>(layout_.canvas_width), -1, TRUE, nullptr
-        );
+        apply_fullscreen_pixbuf_ = current_core_pixbuf_
+            ? GDK_PIXBUF(g_object_ref(current_core_pixbuf_))
+            : nullptr;
     }
 
     queue_redraw();

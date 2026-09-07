@@ -477,6 +477,10 @@ public:
         now_playing_subscription_.reset();
         notification_server_.set_notification_handler({});
         notification_daemon_.stop();
+        ++mana_cores_launch_generation_;
+        if (mana_cores_selector_ != nullptr) {
+            mana_cores_selector_.reset();
+        }
         if (restart_readiness_fd_ >= 0) {
             ::close(restart_readiness_fd_);
             restart_readiness_fd_ = -1;
@@ -1062,6 +1066,7 @@ public:
 
         mana_cores_launch_pending_ = true;
         const std::uint64_t generation = ++mana_cores_launch_generation_;
+        const std::uint64_t topology_generation = monitor_topology_generation_;
         const auto& monitor_workspace = workspace_snapshot_for_monitor(monitor_index);
         const int cached_workspace = monitor_workspace.available
             ? monitor_workspace.active_id
@@ -1074,7 +1079,8 @@ public:
             cached_workspace,
             current_path,
             monitor_index,
-            monitor_connector
+            monitor_connector,
+            topology_generation
         ] {
             int original_workspace = cached_workspace;
             if (!monitor_connector.empty()) {
@@ -1103,6 +1109,7 @@ public:
                 bool switched = false;
                 int monitor_index = 0;
                 std::string monitor_connector;
+                std::uint64_t topology_generation = 0;
             };
 
             g_idle_add_full(
@@ -1117,7 +1124,8 @@ public:
                             payload->original_workspace,
                             payload->switched,
                             payload->monitor_index,
-                            std::move(payload->monitor_connector)
+                            std::move(payload->monitor_connector),
+                            payload->topology_generation
                         );
                     }
                     return G_SOURCE_REMOVE;
@@ -1130,6 +1138,7 @@ public:
                     switched,
                     monitor_index,
                     monitor_connector,
+                    topology_generation,
                 },
                 +[](gpointer raw) { delete static_cast<Payload*>(raw); }
             );
@@ -1831,10 +1840,27 @@ private:
         int original_workspace,
         bool switched,
         int monitor_index,
-        std::string monitor_connector
+        std::string monitor_connector,
+        std::uint64_t topology_generation
     ) {
         if (generation != mana_cores_launch_generation_) return;
         mana_cores_launch_pending_ = false;
+
+        const std::string current_connector = monitor_connector_for_index(
+            gdk_display_get_default(), monitor_index
+        );
+        if (topology_generation != monitor_topology_generation_ ||
+            monitor_connector.empty() || current_connector != monitor_connector) {
+            std::cerr << "[ManaCores] monitor topology changed before presentation; aborting launch\n";
+            if (switched) {
+                mana_cores_restore_workspace_id_ = original_workspace;
+                mana_cores_restore_monitor_connector_ = std::move(monitor_connector);
+                restore_mana_cores_workspace();
+            } else {
+                restore_mana_cores_chrome();
+            }
+            return;
+        }
 
         if (!switched) {
             restore_mana_cores_chrome();
@@ -1865,8 +1891,15 @@ private:
         // monitor-local surface; applying from monitor A must never mutate
         // monitor B's wallpaper.
         mana_cores_selector_->set_apply_callback([
-            this, wallpaper_target
+            this, wallpaper_target, topology_generation
         ](const std::string& path) {
+            if (monitor_topology_generation_ != topology_generation ||
+                monitor_connector_for_index(
+                    gdk_display_get_default(), wallpaper_target.monitor_index
+                ) != wallpaper_target.connector) {
+                std::cerr << "[ManaCores] refusing wallpaper apply for stale monitor target\n";
+                return;
+            }
             if (wallpaper_controller_) {
                 const auto utilities = utilities_;
                 const std::optional<std::filesystem::path> previous_path =
@@ -2813,7 +2846,9 @@ private:
             G_CALLBACK(+[](
                 GListModel*, guint, guint, guint, gpointer data
             ) {
-                static_cast<ShellRuntime*>(data)->schedule_monitor_surface_rebuild();
+                auto* runtime = static_cast<ShellRuntime*>(data);
+                ++runtime->monitor_topology_generation_;
+                runtime->schedule_monitor_surface_rebuild();
             }),
             this
         );
@@ -3030,6 +3065,7 @@ private:
     GListModel* monitor_model_ = nullptr;
     gulong monitor_model_signal_id_ = 0;
     guint monitor_rebuild_idle_id_ = 0;
+    std::uint64_t monitor_topology_generation_ = 0;
     int active_monitor_index_ = 0;
     GtkWindow* sidebar_backdrop_ = nullptr;
     std::unique_ptr<sidebar::RightSidebar> sidebar_;

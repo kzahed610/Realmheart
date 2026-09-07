@@ -1,6 +1,7 @@
 // tests/ManaCoresSelectorTests.cpp
 #include <gtest/gtest.h>
 #include "mana_core/ManaCoresSelector.hpp"
+#include "mana_core/ThumbnailCache.hpp"
 #include <gdk/gdk.h>
 
 TEST(ManaCoresSelector, Constructs) {
@@ -35,4 +36,15 @@ TEST(ManaCoresSelector, HandleKeyWhenHiddenReturnsFalse) {
     EXPECT_FALSE(sel.handle_key(GDK_KEY_Return));
     EXPECT_FALSE(sel.handle_key(GDK_KEY_Left));
     EXPECT_FALSE(sel.handle_key(GDK_KEY_Right));
+}
+
+TEST(ThumbnailCache, RejectsUnsafeTargetDimensionsBeforeDecode) {
+    const auto missing = std::filesystem::temp_directory_path() /
+        "realmheart-thumbnail-cache-missing.png";
+    std::string error;
+    EXPECT_EQ(
+        realmheart::mana_core::ThumbnailCache::load_or_create(missing, 5000, &error),
+        nullptr
+    );
+    EXPECT_FALSE(error.empty());
 }

@@ -78,4 +78,27 @@ TEST_F(WallpaperLibraryTest, MissingRootProducesDiagnosticNotCrash) {
     EXPECT_FALSE(discovery.diagnostics.empty());
 }
 
+TEST_F(WallpaperLibraryTest, DeduplicatesSymlinkAndHardlinkAliases) {
+    realmheart::mana_core::WallpaperLibrary library;
+    create_binary("wallpaper.png", {
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+        0x00, 0x00, 0x00, 0x00
+    });
+    std::error_code symlink_error;
+    std::filesystem::create_symlink(
+        root_ / "wallpaper.png", root_ / "alias.png", symlink_error
+    );
+    ASSERT_FALSE(symlink_error);
+    std::error_code hardlink_error;
+    std::filesystem::create_hard_link(
+        root_ / "wallpaper.png", root_ / "hardlink.jpg", hardlink_error
+    );
+    ASSERT_FALSE(hardlink_error);
+
+    const auto discovery = library.discover(root_);
+    ASSERT_EQ(discovery.paths.size(), 1u);
+    EXPECT_EQ(discovery.paths.front().filename(), "alias.png");
+    EXPECT_FALSE(discovery.diagnostics.empty());
+}
+
 } // namespace

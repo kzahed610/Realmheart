@@ -10,6 +10,8 @@
 #include <vector>
 #include <filesystem>
 #include <string>
+#include <atomic>
+#include <cstdint>
 
 #include "mana_core/ManaCoresLayout.hpp"
 #include "mana_core/WallpaperLibrary.hpp"
@@ -49,6 +51,12 @@ public:
     void request_dismiss();
 
 private:
+    struct AsyncState {
+        std::atomic<bool> alive{true};
+        std::atomic<ManaCoresSelector*> owner{nullptr};
+        std::atomic<std::uint64_t> generation{0};
+    };
+
     // State machine
     enum class State { Hidden, Assembling, Idle, Applying, Dismissing };
     State state_ = State::Hidden;
@@ -72,6 +80,7 @@ private:
 
     // Wallpaper library & pixbufs
     std::vector<std::filesystem::path> all_wallpaper_paths_;
+    std::vector<bool> wallpaper_decode_ready_;
     int current_wallpaper_index_ = 0;
     GdkPixbuf* current_core_pixbuf_ = nullptr;
     std::array<GdkPixbuf*, 3> slice_pixbufs_ = {nullptr, nullptr, nullptr};
@@ -168,12 +177,19 @@ private:
     void setup_window(GtkApplication* app);
 
     void reload_pixbufs();
+    void request_preview_load(std::uint64_t generation);
+    void apply_preview_load(
+        std::uint64_t generation,
+        int wallpaper_index,
+        std::array<GdkPixbuf*, 4> pixbufs
+    );
     void clear_pixbufs();
     void clear_old_pixbufs();
 
     // Callbacks
     DismissCallback dismiss_callback_;
     std::function<void(const std::string& /*path*/)> apply_callback_;
+    std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
 };
 
 } // namespace realmheart::mana_core

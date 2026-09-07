@@ -1,6 +1,8 @@
 // tests/ManaCoresLayoutTests.cpp
 #include <gtest/gtest.h>
 #include "mana_core/ManaCoresLayout.hpp"
+#include <cmath>
+#include <utility>
 
 TEST(ManaCoresLayout, CoreIsCentredVertically) {
     auto l = realmheart::mana_core::ManaCoresLayout::for_height(1080);
@@ -59,4 +61,20 @@ TEST(ManaCoresLayout, ScalesWithHeight) {
     EXPECT_NEAR(l1440.core_radius_expanded / l1080.core_radius_expanded, 1440.0 / 1080.0, 0.01);
     EXPECT_NEAR(l1440.core_radius_small / l1080.core_radius_small, 1440.0 / 1080.0, 0.01);
     EXPECT_NEAR(l1440.slice_gap / l1080.slice_gap, 1440.0 / 1080.0, 0.01);
+}
+
+TEST(ManaCoresLayout, PreservesFiniteGeometryAtFourKAndPortraitWidths) {
+    for (const auto [height, width] : {
+             std::pair{2160, 3840},
+             std::pair{2160, 900},
+             std::pair{1440, 2560},
+         }) {
+        const auto layout = realmheart::mana_core::ManaCoresLayout::for_height(height, width);
+        EXPECT_GT(layout.canvas_width, 0.0);
+        EXPECT_GT(layout.canvas_height, 0.0);
+        EXPECT_GE(layout.core_centre_x, 0.0);
+        EXPECT_LE(layout.core_centre_x, layout.canvas_width);
+        EXPECT_TRUE(std::isfinite(layout.core_radius_expanded));
+        EXPECT_TRUE(std::isfinite(layout.slice_depth_expanded));
+    }
 }

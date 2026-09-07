@@ -1290,6 +1290,14 @@ if(BUILD_TESTING)
     target_link_libraries(realmheart_mana_cores_layout_tests PRIVATE GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_mana_cores_layout_tests)
 
+    add_executable(
+        realmheart_wallpaper_library_tests
+        tests/WallpaperLibraryTests.cpp
+        src/mana_core/WallpaperLibrary.cpp
+    )
+    target_link_libraries(realmheart_wallpaper_library_tests PRIVATE PkgConfig::GDK_PIXBUF GTest::gtest GTest::gtest_main)
+    realmheart_register_test(realmheart_wallpaper_library_tests)
+
     add_executable(realmheart_wifi_tests tests/WifiTests.cpp src/core/Command.cpp src/services/Wifi.cpp)
     realmheart_register_test(realmheart_wifi_tests)
 endif()

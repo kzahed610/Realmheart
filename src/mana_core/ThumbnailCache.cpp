@@ -4,6 +4,7 @@
 #include <gdk-pixbuf/gdk-pixbuf.h>
 
 #include <array>
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -16,13 +17,22 @@
 #include <unistd.h>
 #include <optional>
 #include <cmath>
+#include <atomic>
+#include <vector>
 
 namespace realmheart::mana_core {
 namespace {
 
 constexpr std::array<char, 8> kPreviewCacheMagic{
-    'R', 'H', 'W', 'S', 'R', 'A', 'W', '1'
+    'R', 'H', 'W', 'S', 'R', 'A', 'W', '2'
 };
+
+constexpr std::uint64_t kMaxSourceBytes = 256ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t kMaxSourcePixels = 64ULL * 1024ULL * 1024ULL;
+constexpr std::uint32_t kMaxSourceDimension = 16384;
+constexpr std::uint32_t kMaxPreviewDimension = 4096;
+constexpr std::uintmax_t kMaxCacheBytes = 64ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaxCacheEntries = 256;
 
 struct PreviewSourceStamp {
     std::uint64_t size = 0;
@@ -53,13 +63,18 @@ std::uint64_t fnv1a_64(std::string_view text) noexcept {
     return hash;
 }
 
-std::filesystem::path preview_cache_path(const std::filesystem::path& source) {
+std::filesystem::path preview_cache_path(
+    const std::filesystem::path& source,
+    int target_dimension
+) {
     std::error_code canonical_error;
     auto canonical = std::filesystem::weakly_canonical(source, canonical_error);
     if (canonical_error) canonical = source.lexically_normal();
 
+    const std::string key = canonical.generic_string() + "\n" +
+        std::to_string(std::max(target_dimension, 0));
     char name[32]{};
-    std::snprintf(name, sizeof(name), "%016llx.raw", static_cast<unsigned long long>(fnv1a_64(canonical.generic_string())));
+    std::snprintf(name, sizeof(name), "%016llx.raw", static_cast<unsigned long long>(fnv1a_64(key)));
 
     const char* user_cache = g_get_user_cache_dir();
     std::filesystem::path root;
@@ -89,35 +104,110 @@ void free_pixbuf_data(guchar* pixels, gpointer) {
     std::free(pixels);
 }
 
-GdkPixbuf* load_cached_preview(const std::filesystem::path& source) {
-    const auto stamp = preview_source_stamp(source);
-    if (!stamp) return nullptr;
+void remove_cache_file(const std::filesystem::path& path) noexcept {
+    std::error_code error;
+    std::filesystem::remove(path, error);
+}
 
-    const auto cache = preview_cache_path(source);
+void prune_cache() noexcept {
+    const char* user_cache = g_get_user_cache_dir();
+    if (user_cache == nullptr || *user_cache == '\0') return;
+    const auto root = std::filesystem::path(user_cache) /
+        "realmheart" / "mana-core-thumbnails";
+    std::error_code iterator_error;
+    std::vector<std::filesystem::directory_entry> entries;
+    for (std::filesystem::directory_iterator iterator(
+             root,
+             std::filesystem::directory_options::skip_permission_denied,
+             iterator_error), end;
+         iterator != end && !iterator_error;
+         iterator.increment(iterator_error)) {
+        std::error_code type_error;
+        if (iterator->is_regular_file(type_error) && !type_error &&
+            iterator->path().extension() == ".raw") {
+            entries.push_back(*iterator);
+        }
+    }
+    if (iterator_error ||
+        (entries.size() <= kMaxCacheEntries &&
+         [&entries] {
+             std::uintmax_t total = 0;
+             for (const auto& entry : entries) {
+                 std::error_code error;
+                 total += entry.file_size(error);
+             }
+             return total <= kMaxCacheBytes;
+         }())) {
+        return;
+    }
+
+    std::sort(entries.begin(), entries.end(), [](const auto& left, const auto& right) {
+        std::error_code left_error;
+        std::error_code right_error;
+        const auto left_time = left.last_write_time(left_error);
+        const auto right_time = right.last_write_time(right_error);
+        if (left_error || right_error) return left.path().string() < right.path().string();
+        return left_time < right_time;
+    });
+
+    auto total_size = [&entries] {
+        std::uintmax_t total = 0;
+        for (const auto& entry : entries) {
+            std::error_code error;
+            total += entry.file_size(error);
+        }
+        return total;
+    };
+    while (!entries.empty() &&
+           (entries.size() > kMaxCacheEntries || total_size() > kMaxCacheBytes)) {
+        remove_cache_file(entries.front().path());
+        entries.erase(entries.begin());
+    }
+}
+
+GdkPixbuf* load_cached_preview(
+    const std::filesystem::path& source,
+    int target_dimension
+) {
+    const auto cache = preview_cache_path(source, target_dimension);
+    const auto stamp = preview_source_stamp(source);
+    if (!stamp) {
+        remove_cache_file(cache);
+        return nullptr;
+    }
     std::ifstream input(cache, std::ios::binary);
     if (!input) return nullptr;
 
     std::array<char, 8> magic{};
     input.read(magic.data(), static_cast<std::streamsize>(magic.size()));
-    if (!input || magic != kPreviewCacheMagic) return nullptr;
+    if (!input || magic != kPreviewCacheMagic) {
+        remove_cache_file(cache);
+        return nullptr;
+    }
 
     std::uint64_t source_size = 0;
     std::int64_t source_mtime = 0;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::uint32_t channels = 0;
+    std::uint32_t cached_target_dimension = 0;
     if (!read_binary(input, source_size) ||
         !read_binary(input, source_mtime) ||
         !read_binary(input, width) ||
         !read_binary(input, height) ||
-        !read_binary(input, channels)) {
+        !read_binary(input, channels) ||
+        !read_binary(input, cached_target_dimension)) {
+        remove_cache_file(cache);
         return nullptr;
     }
 
     if (source_size != stamp->size || source_mtime != stamp->mtime ||
+        cached_target_dimension != static_cast<std::uint32_t>(std::max(target_dimension, 0)) ||
         width == 0 || height == 0 ||
-        width > 2000 || height > 2000 || // sanity check
+        width > kMaxPreviewDimension || height > kMaxPreviewDimension ||
+        static_cast<std::uint64_t>(width) * height > kMaxSourcePixels ||
         (channels != 3U && channels != 4U)) {
+        remove_cache_file(cache);
         return nullptr;
     }
 
@@ -154,7 +244,11 @@ GdkPixbuf* load_cached_preview(const std::filesystem::path& source) {
     return pixbuf;
 }
 
-void store_cached_preview(const std::filesystem::path& source, GdkPixbuf* pixbuf) noexcept {
+void store_cached_preview(
+    const std::filesystem::path& source,
+    int target_dimension,
+    GdkPixbuf* pixbuf
+) noexcept {
     const auto stamp = preview_source_stamp(source);
     if (!stamp || !pixbuf) return;
     
@@ -164,22 +258,26 @@ void store_cached_preview(const std::filesystem::path& source, GdkPixbuf* pixbuf
     const int row_stride = gdk_pixbuf_get_rowstride(pixbuf);
     const guchar* pixels = gdk_pixbuf_read_pixels(pixbuf);
 
-    if (width <= 0 || height <= 0 || (channels != 3 && channels != 4) || !pixels) {
+    if (width <= 0 || height <= 0 ||
+        width > static_cast<int>(kMaxPreviewDimension) ||
+        height > static_cast<int>(kMaxPreviewDimension) ||
+        static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) > kMaxSourcePixels ||
+        (channels != 3 && channels != 4) || !pixels) {
         return;
     }
 
     const int row_bytes = width * channels;
     if (row_bytes <= 0 || row_stride < row_bytes) return;
 
-    const auto cache = preview_cache_path(source);
+    const auto cache = preview_cache_path(source, target_dimension);
     std::error_code directory_error;
     std::filesystem::create_directories(cache.parent_path(), directory_error);
     if (directory_error) return;
 
-    static std::uint64_t temp_counter = 0;
+    static std::atomic<std::uint64_t> temp_counter{0};
     const auto temporary = cache.string() + ".tmp." +
         std::to_string(static_cast<long long>(::getpid())) + "." +
-        std::to_string(++temp_counter);
+        std::to_string(temp_counter.fetch_add(1) + 1);
 
     std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
     if (!output) return;
@@ -192,7 +290,8 @@ void store_cached_preview(const std::filesystem::path& source, GdkPixbuf* pixbuf
         !write_binary(output, stamp->mtime) ||
         !write_binary(output, w) ||
         !write_binary(output, h) ||
-        !write_binary(output, c)) {
+        !write_binary(output, c) ||
+        !write_binary(output, static_cast<std::uint32_t>(std::max(target_dimension, 0)))) {
         output.close();
         std::error_code remove_error;
         std::filesystem::remove(temporary, remove_error);
@@ -234,14 +333,34 @@ GdkPixbuf* ThumbnailCache::load_or_create(
     int target_dimension,
     std::string* error
 ) {
-    if (GdkPixbuf* cached = load_cached_preview(source_path)) {
-        if (error) error->clear();
-        return cached;
+    if (target_dimension < 0 ||
+        static_cast<std::uint32_t>(target_dimension) > kMaxPreviewDimension) {
+        if (error) *error = "thumbnail target dimension is out of bounds";
+        return nullptr;
+    }
+
+    std::error_code file_error;
+    const auto source_size = std::filesystem::file_size(source_path, file_error);
+    if (file_error || source_size == 0 || source_size > kMaxSourceBytes) {
+        if (error) *error = "wallpaper file is missing or exceeds the size limit";
+        return nullptr;
     }
 
     int source_width = 0;
     int source_height = 0;
     static_cast<void>(gdk_pixbuf_get_file_info(source_path.c_str(), &source_width, &source_height));
+    if (source_width <= 0 || source_height <= 0 ||
+        static_cast<std::uint32_t>(source_width) > kMaxSourceDimension ||
+        static_cast<std::uint32_t>(source_height) > kMaxSourceDimension ||
+        static_cast<std::uint64_t>(source_width) * static_cast<std::uint64_t>(source_height) > kMaxSourcePixels) {
+        if (error) *error = "wallpaper dimensions exceed the decode limit";
+        return nullptr;
+    }
+
+    if (GdkPixbuf* cached = load_cached_preview(source_path, target_dimension)) {
+        if (error) error->clear();
+        return cached;
+    }
 
     int target_width = source_width;
     int target_height = source_height;
@@ -270,7 +389,8 @@ GdkPixbuf* ThumbnailCache::load_or_create(
     }
     g_clear_error(&decode_error);
 
-    store_cached_preview(source_path, pixbuf);
+    store_cached_preview(source_path, target_dimension, pixbuf);
+    prune_cache();
     
     if (error) error->clear();
     return pixbuf;

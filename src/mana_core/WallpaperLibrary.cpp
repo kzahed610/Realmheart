@@ -11,6 +11,8 @@
 #include <iterator>
 #include <string_view>
 #include <system_error>
+#include <unordered_set>
+#include <sys/stat.h>
 
 namespace realmheart::mana_core {
 namespace {
@@ -81,6 +83,18 @@ bool plausible_image(const std::filesystem::path& path) {
     return false;
 }
 
+std::string file_identity(const std::filesystem::path& path) {
+    struct stat metadata {};
+    if (::stat(path.c_str(), &metadata) == 0) {
+        return "inode:" + std::to_string(static_cast<unsigned long long>(metadata.st_dev)) +
+            ":" + std::to_string(static_cast<unsigned long long>(metadata.st_ino));
+    }
+
+    std::error_code error;
+    const auto canonical = std::filesystem::weakly_canonical(path, error);
+    return "path:" + (error ? path.lexically_normal() : canonical).generic_string();
+}
+
 } // namespace
 
 std::filesystem::path WallpaperLibrary::default_root() {
@@ -119,6 +133,7 @@ WallpaperDiscovery WallpaperLibrary::discover(std::filesystem::path root) const 
     }
 
     const std::filesystem::directory_iterator end;
+    std::vector<std::filesystem::path> candidates;
     while (iterator != end) {
         const std::filesystem::path path = iterator->path();
 
@@ -130,7 +145,7 @@ WallpaperDiscovery WallpaperLibrary::discover(std::filesystem::path root) const 
             );
         } else if (regular && supported_extension(path.extension().string())) {
             if (plausible_image(path)) {
-                result.paths.push_back(path);
+                candidates.push_back(path);
             } else {
                 result.diagnostics.emplace_back(
                     "ignored unsupported or corrupt image: " + path.string()
@@ -148,8 +163,8 @@ WallpaperDiscovery WallpaperLibrary::discover(std::filesystem::path root) const 
     }
 
     std::sort(
-        result.paths.begin(),
-        result.paths.end(),
+        candidates.begin(),
+        candidates.end(),
         [](const auto& left, const auto& right) {
             const std::string left_folded = lowercase_filename(left);
             const std::string right_folded = lowercase_filename(right);
@@ -157,6 +172,18 @@ WallpaperDiscovery WallpaperLibrary::discover(std::filesystem::path root) const 
             return left.filename().string() < right.filename().string();
         }
     );
+
+    std::unordered_set<std::string> identities;
+    identities.reserve(candidates.size());
+    for (const auto& candidate : candidates) {
+        if (identities.insert(file_identity(candidate)).second) {
+            result.paths.push_back(candidate);
+        } else {
+            result.diagnostics.emplace_back(
+                "ignored duplicate wallpaper alias: " + candidate.string()
+            );
+        }
+    }
 
     return result;
 }
