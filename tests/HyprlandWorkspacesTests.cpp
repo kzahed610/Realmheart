@@ -254,9 +254,13 @@ void test_switch_to_on_monitor_focuses_output_before_workspace() {
     require(switched, "monitor-specific workspace dispatch must report success");
     std::ifstream recorded(output);
     std::string first;
+    std::string second;
     std::getline(recorded, first);
-    require(first == "dispatch hl.dsp.focus({ monitor = \"DP-1\", workspace = 6 })",
-            "monitor-specific switch must target connector and workspace atomically");
+    std::getline(recorded, second);
+    require(first == "dispatch hl.dsp.focus({ monitor = \"DP-1\" })",
+            "monitor-specific switch must focus the requested connector first");
+    require(second == "dispatch hl.dsp.focus({ workspace = 6, on_current_monitor = true })",
+            "monitor-specific switch must focus the requested workspace on the selected connector");
 
     std::filesystem::remove_all(root);
 }
@@ -299,9 +303,16 @@ void test_switch_to_named_on_monitor_focuses_output_before_named_workspace() {
     require(switched, "monitor-specific named workspace dispatch must report success");
     std::ifstream recorded(output);
     std::string first;
+    std::string second;
     std::getline(recorded, first);
-    require(first == "dispatch hl.dsp.focus({ monitor = \"HDMI-A-1\", workspace = \"name:realmheart-mana-cores\" })",
-            "named workspace switch must target connector and workspace atomically");
+    std::getline(recorded, second);
+    require(first == "dispatch hl.dsp.focus({ monitor = \"HDMI-A-1\" })",
+            "named workspace switch must focus the requested connector first");
+    require(second == "dispatch hl.dsp.focus({ workspace = \"name:realmheart-mana-cores\", on_current_monitor = true })",
+            "named workspace switch must focus the named workspace on the selected connector");
+    std::string unexpected;
+    require(!std::getline(recorded, unexpected),
+            "named workspace switch must issue exactly two dispatches");
 
     std::filesystem::remove_all(root);
 }

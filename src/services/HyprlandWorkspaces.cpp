@@ -42,14 +42,6 @@ std::string lua_string_literal(std::string_view value) {
     return escaped;
 }
 
-std::string focus_workspace_on_monitor_dispatcher(
-    std::string_view workspace_expression,
-    std::string_view monitor_name
-) {
-    return "hl.dsp.focus({ monitor = " + lua_string_literal(monitor_name) +
-        ", workspace = " + std::string(workspace_expression) + " })";
-}
-
 } // namespace
 
 bool HyprlandWorkspaces::switch_to(
@@ -74,15 +66,25 @@ bool HyprlandWorkspaces::switch_to_on_monitor(
     if (monitor_name.empty()) return switch_to(workspace_id, options);
     if (workspace_id <= 0 || !realmheart::core::command_exists("hyprctl")) return false;
 
-    const std::string dispatcher = focus_workspace_on_monitor_dispatcher(
-        std::to_string(workspace_id),
-        monitor_name
-    );
-    const auto result = realmheart::core::run_capture(
-        {"hyprctl", "dispatch", dispatcher},
+    const std::string focus_dispatcher =
+        "hl.dsp.focus({ monitor = " + lua_string_literal(monitor_name) + " })";
+    const auto focused = realmheart::core::run_capture(
+        {"hyprctl", "dispatch", focus_dispatcher},
         options
     );
-    return result.succeeded() && result.output.find("error:") == std::string::npos;
+    if (!focused.succeeded() || focused.output.find("error:") != std::string::npos) {
+        return false;
+    }
+
+    const std::string workspace_dispatcher =
+        "hl.dsp.focus({ workspace = " + std::to_string(workspace_id) +
+        ", on_current_monitor = true })";
+    const auto workspace_result = realmheart::core::run_capture(
+        {"hyprctl", "dispatch", workspace_dispatcher},
+        options
+    );
+    return workspace_result.succeeded() &&
+        workspace_result.output.find("error:") == std::string::npos;
 }
 
 bool HyprlandWorkspaces::switch_to_named(
@@ -121,16 +123,26 @@ bool HyprlandWorkspaces::switch_to_named_on_monitor(
         return false;
     }
 
-    const std::string workspace = "name:" + std::string(workspace_name);
-    const std::string dispatcher = focus_workspace_on_monitor_dispatcher(
-        lua_string_literal(workspace),
-        monitor_name
-    );
-    const auto result = realmheart::core::run_capture(
-        {"hyprctl", "dispatch", dispatcher},
+    const std::string focus_dispatcher =
+        "hl.dsp.focus({ monitor = " + lua_string_literal(monitor_name) + " })";
+    const auto focused = realmheart::core::run_capture(
+        {"hyprctl", "dispatch", focus_dispatcher},
         options
     );
-    return result.succeeded() && result.output.find("error:") == std::string::npos;
+    if (!focused.succeeded() || focused.output.find("error:") != std::string::npos) {
+        return false;
+    }
+
+    const std::string workspace = "name:" + std::string(workspace_name);
+    const std::string workspace_dispatcher =
+        "hl.dsp.focus({ workspace = " + lua_string_literal(workspace) +
+        ", on_current_monitor = true })";
+    const auto workspace_result = realmheart::core::run_capture(
+        {"hyprctl", "dispatch", workspace_dispatcher},
+        options
+    );
+    return workspace_result.succeeded() &&
+        workspace_result.output.find("error:") == std::string::npos;
 }
 
 bool HyprlandWorkspaces::set_submap(
