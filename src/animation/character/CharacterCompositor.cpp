@@ -306,7 +306,8 @@ std::unique_ptr<CharacterCompositor> CharacterCompositor::create(
     core::DisplayTier asset_tier,
     core::DisplayTier layout_tier,
     CharacterHostGeometry host_geometry,
-    std::string* error_message
+    std::string* error_message,
+    CharacterHairMode initial_hair_mode
 ) {
     if (back_host == nullptr || front_host == nullptr ||
         !GTK_IS_FIXED(back_host) || !GTK_IS_FIXED(front_host) ||
@@ -328,12 +329,24 @@ std::unique_ptr<CharacterCompositor> CharacterCompositor::create(
             front_host,
             std::move(*manifest),
             layout_tier,
-            host_geometry
+            host_geometry,
+            initial_hair_mode
         )
     );
-    if (!compositor->load_surfaces(error_message) ||
-        !compositor->build_hair_meshes(error_message) ||
-        !compositor->create_draw_groups(error_message)) {
+    if (!compositor->load_surfaces(error_message)) return nullptr;
+    if (initial_hair_mode == CharacterHairMode::Static) {
+        if (!compositor->build_static_hair_textures(error_message)) return nullptr;
+    } else if (!compositor->build_hair_meshes(error_message)) {
+        if (!compositor->activate_static_fallback(error_message)) return nullptr;
+        initial_hair_mode = CharacterHairMode::Static;
+    }
+    if (initial_hair_mode == CharacterHairMode::MeshFlow &&
+        !compositor->ensure_flow_caches(error_message)) {
+        if (!compositor->activate_static_fallback(error_message)) return nullptr;
+        initial_hair_mode = CharacterHairMode::Static;
+    }
+    compositor->hair_mode_ = initial_hair_mode;
+    if (!compositor->create_draw_groups(error_message)) {
         return nullptr;
     }
     return compositor;
@@ -344,12 +357,14 @@ CharacterCompositor::CharacterCompositor(
     GtkWidget* front_host,
     CharacterManifest manifest,
     core::DisplayTier layout_tier,
-    CharacterHostGeometry host_geometry
+    CharacterHostGeometry host_geometry,
+    CharacterHairMode initial_hair_mode
 ) : back_host_(back_host),
     front_host_(front_host),
     manifest_(std::move(manifest)),
     layout_tier_(layout_tier),
-    host_geometry_(host_geometry) {}
+    host_geometry_(host_geometry),
+    hair_mode_(initial_hair_mode) {}
 
 CharacterCompositor::~CharacterCompositor() {
     stop_tick();
@@ -832,8 +847,27 @@ bool CharacterCompositor::set_hair_mode(
     CharacterHairMode mode,
     std::string* error_message
 ) {
+    if (mode == CharacterHairMode::Static) {
+        if (hair_mode_ != CharacterHairMode::Static) {
+            release_mesh_caches();
+            if (!load_surfaces(error_message) ||
+                !build_static_hair_textures(error_message)) {
+                return false;
+            }
+        }
+    } else if (!mesh_caches_loaded_) {
+        if (!load_surfaces(error_message) ||
+            !build_hair_meshes(error_message)) {
+            if (!activate_static_fallback(error_message)) return false;
+            mode = CharacterHairMode::Static;
+        }
+    }
+
     if (mode == CharacterHairMode::MeshFlow && !flow_caches_loaded_) {
-        if (!ensure_flow_caches(error_message)) return false;
+        if (!ensure_flow_caches(error_message)) {
+            if (!activate_static_fallback(error_message)) return false;
+            mode = CharacterHairMode::Static;
+        }
         flow_elapsed_seconds_ = 0.0;
     }
 
@@ -855,6 +889,27 @@ bool CharacterCompositor::set_hair_mode(
         stop_tick();
     }
     if (animator_.idle()) ensure_idle_timeout();
+    return true;
+}
+
+void CharacterCompositor::release_mesh_caches() noexcept {
+    release_flow_caches();
+    std::unordered_map<std::string, HairRenderCache>().swap(hair_render_caches_);
+    mesh_caches_loaded_ = false;
+}
+
+bool CharacterCompositor::activate_static_fallback(std::string* error_message) {
+    release_mesh_caches();
+    std::string fallback_error;
+    if (!load_surfaces(&fallback_error) ||
+        !build_static_hair_textures(&fallback_error)) {
+        if (error_message != nullptr) *error_message = std::move(fallback_error);
+        return false;
+    }
+    if (error_message != nullptr && error_message->empty()) {
+        error_message->clear();
+    }
+    hair_mode_ = CharacterHairMode::Static;
     return true;
 }
 
@@ -1233,6 +1288,13 @@ bool CharacterCompositor::load_surfaces(std::string* error_message) {
         required_assets.insert(manifest_.expression.eyes_closed_asset_id);
         required_assets.insert(manifest_.expression.mouth_curious_asset_id);
     }
+    const auto is_optional_expression_asset = [this](const std::string& asset_id) {
+        if (!manifest_.expression.enabled) return false;
+        return asset_id == manifest_.expression.eyes_inward_asset_id ||
+            asset_id == manifest_.expression.eyes_half_asset_id ||
+            asset_id == manifest_.expression.eyes_closed_asset_id ||
+            asset_id == manifest_.expression.mouth_curious_asset_id;
+    };
 
     for (const auto& asset_id : required_assets) {
         const auto* asset = manifest_.find_asset(asset_id);
@@ -1243,6 +1305,10 @@ bool CharacterCompositor::load_surfaces(std::string* error_message) {
         );
         const cairo_status_t status = cairo_surface_status(surface.get());
         if (status != CAIRO_STATUS_SUCCESS) {
+            if (is_optional_expression_asset(asset_id)) {
+                manifest_.expression = {};
+                continue;
+            }
             if (error_message != nullptr) {
                 *error_message = "Unable to decode character asset " +
                     asset->path.string() + ": " + cairo_status_to_string(status);
@@ -1252,6 +1318,10 @@ bool CharacterCompositor::load_surfaces(std::string* error_message) {
 
         if (cairo_image_surface_get_width(surface.get()) != asset->size.width ||
             cairo_image_surface_get_height(surface.get()) != asset->size.height) {
+            if (is_optional_expression_asset(asset_id)) {
+                manifest_.expression = {};
+                continue;
+            }
             if (error_message != nullptr) {
                 *error_message = "Decoded character asset dimensions disagree with manifest: " +
                     asset->path.string();
@@ -1260,6 +1330,97 @@ bool CharacterCompositor::load_surfaces(std::string* error_message) {
         }
         surfaces_.emplace(asset_id, std::move(surface));
     }
+    return true;
+}
+
+bool CharacterCompositor::build_static_hair_textures(std::string* error_message) {
+    if (manifest_.source_canvas.height <= 0 || host_geometry_.surface_height <= 0) {
+        if (error_message != nullptr) {
+            *error_message = "Unable to derive final hair render scale";
+        }
+        return false;
+    }
+
+    const double render_scale =
+        (static_cast<double>(host_geometry_.surface_height) *
+         manifest_.placement.height_fraction) /
+        static_cast<double>(manifest_.source_canvas.height);
+    if (!std::isfinite(render_scale) || render_scale <= 0.0) {
+        if (error_message != nullptr) *error_message = "Character hair render scale is invalid";
+        return false;
+    }
+
+    for (const auto& layer : manifest_.layers) {
+        if (!layer.visible || layer.renderer != CharacterLayerRenderer::HairMesh ||
+            hair_render_caches_.contains(layer.id)) continue;
+        const auto* asset = manifest_.find_asset(layer.asset_id);
+        const auto surface = surfaces_.find(layer.asset_id);
+        if (asset == nullptr || surface == surfaces_.end()) {
+            if (error_message != nullptr) {
+                *error_message = "Missing hair texture for static layer " + layer.id;
+            }
+            return false;
+        }
+
+        const double width = std::ceil(static_cast<double>(asset->size.width) * render_scale);
+        const double height = std::ceil(static_cast<double>(asset->size.height) * render_scale);
+        if (!std::isfinite(width) || !std::isfinite(height) || width < 1.0 || height < 1.0 ||
+            width > CharacterResourceBudget::kMaxSourceDimension ||
+            height > CharacterResourceBudget::kMaxSourceDimension ||
+            width > static_cast<double>(CharacterResourceBudget::kMaxSourcePixels) / height) {
+            if (error_message != nullptr) {
+                *error_message = "Static hair texture exceeds its resource budget for " + layer.id;
+            }
+            return false;
+        }
+
+        cairo_surface_flush(surface->second.get());
+        const int stride = cairo_image_surface_get_stride(surface->second.get());
+        if (stride <= 0) {
+            if (error_message != nullptr) {
+                *error_message = "Static hair texture has an invalid stride for " + layer.id;
+            }
+            return false;
+        }
+        const std::uint64_t byte_count = static_cast<std::uint64_t>(stride) *
+            static_cast<std::uint64_t>(asset->size.height);
+        if (byte_count > CharacterResourceBudget::kMaxDecodedBytes) {
+            if (error_message != nullptr) {
+                *error_message = "Static hair texture allocation exceeds its resource budget for " + layer.id;
+            }
+            return false;
+        }
+        gpointer data = g_memdup2(
+            cairo_image_surface_get_data(surface->second.get()),
+            static_cast<gsize>(byte_count)
+        );
+        if (data == nullptr) {
+            if (error_message != nullptr) {
+                *error_message = "Unable to allocate static hair texture for " + layer.id;
+            }
+            return false;
+        }
+        GBytes* bytes = g_bytes_new_take(data, static_cast<gsize>(byte_count));
+        HairRenderCache cache;
+        cache.width = static_cast<int>(width);
+        cache.height = static_cast<int>(height);
+        cache.texture.reset(gdk_memory_texture_new(
+            asset->size.width,
+            asset->size.height,
+            kCairoArgb32MemoryFormat,
+            bytes,
+            static_cast<gsize>(stride)
+        ));
+        g_bytes_unref(bytes);
+        if (cache.texture == nullptr) {
+            if (error_message != nullptr) {
+                *error_message = "Unable to create static hair texture for " + layer.id;
+            }
+            return false;
+        }
+        hair_render_caches_.emplace(layer.id, std::move(cache));
+    }
+    mesh_caches_loaded_ = false;
     return true;
 }
 
@@ -1283,8 +1444,9 @@ bool CharacterCompositor::build_hair_meshes(std::string* error_message) {
     }
 
     std::unordered_set<std::string> cached_source_assets;
-    for (const auto& layer : manifest_.layers) {
-        if (!layer.visible || layer.renderer != CharacterLayerRenderer::HairMesh) {
+    for (auto& layer : manifest_.layers) {
+        if (!layer.visible || layer.renderer != CharacterLayerRenderer::HairMesh ||
+            !layer.mesh_available) {
             continue;
         }
 
@@ -1306,21 +1468,15 @@ bool CharacterCompositor::build_hair_meshes(std::string* error_message) {
         );
         const cairo_status_t mask_status = cairo_surface_status(mask_surface.get());
         if (mask_status != CAIRO_STATUS_SUCCESS) {
-            if (error_message != nullptr) {
-                *error_message = "Unable to decode movement mask " +
-                    mask_asset->path.string() + ": " +
-                    cairo_status_to_string(mask_status);
-            }
-            return false;
+            static_cast<void>(mask_status);
+            layer.mesh_available = false;
+            continue;
         }
         if (cairo_image_surface_get_format(mask_surface.get()) != CAIRO_FORMAT_ARGB32 ||
             cairo_image_surface_get_width(mask_surface.get()) != mask_asset->size.width ||
             cairo_image_surface_get_height(mask_surface.get()) != mask_asset->size.height) {
-            if (error_message != nullptr) {
-                *error_message = "Movement mask must decode as ARGB32 with manifest geometry: " +
-                    mask_asset->path.string();
-            }
-            return false;
+            layer.mesh_available = false;
+            continue;
         }
 
         cairo_surface_flush(mask_surface.get());
@@ -1332,21 +1488,32 @@ bool CharacterCompositor::build_hair_meshes(std::string* error_message) {
             layer.mesh_rows,
             error_message
         );
-        if (!mesh) return false;
+        if (!mesh) {
+            if (error_message != nullptr) error_message->clear();
+            layer.mesh_available = false;
+            continue;
+        }
 
         HairRenderCache cache;
-        cache.width = std::max(
-            static_cast<int>(std::ceil(
-                static_cast<double>(hair_asset->size.width) * render_scale
-            )),
-            1
+        const double cache_width = std::ceil(
+            static_cast<double>(hair_asset->size.width) * render_scale
         );
-        cache.height = std::max(
-            static_cast<int>(std::ceil(
-                static_cast<double>(hair_asset->size.height) * render_scale
-            )),
-            1
+        const double cache_height = std::ceil(
+            static_cast<double>(hair_asset->size.height) * render_scale
         );
+        if (!std::isfinite(cache_width) || !std::isfinite(cache_height) ||
+            cache_width < 1.0 || cache_height < 1.0 ||
+            cache_width > CharacterResourceBudget::kMaxSourceDimension ||
+            cache_height > CharacterResourceBudget::kMaxSourceDimension ||
+            cache_width > static_cast<double>(CharacterResourceBudget::kMaxSourcePixels) /
+                cache_height) {
+            if (error_message != nullptr) {
+                *error_message = "Hair mesh cache exceeds its resource budget for " + layer.id;
+            }
+            return false;
+        }
+        cache.width = static_cast<int>(cache_width);
+        cache.height = static_cast<int>(cache_height);
         SurfacePtr scaled_surface(cairo_image_surface_create(
             CAIRO_FORMAT_ARGB32,
             cache.width,
@@ -1396,13 +1563,31 @@ bool CharacterCompositor::build_hair_meshes(std::string* error_message) {
         const int texture_stride = cairo_image_surface_get_stride(
             scaled_surface.get()
         );
-        const gsize texture_bytes = static_cast<gsize>(texture_stride) *
-            static_cast<gsize>(cache.height);
+        if (texture_stride <= 0) {
+            if (error_message != nullptr) {
+                *error_message = "Scaled hair texture has an invalid stride for " + layer.id;
+            }
+            return false;
+        }
+        const std::uint64_t texture_bytes = static_cast<std::uint64_t>(texture_stride) *
+            static_cast<std::uint64_t>(cache.height);
+        if (texture_bytes > CharacterResourceBudget::kMaxDecodedBytes) {
+            if (error_message != nullptr) {
+                *error_message = "Scaled hair texture exceeds its resource budget for " + layer.id;
+            }
+            return false;
+        }
         gpointer texture_data = g_memdup2(
             cairo_image_surface_get_data(scaled_surface.get()),
-            texture_bytes
+            static_cast<gsize>(texture_bytes)
         );
-        GBytes* bytes = g_bytes_new_take(texture_data, texture_bytes);
+        if (texture_data == nullptr) {
+            if (error_message != nullptr) {
+                *error_message = "Unable to allocate scaled hair texture for " + layer.id;
+            }
+            return false;
+        }
+        GBytes* bytes = g_bytes_new_take(texture_data, static_cast<gsize>(texture_bytes));
         cache.texture.reset(gdk_memory_texture_new(
             cache.width,
             cache.height,
@@ -1461,37 +1646,44 @@ bool CharacterCompositor::build_hair_meshes(std::string* error_message) {
     // Releasing the original decoded PNG surfaces avoids retaining duplicate
     // CPU-side copies after the GSK renderer has its texture source.
     for (const auto& asset_id : cached_source_assets) surfaces_.erase(asset_id);
+    if (!build_static_hair_textures(error_message)) return false;
+    mesh_caches_loaded_ = true;
     return true;
 }
 
 bool CharacterCompositor::ensure_flow_caches(std::string* error_message) {
+    static_cast<void>(error_message);
     if (flow_caches_loaded_) return true;
 
-    for (const CharacterLayer& layer : manifest_.layers) {
+    bool flow_failed = false;
+    for (auto& layer : manifest_.layers) {
         if (!layer.visible ||
             layer.renderer != CharacterLayerRenderer::HairMesh ||
-            layer.flow_asset_id.empty() || layer.flow_strength <= 0.0) {
+            !layer.mesh_available || layer.flow_asset_id.empty() ||
+            layer.flow_strength <= 0.0) {
             continue;
         }
 
         const auto cache = hair_render_caches_.find(layer.id);
         if (cache == hair_render_caches_.end()) {
-            if (error_message != nullptr) {
-                *error_message = "Missing mesh cache for flow layer " + layer.id;
-            }
-            release_flow_caches();
-            return false;
+            layer.flow_asset_id.clear();
+            layer.flow_strength = 0.0;
+            continue;
         }
-        if (!build_flow_cache_for_layer(layer, cache->second, error_message)) {
-            release_flow_caches();
-            return false;
+        std::string flow_error;
+        if (!build_flow_cache_for_layer(layer, cache->second, &flow_error)) {
+            if (error_message != nullptr) *error_message = flow_error;
+            release_flow_cache(cache->second);
+            layer.flow_asset_id.clear();
+            layer.flow_strength = 0.0;
+            flow_failed = true;
         }
     }
 
     // A rig with no flow-enabled layer may still enter MeshFlow mode; it simply
     // behaves like mesh-only without keeping a useless animation tick alive.
     flow_caches_loaded_ = true;
-    return true;
+    return !flow_failed;
 }
 
 bool CharacterCompositor::build_flow_cache_for_layer(
@@ -1508,6 +1700,16 @@ bool CharacterCompositor::build_flow_cache_for_layer(
         if (error_message != nullptr) {
             *error_message = "Missing source, movement mask, or flow map for " +
                 layer.id;
+        }
+        return false;
+    }
+    const std::uint64_t cache_pixels = static_cast<std::uint64_t>(cache.width) *
+        static_cast<std::uint64_t>(cache.height);
+    constexpr std::uint64_t flow_surface_count = 12U;
+    if (cache_pixels > CharacterResourceBudget::kMaxDecodedBytes /
+            (sizeof(std::uint32_t) * flow_surface_count)) {
+        if (error_message != nullptr) {
+            *error_message = "Flow cache exceeds its decoded-byte resource budget for " + layer.id;
         }
         return false;
     }
@@ -1609,6 +1811,13 @@ bool CharacterCompositor::build_flow_cache_for_layer(
         (kFlowPoseMaxDisplacement - kFlowPoseMinDisplacement) /
         kFlowPoseStep
     )) + 1;
+    if (flow_pose_count <= 0 ||
+        static_cast<std::size_t>(flow_pose_count) > CharacterResourceBudget::kMaxFlowPoses) {
+        if (error_message != nullptr) {
+            *error_message = "Flow pose count exceeds its resource budget for " + layer.id;
+        }
+        return false;
+    }
     cache.flow_poses.reserve(static_cast<std::size_t>(flow_pose_count));
 
     for (int pose_index = 0; pose_index < flow_pose_count; ++pose_index) {
@@ -1627,9 +1836,23 @@ bool CharacterCompositor::build_flow_cache_for_layer(
             return false;
         }
 
-        const gsize byte_count = static_cast<gsize>(warped->size());
-        gpointer data = g_memdup2(warped->data(), byte_count);
-        GBytes* pose_bytes = g_bytes_new_take(data, byte_count);
+        const std::uint64_t byte_count = static_cast<std::uint64_t>(warped->size());
+        if (byte_count == 0U || byte_count > CharacterResourceBudget::kMaxDecodedBytes) {
+            if (error_message != nullptr) {
+                *error_message = "Flow pose exceeds its resource budget for " + layer.id;
+            }
+            release_flow_cache(cache);
+            return false;
+        }
+        gpointer data = g_memdup2(warped->data(), static_cast<gsize>(byte_count));
+        if (data == nullptr) {
+            if (error_message != nullptr) {
+                *error_message = "Unable to allocate flow pose for " + layer.id;
+            }
+            release_flow_cache(cache);
+            return false;
+        }
+        GBytes* pose_bytes = g_bytes_new_take(data, static_cast<gsize>(byte_count));
         pose.texture.reset(gdk_memory_texture_new(
             cache.width,
             cache.height,
@@ -1922,6 +2145,16 @@ bool CharacterCompositor::build_flow_node_cache(
     const std::size_t total_nodes =
         static_cast<std::size_t>(flow_node_count) *
         cache.flow_mesh_pose_count;
+    if (static_cast<std::size_t>(flow_node_count) >
+            CharacterResourceBudget::kMaxFlowNodes ||
+        cache.flow_mesh_pose_count >
+            CharacterResourceBudget::kMaxFlowNodes / static_cast<std::size_t>(flow_node_count) ||
+        total_nodes > CharacterResourceBudget::kMaxFlowNodes) {
+        if (error_message != nullptr) {
+            *error_message = "Flow node count exceeds its resource budget for " + layer_id;
+        }
+        return false;
+    }
     cache.flow_quantized_nodes.reserve(total_nodes);
 
     for (int flow_index = 0; flow_index < flow_node_count; ++flow_index) {
@@ -2248,7 +2481,22 @@ void CharacterCompositor::snapshot_hair_group(
                 ? 0.0
                 : (animation.hair_tip_offset_x * layer.mesh_strength) +
                     idle_hair_offset(layer);
-        if (hair_mode_ == CharacterHairMode::MeshFlow &&
+        if (hair_mode_ == CharacterHairMode::Static || !layer.mesh_available) {
+            graphene_rect_t bounds;
+            graphene_rect_init(
+                &bounds,
+                static_cast<float>(x),
+                static_cast<float>(y),
+                static_cast<float>(cache->second.width),
+                static_cast<float>(cache->second.height)
+            );
+            gtk_snapshot_append_scaled_texture(
+                snapshot,
+                cache->second.texture.get(),
+                GSK_SCALING_FILTER_LINEAR,
+                &bounds
+            );
+        } else if (hair_mode_ == CharacterHairMode::MeshFlow &&
             !cache->second.flow_poses.empty()) {
             append_cached_hair_mesh_flow(
                 snapshot,

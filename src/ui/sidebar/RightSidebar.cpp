@@ -736,7 +736,8 @@ void RightSidebar::initialize_character_compositor() {
                 .surface_width = frame_layout_.surface_width(),
                 .surface_height = sidebar_height_,
             },
-            &character_error
+            &character_error,
+            character_hair_mode_
         );
     if (!character_compositor_) {
         std::cerr << "Unable to initialize sidebar character composition: "

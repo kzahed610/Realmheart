@@ -1,4 +1,5 @@
 #include "animation/character/HairMesh.hpp"
+#include "animation/character/CharacterManifest.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -29,9 +30,19 @@ std::optional<HairMesh> HairMesh::from_argb32(
     int requested_rows,
     std::string* error_message
 ) {
-    if (data == nullptr || width <= 0 || height <= 0 ||
-        stride < width * static_cast<int>(sizeof(std::uint32_t)) ||
-        requested_rows < 2) {
+    const auto width_u = static_cast<std::uint64_t>(std::max(width, 0));
+    const auto height_u = static_cast<std::uint64_t>(std::max(height, 0));
+    const bool dimensions_valid = width > 0 && height > 0 &&
+        width <= CharacterResourceBudget::kMaxSourceDimension &&
+        height <= CharacterResourceBudget::kMaxSourceDimension &&
+        width_u <= CharacterResourceBudget::kMaxSourcePixels / height_u;
+    const auto minimum_stride = width_u * sizeof(std::uint32_t);
+    const auto input_bytes = static_cast<std::uint64_t>(std::max(stride, 0)) * height_u;
+    if (data == nullptr || !dimensions_valid || stride <= 0 ||
+        static_cast<std::uint64_t>(stride) < minimum_stride ||
+        input_bytes > CharacterResourceBudget::kMaxDecodedBytes ||
+        requested_rows < 2 ||
+        requested_rows > CharacterResourceBudget::kMaxMeshRows) {
         set_error(error_message, "Hair mesh received invalid mask geometry");
         return std::nullopt;
     }

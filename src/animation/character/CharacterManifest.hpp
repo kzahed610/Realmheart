@@ -3,6 +3,8 @@
 #include "core/DisplayTier.hpp"
 
 #include <filesystem>
+#include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -45,6 +47,17 @@ struct CharacterAsset {
     std::filesystem::path path;
 };
 
+struct CharacterResourceBudget {
+    static constexpr int kMaxSourceDimension = 8192;
+    static constexpr std::uint64_t kMaxSourcePixels = 16'777'216ULL;
+    static constexpr std::uint64_t kMaxManifestFileBytes = 4ULL * 1024ULL * 1024ULL;
+    static constexpr std::uint64_t kMaxAssetFileBytes = 64ULL * 1024ULL * 1024ULL;
+    static constexpr std::uint64_t kMaxDecodedBytes = 128ULL * 1024ULL * 1024ULL;
+    static constexpr int kMaxMeshRows = 128;
+    static constexpr std::size_t kMaxFlowPoses = 9U;
+    static constexpr std::size_t kMaxFlowNodes = 65'536U;
+};
+
 struct CharacterLayer {
     std::string id;
     std::string asset_id;
@@ -61,6 +74,7 @@ struct CharacterLayer {
     double flow_strength = 0.0;
     double flow_frequency = 0.0;
     double flow_phase = 0.0;
+    bool mesh_available = true;
     bool visible = true;
 };
 

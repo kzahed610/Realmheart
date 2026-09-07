@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <limits>
 #include <system_error>
+#include <unordered_set>
 #include <utility>
 
 namespace realmheart::animation::character {
@@ -17,10 +19,64 @@ void set_error(std::string* target, std::string message) {
     if (target != nullptr) *target = std::move(message);
 }
 
+bool path_is_within(
+    const std::filesystem::path& parent,
+    const std::filesystem::path& candidate
+) {
+    auto parent_it = parent.begin();
+    auto candidate_it = candidate.begin();
+    for (; parent_it != parent.end() && candidate_it != candidate.end();
+         ++parent_it, ++candidate_it) {
+        if (*parent_it != *candidate_it) return false;
+    }
+    return parent_it == parent.end();
+}
+
+bool checked_pixel_count(
+    int width,
+    int height,
+    std::uint64_t* output
+) noexcept {
+    if (width <= 0 || height <= 0) return false;
+    const auto unsigned_width = static_cast<std::uint64_t>(width);
+    const auto unsigned_height = static_cast<std::uint64_t>(height);
+    if (unsigned_width > CharacterResourceBudget::kMaxSourceDimension ||
+        unsigned_height > CharacterResourceBudget::kMaxSourceDimension ||
+        unsigned_width > CharacterResourceBudget::kMaxSourcePixels / unsigned_height) {
+        return false;
+    }
+    if (output != nullptr) *output = unsigned_width * unsigned_height;
+    return true;
+}
+
+std::string optional_string(const Json& parent, std::string_view key) noexcept {
+    try {
+        return parent.value(std::string(key), std::string{});
+    } catch (const std::exception&) {
+        return {};
+    }
+}
+
+template <typename T>
+std::optional<T> optional_value(const Json& parent, std::string_view key) noexcept {
+    try {
+        if (!parent.contains(std::string(key))) return std::nullopt;
+        return parent.at(std::string(key)).get<T>();
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 std::optional<Json> read_json(
     const std::filesystem::path& path,
     std::string* error_message
 ) {
+    std::error_code file_error;
+    const auto file_bytes = std::filesystem::file_size(path, file_error);
+    if (file_error || file_bytes > CharacterResourceBudget::kMaxManifestFileBytes) {
+        set_error(error_message, "Character manifest exceeds its file-size resource budget: " + path.string());
+        return std::nullopt;
+    }
     std::ifstream input(path);
     if (!input) {
         set_error(error_message, "Unable to open character manifest: " + path.string());
@@ -145,11 +201,9 @@ bool validate_family_geometry(
                 const std::string member = member_json.get<std::string>();
                 const auto* asset = manifest.find_asset(member);
                 if (asset == nullptr) {
-                    set_error(
-                        error_message,
-                        "Family '" + family_name + "' references missing asset '" + member + "'"
-                    );
-                    return false;
+                    // Expression, mask, and flow members are optional. Their
+                    // owning layer will select a lower-cost fallback below.
+                    continue;
                 }
                 if (first == nullptr) {
                     first = asset;
@@ -232,8 +286,13 @@ std::optional<CharacterManifest> CharacterManifest::load(
             .height = scale_json->at("sourceCanvas").at("height").get<int>(),
         };
         if (manifest.character.empty() || manifest.source_canvas.width <= 0 ||
-            manifest.source_canvas.height <= 0) {
-            set_error(error_message, "Character manifest has an invalid identity or source canvas");
+            manifest.source_canvas.height <= 0 ||
+            !checked_pixel_count(
+                manifest.source_canvas.width,
+                manifest.source_canvas.height,
+                nullptr
+            )) {
+            set_error(error_message, "Character manifest exceeds its resource budget or has an invalid identity/source canvas");
             return std::nullopt;
         }
 
@@ -261,41 +320,103 @@ std::optional<CharacterManifest> CharacterManifest::load(
         }
 
         const auto scale_directory = selected_manifest_path->path.parent_path();
+        const auto canonical_scale_directory = std::filesystem::weakly_canonical(
+            scale_directory, error
+        );
+        if (error || !std::filesystem::is_directory(canonical_scale_directory, error) || error) {
+            set_error(error_message, "Selected character display-tier directory is invalid");
+            return std::nullopt;
+        }
+
+        std::unordered_set<std::string> optional_asset_ids;
+        std::unordered_set<std::string> required_asset_ids;
+        for (const auto& layer_json : rig_json->at("layers")) {
+            required_asset_ids.insert(layer_json.at("asset").get<std::string>());
+            const auto mask_id = optional_string(layer_json, "mask");
+            const auto flow_id = optional_string(layer_json, "flow");
+            if (!mask_id.empty()) optional_asset_ids.insert(mask_id);
+            if (!flow_id.empty()) optional_asset_ids.insert(flow_id);
+        }
+        if (rig_json->contains("expression")) {
+            try {
+                const auto& expression_json = rig_json->at("expression");
+                for (const auto& id : {
+                    optional_string(expression_json.at("eyes"), "inward"),
+                    optional_string(expression_json.at("eyes"), "half"),
+                    optional_string(expression_json.at("eyes"), "closed"),
+                    optional_string(expression_json.at("mouth"), "curious"),
+                }) {
+                    if (!id.empty()) optional_asset_ids.insert(id);
+                }
+            } catch (const std::exception&) {
+                // A malformed optional expression must not make the baseline
+                // character package unloadable.
+            }
+        }
+
+        std::uint64_t decoded_bytes = 0U;
         for (const auto& [asset_id, asset_json] : scale_json->at("assets").items()) {
+            const bool optional = optional_asset_ids.contains(asset_id) &&
+                !required_asset_ids.contains(asset_id);
             CharacterAsset asset;
-            asset.id = asset_id;
-            asset.file = asset_json.at("file").get<std::string>();
-            asset.family = asset_json.at("family").get<std::string>();
-            asset.offset = {
-                .x = asset_json.at("offset").at("x").get<double>(),
-                .y = asset_json.at("offset").at("y").get<double>(),
-            };
-            asset.size = {
-                .width = asset_json.at("size").at("width").get<int>(),
-                .height = asset_json.at("size").at("height").get<int>(),
-            };
-            asset.path = scale_directory / asset.file;
+            try {
+                asset.id = asset_id;
+                asset.file = asset_json.at("file").get<std::string>();
+                asset.family = asset_json.at("family").get<std::string>();
+                asset.offset = {
+                    .x = asset_json.at("offset").at("x").get<double>(),
+                    .y = asset_json.at("offset").at("y").get<double>(),
+                };
+                asset.size = {
+                    .width = asset_json.at("size").at("width").get<int>(),
+                    .height = asset_json.at("size").at("height").get<int>(),
+                };
+                asset.path = scale_directory / asset.file;
+            } catch (const std::exception&) {
+                if (optional) continue;
+                throw;
+            }
 
+            std::uint64_t asset_pixels = 0U;
             if (asset.id.empty() || asset.file.empty() || asset.family.empty() ||
-                asset.size.width <= 0 || asset.size.height <= 0 ||
+                !checked_pixel_count(asset.size.width, asset.size.height, &asset_pixels) ||
                 !std::isfinite(asset.offset.x) || !std::isfinite(asset.offset.y)) {
-                set_error(error_message, "Character asset '" + asset_id + "' is invalid");
+                if (optional) continue;
+                set_error(error_message, "Character asset '" + asset_id + "' exceeds its resource budget or is invalid");
                 return std::nullopt;
             }
-
             const auto canonical_asset = std::filesystem::weakly_canonical(asset.path, error);
-            if (error || !std::filesystem::is_regular_file(canonical_asset, error) || error) {
-                set_error(error_message, "Character asset file is missing: " + asset.path.string());
+            if (error) {
+                if (optional) continue;
+                set_error(error_message, "Unable to canonicalize character asset: " + asset.path.string());
                 return std::nullopt;
             }
-            const auto mismatch = std::mismatch(
-                canonical_root.begin(), canonical_root.end(),
-                canonical_asset.begin(), canonical_asset.end()
-            );
-            if (mismatch.first != canonical_root.end()) {
+            if (!path_is_within(canonical_scale_directory, canonical_asset)) {
+                set_error(error_message, "Character asset escapes its selected display tier: " + asset.path.string());
+                return std::nullopt;
+            }
+            if (!path_is_within(canonical_root, canonical_asset)) {
                 set_error(error_message, "Character asset escapes its asset root: " + asset.path.string());
                 return std::nullopt;
             }
+            if (!std::filesystem::is_regular_file(canonical_asset, error) || error) {
+                if (optional) continue;
+                set_error(error_message, "Character asset file is missing: " + asset.path.string());
+                return std::nullopt;
+            }
+            const auto file_bytes = std::filesystem::file_size(canonical_asset, error);
+            if (error || file_bytes > CharacterResourceBudget::kMaxAssetFileBytes) {
+                if (optional) continue;
+                set_error(error_message, "Character asset exceeds its file-size resource budget: " + asset.path.string());
+                return std::nullopt;
+            }
+            if (asset_pixels > (std::numeric_limits<std::uint64_t>::max() - decoded_bytes) / 4U ||
+                decoded_bytes + (asset_pixels * 4U) > CharacterResourceBudget::kMaxDecodedBytes) {
+                if (optional) continue;
+                set_error(error_message, "Character assets exceed their resource budget");
+                return std::nullopt;
+            }
+            decoded_bytes += asset_pixels * 4U;
             asset.path = canonical_asset;
             manifest.assets.emplace(asset.id, std::move(asset));
         }
@@ -343,15 +464,22 @@ std::optional<CharacterManifest> CharacterManifest::load(
             }
 
             if (layer.renderer == CharacterLayerRenderer::HairMesh) {
-                layer.mask_asset_id = layer_json.at("mask").get<std::string>();
-                layer.mesh_rows = layer_json.value("meshRows", 24);
-                layer.mesh_strength = layer_json.value("meshStrength", 1.0);
-                layer.idle_strength = layer_json.value("idleStrength", 0.0);
-                layer.idle_phase = layer_json.value("idlePhase", 0.0);
-                layer.flow_asset_id = layer_json.value("flow", std::string{});
-                layer.flow_strength = layer_json.value("flowStrength", 0.0);
-                layer.flow_frequency = layer_json.value("flowFrequency", 0.0);
-                layer.flow_phase = layer_json.value("flowPhase", 0.0);
+                layer.mask_asset_id = optional_string(layer_json, "mask");
+                layer.flow_asset_id = optional_string(layer_json, "flow");
+                const auto mesh_rows = optional_value<int>(layer_json, "meshRows");
+                const auto mesh_strength = optional_value<double>(layer_json, "meshStrength");
+                const auto idle_strength = optional_value<double>(layer_json, "idleStrength");
+                const auto idle_phase = optional_value<double>(layer_json, "idlePhase");
+                const auto flow_strength = optional_value<double>(layer_json, "flowStrength");
+                const auto flow_frequency = optional_value<double>(layer_json, "flowFrequency");
+                const auto flow_phase = optional_value<double>(layer_json, "flowPhase");
+                layer.mesh_rows = mesh_rows.value_or(24);
+                layer.mesh_strength = mesh_strength.value_or(1.0);
+                layer.idle_strength = idle_strength.value_or(0.0);
+                layer.idle_phase = idle_phase.value_or(0.0);
+                layer.flow_strength = flow_strength.value_or(0.0);
+                layer.flow_frequency = flow_frequency.value_or(0.0);
+                layer.flow_phase = flow_phase.value_or(0.0);
 
                 const CharacterAsset* mask_asset = manifest.find_asset(
                     layer.mask_asset_id
@@ -359,57 +487,59 @@ std::optional<CharacterManifest> CharacterManifest::load(
                 const CharacterAsset* flow_asset = layer.flow_asset_id.empty()
                     ? nullptr
                     : manifest.find_asset(layer.flow_asset_id);
-                if (layer.placement != CharacterLayerPlacement::SourceCanvas ||
-                    mask_asset == nullptr || layer.mesh_rows < 2 ||
-                    layer.mesh_rows > 128 ||
-                    !std::isfinite(layer.mesh_strength) ||
-                    layer.mesh_strength < 0.0 || layer.mesh_strength > 4.0 ||
-                    !std::isfinite(layer.idle_strength) ||
-                    layer.idle_strength < 0.0 || layer.idle_strength > 32.0 ||
-                    !std::isfinite(layer.idle_phase) ||
-                    std::abs(layer.idle_phase) > 100.0 ||
-                    !std::isfinite(layer.flow_strength) ||
-                    layer.flow_strength < 0.0 || layer.flow_strength > 4.0 ||
-                    !std::isfinite(layer.flow_frequency) ||
-                    layer.flow_frequency < 0.0 || layer.flow_frequency > 10.0 ||
-                    !std::isfinite(layer.flow_phase) ||
-                    std::abs(layer.flow_phase) > 100.0 ||
-                    (!layer.flow_asset_id.empty() && flow_asset == nullptr)) {
-                    set_error(
-                        error_message,
-                        "Character mesh layer '" + layer.id + "' has invalid mesh settings"
-                    );
-                    return std::nullopt;
-                }
-                if (mask_asset->size.width != texture_asset->size.width ||
+                const bool mesh_settings_valid =
+                    (!layer_json.contains("meshRows") || mesh_rows.has_value()) &&
+                    (!layer_json.contains("meshStrength") || mesh_strength.has_value()) &&
+                    (!layer_json.contains("idleStrength") || idle_strength.has_value()) &&
+                    (!layer_json.contains("idlePhase") || idle_phase.has_value()) &&
+                    layer.placement == CharacterLayerPlacement::SourceCanvas &&
+                    mask_asset != nullptr && layer.mesh_rows >= 2 &&
+                    layer.mesh_rows <= CharacterResourceBudget::kMaxMeshRows &&
+                    std::isfinite(layer.mesh_strength) &&
+                    layer.mesh_strength >= 0.0 && layer.mesh_strength <= 4.0 &&
+                    std::isfinite(layer.idle_strength) &&
+                    layer.idle_strength >= 0.0 && layer.idle_strength <= 32.0 &&
+                    std::isfinite(layer.idle_phase) &&
+                    std::abs(layer.idle_phase) <= 100.0 &&
+                    std::isfinite(layer.flow_strength) &&
+                    layer.flow_strength >= 0.0 && layer.flow_strength <= 4.0 &&
+                    std::isfinite(layer.flow_frequency) &&
+                    layer.flow_frequency >= 0.0 && layer.flow_frequency <= 10.0 &&
+                    std::isfinite(layer.flow_phase) &&
+                    std::abs(layer.flow_phase) <= 100.0;
+                const bool flow_settings_valid =
+                    (!layer_json.contains("flowStrength") || flow_strength.has_value()) &&
+                    (!layer_json.contains("flowFrequency") || flow_frequency.has_value()) &&
+                    (!layer_json.contains("flowPhase") || flow_phase.has_value());
+                if (!mesh_settings_valid) {
+                    layer.mesh_available = false;
+                    layer.mask_asset_id.clear();
+                    layer.flow_asset_id.clear();
+                    layer.flow_strength = 0.0;
+                } else if (mask_asset->size.width != texture_asset->size.width ||
                     mask_asset->size.height != texture_asset->size.height ||
                     mask_asset->offset.x != texture_asset->offset.x ||
                     mask_asset->offset.y != texture_asset->offset.y) {
-                    set_error(
-                        error_message,
-                        "Character mesh layer '" + layer.id +
-                            "' texture and mask geometry disagree"
-                    );
-                    return std::nullopt;
-                }
-                if (flow_asset != nullptr &&
-                    (flow_asset->size.width != texture_asset->size.width ||
+                    layer.mesh_available = false;
+                    layer.mask_asset_id.clear();
+                    layer.flow_asset_id.clear();
+                    layer.flow_strength = 0.0;
+                } else if (!flow_settings_valid || (!layer.flow_asset_id.empty() &&
+                    (flow_asset == nullptr ||
+                     flow_asset->size.width != texture_asset->size.width ||
                      flow_asset->size.height != texture_asset->size.height ||
                      flow_asset->offset.x != texture_asset->offset.x ||
-                     flow_asset->offset.y != texture_asset->offset.y)) {
-                    set_error(
-                        error_message,
-                        "Character mesh layer '" + layer.id +
-                            "' texture and flow-map geometry disagree"
-                    );
-                    return std::nullopt;
+                     flow_asset->offset.y != texture_asset->offset.y))) {
+                    layer.flow_asset_id.clear();
+                    layer.flow_strength = 0.0;
                 }
             }
             manifest.layers.push_back(std::move(layer));
         }
 
         if (rig_json->contains("expression")) {
-            const auto& expression_json = rig_json->at("expression");
+            try {
+                const auto& expression_json = rig_json->at("expression");
             CharacterExpressionRig expression;
             expression.enabled = true;
             expression.eyes_layer_id = expression_json.at("eyesLayer").get<std::string>();
@@ -432,57 +562,52 @@ std::optional<CharacterManifest> CharacterManifest::load(
             if (eyes_layer == nullptr || mouth_layer == nullptr ||
                 eyes_layer->renderer != CharacterLayerRenderer::Static ||
                 mouth_layer->renderer != CharacterLayerRenderer::Static) {
-                set_error(
-                    error_message,
-                    "Character expression rig references missing or non-static layers"
+                manifest.expression = {};
+            } else {
+                const CharacterAsset* eyes_base = manifest.find_asset(
+                    eyes_layer->asset_id
                 );
-                return std::nullopt;
+                const CharacterAsset* mouth_base = manifest.find_asset(
+                    mouth_layer->asset_id
+                );
+                const auto geometry_matches = [](
+                    const CharacterAsset* base,
+                    const CharacterAsset* variant
+                ) {
+                    return base != nullptr && variant != nullptr &&
+                        base->family == variant->family &&
+                        base->size.width == variant->size.width &&
+                        base->size.height == variant->size.height &&
+                        base->offset.x == variant->offset.x &&
+                        base->offset.y == variant->offset.y;
+                };
+
+                const bool eyes_valid =
+                    geometry_matches(
+                        eyes_base,
+                        manifest.find_asset(expression.eyes_inward_asset_id)
+                    ) &&
+                    geometry_matches(
+                        eyes_base,
+                        manifest.find_asset(expression.eyes_half_asset_id)
+                    ) &&
+                    geometry_matches(
+                        eyes_base,
+                        manifest.find_asset(expression.eyes_closed_asset_id)
+                    );
+                const bool mouth_valid = geometry_matches(
+                    mouth_base,
+                    manifest.find_asset(expression.mouth_curious_asset_id)
+                );
+                if (!eyes_valid || !mouth_valid) {
+                    manifest.expression = {};
+                } else {
+                    manifest.expression = std::move(expression);
+                }
             }
-
-            const CharacterAsset* eyes_base = manifest.find_asset(
-                eyes_layer->asset_id
-            );
-            const CharacterAsset* mouth_base = manifest.find_asset(
-                mouth_layer->asset_id
-            );
-            const auto geometry_matches = [](
-                const CharacterAsset* base,
-                const CharacterAsset* variant
-            ) {
-                return base != nullptr && variant != nullptr &&
-                    base->family == variant->family &&
-                    base->size.width == variant->size.width &&
-                    base->size.height == variant->size.height &&
-                    base->offset.x == variant->offset.x &&
-                    base->offset.y == variant->offset.y;
-            };
-
-            const bool eyes_valid =
-                geometry_matches(
-                    eyes_base,
-                    manifest.find_asset(expression.eyes_inward_asset_id)
-                ) &&
-                geometry_matches(
-                    eyes_base,
-                    manifest.find_asset(expression.eyes_half_asset_id)
-                ) &&
-                geometry_matches(
-                    eyes_base,
-                    manifest.find_asset(expression.eyes_closed_asset_id)
-                );
-            const bool mouth_valid = geometry_matches(
-                mouth_base,
-                manifest.find_asset(expression.mouth_curious_asset_id)
-            );
-            if (!eyes_valid || !mouth_valid) {
-                set_error(
-                    error_message,
-                    "Character expression variants must share their layer family geometry"
-                );
-                return std::nullopt;
-            }
-
-            manifest.expression = std::move(expression);
+        } catch (const std::exception&) {
+            manifest.expression = {};
+        }
         }
     } catch (const std::exception& parse_error) {
         set_error(

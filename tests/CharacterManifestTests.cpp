@@ -1,5 +1,6 @@
 #include "animation/character/CharacterManifest.hpp"
 #include "core/DisplayTier.hpp"
+#include "nlohmann_json/json.hpp"
 #include "ui/sidebar/SidebarGeometry.hpp"
 
 #include <array>
@@ -7,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -37,6 +39,32 @@ CharacterManifest load_manifest(DisplayTier tier) {
     );
     require(manifest.has_value(), "Tessia manifest must load: " + error);
     return std::move(*manifest);
+}
+
+std::filesystem::path copy_fixture(const std::string& label) {
+    namespace fs = std::filesystem;
+    const auto suffix = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count()
+    );
+    const auto temporary_root = fs::temp_directory_path() /
+        ("realmheart-character-manifest-" + label + "-" + suffix);
+    std::error_code error;
+    fs::create_directories(temporary_root, error);
+    require(!error, "fixture root must be creatable");
+    fs::copy(
+        fs::path(REALMHEART_TEST_TESSIA_ROOT),
+        temporary_root,
+        fs::copy_options::recursive,
+        error
+    );
+    require(!error, "fixture must contain the complete character package");
+    return temporary_root;
+}
+
+void write_json(const std::filesystem::path& path, nlohmann::json value) {
+    std::ofstream output(path);
+    require(static_cast<bool>(output), "fixture manifest must be writable");
+    output << value.dump(2) << '\n';
 }
 
 void test_1080p_manifest_uses_exact_export_geometry() {
@@ -331,6 +359,84 @@ void test_tiered_tessia_bounds_fit_the_sidebar_host() {
     }
 }
 
+void test_optional_assets_degrade_to_static_character() {
+    namespace fs = std::filesystem;
+    const auto temporary_root = copy_fixture("optional-assets");
+    std::error_code error;
+    for (const auto& file : {
+        "eyes-half.png",
+        "eyes-closed.png",
+        "hair-mask-front.png",
+        "hair-flow-rear.png",
+    }) {
+        fs::remove(temporary_root / "1080p" / file, error);
+        require(!error, "optional fixture asset must be removable");
+    }
+
+    std::string load_error;
+    const auto manifest = CharacterManifest::load(
+        temporary_root, DisplayTier::P1080, &load_error
+    );
+    require(manifest.has_value(), "optional asset loss must preserve a loadable character: " + load_error);
+    require(!manifest->expression.enabled,
+            "missing expression overlays must disable only the expression controller");
+    const auto* front_hair = manifest->find_layer("front-hair");
+    require(front_hair != nullptr && !front_hair->mesh_available,
+            "missing hair mask must select static rendering for that hair layer");
+    const auto* rear_hair = manifest->find_layer("rear-hair");
+    require(rear_hair != nullptr && rear_hair->flow_asset_id.empty(),
+            "missing flow data must disable only directional flow");
+
+    fs::remove_all(temporary_root, error);
+    require(!error, "optional fixture cleanup must succeed");
+}
+
+void test_selected_tier_rejects_sibling_tier_asset_traversal() {
+    namespace fs = std::filesystem;
+    const auto temporary_root = copy_fixture("tier-containment");
+    const auto manifest_path = temporary_root / "1440p" / "manifest.json";
+    std::ifstream input(manifest_path);
+    require(static_cast<bool>(input), "tier fixture manifest must be readable");
+    auto manifest_json = nlohmann::json::parse(input);
+    manifest_json.at("assets").at("base.png").at("file") = "../1080p/base.png";
+    write_json(manifest_path, std::move(manifest_json));
+
+    std::string load_error;
+    const auto manifest = CharacterManifest::load(
+        temporary_root, DisplayTier::P1440, &load_error
+    );
+    require(!manifest.has_value(), "selected tier must reject sibling-tier asset traversal");
+    require(load_error.find("selected display tier") != std::string::npos,
+            "tier traversal rejection must identify the selected display tier boundary");
+
+    std::error_code error;
+    fs::remove_all(temporary_root, error);
+    require(!error, "tier containment fixture cleanup must succeed");
+}
+
+void test_manifest_rejects_oversized_geometry_before_asset_decode() {
+    namespace fs = std::filesystem;
+    const auto temporary_root = copy_fixture("oversized-geometry");
+    const auto manifest_path = temporary_root / "1080p" / "manifest.json";
+    std::ifstream input(manifest_path);
+    require(static_cast<bool>(input), "oversized fixture manifest must be readable");
+    auto manifest_json = nlohmann::json::parse(input);
+    manifest_json.at("sourceCanvas").at("width") = 100000;
+    write_json(manifest_path, std::move(manifest_json));
+
+    std::string load_error;
+    const auto manifest = CharacterManifest::load(
+        temporary_root, DisplayTier::P1080, &load_error
+    );
+    require(!manifest.has_value(), "oversized source geometry must be rejected early");
+    require(load_error.find("resource budget") != std::string::npos,
+            "oversized geometry rejection must identify the resource budget");
+
+    std::error_code error;
+    fs::remove_all(temporary_root, error);
+    require(!error, "oversized fixture cleanup must succeed");
+}
+
 } // namespace
 
 int main() {
@@ -344,6 +450,9 @@ int main() {
     test_expression_assets_are_declared_and_geometry_safe();
     test_side_hand_source_anchor_maps_to_host_occlusion_edge();
     test_tiered_tessia_bounds_fit_the_sidebar_host();
+    test_optional_assets_degrade_to_static_character();
+    test_selected_tier_rejects_sibling_tier_asset_traversal();
+    test_manifest_rejects_oversized_geometry_before_asset_decode();
     std::cout << "Character manifest tests passed\n";
     return 0;
 }

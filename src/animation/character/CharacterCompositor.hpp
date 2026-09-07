@@ -38,7 +38,8 @@ public:
         core::DisplayTier asset_tier,
         core::DisplayTier layout_tier,
         CharacterHostGeometry host_geometry,
-        std::string* error_message = nullptr
+        std::string* error_message = nullptr,
+        CharacterHairMode initial_hair_mode = CharacterHairMode::Mesh
     );
 
     ~CharacterCompositor();
@@ -60,6 +61,15 @@ public:
         );
     }
     [[nodiscard]] const CharacterManifest& manifest() const { return manifest_; }
+    [[nodiscard]] std::size_t hair_mesh_cache_count() const noexcept {
+        return hair_render_caches_.size();
+    }
+    [[nodiscard]] bool mesh_resources_loaded() const noexcept {
+        return mesh_caches_loaded_;
+    }
+    [[nodiscard]] bool flow_caches_loaded() const noexcept {
+        return flow_caches_loaded_;
+    }
 
 private:
     struct SurfaceDeleter {
@@ -156,11 +166,15 @@ private:
         GtkWidget* front_host,
         CharacterManifest manifest,
         core::DisplayTier layout_tier,
-        CharacterHostGeometry host_geometry
+        CharacterHostGeometry host_geometry,
+        CharacterHairMode initial_hair_mode
     );
 
     bool load_surfaces(std::string* error_message);
+    bool build_static_hair_textures(std::string* error_message);
     bool build_hair_meshes(std::string* error_message);
+    bool activate_static_fallback(std::string* error_message);
+    void release_mesh_caches() noexcept;
     bool ensure_flow_caches(std::string* error_message);
     bool build_flow_cache_for_layer(
         const CharacterLayer& layer,
@@ -291,6 +305,7 @@ private:
     double idle_elapsed_seconds_ = 0.0;
     double flow_elapsed_seconds_ = 0.0;
     CharacterHairMode hair_mode_ = CharacterHairMode::Mesh;
+    bool mesh_caches_loaded_ = false;
     bool flow_caches_loaded_ = false;
 };
 

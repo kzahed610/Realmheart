@@ -860,6 +860,25 @@ if(BUILD_TESTING)
     realmheart_register_test(realmheart_character_manifest_tests)
 
     add_executable(
+        realmheart_character_compositor_tests
+        tests/CharacterCompositorTests.cpp
+        src/core/DisplayTier.cpp
+        src/animation/character/CharacterAnimator.cpp
+        src/animation/character/CharacterExpressionAnimator.cpp
+        src/animation/character/CharacterHairMode.cpp
+        src/animation/character/CharacterManifest.cpp
+        src/animation/character/HairFlowWarp.cpp
+        src/animation/character/HairMesh.cpp
+        src/animation/character/CharacterCompositor.cpp
+        src/animation/layered/FlowWarp.cpp
+    )
+    target_compile_definitions(realmheart_character_compositor_tests PRIVATE
+        REALMHEART_TEST_TESSIA_ROOT="${CMAKE_SOURCE_DIR}/assets/characters/tessia"
+    )
+    target_link_libraries(realmheart_character_compositor_tests PRIVATE PkgConfig::GTK4)
+    realmheart_register_test(realmheart_character_compositor_tests)
+
+    add_executable(
         realmheart_workspace_overview_assets_tests
         tests/WorkspaceOverviewAssetsTests.cpp
         src/core/DisplayTier.cpp
