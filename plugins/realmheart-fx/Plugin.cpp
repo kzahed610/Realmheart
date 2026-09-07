@@ -37,8 +37,11 @@
 #include <filesystem>
 #include <fcntl.h>
 #include <fstream>
+#include <iterator>
 #include <limits>
+#include <optional>
 #include <random>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -65,9 +68,10 @@ constexpr std::string_view kPlasmaSystemMonitorClass =
     "org.kde.plasma-systemmonitor";
 constexpr float kAutomaticOpenDurationScale = 0.82F;
 constexpr float kAutomaticCloseDurationScale = 0.82F;
-constexpr const char* kDiagnosticLog = "/tmp/realmheart-fx.log";
 constexpr const char* kCommandName = "realmheart-fx";
 constexpr std::size_t kMaximumShaderBytes = 2U * 1024U * 1024U;
+constexpr std::size_t kMaximumDiagnosticBytes = 256U * 1024U;
+constexpr std::size_t kMaximumDiagnosticMessageBytes = 4096U;
 
 constexpr const char* kVertexShader = R"GLSL(#version 300 es
 precision highp float;
@@ -119,6 +123,101 @@ struct SCompiledWindowEffect {
     void destroy() {
         for (auto& shader : shaders)
             shader.destroy();
+    }
+};
+
+bool sameOverrideValue(
+    const Desktop::Types::SAlphaValue& lhs,
+    const Desktop::Types::SAlphaValue& rhs
+) noexcept {
+    return lhs.alpha == rhs.alpha && lhs.overridden == rhs.overridden;
+}
+
+template <typename T>
+bool sameOverrideValue(const T& lhs, const T& rhs) noexcept {
+    return lhs == rhs;
+}
+
+template <typename T>
+struct SOwnedSetProp {
+    using SOverride = Desktop::Types::COverridableVar<T>;
+
+    std::optional<T> previous;
+    std::optional<T> owned;
+
+    void capture(const SOverride& value) {
+        const auto priority = Desktop::Types::PRIORITY_SET_PROP;
+        if (value.hasValue() && value.getPriority() == priority)
+            previous = value.value();
+        else
+            previous.reset();
+    }
+
+    void claim(SOverride& value, const T& replacement) {
+        owned = replacement;
+        value.set(replacement, Desktop::Types::PRIORITY_SET_PROP);
+    }
+
+    void refreshIfOwned(SOverride& value, const T& replacement) {
+        if (!owned.has_value() || !value.hasValue())
+            return;
+
+        const auto priority = Desktop::Types::PRIORITY_SET_PROP;
+        if (value.getPriority() == priority &&
+            sameOverrideValue(value.value(), *owned)) {
+            claim(value, replacement);
+        }
+    }
+
+    void restore(SOverride& value) {
+        if (!owned.has_value())
+            return;
+
+        const auto priority = Desktop::Types::PRIORITY_SET_PROP;
+        const bool stillOwned =
+            value.hasValue() &&
+            value.getPriority() == priority &&
+            sameOverrideValue(value.value(), *owned);
+        if (!stillOwned) {
+            previous.reset();
+            owned.reset();
+            return;
+        }
+
+        if (previous.has_value())
+            value.set(*previous, priority);
+        else
+            value.unset(priority);
+
+        previous.reset();
+        owned.reset();
+    }
+};
+
+struct SWindowHiddenState {
+    SOwnedSetProp<Desktop::Types::SAlphaValue> alpha;
+    SOwnedSetProp<Desktop::Types::SAlphaValue> alphaInactive;
+    SOwnedSetProp<Desktop::Types::SAlphaValue> alphaFullscreen;
+    SOwnedSetProp<bool> noAnim;
+    bool captured = false;
+
+    void capture(Desktop::Rule::CWindowRuleApplicator& applicator) {
+        alpha.capture(applicator.alpha());
+        alphaInactive.capture(applicator.alphaInactive());
+        alphaFullscreen.capture(applicator.alphaFullscreen());
+        noAnim.capture(applicator.noAnim());
+        captured = true;
+    }
+
+    void restore(Desktop::Rule::CWindowRuleApplicator& applicator) {
+        if (!captured)
+            return;
+
+        alpha.restore(applicator.alpha());
+        alphaInactive.restore(applicator.alphaInactive());
+        alphaFullscreen.restore(applicator.alphaFullscreen());
+        noAnim.restore(applicator.noAnim());
+        captured = false;
     }
 };
 
@@ -175,6 +274,7 @@ struct SHeldReflowWindow {
     Vector2D finalSize{};
     float rounding = 0.0F;
     SRetainedCloseFrame frame{};
+    SWindowHiddenState hiddenState{};
     bool applied = false;
     bool hidden = false;
 };
@@ -192,6 +292,7 @@ struct SWindowAnimation {
     // clients, and replay those frozen frames until native reflow resumes.
     SRetainedCloseFrame closeFrame{};
     std::vector<SHeldReflowWindow> heldReflowWindows{};
+    SWindowHiddenState hiddenState{};
     bool reflowHoldApplied = false;
 
     CBox box{};
@@ -268,10 +369,99 @@ std::string_view animationModeName(EWindowAnimationMode mode) noexcept {
     return "unknown";
 }
 
-void appendDiagnostic(const std::string& message) {
-    std::ofstream stream(kDiagnosticLog, std::ios::app);
-    if (stream)
-        stream << message << '\n';
+std::filesystem::path diagnosticLogPath() {
+    if (const char* runtime = std::getenv("XDG_RUNTIME_DIR");
+        runtime != nullptr && *runtime != '\0') {
+        const std::filesystem::path runtimePath{runtime};
+        if (runtimePath.is_absolute())
+            return runtimePath / "realmheart-fx.log";
+    }
+
+    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0')
+        return std::filesystem::path{home} / ".cache" / "realmheart" /
+            "realmheart-fx.log";
+
+    return {};
+}
+
+std::string boundedDiagnosticMessage(std::string_view message) {
+    std::string sanitized;
+    sanitized.reserve(std::min(message.size(), kMaximumDiagnosticMessageBytes));
+    for (const unsigned char character : message) {
+        if (sanitized.size() >= kMaximumDiagnosticMessageBytes)
+            break;
+        if (character == '\n' || character == '\r' || character == '\t' ||
+            character >= 0x20U) {
+            sanitized.push_back(static_cast<char>(character));
+        } else {
+            sanitized.push_back(' ');
+        }
+    }
+    return sanitized;
+}
+
+void appendDiagnostic(const std::string& message) noexcept {
+    try {
+        const std::filesystem::path path = diagnosticLogPath();
+        if (path.empty())
+            return;
+
+        const auto parent = path.parent_path();
+        std::error_code error;
+        if (!std::filesystem::exists(parent, error)) {
+            std::filesystem::create_directories(parent, error);
+            if (error)
+                return;
+            ::chmod(parent.c_str(), 0700);
+        }
+        if (error || !std::filesystem::is_directory(parent, error) || error)
+            return;
+
+        const int flags = O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW;
+        int descriptor = ::open(path.c_str(), flags, 0600);
+        if (descriptor < 0)
+            return;
+
+        struct stat metadata {};
+        if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
+            ::close(descriptor);
+            return;
+        }
+        ::fchmod(descriptor, 0600);
+        const std::string line = boundedDiagnosticMessage(message) + '\n';
+        if (static_cast<std::uintmax_t>(metadata.st_size) + line.size() >
+            kMaximumDiagnosticBytes) {
+            ::close(descriptor);
+            descriptor = ::open(
+                path.c_str(),
+                O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW,
+                0600
+            );
+            if (descriptor < 0)
+                return;
+            if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
+                ::close(descriptor);
+                return;
+            }
+            ::fchmod(descriptor, 0600);
+        }
+
+        const char* data = line.data();
+        std::size_t remaining = line.size();
+        while (remaining > 0U) {
+            const ssize_t written = ::write(descriptor, data, remaining);
+            if (written < 0) {
+                if (errno == EINTR)
+                    continue;
+                break;
+            }
+            data += written;
+            remaining -= static_cast<std::size_t>(written);
+        }
+        ::close(descriptor);
+    } catch (...) {
+        // Diagnostics must never alter plugin control flow.
+    }
 }
 
 std::string reloadWindowEffectConfig(bool startup) {
@@ -511,24 +701,95 @@ std::string readEffectShader(const SWindowEffectSpec& effect) {
     }
 }
 
+bool hasExternalTextureExtension() noexcept {
+    const auto* rawExtensions = glGetString(GL_EXTENSIONS);
+    if (rawExtensions == nullptr)
+        return false;
+
+    std::istringstream extensions{
+        reinterpret_cast<const char*>(rawExtensions)
+    };
+    std::string extension;
+    while (extensions >> extension) {
+        if (extension == "GL_OES_EGL_image_external_essl3")
+            return true;
+    }
+    return false;
+}
+
+std::string shaderWithoutComments(std::string_view source) {
+    std::string output{source};
+    bool lineComment = false;
+    bool blockComment = false;
+    for (std::size_t index = 0; index < output.size(); ++index) {
+        if (lineComment) {
+            if (output[index] == '\n')
+                lineComment = false;
+            else if (output[index] != '\r')
+                output[index] = ' ';
+            continue;
+        }
+        if (blockComment) {
+            if (output[index] == '*' && index + 1U < output.size() &&
+                output[index + 1U] == '/') {
+                output[index] = ' ';
+                output[index + 1U] = ' ';
+                ++index;
+                blockComment = false;
+            } else if (output[index] != '\n' && output[index] != '\r') {
+                output[index] = ' ';
+            }
+            continue;
+        }
+        if (output[index] == '/' && index + 1U < output.size()) {
+            if (output[index + 1U] == '/') {
+                output[index] = ' ';
+                output[index + 1U] = ' ';
+                ++index;
+                lineComment = true;
+            } else if (output[index + 1U] == '*') {
+                output[index] = ' ';
+                output[index + 1U] = ' ';
+                ++index;
+                blockComment = true;
+            }
+        }
+    }
+    return output;
+}
+
 std::string externalVariant(std::string fragment) {
-    constexpr const char* version = "#version 300 es\n";
-    if (const auto position = fragment.find(version); position != std::string::npos) {
-        fragment.insert(
-            position + std::char_traits<char>::length(version),
-            "#extension GL_OES_EGL_image_external_essl3 : require\n"
+    const std::string uncommented = shaderWithoutComments(fragment);
+    const std::regex versionPattern{
+        R"((^|\n)[ \t]*#version[ \t]+300[ \t]+es[ \t]*(\r?\n|$))"
+    };
+    std::smatch versionMatch;
+    if (!std::regex_search(uncommented, versionMatch, versionPattern)) {
+        throw std::runtime_error(
+            "external shader variant requires a #version 300 es directive"
         );
     }
+    fragment.insert(
+        static_cast<std::size_t>(versionMatch.position() + versionMatch.length()),
+        "#extension GL_OES_EGL_image_external_essl3 : require\n"
+    );
 
-    constexpr const char* sampler2d = "uniform sampler2D tex;";
-    if (const auto position = fragment.find(sampler2d); position != std::string::npos) {
-        fragment.replace(
-            position,
-            std::char_traits<char>::length(sampler2d),
-            "uniform samplerExternalOES tex;"
+    const std::regex samplerPattern{
+        R"(\buniform[ \t]+(?:(?:lowp|mediump|highp)[ \t]+)?sampler2D[ \t]+tex[ \t]*;)"
+    };
+    std::sregex_iterator begin{uncommented.begin(), uncommented.end(), samplerPattern};
+    const std::sregex_iterator end{};
+    if (begin == end || std::next(begin) != end) {
+        throw std::runtime_error(
+            "external shader variant requires exactly one uniform sampler2D tex"
         );
     }
-
+    const auto samplerMatch = *begin;
+    fragment.replace(
+        static_cast<std::size_t>(samplerMatch.position()),
+        static_cast<std::size_t>(samplerMatch.length()),
+        "uniform samplerExternalOES tex;"
+    );
     return fragment;
 }
 
@@ -572,6 +833,7 @@ SCompiledWindowEffect* compiledEffect(const SWindowEffectSpec* spec) {
 
 void initialiseEffects() {
     g_pHyprOpenGL->makeEGLCurrent();
+    const bool externalTextureSupported = hasExternalTextureExtension();
 
     for (const auto& spec : windowEffectSpecs()) {
         if (windowEffectIsNone(spec) || spec.fragmentShaderAsset.empty())
@@ -586,11 +848,25 @@ void initialiseEffects() {
             fillLocations(compiled.shaders[0]);
 
             if (windowEffectSupports(spec, EWindowEffectCapability::ExternalTexture)) {
-                compiled.shaders[1].program = createProgram(
-                    kVertexShader,
-                    externalVariant(fragment)
-                );
-                fillLocations(compiled.shaders[1]);
+                if (!externalTextureSupported) {
+                    appendDiagnostic(
+                        "external texture variant disabled: extension unavailable effect=" +
+                        spec.name
+                    );
+                } else {
+                    try {
+                        compiled.shaders[1].program = createProgram(
+                            kVertexShader,
+                            externalVariant(fragment)
+                        );
+                        fillLocations(compiled.shaders[1]);
+                    } catch (const std::exception& exception) {
+                        appendDiagnostic(
+                            "external texture variant disabled: effect=" + spec.name +
+                            " reason=" + exception.what()
+                        );
+                    }
+                }
             }
 
             g_state->effects.push_back(std::move(compiled));
@@ -913,8 +1189,15 @@ bool captureCloseFrame(
 }
 
 std::string_view effectiveWindowClass(const PHLWINDOW& window) noexcept;
-void setWindowHidden(const PHLWINDOW& window, float alpha = 0.0F);
-void clearWindowHidden(const PHLWINDOW& window);
+void setWindowHidden(
+    const PHLWINDOW& window,
+    SWindowHiddenState& hiddenState,
+    float alpha = 0.0F
+);
+void clearWindowHidden(
+    const PHLWINDOW& window,
+    SWindowHiddenState& hiddenState
+);
 
 bool captureTiledReflowHold(
     const PHLWINDOW& closingWindow,
@@ -1005,7 +1288,7 @@ void applyTiledReflowHold(SWindowAnimation& animation) {
         size->setValueAndWarp(hold.oldSize);
 
         if (!hold.hidden) {
-            setWindowHidden(window);
+            setWindowHidden(window, hold.hiddenState);
             hold.hidden = true;
         }
 
@@ -1038,7 +1321,7 @@ void releaseTiledReflowHold(SWindowAnimation& animation) {
         auto& size = window->sizeAnimation();
 
         if (hold.hidden) {
-            clearWindowHidden(window);
+            clearWindowHidden(window, hold.hiddenState);
             hold.hidden = false;
         }
 
@@ -1213,7 +1496,11 @@ void applyAlphaNow(const PHLWINDOW& window) {
     alpha->setValueAndWarp(alpha->goal());
 }
 
-void setWindowHidden(const PHLWINDOW& window, float alpha) {
+void setWindowHidden(
+    const PHLWINDOW& window,
+    SWindowHiddenState& hiddenState,
+    float alpha
+) {
     if (!window || !window->m_ruleApplicator)
         return;
 
@@ -1222,33 +1509,49 @@ void setWindowHidden(const PHLWINDOW& window, float alpha) {
         .overridden = true,
     };
 
-    window->m_ruleApplicator->alpha().set(
-        hidden,
-        Desktop::Types::PRIORITY_SET_PROP
+    if (!hiddenState.captured) {
+        hiddenState.capture(*window->m_ruleApplicator);
+        hiddenState.alpha.claim(window->m_ruleApplicator->alpha(), hidden);
+        hiddenState.alphaInactive.claim(
+            window->m_ruleApplicator->alphaInactive(),
+            hidden
+        );
+        hiddenState.alphaFullscreen.claim(
+            window->m_ruleApplicator->alphaFullscreen(),
+            hidden
+        );
+        hiddenState.noAnim.claim(window->m_ruleApplicator->noAnim(), true);
+        applyAlphaNow(window);
+        return;
+    }
+
+    // Do not overwrite a newer set-prop owner. This function is normally
+    // called once per hidden state, but retaining the guard makes repeated
+    // reflow holds safe if another rule writer races the initial claim.
+    hiddenState.alpha.refreshIfOwned(
+        window->m_ruleApplicator->alpha(),
+        hidden
     );
-    window->m_ruleApplicator->alphaInactive().set(
-        hidden,
-        Desktop::Types::PRIORITY_SET_PROP
+    hiddenState.alphaInactive.refreshIfOwned(
+        window->m_ruleApplicator->alphaInactive(),
+        hidden
     );
-    window->m_ruleApplicator->alphaFullscreen().set(
-        hidden,
-        Desktop::Types::PRIORITY_SET_PROP
+    hiddenState.alphaFullscreen.refreshIfOwned(
+        window->m_ruleApplicator->alphaFullscreen(),
+        hidden
     );
-    window->m_ruleApplicator->noAnim().set(
-        true,
-        Desktop::Types::PRIORITY_SET_PROP
-    );
+    hiddenState.noAnim.refreshIfOwned(window->m_ruleApplicator->noAnim(), true);
     applyAlphaNow(window);
 }
 
-void clearWindowHidden(const PHLWINDOW& window) {
+void clearWindowHidden(
+    const PHLWINDOW& window,
+    SWindowHiddenState& hiddenState
+) {
     if (!window || !window->m_ruleApplicator)
         return;
 
-    window->m_ruleApplicator->alpha().unset(Desktop::Types::PRIORITY_SET_PROP);
-    window->m_ruleApplicator->alphaInactive().unset(Desktop::Types::PRIORITY_SET_PROP);
-    window->m_ruleApplicator->alphaFullscreen().unset(Desktop::Types::PRIORITY_SET_PROP);
-    window->m_ruleApplicator->noAnim().unset(Desktop::Types::PRIORITY_SET_PROP);
+    hiddenState.restore(*window->m_ruleApplicator);
     applyAlphaNow(window);
 
     CBox box = currentWindowRenderBox(window);
@@ -1296,7 +1599,7 @@ void cancelAnimation(const std::string& reason, bool restoreWindow = true) {
     const CBox oldBox = g_state->animation.box;
 
     if (restoreWindow && mode != EWindowAnimationMode::AutomaticClose)
-        clearWindowHidden(window);
+        clearWindowHidden(window, g_state->animation.hiddenState);
     if (mode == EWindowAnimationMode::AutomaticClose)
         releaseTiledReflowHold(g_state->animation);
 
@@ -1342,7 +1645,8 @@ std::string armFocusedWindow(std::string_view effectName = "void") {
         cancelAnimation("manual test restarted");
 
     window->finishAnimation();
-    setWindowHidden(window);
+    SWindowHiddenState hiddenState;
+    setWindowHidden(window, hiddenState);
     const auto now = std::chrono::steady_clock::now();
     g_state->animation = {
         .window = window,
@@ -1351,6 +1655,7 @@ std::string armFocusedWindow(std::string_view effectName = "void") {
         .candidateEffects = WindowEffectPool{std::string{effect->name}},
         .mode = EWindowAnimationMode::ManualCycle,
         .closeFrame = {},
+        .hiddenState = std::move(hiddenState),
         .box = currentWindowRenderBox(window),
         .rounding = window->rounding(),
         .windowClass = std::string{effectiveWindowClass(window)},
@@ -1363,8 +1668,7 @@ std::string armFocusedWindow(std::string_view effectName = "void") {
     };
 
     appendDiagnostic(
-        "manual animation armed: effect=" + std::string(effect->name) +
-        " class=" + g_state->animation.windowClass
+        "manual animation armed: effect=" + std::string(effect->name)
     );
     damageExpandedBox(g_state->animation.box);
     return "ok";
@@ -1476,10 +1780,7 @@ void onWindowOpen(PHLWINDOW window) {
     );
     if (effectName == kNoWindowEffect) {
         appendDiagnostic(
-            "automatic open skipped: class=" + std::string(windowClass) +
-            " liveClass=" + window->m_class +
-            " initialClass=" + window->m_initialClass +
-            " reason=assignment resolved to none or class is excluded"
+            "automatic open skipped: reason=assignment resolved to none or class is excluded"
         );
         return;
     }
@@ -1487,16 +1788,14 @@ void onWindowOpen(PHLWINDOW window) {
     const SWindowEffectSpec* effect = findWindowEffect(effectName);
     if (effect == nullptr) {
         appendDiagnostic(
-            "automatic open skipped: class=" + std::string(windowClass) +
-            " reason=assigned effect is missing"
+            "automatic open skipped: reason=assigned effect is missing"
         );
         return;
     }
 
     if (g_state->animation.active) {
         appendDiagnostic(
-            "automatic open skipped: class=" + std::string(windowClass) +
-            " reason=another animation is active"
+            "automatic open skipped: reason=another animation is active"
         );
         return;
     }
@@ -1504,8 +1803,7 @@ void onWindowOpen(PHLWINDOW window) {
     std::string reason;
     if (!automaticOpenEligibility(window, *effect, reason)) {
         appendDiagnostic(
-            "automatic open skipped: class=" + std::string(windowClass) +
-            " reason=" + reason
+            "automatic open skipped: reason=" + reason
         );
         return;
     }
@@ -1519,7 +1817,8 @@ void onWindowOpen(PHLWINDOW window) {
     // multi-surface clients then do not submit their real content until they are
     // revealed. Keep the target at one 8-bit alpha step: visually imperceptible,
     // but still rendered so frame callbacks and subsurface commits continue.
-    setWindowHidden(window, kOpeningGhostAlpha);
+    SWindowHiddenState hiddenState;
+    setWindowHidden(window, hiddenState, kOpeningGhostAlpha);
 
     const auto now = std::chrono::steady_clock::now();
     g_state->animation = {
@@ -1529,6 +1828,7 @@ void onWindowOpen(PHLWINDOW window) {
         .candidateEffects = effectPool,
         .mode = EWindowAnimationMode::AutomaticOpen,
         .closeFrame = {},
+        .hiddenState = std::move(hiddenState),
         .box = currentWindowRenderBox(window),
         .rounding = window->rounding(),
         .windowClass = std::string(windowClass),
@@ -1542,7 +1842,6 @@ void onWindowOpen(PHLWINDOW window) {
 
     appendDiagnostic(
         "automatic open armed: effect=" + std::string(effect->name) +
-        " class=" + std::string(windowClass) + " title=" + window->m_title +
         " source=live-target ghostAlpha=" +
         std::to_string(kOpeningGhostAlpha)
     );
@@ -1561,6 +1860,10 @@ void onRenderStage(eRenderStage stage) {
     if (stage != RENDER_POST_WINDOWS)
         return;
     const auto currentMonitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+    if (!currentMonitor) {
+        cancelAnimation("render monitor disappeared");
+        return;
+    }
     const auto window = animation.window.lock();
 
     SP<Render::ITexture> liveTexture;
@@ -1571,7 +1874,11 @@ void onRenderStage(eRenderStage stage) {
 
     if (animation.mode == EWindowAnimationMode::AutomaticClose) {
         const auto targetMonitor = animation.monitor.lock();
-        if (targetMonitor && currentMonitor && targetMonitor != currentMonitor)
+        if (!targetMonitor) {
+            cancelAnimation("closing target monitor disappeared");
+            return;
+        }
+        if (targetMonitor != currentMonitor)
             return;
 
         sourceTextureId = animation.closeFrame.texture;
@@ -1589,7 +1896,7 @@ void onRenderStage(eRenderStage stage) {
             cancelAnimation("window monitor disappeared");
             return;
         }
-        if (currentMonitor && currentMonitor != liveMonitor)
+        if (currentMonitor != liveMonitor)
             return;
 
         liveTexture = surfaceTexture(
@@ -1731,7 +2038,6 @@ void onRenderStage(eRenderStage stage) {
             "animation started: mode=" +
             std::string(animationModeName(animation.mode)) +
             " effect=" + std::string(effect->name) +
-            " class=" + animation.windowClass +
             " source=" +
             (animation.mode == EWindowAnimationMode::AutomaticClose
                  ? "owned-surface-copy"
@@ -1909,6 +2215,8 @@ int onTick(void* data) {
     } else if (animation.mode == EWindowAnimationMode::AutomaticOpen &&
                window->m_workspace && !window->m_workspace->isVisible()) {
         cancelAnimation("window moved to a non-visible workspace during opening");
+    } else if (closing && !animation.monitor.lock()) {
+        cancelAnimation("closing target monitor disappeared");
     } else if (closing &&
                animation.closeFrame.texture == 0) {
         cancelAnimation("retained closing target disappeared");
@@ -1925,8 +2233,7 @@ int onTick(void* data) {
                 : kSourceWaitTimeoutSeconds;
             if (armedElapsed >= sourceWaitTimeout) {
                 appendDiagnostic(
-                    "opening source timeout: class=" + animation.windowClass +
-                    " texture=" +
+                    "opening source timeout: texture=" +
                     std::to_string(animation.observedSourceTexture) +
                     " target=" +
                     std::to_string(animation.observedSourceTarget) +
@@ -2017,18 +2324,14 @@ void onWindowClose(PHLWINDOW window) {
     );
     if (effectName == kNoWindowEffect) {
         appendDiagnostic(
-            "automatic close skipped: class=" + std::string(windowClass) +
-            " liveClass=" + window->m_class +
-            " initialClass=" + window->m_initialClass +
-            " reason=assignment resolved to none or class is excluded"
+            "automatic close skipped: reason=assignment resolved to none or class is excluded"
         );
         return;
     }
 
     if (g_state->animation.active) {
         appendDiagnostic(
-            "automatic close skipped: class=" + std::string(windowClass) +
-            " reason=another animation is active"
+            "automatic close skipped: reason=another animation is active"
         );
         return;
     }
@@ -2036,8 +2339,7 @@ void onWindowClose(PHLWINDOW window) {
     const SWindowEffectSpec* effect = findWindowEffect(effectName);
     if (effect == nullptr) {
         appendDiagnostic(
-            "automatic close skipped: class=" + std::string(windowClass) +
-            " reason=assigned effect is missing"
+            "automatic close skipped: reason=assigned effect is missing"
         );
         return;
     }
@@ -2045,8 +2347,7 @@ void onWindowClose(PHLWINDOW window) {
     std::string reason;
     if (!automaticCloseEligibility(window, *effect, reason)) {
         appendDiagnostic(
-            "automatic close skipped: class=" + std::string(windowClass) +
-            " reason=" + reason
+            "automatic close skipped: reason=" + reason
         );
         return;
     }
@@ -2055,8 +2356,7 @@ void onWindowClose(PHLWINDOW window) {
     const CBox closingBox = currentWindowRenderBox(window);
     if (!monitor || !validBox(closingBox)) {
         appendDiagnostic(
-            "automatic close skipped: class=" + std::string(windowClass) +
-            " reason=target monitor or geometry is unavailable"
+            "automatic close skipped: reason=target monitor or geometry is unavailable"
         );
         return;
     }
@@ -2072,15 +2372,13 @@ void onWindowClose(PHLWINDOW window) {
             &closeSurfaceCandidates
         )) {
         appendDiagnostic(
-            "automatic close skipped: class=" + std::string(windowClass) +
-            " reason=owned closing snapshot failed: " + reason
+            "automatic close skipped: reason=owned closing snapshot failed: " + reason
         );
         return;
     }
     if (!effectSupportsTarget(*effect, GL_TEXTURE_2D, window->rounding() > 0.0F)) {
         appendDiagnostic(
-            "automatic close skipped: class=" + std::string(windowClass) +
-            " reason=effect does not support the owned 2D snapshot"
+            "automatic close skipped: reason=effect does not support the owned 2D snapshot"
         );
         return;
     }
@@ -2093,8 +2391,7 @@ void onWindowClose(PHLWINDOW window) {
             reason
         )) {
         appendDiagnostic(
-            "automatic close skipped: class=" + std::string(windowClass) +
-            " reason=survivor scene capture failed: " + reason
+            "automatic close skipped: reason=survivor scene capture failed: " + reason
         );
         return;
     }
@@ -2124,7 +2421,6 @@ void onWindowClose(PHLWINDOW window) {
 
     appendDiagnostic(
         "automatic close armed: effect=" + std::string(effect->name) +
-        " class=" + std::string(windowClass) + " title=" + window->m_title +
         " source=owned-surface-copy target=" +
         std::to_string(GL_TEXTURE_2D) + " box=" +
         std::to_string(static_cast<int>(closingBox.width)) + "x" +
@@ -2227,6 +2523,55 @@ std::string controlCommand(eHyprCtlOutputFormat format, std::string request) {
            "auto-close on|off|status";
 }
 
+void cleanupPlugin() noexcept {
+    try {
+        g_listeners.clear();
+    } catch (...) {
+    }
+
+    if (!g_state) {
+        g_handle = nullptr;
+        return;
+    }
+
+    try {
+        cancelAnimation("plugin cleanup");
+    } catch (...) {
+    }
+
+    try {
+        if (g_state->command)
+            HyprlandAPI::unregisterHyprCtlCommand(g_handle, g_state->command);
+    } catch (...) {
+    }
+    if (g_state->tick != nullptr) {
+        wl_event_source_remove(g_state->tick);
+        g_state->tick = nullptr;
+    }
+
+    try {
+        if (g_pHyprRenderer != nullptr) {
+            g_pHyprRenderer->m_renderPass.removeAllOfType(
+                "CRealmheartEffectPassElement"
+            );
+        }
+    } catch (...) {
+    }
+
+    try {
+        if (g_pHyprOpenGL != nullptr) {
+            g_pHyprOpenGL->makeEGLCurrent();
+            for (auto& effect : g_state->effects)
+                effect.destroy();
+            g_state->sceneBlitShader.destroy();
+        }
+    } catch (...) {
+    }
+    g_state->effects.clear();
+    g_state.reset();
+    g_handle = nullptr;
+}
+
 } // namespace
 
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
@@ -2235,95 +2580,79 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() {
 
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_handle = handle;
+    try {
+        appendDiagnostic("Realmheart FX target-only pluginInit");
 
-    {
-        std::ofstream stream(kDiagnosticLog, std::ios::trunc);
-        if (stream)
-            stream << "Realmheart FX target-only pluginInit\n";
-    }
-
-    const auto runtime = HyprlandAPI::getHyprlandVersion(handle);
-    if (runtime.hash != GIT_COMMIT_HASH) {
-        throw std::runtime_error(
-            "Realmheart FX was built for Hyprland " + std::string(GIT_COMMIT_HASH) +
-            " but the running compositor is " + runtime.hash
-        );
-    }
-
-    const auto registry = loadWindowEffectRegistry(defaultWindowEffectAssetRoot());
-    if (!registry.success)
-        throw std::runtime_error("Realmheart FX effect registry failed: " + registry.error);
-
-    appendDiagnostic(
-        "effect manifests loaded: count=" + std::to_string(registry.loadedEffects) +
-        " effects=" + currentWindowEffectsSummary()
-    );
-
-    g_state = makeUnique<SPluginState>();
-    initialiseEffects();
-    (void)reloadWindowEffectConfig(true);
-
-    auto& events = Event::bus()->m_events;
-    g_listeners.push_back(events.window.open.listen(onWindowOpen));
-    g_listeners.push_back(events.window.close.listen(onWindowClose));
-    g_listeners.push_back(events.render.stage.listen(onRenderStage));
-    g_listeners.push_back(events.workspace.active.listen(onWorkspace));
-
-    g_state->command = HyprlandAPI::registerHyprCtlCommand(
-        g_handle,
-        SHyprCtlCommand{
-            .name = kCommandName,
-            .exact = false,
-            .fn = controlCommand,
+        const auto runtime = HyprlandAPI::getHyprlandVersion(handle);
+        if (runtime.hash != GIT_COMMIT_HASH) {
+            throw std::runtime_error(
+                "Realmheart FX was built for Hyprland " + std::string(GIT_COMMIT_HASH) +
+                " but the running compositor is " + runtime.hash
+            );
         }
-    );
-    if (!g_state->command)
-        throw std::runtime_error("failed to register Realmheart FX hyprctl command");
+        if (runtime.dirty) {
+            throw std::runtime_error(
+                "Realmheart FX refuses to load against a dirty Hyprland build"
+            );
+        }
 
-    g_state->tick = wl_event_loop_add_timer(
-        g_pCompositor->m_wlEventLoop,
-        &onTick,
-        nullptr
-    );
-    if (!g_state->tick)
-        throw std::runtime_error("failed to create Realmheart FX frame timer");
-    wl_event_source_timer_update(g_state->tick, 1);
+        const auto registry = loadWindowEffectRegistry(defaultWindowEffectAssetRoot());
+        if (!registry.success)
+            throw std::runtime_error("Realmheart FX effect registry failed: " + registry.error);
 
-    appendDiagnostic("automatic open policy enabled");
-    appendDiagnostic("automatic close policy disabled by default; explicit opt-in required");
-    appendDiagnostic(
-        "lifecycle invariant: tiled close replays frozen survivor pixels; live clients stay hidden until native reflow resumes"
-    );
+        appendDiagnostic(
+            "effect manifests loaded: count=" + std::to_string(registry.loadedEffects) +
+            " effects=" + currentWindowEffectsSummary()
+        );
 
-    return {
-        .name = "Realmheart FX",
-        .description = "Realmheart target-only Hyprland window transitions",
-        .author = "Zahed",
-        .version = "0.10.14-realmheart",
-    };
+        g_state = makeUnique<SPluginState>();
+        initialiseEffects();
+        (void)reloadWindowEffectConfig(true);
+
+        auto& events = Event::bus()->m_events;
+        g_listeners.push_back(events.window.open.listen(onWindowOpen));
+        g_listeners.push_back(events.window.close.listen(onWindowClose));
+        g_listeners.push_back(events.render.stage.listen(onRenderStage));
+        g_listeners.push_back(events.workspace.active.listen(onWorkspace));
+
+        g_state->command = HyprlandAPI::registerHyprCtlCommand(
+            g_handle,
+            SHyprCtlCommand{
+                .name = kCommandName,
+                .exact = false,
+                .fn = controlCommand,
+            }
+        );
+        if (!g_state->command)
+            throw std::runtime_error("failed to register Realmheart FX hyprctl command");
+
+        g_state->tick = wl_event_loop_add_timer(
+            g_pCompositor->m_wlEventLoop,
+            &onTick,
+            nullptr
+        );
+        if (!g_state->tick)
+            throw std::runtime_error("failed to create Realmheart FX frame timer");
+        wl_event_source_timer_update(g_state->tick, 1);
+
+        appendDiagnostic("automatic open policy enabled");
+        appendDiagnostic("automatic close policy disabled by default; explicit opt-in required");
+        appendDiagnostic(
+            "lifecycle invariant: tiled close replays frozen survivor pixels; live clients stay hidden until native reflow resumes"
+        );
+
+        return {
+            .name = "Realmheart FX",
+            .description = "Realmheart target-only Hyprland window transitions",
+            .author = "Zahed",
+            .version = "0.10.14-realmheart",
+        };
+    } catch (...) {
+        cleanupPlugin();
+        throw;
+    }
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
-    g_listeners.clear();
-
-    if (g_state) {
-        cancelAnimation("plugin unload");
-
-        if (g_state->command)
-            HyprlandAPI::unregisterHyprCtlCommand(g_handle, g_state->command);
-        if (g_state->tick)
-            wl_event_source_remove(g_state->tick);
-
-        g_pHyprRenderer->m_renderPass.removeAllOfType(
-            "CRealmheartEffectPassElement"
-        );
-        g_pHyprOpenGL->makeEGLCurrent();
-        for (auto& effect : g_state->effects)
-            effect.destroy();
-        g_state->effects.clear();
-        g_state->sceneBlitShader.destroy();
-        g_state.reset();
-    }
-
-    g_handle = nullptr;
+    cleanupPlugin();
 }

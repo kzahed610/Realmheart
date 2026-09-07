@@ -41,5 +41,15 @@ if [[ -z "$so" ]]; then
     exit 1
 fi
 
-hyprctl plugin load "$so"
+if ! load_output=$(hyprctl plugin load "$so" 2>&1); then
+    printf '%s\n' "$load_output" >&2
+    echo "realmheart-fx: plugin load failed: $so" >&2
+    exit 1
+fi
+
+if ! hyprctl plugin list 2>/dev/null | grep -q -i "realmheart-fx"; then
+    echo "realmheart-fx: compositor did not report the plugin as loaded: $so" >&2
+    exit 1
+fi
+
 echo "realmheart-fx: loaded $so"
