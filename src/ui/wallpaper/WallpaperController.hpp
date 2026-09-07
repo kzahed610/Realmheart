@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 
 namespace realmheart::ui::wallpaper {
@@ -16,10 +18,15 @@ namespace realmheart::ui::wallpaper {
 class WallpaperController {
 public:
     using SetWallpaperCallback = std::function<void(bool, std::string)>;
+    using BackendFactory = std::function<std::shared_ptr<WallpaperBackend>(
+        GtkApplication*,
+        WallpaperBackendType
+    )>;
 
     WallpaperController(
         GtkApplication* application,
-        WallpaperBackendType requested_backend
+        WallpaperBackendType requested_backend,
+        BackendFactory backend_factory = {}
     );
     ~WallpaperController();
 
@@ -60,12 +67,15 @@ public:
     );
 
     [[nodiscard]] WallpaperBackendType active_backend() const noexcept;
+    [[nodiscard]] bool has_prepared_wallpaper() const noexcept;
+    [[nodiscard]] bool has_prepared_output_target() const noexcept;
 
 private:
     struct AsyncState {
         std::atomic<bool> alive{true};
         std::atomic<std::uint64_t> generation{0};
         std::atomic<WallpaperController*> owner{nullptr};
+        std::shared_ptr<std::mutex> operation_mutex = std::make_shared<std::mutex>();
     };
 
     [[nodiscard]] std::shared_ptr<WallpaperBackend> create_backend(
@@ -75,18 +85,28 @@ private:
         WallpaperBackendType type,
         std::string* error_message
     );
+    void clear_prepared_state() noexcept;
     void start_gtk_request(
         std::shared_ptr<WallpaperBackend> backend,
         std::filesystem::path path,
         std::uint64_t generation,
         SetWallpaperCallback callback
     );
+    void start_gtk_prepare_request(
+        std::filesystem::path path,
+        std::optional<WallpaperOutputTarget> target,
+        std::uint64_t generation,
+        bool commit_after_prepare,
+        SetWallpaperCallback callback
+    );
 
     GtkApplication* application_ = nullptr;
     WallpaperBackendType requested_backend_ = WallpaperBackendType::Gtk;
+    BackendFactory backend_factory_;
     std::shared_ptr<WallpaperBackend> backend_;
     std::filesystem::path current_wallpaper_;
     std::filesystem::path prepared_wallpaper_;
+    std::optional<WallpaperOutputTarget> prepared_target_;
     std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
 };
 

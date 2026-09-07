@@ -188,6 +188,7 @@ add_library(realmheart_ui STATIC
     src/ui/wallpaper/GtkWallpaperBackend.cpp
     src/ui/wallpaper/NativeWallpaperBackend.cpp
     src/ui/wallpaper/WallpaperController.cpp
+    src/ui/wallpaper/WallpaperTransaction.cpp
     src/ui/ShellApp.cpp
     src/ui/bar/VerticalBar.cpp
     src/ui/bar/VerticalBarModel.cpp
@@ -1235,9 +1236,51 @@ if(BUILD_TESTING)
     add_executable(realmheart_wallpaper_backend_tests tests/WallpaperBackendTests.cpp src/ui/wallpaper/WallpaperBackend.cpp)
     realmheart_register_test(realmheart_wallpaper_backend_tests)
 
+    add_executable(
+        realmheart_native_wallpaper_lifecycle_tests
+        tests/NativeWallpaperLifecycleTests.cpp
+    )
+    target_include_directories(
+        realmheart_native_wallpaper_lifecycle_tests
+        PRIVATE
+        src
+    )
+    target_link_libraries(realmheart_native_wallpaper_lifecycle_tests PRIVATE GTest::gtest GTest::gtest_main)
+    realmheart_register_test(realmheart_native_wallpaper_lifecycle_tests)
+
     add_executable(realmheart_wallpaper_service_tests tests/WallpaperServiceTests.cpp src/services/WallpaperService.cpp src/core/Command.cpp)
     target_link_libraries(realmheart_wallpaper_service_tests PRIVATE GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_wallpaper_service_tests)
+
+    add_executable(
+        realmheart_wallpaper_transaction_tests
+        tests/WallpaperTransactionTests.cpp
+        src/ui/wallpaper/WallpaperTransaction.cpp
+    )
+    target_link_libraries(realmheart_wallpaper_transaction_tests PRIVATE GTest::gtest GTest::gtest_main)
+    realmheart_register_test(realmheart_wallpaper_transaction_tests)
+
+    add_executable(
+        realmheart_wallpaper_controller_tests
+        tests/WallpaperControllerTests.cpp
+        src/ui/wallpaper/WallpaperController.cpp
+        src/ui/wallpaper/WallpaperBackend.cpp
+        src/ui/wallpaper/WallpaperSurface.cpp
+        src/ui/wallpaper/GtkWallpaperBackend.cpp
+        src/ui/wallpaper/NativeWallpaperBackend.cpp
+        src/ui/LayerSurface.cpp
+        src/core/TaskExecutor.cpp
+    )
+    target_link_libraries(
+        realmheart_wallpaper_controller_tests
+        PRIVATE
+        PkgConfig::GTK4
+        PkgConfig::GTK4_LAYER_SHELL
+        PkgConfig::GDK_PIXBUF
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_controller_tests)
 
     add_executable(realmheart_mana_cores_selector_tests tests/ManaCoresSelectorTests.cpp src/mana_core/ThumbnailCache.cpp src/mana_core/ManaCoresSelector.cpp src/mana_core/ManaCoresLayout.cpp src/mana_core/WallpaperLibrary.cpp src/ui/LayerSurface.cpp src/effects/core/ShaderSource.cpp src/core/TaskExecutor.cpp)
     target_link_libraries(realmheart_mana_cores_selector_tests PRIVATE PkgConfig::GTK4 PkgConfig::GTK4_LAYER_SHELL PkgConfig::GDK_PIXBUF PkgConfig::EPOXY GTest::gtest GTest::gtest_main)

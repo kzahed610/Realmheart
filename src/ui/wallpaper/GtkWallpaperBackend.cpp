@@ -7,8 +7,10 @@
 #include <cstring>
 #include <exception>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 namespace realmheart::ui::wallpaper {
@@ -116,8 +118,7 @@ bool GtkWallpaperBackend::prepare_wallpaper(
     prepared_target_.reset();
     auto decoded = decode_wallpaper(path, error_message);
     if (!decoded) return false;
-    prepared_wallpaper_ = std::move(*decoded);
-    return true;
+    return prepare_decoded_wallpaper(std::move(*decoded), error_message);
 }
 
 bool GtkWallpaperBackend::prepare_wallpaper_for_output(
@@ -136,9 +137,9 @@ bool GtkWallpaperBackend::prepare_wallpaper_for_output(
     prepared_target_.reset();
     auto decoded = decode_wallpaper(path, error_message);
     if (!decoded) return false;
-    prepared_wallpaper_ = std::move(*decoded);
-    prepared_target_ = target;
-    return true;
+    return prepare_decoded_wallpaper_for_output(
+        std::move(*decoded), target, error_message
+    );
 }
 
 bool GtkWallpaperBackend::commit_prepared_wallpaper(
@@ -172,6 +173,24 @@ GtkWallpaperBackend::decode_wallpaper(
     std::string* error_message
 ) {
     if (error_message != nullptr) error_message->clear();
+    std::error_code file_error;
+    const auto file_size = std::filesystem::file_size(path, file_error);
+    if (file_error || file_size > kMaxSourceFileBytes) {
+        set_error(error_message, "wallpaper file exceeds the decode budget");
+        return std::nullopt;
+    }
+
+    int header_width = 0;
+    int header_height = 0;
+    if (gdk_pixbuf_get_file_info(
+            path.c_str(), &header_width, &header_height
+        ) == nullptr || header_width <= 0 || header_height <= 0 ||
+        static_cast<std::uintmax_t>(header_width) >
+            kMaxDecodedPixels / static_cast<std::uintmax_t>(header_height)) {
+        set_error(error_message, "wallpaper dimensions exceed the decode budget");
+        return std::nullopt;
+    }
+
     GError* error = nullptr;
     GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file(path.c_str(), &error);
     if (pixbuf == nullptr) {
@@ -198,10 +217,28 @@ GtkWallpaperBackend::decode_wallpaper(
         return std::nullopt;
     }
 
+    if (static_cast<std::uintmax_t>(width) >
+        kMaxDecodedPixels / static_cast<std::uintmax_t>(height)) {
+        g_object_unref(pixbuf);
+        set_error(error_message, "decoded wallpaper dimensions exceed the decode budget");
+        return std::nullopt;
+    }
+
     const std::size_t stride = static_cast<std::size_t>(width) *
         static_cast<std::size_t>(channels);
+    if (static_cast<std::size_t>(height) >
+        std::numeric_limits<std::size_t>::max() / stride) {
+        g_object_unref(pixbuf);
+        set_error(error_message, "decoded wallpaper size overflows the decode budget");
+        return std::nullopt;
+    }
     const std::size_t size = stride * static_cast<std::size_t>(height);
     auto* pixels = static_cast<guint8*>(g_malloc(size));
+    if (pixels == nullptr) {
+        g_object_unref(pixbuf);
+        set_error(error_message, "unable to allocate decoded wallpaper pixels");
+        return std::nullopt;
+    }
     for (int row = 0; row < height; ++row) {
         std::memcpy(
             pixels + static_cast<std::size_t>(row) * stride,
@@ -219,6 +256,48 @@ GtkWallpaperBackend::decode_wallpaper(
     decoded.channels = channels;
     decoded.stride = stride;
     return decoded;
+}
+
+bool GtkWallpaperBackend::prepare_decoded_wallpaper(
+    DecodedWallpaper&& decoded,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!initialized_ && !initialize(error_message)) return false;
+    if (decoded.bytes == nullptr || decoded.width <= 0 || decoded.height <= 0 ||
+        (decoded.channels != 3 && decoded.channels != 4) || decoded.stride == 0) {
+        set_error(error_message, "decoded wallpaper payload is invalid");
+        return false;
+    }
+    prepared_wallpaper_ = std::move(decoded);
+    prepared_target_.reset();
+    return true;
+}
+
+bool GtkWallpaperBackend::prepare_decoded_wallpaper_for_output(
+    DecodedWallpaper&& decoded,
+    const WallpaperOutputTarget& target,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (!target.valid()) {
+        set_error(error_message, "wallpaper output target is invalid");
+        return false;
+    }
+    if (!initialized_ && !initialize(error_message)) return false;
+    if (decoded.bytes == nullptr || decoded.width <= 0 || decoded.height <= 0 ||
+        (decoded.channels != 3 && decoded.channels != 4) || decoded.stride == 0) {
+        set_error(error_message, "decoded wallpaper payload is invalid");
+        return false;
+    }
+    if (std::find(surface_keys_.begin(), surface_keys_.end(), target_key(target)) ==
+        surface_keys_.end()) {
+        set_error(error_message, "requested wallpaper output is unavailable: " + target_key(target));
+        return false;
+    }
+    prepared_wallpaper_ = std::move(decoded);
+    prepared_target_ = target;
+    return true;
 }
 
 bool GtkWallpaperBackend::apply_decoded_wallpaper(
@@ -364,6 +443,20 @@ void GtkWallpaperBackend::rebuild_surfaces() {
 
     surfaces_.swap(replacements);
     surface_keys_.swap(replacement_keys);
+
+    const std::unordered_set<std::string> active_keys(
+        surface_keys_.begin(), surface_keys_.end()
+    );
+    for (auto iterator = output_textures_.begin();
+         iterator != output_textures_.end();) {
+        const bool index_key = !iterator->first.empty() && iterator->first.front() == '#';
+        if (index_key || !active_keys.contains(iterator->first)) {
+            if (iterator->second != nullptr) g_object_unref(iterator->second);
+            iterator = output_textures_.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
 }
 
 void GtkWallpaperBackend::apply_texture(GdkTexture* texture) {

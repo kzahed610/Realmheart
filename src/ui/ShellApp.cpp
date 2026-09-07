@@ -38,6 +38,7 @@
 #include "ui/sidebar/SidebarFrame.hpp"
 #include "ui/wallpaper/WallpaperBackend.hpp"
 #include "ui/wallpaper/WallpaperController.hpp"
+#include "ui/wallpaper/WallpaperTransaction.hpp"
 #include "ui/workspace/WorkspaceOverviewOverlay.hpp"
 #include "mana_core/ManaCoresSelector.hpp"
 
@@ -1867,42 +1868,93 @@ private:
             this, wallpaper_target
         ](const std::string& path) {
             if (wallpaper_controller_) {
-                wallpaper_controller_->prepare_wallpaper_for_output_async(
-                    std::filesystem::path(path),
-                    wallpaper_target,
-                    [this, path, wallpaper_target](bool success, std::string error_msg) {
-                        if (!success) {
-                            std::cerr << "[ManaCores] wallpaper prepare failed: " << error_msg << "\n";
-                            return;
-                        }
-                        wallpaper_controller_->commit_prepared_wallpaper_async(
-                            [this, path, wallpaper_target](
-                                bool success,
-                                std::string error_msg
-                            ) {
-                                if (!success) {
-                                    std::cerr << "[ManaCores] wallpaper commit failed: " << error_msg << "\n";
-                                } else {
-                                    if (services::WallpaperService* service =
-                                            utilities_->get_wallpaper_service()) {
-                                        if (!wallpaper_target.connector.empty()) {
-                                            if (!service->persist_output_path(
-                                                    wallpaper_target.connector, path
-                                                )) {
-                                                std::cerr
-                                                    << "[ManaCores] wallpaper changed, but the output-specific path could not be persisted\n";
-                                            }
-                                        } else {
-                                            std::cerr
-                                                << "[ManaCores] output connector unavailable; wallpaper override is session-only\n";
-                                        }
-                                    }
-                                    generate_theme_for(path);
+                const auto utilities = utilities_;
+                const std::optional<std::filesystem::path> previous_path =
+                    [&utilities, wallpaper_target] {
+                        if (services::WallpaperService* service =
+                                utilities->get_wallpaper_service()) {
+                            if (!wallpaper_target.connector.empty()) {
+                                if (const auto output_path = service->load_output_path(
+                                        wallpaper_target.connector
+                                    )) {
+                                    return output_path;
                                 }
                             }
-                        );
+                            return service->load_path();
+                        }
+                        return std::optional<std::filesystem::path>{};
+                    }();
+                const auto apply_output = [this, wallpaper_target](
+                    const std::filesystem::path& requested_path,
+                    wallpaper::WallpaperTransaction::Completion callback
+                ) {
+                    if (wallpaper_controller_ == nullptr) {
+                        callback(false, "wallpaper controller is unavailable");
+                        return;
                     }
-                );
+                    wallpaper_controller_->prepare_wallpaper_for_output_async(
+                        requested_path,
+                        wallpaper_target,
+                        [this, callback = std::move(callback)](
+                            bool prepared,
+                            std::string prepare_error
+                        ) mutable {
+                            if (!prepared) {
+                                callback(false, std::move(prepare_error));
+                                return;
+                            }
+                            wallpaper_controller_->commit_prepared_wallpaper_async(
+                                std::move(callback)
+                            );
+                        }
+                    );
+                };
+                wallpaper::WallpaperTransaction::run({
+                    std::filesystem::path(path),
+                    previous_path,
+                    apply_output,
+                    apply_output,
+                    [utilities, wallpaper_target](
+                        const std::filesystem::path& requested_path,
+                        std::string* error_message
+                    ) {
+                        services::WallpaperService* service =
+                            utilities->get_wallpaper_service();
+                        if (service == nullptr) {
+                            if (error_message != nullptr) {
+                                *error_message = "wallpaper service is unavailable";
+                            }
+                            return false;
+                        }
+                        if (wallpaper_target.connector.empty()) {
+                            if (error_message != nullptr) {
+                                *error_message =
+                                    "output connector unavailable; override is not durable";
+                            }
+                            return false;
+                        }
+                        if (service->persist_output_path(
+                                wallpaper_target.connector,
+                                requested_path
+                            )) {
+                            return true;
+                        }
+                        if (error_message != nullptr) {
+                            *error_message =
+                                "output-specific wallpaper path could not be persisted";
+                        }
+                        return false;
+                    },
+                    [this, path](bool success, std::string error_msg) {
+                        if (!success) {
+                            std::cerr
+                                << "[ManaCores] wallpaper transaction failed: "
+                                << error_msg << "\n";
+                            return;
+                        }
+                        generate_theme_for(path);
+                    }
+                });
             }
         });
 
@@ -2074,32 +2126,69 @@ private:
             return;
         }
         const auto utilities = utilities_;
-        wallpaper_controller_->set_wallpaper_async(
-            path,
-            [
-                this,
-                utilities,
-                path,
-                failure_prefix = std::string(failure_prefix),
-                completion = std::move(completion)
-            ](bool success, std::string error_message) mutable {
+        const std::optional<std::filesystem::path> previous_path = [&utilities] {
+            if (services::WallpaperService* service = utilities->get_wallpaper_service()) {
+                return service->load_path();
+            }
+            return std::optional<std::filesystem::path>{};
+        }();
+        const std::string failure_prefix_copy = failure_prefix;
+        wallpaper::WallpaperTransaction::run({
+            std::filesystem::path(path),
+            previous_path,
+            [this](const std::filesystem::path& requested_path,
+                   wallpaper::WallpaperTransaction::Completion callback) {
+                if (wallpaper_controller_ == nullptr) {
+                    callback(false, "wallpaper controller is unavailable");
+                    return;
+                }
+                wallpaper_controller_->set_wallpaper_async(
+                    requested_path,
+                    std::move(callback)
+                );
+            },
+            [this](const std::filesystem::path& rollback_path,
+                   wallpaper::WallpaperTransaction::Completion callback) {
+                if (wallpaper_controller_ == nullptr) {
+                    callback(false, "wallpaper controller is unavailable");
+                    return;
+                }
+                wallpaper_controller_->set_wallpaper_async(
+                    rollback_path,
+                    std::move(callback)
+                );
+            },
+            [utilities](const std::filesystem::path& requested_path,
+                        std::string* error_message) {
+                services::WallpaperService* service =
+                    utilities->get_wallpaper_service();
+                if (service == nullptr) {
+                    if (error_message != nullptr) {
+                        *error_message = "wallpaper service is unavailable";
+                    }
+                    return false;
+                }
+                if (service->update_state(requested_path)) return true;
+                if (error_message != nullptr) {
+                    *error_message = "wallpaper path could not be persisted";
+                }
+                return false;
+            },
+            [this, failure_prefix_copy, completion = std::move(completion), path](
+                bool success,
+                std::string error_message
+            ) mutable {
                 if (!success) {
-                    std::cerr << failure_prefix << ": " << error_message << '\n';
+                    std::cerr << failure_prefix_copy << ": " << error_message << '\n';
                     if (completion) {
                         completion(false, std::move(error_message));
                     }
                     return;
                 }
-
-                if (services::WallpaperService* service = utilities->get_wallpaper_service()) {
-                    if (!service->update_state(path)) {
-                        std::cerr << "Wallpaper changed, but its path could not be persisted\n";
-                    }
-                }
                 generate_theme_for(path);
                 if (completion) completion(true, {});
             }
-        );
+        });
     }
 
     void generate_theme_for(const std::string& path) {

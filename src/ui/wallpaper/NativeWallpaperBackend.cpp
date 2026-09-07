@@ -1,4 +1,5 @@
 #include "ui/wallpaper/NativeWallpaperBackend.hpp"
+#include "wallpaper-native/NativeWallpaperContracts.hpp"
 
 #include <glib.h>
 
@@ -124,6 +125,10 @@ constexpr auto kShutdownTimeout = std::chrono::milliseconds(250);
 } // namespace
 
 NativeWallpaperBackend::~NativeWallpaperBackend() {
+    {
+        std::lock_guard lock(operation_mutex_);
+        shutting_down_ = true;
+    }
     stop();
 }
 
@@ -183,7 +188,91 @@ bool NativeWallpaperBackend::initialize_locked(std::string* error_message) {
     }
 
     initialized_ = true;
+    struct ProcessWaitContext {
+        std::weak_ptr<NativeWallpaperBackend> backend;
+    };
+    g_subprocess_wait_async(
+        process_,
+        nullptr,
+        +[](GObject* source, GAsyncResult* result, gpointer raw) {
+            std::unique_ptr<ProcessWaitContext> context(
+                static_cast<ProcessWaitContext*>(raw)
+            );
+            GError* error = nullptr;
+            static_cast<void>(g_subprocess_wait_finish(
+                G_SUBPROCESS(source), result, &error
+            ));
+            g_clear_error(&error);
+            auto backend = context->backend.lock();
+            if (!backend) return;
+
+            std::lock_guard lock(backend->operation_mutex_);
+            backend->handle_process_exit(G_SUBPROCESS(source));
+        },
+        new ProcessWaitContext{weak_from_this()}
+    );
     return true;
+}
+
+void NativeWallpaperBackend::handle_process_exit(GSubprocess* source) noexcept {
+    if (process_ != source) return;
+
+    initialized_ = false;
+    if (command_stream_ != nullptr) {
+        g_output_stream_close(command_stream_, nullptr, nullptr);
+        g_object_unref(command_stream_);
+        command_stream_ = nullptr;
+    }
+    if (response_stream_ != nullptr) {
+        g_object_unref(response_stream_);
+        response_stream_ = nullptr;
+    }
+    process_ = nullptr;
+    g_object_unref(source);
+
+    const realmheart::wallpaper_native::NativeRecoveryState recovery_state{
+        shutting_down_,
+        last_replay_kind_ != ReplayKind::None,
+        recovery_attempts_,
+    };
+    if (realmheart::wallpaper_native::native_restart_decision(recovery_state) !=
+        realmheart::wallpaper_native::NativeRestartDecision::RestartAndReplay) {
+        return;
+    }
+
+    ++recovery_attempts_;
+    recovering_ = true;
+    std::string error;
+    const bool recovered = replay_last_committed_locked(&error);
+    recovering_ = false;
+    if (!recovered) {
+        stop_locked();
+    }
+}
+
+bool NativeWallpaperBackend::replay_last_committed_locked(
+    std::string* error_message
+) {
+    if (last_replay_kind_ == ReplayKind::None || last_committed_path_.empty()) {
+        set_error(error_message, "native wallpaper renderer has no safe replay state");
+        return false;
+    }
+    if (!initialize_locked(error_message)) return false;
+
+    if (last_replay_kind_ == ReplayKind::Global) {
+        return set_wallpaper_locked(last_committed_path_, error_message);
+    }
+
+    WallpaperOutputTarget target;
+    target.connector = last_committed_output_connector_;
+    if (!target.valid()) {
+        set_error(error_message, "native wallpaper replay target is unavailable");
+        return false;
+    }
+    return prepare_wallpaper_for_output_locked(
+               last_committed_path_, target, error_message
+           ) &&
+           commit_prepared_wallpaper_locked(error_message);
 }
 
 bool NativeWallpaperBackend::set_wallpaper(
@@ -224,7 +313,14 @@ void NativeWallpaperBackend::discard_prepared_wallpaper() noexcept {
     std::string ignored;
     if (!send_line("DISCARD\n", &ignored) || !read_response("OK", &ignored)) {
         stop_locked();
+        prepared_replay_kind_ = ReplayKind::None;
+        prepared_path_.clear();
+        prepared_output_connector_.clear();
+        return;
     }
+    prepared_replay_kind_ = ReplayKind::None;
+    prepared_path_.clear();
+    prepared_output_connector_.clear();
 }
 
 bool NativeWallpaperBackend::set_wallpaper_locked(
@@ -241,6 +337,10 @@ bool NativeWallpaperBackend::set_wallpaper_locked(
         stop_locked();
         return false;
     }
+    last_replay_kind_ = ReplayKind::Global;
+    last_committed_path_ = path;
+    last_committed_output_connector_.clear();
+    if (!recovering_) recovery_attempts_ = 0;
     return true;
 }
 
@@ -258,6 +358,9 @@ bool NativeWallpaperBackend::prepare_wallpaper_locked(
         stop_locked();
         return false;
     }
+    prepared_replay_kind_ = ReplayKind::Global;
+    prepared_path_ = path;
+    prepared_output_connector_.clear();
     return true;
 }
 
@@ -285,6 +388,9 @@ bool NativeWallpaperBackend::prepare_wallpaper_for_output_locked(
         stop_locked();
         return false;
     }
+    prepared_replay_kind_ = ReplayKind::Output;
+    prepared_path_ = path;
+    prepared_output_connector_ = target.connector;
     return true;
 }
 
@@ -301,6 +407,13 @@ bool NativeWallpaperBackend::commit_prepared_wallpaper_locked(
         stop_locked();
         return false;
     }
+    last_replay_kind_ = prepared_replay_kind_;
+    last_committed_path_ = prepared_path_;
+    last_committed_output_connector_ = prepared_output_connector_;
+    prepared_replay_kind_ = ReplayKind::None;
+    prepared_path_.clear();
+    prepared_output_connector_.clear();
+    if (!recovering_) recovery_attempts_ = 0;
     return true;
 }
 

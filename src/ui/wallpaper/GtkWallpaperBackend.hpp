@@ -6,6 +6,7 @@
 #include <gtk/gtk.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -65,6 +66,15 @@ public:
         DecodedWallpaper&& decoded,
         std::string* error_message = nullptr
     );
+    [[nodiscard]] bool prepare_decoded_wallpaper(
+        DecodedWallpaper&& decoded,
+        std::string* error_message = nullptr
+    );
+    [[nodiscard]] bool prepare_decoded_wallpaper_for_output(
+        DecodedWallpaper&& decoded,
+        const WallpaperOutputTarget& target,
+        std::string* error_message = nullptr
+    );
     [[nodiscard]] bool apply_decoded_wallpaper_to_output(
         DecodedWallpaper&& decoded,
         const WallpaperOutputTarget& target,
@@ -91,6 +101,9 @@ private:
     ) const;
     void clear_output_textures() noexcept;
     void reset() noexcept;
+
+    static constexpr std::uintmax_t kMaxDecodedPixels = 64'000'000;
+    static constexpr std::uintmax_t kMaxSourceFileBytes = 128ULL * 1024ULL * 1024ULL;
 
     GtkApplication* application_ = nullptr;
     GdkDisplay* display_ = nullptr;

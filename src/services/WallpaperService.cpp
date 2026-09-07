@@ -14,6 +14,9 @@
 #include <vector>
 #include <iostream>
 
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace realmheart::services {
@@ -88,23 +91,34 @@ bool persist_saved_path(
         if (error) return false;
     }
 
-    const auto temporary = state_file.string() + ".tmp-" +
-                           std::to_string(static_cast<unsigned long>(::getpid()));
-    {
-        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-        if (!output) return false;
-        output << absolute_path.string() << '\n';
-        output.flush();
-        if (!output) {
-            output.close();
-            std::filesystem::remove(temporary, error);
-            return false;
+    const std::string temporary_template = state_file.string() + ".tmp-XXXXXX";
+    std::vector<char> temporary_path(temporary_template.begin(), temporary_template.end());
+    temporary_path.push_back('\0');
+    const int temporary_fd = ::mkstemp(temporary_path.data());
+    if (temporary_fd < 0) return false;
+
+    const std::string content = absolute_path.string() + '\n';
+    bool write_succeeded = ::fchmod(temporary_fd, S_IRUSR | S_IWUSR) == 0;
+    std::size_t written = 0;
+    while (write_succeeded && written < content.size()) {
+        const ssize_t result = ::write(
+            temporary_fd,
+            content.data() + written,
+            content.size() - written
+        );
+        if (result > 0) {
+            written += static_cast<std::size_t>(result);
+        } else if (result < 0 && errno == EINTR) {
+            continue;
+        } else {
+            write_succeeded = false;
         }
-        output.close();
-        if (output.fail()) {
-            std::filesystem::remove(temporary, error);
-            return false;
-        }
+    }
+    if (::close(temporary_fd) != 0) write_succeeded = false;
+    const std::filesystem::path temporary(temporary_path.data());
+    if (!write_succeeded || written != content.size()) {
+        std::filesystem::remove(temporary, error);
+        return false;
     }
 
     std::filesystem::rename(temporary, state_file, error);

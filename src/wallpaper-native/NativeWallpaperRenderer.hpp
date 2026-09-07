@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 struct zwlr_layer_shell_v1;
@@ -44,7 +45,9 @@ public:
     [[nodiscard]] bool commit_prepared_wallpaper(
         std::string* error_message = nullptr
     );
-    void discard_prepared_wallpaper() noexcept;
+    [[nodiscard]] bool discard_prepared_wallpaper(
+        std::string* error_message = nullptr
+    ) noexcept;
     int run_stdio();
 
 private:
@@ -69,6 +72,9 @@ private:
         Texture override_texture;
         bool configured = false;
         bool closed = false;
+        std::string override_source_path;
+        int decoded_required_width = 0;
+        int decoded_required_height = 0;
     };
 
 public:
@@ -151,16 +157,27 @@ private:
     );
     [[nodiscard]] bool link_program(std::string* error_message);
 
-    void draw_all();
-    void draw_output(OutputSurface& output, float progress);
+    [[nodiscard]] bool draw_all(std::string* error_message = nullptr);
+    [[nodiscard]] bool draw_output(
+        OutputSurface& output,
+        float progress,
+        std::string* error_message = nullptr
+    );
     [[nodiscard]] OutputSurface* find_output_by_name(
         std::string_view name
     ) noexcept;
     void clear_output_overrides() noexcept;
     void advance_animation();
     void destroy_texture(Texture& texture) noexcept;
+    void destroy_layer_surface(OutputSurface& output) noexcept;
     void destroy_output_surface(OutputSurface& output) noexcept;
     void remove_output(std::uint32_t registry_name) noexcept;
+    void process_closed_outputs();
+    [[nodiscard]] bool redecode_for_topology(std::string* error_message = nullptr);
+    [[nodiscard]] std::pair<int, int> required_output_dimensions(
+        std::string_view target_output = {}
+    ) const noexcept;
+    void mark_fatal(const std::string& message) noexcept;
     void process_stdin_bytes();
     void process_command(const std::string& command);
     void send_ok() const;
@@ -194,7 +211,13 @@ private:
     Texture current_texture_;
     Texture next_texture_;
     Texture prepared_texture_;
+    std::string current_source_path_;
+    std::string next_source_path_;
+    int decoded_required_width_ = 0;
+    int decoded_required_height_ = 0;
     std::string prepared_output_name_;
+    std::string prepared_source_path_;
+    std::vector<std::uint32_t> closed_output_registry_names_;
     bool animating_ = false;
     std::chrono::steady_clock::time_point animation_started_{};
     std::chrono::milliseconds transition_duration_{350};
@@ -202,6 +225,8 @@ private:
     bool initialized_ = false;
     bool running_ = false;
     bool set_response_pending_ = false;
+    bool topology_redecode_pending_ = false;
+    std::string fatal_error_;
     std::string stdin_buffer_;
 };
 

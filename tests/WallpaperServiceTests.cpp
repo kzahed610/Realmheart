@@ -117,4 +117,25 @@ TEST_F(WallpaperServiceTest, EmptyOutputConnectorIsRejected) {
     EXPECT_EQ(service.load_output_path(""), std::nullopt);
 }
 
+TEST_F(WallpaperServiceTest, PersistenceDoesNotFollowPredictableTemporarySymlink) {
+    realmheart::services::WallpaperService service(state_file_);
+    const auto image = create_file("wallpaper.png");
+    const auto sentinel = root_ / "sentinel.txt";
+    std::ofstream(sentinel) << "untouched\n";
+
+    std::filesystem::create_directories(state_file_.parent_path());
+    const auto predictable_temporary = state_file_.string() + ".tmp-" +
+        std::to_string(static_cast<unsigned long>(::getpid()));
+    std::error_code error;
+    std::filesystem::create_symlink(sentinel, predictable_temporary, error);
+    ASSERT_FALSE(error);
+
+    ASSERT_TRUE(service.persist_path(image));
+    std::ifstream check(sentinel);
+    std::string content;
+    std::getline(check, content);
+    EXPECT_EQ(content, "untouched");
+    EXPECT_EQ(service.load_path(), std::optional<std::filesystem::path>{image});
+}
+
 } // namespace

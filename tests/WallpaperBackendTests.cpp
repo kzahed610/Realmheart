@@ -14,6 +14,7 @@ void require(bool condition, std::string_view message) {
 
 int main() {
     using realmheart::ui::wallpaper::WallpaperBackendType;
+    using realmheart::ui::wallpaper::WallpaperOutputTarget;
     using realmheart::ui::wallpaper::parse_wallpaper_backend_type;
     using realmheart::ui::wallpaper::wallpaper_backend_type_name;
 
@@ -32,6 +33,12 @@ int main() {
                 "GTK backend name should be stable");
         require(wallpaper_backend_type_name(WallpaperBackendType::Native) == "native",
                 "native backend name should be stable");
+        require(!WallpaperOutputTarget{}.valid(),
+                "empty wallpaper output target should be rejected");
+        require(WallpaperOutputTarget{2, {}}.valid(),
+                "indexed wallpaper output target should be accepted");
+        require(WallpaperOutputTarget{-1, "DP-1"}.valid(),
+                "connector wallpaper output target should be accepted");
     } catch (const std::exception& error) {
         std::cerr << "WallpaperBackendTests failed: " << error.what() << '\n';
         return 1;
