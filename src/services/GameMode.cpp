@@ -16,7 +16,9 @@
 #include <sstream>
 #include <string_view>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <sys/types.h>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -28,6 +30,7 @@ using json = nlohmann::json;
 using namespace std::chrono_literals;
 
 constexpr std::size_t kMaximumSnapshotBytes = 16 * 1024;
+constexpr int kSnapshotVersion = 2;
 
 enum class OptionKind { Boolean, Integer };
 
@@ -55,9 +58,24 @@ std::mutex& transaction_mutex() {
     return *mutex;
 }
 
+const std::string& process_owner() {
+    static const auto owner = [] {
+        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        return std::to_string(::getpid()) + ":" +
+            std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
+    }();
+    return owner;
+}
+
 std::uint64_t next_token() {
     static std::atomic<std::uint64_t> token{1};
-    return token.fetch_add(1, std::memory_order_relaxed);
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    const auto timestamp = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now).count()
+    );
+    const auto counter = token.fetch_add(1, std::memory_order_relaxed);
+    const auto value = timestamp ^ (static_cast<std::uint64_t>(::getpid()) << 32) ^ counter;
+    return value == 0 ? 1 : value;
 }
 
 realmheart::core::CommandOptions operation_options(
@@ -86,6 +104,67 @@ std::filesystem::path state_path() {
     return std::filesystem::path("/tmp") /
         ("realmheart-" + std::to_string(::getuid())) / "gamemode-state.json";
 }
+
+bool ensure_private_parent(const std::filesystem::path& path) {
+    std::error_code error;
+    const auto parent = path.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, error);
+        if (error) return false;
+        if (::chmod(parent.c_str(), 0700) != 0) return false;
+        struct stat parent_metadata {};
+        if (::stat(parent.c_str(), &parent_metadata) != 0 ||
+            parent_metadata.st_uid != ::getuid() ||
+            (parent_metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+class TransactionLock {
+public:
+    explicit TransactionLock(const realmheart::core::CommandOptions& options) {
+        const auto path = std::filesystem::path(state_path().string() + ".lock");
+        if (!ensure_private_parent(path)) return;
+        descriptor_ = ::open(
+            path.c_str(),
+            O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+            0600
+        );
+        if (descriptor_ < 0) return;
+        static_cast<void>(::fchmod(descriptor_, 0600));
+
+        for (;;) {
+            if (::flock(descriptor_, LOCK_EX | LOCK_NB) == 0) {
+                acquired_ = true;
+                return;
+            }
+            if (errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) break;
+            if (options.cancelled && options.cancelled()) break;
+            if (options.deadline_at && std::chrono::steady_clock::now() >= *options.deadline_at) break;
+            std::this_thread::sleep_for(5ms);
+        }
+        ::close(descriptor_);
+        descriptor_ = -1;
+    }
+
+    ~TransactionLock() {
+        if (descriptor_ >= 0) {
+            if (acquired_) static_cast<void>(::flock(descriptor_, LOCK_UN));
+            ::close(descriptor_);
+        }
+    }
+
+    TransactionLock(const TransactionLock&) = delete;
+    TransactionLock& operator=(const TransactionLock&) = delete;
+
+    [[nodiscard]] bool acquired() const noexcept { return acquired_; }
+
+private:
+    int descriptor_ = -1;
+    bool acquired_ = false;
+};
 
 const OptionOverride* override_for(std::string_view name) {
     for (const auto& override : kOverrides) {
@@ -155,9 +234,11 @@ std::optional<json> load_snapshot() {
     if (!file.good() && !file.eof()) return std::nullopt;
     try {
         const auto snapshot = json::parse(contents);
-        if (!snapshot.is_object() || snapshot.value("version", 0) != 1 ||
+        if (!snapshot.is_object() || snapshot.value("version", 0) != kSnapshotVersion ||
             !snapshot.contains("token") || !snapshot["token"].is_number_unsigned() ||
             snapshot["token"].get<std::uint64_t>() == 0 ||
+            !snapshot.contains("owner") || !snapshot["owner"].is_string() ||
+            snapshot["owner"].get<std::string>().empty() ||
             !snapshot.contains("options") || !snapshot["options"].is_object()) {
             return std::nullopt;
         }
@@ -172,18 +253,7 @@ bool save_snapshot(const json& snapshot) {
     const auto serialized = snapshot.dump(2) + "\n";
     if (serialized.size() > kMaximumSnapshotBytes) return false;
 
-    std::error_code error;
-    const auto parent = path.parent_path();
-    if (!parent.empty()) {
-        std::filesystem::create_directories(parent, error);
-        if (error) return false;
-        if (::chmod(parent.c_str(), 0700) != 0) return false;
-        struct stat parent_metadata {};
-        if (::stat(parent.c_str(), &parent_metadata) != 0 ||
-            parent_metadata.st_uid != ::getuid() || (parent_metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
-            return false;
-        }
-    }
+    if (!ensure_private_parent(path)) return false;
 
     const auto temporary = std::filesystem::path(path.string() + ".tmp." + std::to_string(::getpid()));
     const int descriptor = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
@@ -210,9 +280,10 @@ bool save_snapshot(const json& snapshot) {
     return true;
 }
 
-bool remove_snapshot_if_token(std::uint64_t token) {
+bool remove_snapshot_if_owned(std::uint64_t token, std::string_view owner) {
     const auto snapshot = load_snapshot();
-    if (!snapshot || (*snapshot)["token"].get<std::uint64_t>() != token) return false;
+    if (!snapshot || (*snapshot)["token"].get<std::uint64_t>() != token ||
+        (*snapshot)["owner"].get<std::string>() != owner) return false;
     std::error_code error;
     return std::filesystem::remove(state_path(), error) && !error;
 }
@@ -220,9 +291,11 @@ bool remove_snapshot_if_token(std::uint64_t token) {
 std::optional<std::vector<std::pair<std::string, std::string>>> snapshot_values(
     const json& snapshot
 ) {
-    if (!snapshot.is_object() || snapshot.value("version", 0) != 1 ||
+    if (!snapshot.is_object() || snapshot.value("version", 0) != kSnapshotVersion ||
         !snapshot.contains("token") || !snapshot["token"].is_number_unsigned() ||
         snapshot["token"].get<std::uint64_t>() == 0 ||
+        !snapshot.contains("owner") || !snapshot["owner"].is_string() ||
+        snapshot["owner"].get<std::string>().empty() ||
         !snapshot.contains("options") || !snapshot["options"].is_object()) {
         return std::nullopt;
     }
@@ -295,6 +368,8 @@ std::optional<GameModeState> GameMode::read(const realmheart::core::CommandOptio
     std::lock_guard lock(transaction_mutex());
     if (!realmheart::core::command_exists("hyprctl")) return std::nullopt;
     const auto options = operation_options(input);
+    TransactionLock process_lock(options);
+    if (!process_lock.acquired()) return std::nullopt;
     const auto snapshot = load_snapshot();
     if (!snapshot) return GameModeState{false};
     return GameModeState{options_match(game_mode_values(), options)};
@@ -304,16 +379,25 @@ GameModeMutationResult GameMode::set_enabled(
     bool enabled,
     const realmheart::core::CommandOptions& input
 ) {
-    std::lock_guard lock(transaction_mutex());
     GameModeMutationResult mutation;
     if (!realmheart::core::command_exists("hyprctl")) {
         mutation.error = "hyprctl not found";
         return mutation;
     }
     const auto options = operation_options(input);
+    std::lock_guard lock(transaction_mutex());
+    TransactionLock process_lock(options);
+    if (!process_lock.acquired()) {
+        mutation.error = "Unable to acquire the Gamemode transaction lock";
+        return mutation;
+    }
 
     if (enabled) {
         auto snapshot = load_snapshot();
+        if (snapshot && (*snapshot).value("owner", std::string{}) != process_owner()) {
+            mutation.error = "Gamemode restoration snapshot is owned by another Realmheart instance";
+            return mutation;
+        }
         if (snapshot && options_match(game_mode_values(), options)) {
             mutation.success = true;
             mutation.state.enabled = true;
@@ -321,9 +405,14 @@ GameModeMutationResult GameMode::set_enabled(
         }
 
         if (!snapshot) {
+            if (std::filesystem::exists(state_path())) {
+                mutation.error = "Gamemode restoration snapshot is invalid or foreign";
+                return mutation;
+            }
             json captured;
-            captured["version"] = 1;
+            captured["version"] = kSnapshotVersion;
             captured["token"] = next_token();
+            captured["owner"] = process_owner();
             captured["options"] = json::object();
             for (const auto& override : kOverrides) {
                 const auto original = option_value(override.name, options);
@@ -351,7 +440,10 @@ GameModeMutationResult GameMode::set_enabled(
         if (!write.succeeded() || !options_match(overrides, options)) {
             const bool restored = restore_snapshot(*snapshot, options);
             if (restored) {
-                static_cast<void>(remove_snapshot_if_token((*snapshot)["token"].get<std::uint64_t>()));
+                static_cast<void>(remove_snapshot_if_owned(
+                    (*snapshot)["token"].get<std::uint64_t>(),
+                    process_owner()
+                ));
             }
             mutation.error = write.succeeded()
                 ? "Hyprland accepted the Gamemode batch but one or more options failed readback"
@@ -367,8 +459,17 @@ GameModeMutationResult GameMode::set_enabled(
 
     const auto snapshot = load_snapshot();
     if (!snapshot) {
+        if (std::filesystem::exists(state_path())) {
+            mutation.error = "Gamemode restoration snapshot is invalid or foreign";
+            return mutation;
+        }
         mutation.success = true;
         mutation.state.enabled = false;
+        return mutation;
+    }
+    if ((*snapshot).value("owner", std::string{}) != process_owner()) {
+        mutation.error = "Gamemode restoration snapshot is owned by another Realmheart instance";
+        mutation.state.enabled = true;
         return mutation;
     }
     const auto token = (*snapshot).value("token", 0ULL);
@@ -380,7 +481,7 @@ GameModeMutationResult GameMode::set_enabled(
         mutation.error = "Unable to restore every pre-Gamemode Hyprland setting";
         return mutation;
     }
-    if (!remove_snapshot_if_token(token)) {
+    if (!remove_snapshot_if_owned(token, process_owner())) {
         mutation.error = "Gamemode restored, but ownership marker changed before removal";
         mutation.state.enabled = true;
         return mutation;

@@ -19,19 +19,25 @@ public:
         if (created == nullptr) throw std::runtime_error("mkdtemp failed");
         directory_ = created;
         running_file_ = directory_ / "running.state";
+        daemon_file_ = directory_ / "daemon.state";
+        temperature_file_ = directory_ / "temperature.state";
         applied_file_ = directory_ / "applied.state";
         std::ofstream(running_file_) << "no";
+        std::ofstream(daemon_file_) << "no";
+        std::ofstream(temperature_file_) << "4000";
 
         const auto hyprctl = directory_ / "hyprctl";
         std::ofstream script(hyprctl);
         script << "#!/bin/sh\n"
                << "IFS= read -r running < \"$REALMHEART_NIGHT_TEST_RUNNING\"\n"
                << "if [ \"$running\" != yes ]; then printf 'not running\\n'; exit 1; fi\n"
+               << "if [ \"$1\" = hyprsunset ]; then IFS= read -r daemon < \"$REALMHEART_NIGHT_TEST_DAEMON\"; if [ \"$daemon\" != yes ]; then printf 'daemon unavailable\\n'; exit 1; fi; fi\n"
                << "if [ \"$REALMHEART_NIGHT_FAIL_WRITES\" = 1 ]; then printf 'forced failure\\n'; exit 1; fi\n"
                << "case \"$*\" in\n"
                << "  'monitors -j') printf '[]' ;;\n"
+               << "  'hyprsunset temperature') IFS= read -r temperature < \"$REALMHEART_NIGHT_TEST_TEMPERATURE\"; printf '%s\\n' \"$temperature\" ;;\n"
                << "  'hyprsunset identity') printf 'off\\n' > \"$REALMHEART_NIGHT_TEST_APPLIED\"; printf 'ok\\n' ;;\n"
-               << "  'hyprsunset temperature '*) printf '%s\\n' \"$3\" > \"$REALMHEART_NIGHT_TEST_APPLIED\"; printf 'ok\\n' ;;\n"
+               << "  'hyprsunset temperature '*) printf '%s\\n' \"$3\" > \"$REALMHEART_NIGHT_TEST_APPLIED\"; printf '%s\\n' \"$3\" > \"$REALMHEART_NIGHT_TEST_TEMPERATURE\"; printf 'ok\\n' ;;\n"
                << "  *) exit 64 ;;\n"
                << "esac\n";
         script.close();
@@ -45,7 +51,8 @@ public:
         std::ofstream start_script(systemctl);
         start_script << "#!/bin/sh\n"
                      << "if [ \"$*\" != '--user start hyprsunset.service' ]; then exit 64; fi\n"
-                     << "printf yes > \"$REALMHEART_NIGHT_TEST_RUNNING\"\n";
+                     << "printf yes > \"$REALMHEART_NIGHT_TEST_RUNNING\"\n"
+                     << "printf yes > \"$REALMHEART_NIGHT_TEST_DAEMON\"\n";
         start_script.close();
         ::chmod(systemctl.c_str(), 0700);
 
@@ -58,6 +65,8 @@ public:
         ::setenv("PATH", directory_.c_str(), 1);
         ::setenv("XDG_RUNTIME_DIR", directory_.c_str(), 1);
         ::setenv("REALMHEART_NIGHT_TEST_RUNNING", running_file_.c_str(), 1);
+        ::setenv("REALMHEART_NIGHT_TEST_DAEMON", daemon_file_.c_str(), 1);
+        ::setenv("REALMHEART_NIGHT_TEST_TEMPERATURE", temperature_file_.c_str(), 1);
         ::setenv("REALMHEART_NIGHT_TEST_APPLIED", applied_file_.c_str(), 1);
         ::unsetenv("REALMHEART_NIGHT_FAIL_WRITES");
     }
@@ -67,6 +76,8 @@ public:
         if (had_runtime_) ::setenv("XDG_RUNTIME_DIR", old_runtime_.c_str(), 1);
         else ::unsetenv("XDG_RUNTIME_DIR");
         ::unsetenv("REALMHEART_NIGHT_TEST_RUNNING");
+        ::unsetenv("REALMHEART_NIGHT_TEST_DAEMON");
+        ::unsetenv("REALMHEART_NIGHT_TEST_TEMPERATURE");
         ::unsetenv("REALMHEART_NIGHT_TEST_APPLIED");
         ::unsetenv("REALMHEART_NIGHT_FAIL_WRITES");
         std::error_code error;
@@ -79,6 +90,18 @@ public:
 
     void allow_writes() {
         ::unsetenv("REALMHEART_NIGHT_FAIL_WRITES");
+    }
+
+    void stop_daemon() const {
+        std::ofstream(daemon_file_, std::ios::trunc) << "no\n";
+    }
+
+    void start_daemon() const {
+        std::ofstream(daemon_file_, std::ios::trunc) << "yes\n";
+    }
+
+    void set_daemon_temperature(int temperature) const {
+        std::ofstream(temperature_file_, std::ios::trunc) << temperature << '\n';
     }
 
     void block_persistence() {
@@ -97,6 +120,8 @@ public:
 private:
     std::filesystem::path directory_;
     std::filesystem::path running_file_;
+    std::filesystem::path daemon_file_;
+    std::filesystem::path temperature_file_;
     std::filesystem::path applied_file_;
     std::string old_path_;
     std::string old_runtime_;
@@ -132,6 +157,16 @@ int main() {
             remembered && remembered->enabled && remembered->temperature == 2750,
             "successful state should be remembered"
         );
+
+        fake.set_daemon_temperature(3000);
+        require(!realmheart::services::NightLight::read(),
+                "externally changed daemon temperature must invalidate remembered state");
+        fake.set_daemon_temperature(2750);
+
+        fake.stop_daemon();
+        require(!realmheart::services::NightLight::read(),
+                "persisted Night Light state must be unavailable when the daemon is dead");
+        fake.start_daemon();
 
         const auto disabled = realmheart::services::NightLight::set_enabled(false);
         require(disabled.success && !disabled.state.enabled, "Night Light disable should succeed");

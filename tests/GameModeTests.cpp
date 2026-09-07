@@ -1,12 +1,15 @@
 #include "services/GameMode.hpp"
 
 #include <cstdlib>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 namespace {
@@ -47,6 +50,8 @@ if len(args) >= 3 and args[0] == "getoption":
     raise SystemExit(0)
 
 if len(args) >= 2 and args[0] == "--batch":
+    delay = os.environ.get("REALMHEART_GAME_BATCH_DELAY")
+    if delay: import time; time.sleep(float(delay))
     if os.environ.get("REALMHEART_GAME_IGNORE_WRITES") != "1":
         for command in args[1].split(";"):
             pieces = command.strip().split(maxsplit=2)
@@ -69,6 +74,7 @@ raise SystemExit(64)
         ::setenv("REALMHEART_GAME_TEST_STATE", compositor_state_.c_str(), 1);
         ::setenv("REALMHEART_GAMEMODE_STATE", marker_state_.c_str(), 1);
         ::unsetenv("REALMHEART_GAME_IGNORE_WRITES");
+        ::unsetenv("REALMHEART_GAME_BATCH_DELAY");
     }
 
     ~TemporaryFakeHyprctl() {
@@ -76,6 +82,7 @@ raise SystemExit(64)
         ::unsetenv("REALMHEART_GAME_TEST_STATE");
         ::unsetenv("REALMHEART_GAMEMODE_STATE");
         ::unsetenv("REALMHEART_GAME_IGNORE_WRITES");
+        ::unsetenv("REALMHEART_GAME_BATCH_DELAY");
         std::error_code error;
         std::filesystem::remove_all(directory_, error);
     }
@@ -83,6 +90,13 @@ raise SystemExit(64)
     void ignore_writes(bool ignore = true) {
         if (ignore) ::setenv("REALMHEART_GAME_IGNORE_WRITES", "1", 1);
         else ::unsetenv("REALMHEART_GAME_IGNORE_WRITES");
+    }
+
+    void allow_writes() { ::unsetenv("REALMHEART_GAME_IGNORE_WRITES"); }
+
+    void delay_batches(double seconds) {
+        const auto value = std::to_string(seconds);
+        ::setenv("REALMHEART_GAME_BATCH_DELAY", value.c_str(), 1);
     }
 
     void write_compositor_state(bool animations_enabled) {
@@ -130,7 +144,13 @@ void require(bool condition, const char* message) {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    static_cast<void>(argc);
+    if (std::getenv("REALMHEART_GAME_CHILD") != nullptr) {
+        const auto result = realmheart::services::GameMode::set_enabled(true);
+        return result.success ? 0 : 1;
+    }
+
     try {
         TemporaryFakeHyprctl fake;
 
@@ -174,6 +194,48 @@ int main() {
         const auto mismatch = realmheart::services::GameMode::set_enabled(true);
         require(!mismatch.success, "Gamemode readback mismatch must fail");
         require(!fake.marker_exists(), "Failed enable must clean up its restoration marker");
+
+        fake.allow_writes();
+        fake.write_compositor_state(true);
+        fake.write_marker(R"json({"version":2,"token":7,"owner":"foreign-process:1","options":{"animations:enabled":"1","decoration:shadow:enabled":"1","decoration:blur:enabled":"1","general:gaps_in":"5","general:gaps_out":"10","general:border_size":"2","decoration:rounding":"8","general:allow_tearing":"0"}})json");
+        const auto foreign_disable = realmheart::services::GameMode::set_enabled(false);
+        require(!foreign_disable.success,
+                "a process must not restore a foreign Gamemode snapshot");
+        require(fake.marker_exists(), "foreign ownership marker must remain durable");
+        fake.clear_marker();
+
+        fake.delay_batches(0.25);
+        const pid_t child = ::fork();
+        require(child >= 0, "cross-process Gamemode child must fork");
+        if (child == 0) {
+            ::setenv("REALMHEART_GAME_CHILD", "enable", 1);
+            ::execl(argv[0], argv[0], static_cast<char*>(nullptr));
+            _exit(127);
+        }
+        bool child_started = false;
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            if (fake.marker_exists()) {
+                child_started = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        require(child_started, "cross-process child must publish its snapshot before contention");
+        const auto contention_started = std::chrono::steady_clock::now();
+        const auto concurrent_disable = realmheart::services::GameMode::set_enabled(false);
+        const auto contention_elapsed = std::chrono::steady_clock::now() - contention_started;
+        int child_status = 0;
+        require(::waitpid(child, &child_status, 0) == child,
+                "cross-process Gamemode child must be reaped");
+        require(WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0,
+                "cross-process Gamemode enable must complete successfully");
+        require(contention_elapsed >= std::chrono::milliseconds(150),
+                "cross-process Gamemode operations must serialize on the durable lock");
+        require(!concurrent_disable.success,
+                "a separate Realmheart instance must not restore another instance's snapshot");
+        require(fake.marker_exists(),
+                "cross-process ownership marker must survive a foreign disable attempt");
+        fake.clear_marker();
     } catch (const std::exception& error) {
         std::cerr << "GameModeTests failed: " << error.what() << '\n';
         return 1;

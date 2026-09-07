@@ -355,12 +355,18 @@ int main(int argc, char** argv) {
     }
 
     if (command == "--cycle-power-profile") {
-        auto next = realmheart::services::PowerProfiles::cycle();
-        if (!next) {
-            std::cerr << "Unable to cycle power profile; is powerprofilesctl available and working?\n";
+        const auto mutation = realmheart::services::PowerProfiles::cycle_result();
+        if (mutation.status != realmheart::services::PowerProfileMutationStatus::Applied ||
+            !mutation.observed_profile) {
+            const char* status = mutation.status == realmheart::services::PowerProfileMutationStatus::Unknown
+                ? "state unknown"
+                : "not applied";
+            std::cerr << "Unable to cycle power profile (" << status << ")";
+            if (!mutation.error.empty()) std::cerr << ": " << mutation.error;
+            std::cerr << '\n';
             return 1;
         }
-        std::cout << "Power profile set to " << *next << '\n';
+        std::cout << "Power profile set to " << *mutation.observed_profile << '\n';
         return 0;
     }
 

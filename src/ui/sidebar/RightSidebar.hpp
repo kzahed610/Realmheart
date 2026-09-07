@@ -8,6 +8,7 @@
 #include "effects/core/EffectFrame.hpp"
 #include "services/KeepAwake.hpp"
 #include "services/Notifications.hpp"
+#include "services/PowerProfiles.hpp"
 #include "ui/components/BaseWidget.hpp"
 
 #include <array>
@@ -20,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace realmheart::animation::character {
@@ -135,9 +137,16 @@ private:
     void refresh_controls();
     static gboolean finish_control_refresh(gpointer raw);
     static void destroy_control_refresh_result(gpointer raw);
-    void post_control_action(std::function<void()> action);
+    void post_control_action(
+        std::function<void()> action,
+        std::function<void()> completion = {}
+    );
     void set_power_profile(const std::string& profile);
-    void show_power_profile_feedback(GtkWidget* button, bool success);
+    void show_power_profile_feedback(
+        GtkWidget* button,
+        services::PowerProfileMutationStatus status,
+        std::string_view detail = {}
+    );
     void clear_power_profile_feedback();
 
     GtkApplication* app_ = nullptr;

@@ -1408,6 +1408,8 @@ gboolean RightSidebar::finish_control_refresh(gpointer raw) {
             owner->show_power_profile_feedback(
                 pending_button,
                 pending_succeeded
+                    ? services::PowerProfileMutationStatus::Applied
+                    : services::PowerProfileMutationStatus::NotApplied
             );
             owner->pending_power_profile_.clear();
         }
@@ -1425,30 +1427,54 @@ void RightSidebar::destroy_control_refresh_result(gpointer raw) {
     delete static_cast<ControlRefreshResult*>(raw);
 }
 
-void RightSidebar::post_control_action(std::function<void()> action) {
+void RightSidebar::post_control_action(
+    std::function<void()> action,
+    std::function<void()> completion
+) {
     const auto state = async_ui_state_;
     const auto generation = state->generation.fetch_add(1) + 1;
     realmheart::core::shared_task_executor().post([
-        state, generation, action = std::move(action)
+        state,
+        generation,
+        action = std::move(action),
+        completion = std::move(completion)
     ] {
+        bool action_ran = false;
         {
             std::lock_guard lock(state->operation_mutex);
             if (!state->alive.load() || state->generation.load() != generation) return;
             if (action) action();
+            action_ran = true;
         }
+        if (!action_ran) return;
         g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,
             +[](gpointer raw) -> gboolean {
-                auto* payload = static_cast<std::pair<std::shared_ptr<AsyncUiState>, std::uint64_t>*>(raw);
-                if (payload->first->alive.load() && payload->first->owner != nullptr &&
-                    payload->first->generation.load() == payload->second) {
-                    payload->first->owner->refresh_controls();
+                auto* payload = static_cast<std::tuple<
+                    std::shared_ptr<AsyncUiState>,
+                    std::uint64_t,
+                    std::function<void()>
+                >*>(raw);
+                auto& state = std::get<0>(*payload);
+                const auto generation = std::get<1>(*payload);
+                if (state->alive.load() && state->owner != nullptr &&
+                    state->generation.load() == generation) {
+                    if (std::get<2>(*payload)) std::get<2>(*payload)();
+                    state->owner->refresh_controls();
                 }
                 return G_SOURCE_REMOVE;
             },
-            new std::pair<std::shared_ptr<AsyncUiState>, std::uint64_t>{state, generation},
+            new std::tuple<std::shared_ptr<AsyncUiState>, std::uint64_t, std::function<void()>>{
+                state,
+                generation,
+                std::move(completion)
+            },
             +[](gpointer raw) {
-                delete static_cast<std::pair<std::shared_ptr<AsyncUiState>, std::uint64_t>*>(raw);
+                delete static_cast<std::tuple<
+                    std::shared_ptr<AsyncUiState>,
+                    std::uint64_t,
+                    std::function<void()>
+                >*>(raw);
             }
         );
     });
@@ -1462,17 +1488,27 @@ void RightSidebar::clear_power_profile_feedback() {
     for (GtkWidget* button : power_profile_buttons_) {
         gtk_widget_remove_css_class(button, "confirmed");
         gtk_widget_remove_css_class(button, "failed");
+        gtk_widget_set_tooltip_text(button, nullptr);
     }
 }
 
 void RightSidebar::show_power_profile_feedback(
     GtkWidget* button,
-    bool success
+    services::PowerProfileMutationStatus status,
+    std::string_view detail
 ) {
     clear_power_profile_feedback();
     if (button == nullptr) return;
 
+    const bool success = status == services::PowerProfileMutationStatus::Applied;
     gtk_widget_add_css_class(button, success ? "confirmed" : "failed");
+    const char* status_text = status == services::PowerProfileMutationStatus::Unknown
+        ? "Power profile state unknown"
+        : (success ? "Power profile applied" : "Power profile not applied");
+    const std::string tooltip = detail.empty()
+        ? std::string(status_text)
+        : std::string(status_text) + ": " + std::string(detail);
+    gtk_widget_set_tooltip_text(button, tooltip.c_str());
     power_feedback_timeout_ = g_timeout_add_full(
         G_PRIORITY_DEFAULT,
         success ? 320U : 460U,
@@ -1482,6 +1518,7 @@ void RightSidebar::show_power_profile_feedback(
             for (GtkWidget* candidate : self->power_profile_buttons_) {
                 gtk_widget_remove_css_class(candidate, "confirmed");
                 gtk_widget_remove_css_class(candidate, "failed");
+                gtk_widget_set_tooltip_text(candidate, nullptr);
             }
             return G_SOURCE_REMOVE;
         },
@@ -1506,9 +1543,26 @@ void RightSidebar::set_power_profile(const std::string& profile) {
         gtk_widget_set_sensitive(button, FALSE);
     }
 
-    post_control_action([profile] {
-        static_cast<void>(services::PowerProfiles::set(profile));
-    });
+    auto mutation = std::make_shared<services::PowerProfileMutationResult>();
+    post_control_action(
+        [profile, mutation] {
+            *mutation = services::PowerProfiles::set_result(profile);
+        },
+        [this, profile, mutation] {
+            GtkWidget* button = nullptr;
+            for (GtkWidget* candidate : power_profile_buttons_) {
+                const char* candidate_profile = static_cast<const char*>(
+                    g_object_get_data(G_OBJECT(candidate), "realmheart-profile")
+                );
+                if (candidate_profile != nullptr && profile == candidate_profile) {
+                    button = candidate;
+                    break;
+                }
+            }
+            show_power_profile_feedback(button, mutation->status, mutation->error);
+            pending_power_profile_.clear();
+        }
+    );
 }
 
 } // namespace realmheart::ui::sidebar

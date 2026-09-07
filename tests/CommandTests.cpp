@@ -112,6 +112,22 @@ void test_cancellation_terminates_child() {
     require(elapsed < 1500ms, "cancelled command must terminate promptly");
 }
 
+void test_early_child_exit_does_not_raise_sigpipe() {
+    realmheart::core::CommandOptions options;
+    options.deadline = 2s;
+    options.stdin_data = std::string(4096, 'p');
+
+    const auto result = realmheart::core::run_capture(
+        {"/bin/sh", "-c", "exec 0<&-; exit 0"},
+        options
+    );
+
+    require(result.status != realmheart::core::CommandStatus::Signaled,
+            "early stdin consumer exit must not terminate the parent with SIGPIPE");
+    require(result.status == realmheart::core::CommandStatus::Exited && result.exit_code == 0,
+            "early stdin consumer exit should preserve the child result");
+}
+
 void test_failure_detail_is_terminal_safe_and_single_line() {
     const std::string unsafe = "\x1b[31mboom\x1b[0m\nsecond\tline\x07";
     require(
@@ -192,6 +208,7 @@ int main() {
     test_spawn_failure_is_structured();
     test_find_in_path_rejects_executable_directories();
     test_cancellation_terminates_child();
+    test_early_child_exit_does_not_raise_sigpipe();
     test_failure_detail_is_terminal_safe_and_single_line();
     test_background_preserves_shell_script_as_one_argument();
     test_background_reports_exec_failure();

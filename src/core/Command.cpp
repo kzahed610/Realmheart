@@ -11,6 +11,8 @@
 #include <fcntl.h>
 #include <mutex>
 #include <poll.h>
+#include <pthread.h>
+#include <signal.h>
 #include <sstream>
 #include <string_view>
 #include <sys/types.h>
@@ -36,6 +38,34 @@ void close_fd(int& fd) {
         ::close(fd);
         fd = -1;
     }
+}
+
+ssize_t write_without_sigpipe(int fd, const void* data, std::size_t size) {
+    sigset_t sigpipe_set;
+    sigemptyset(&sigpipe_set);
+    sigaddset(&sigpipe_set, SIGPIPE);
+
+    sigset_t previous_mask;
+    sigset_t pending_before;
+    const bool mask_installed = pthread_sigmask(
+        SIG_BLOCK,
+        &sigpipe_set,
+        &previous_mask
+    ) == 0;
+    if (!mask_installed) return ::write(fd, data, size);
+
+    const bool was_pending = sigpending(&pending_before) == 0 &&
+        sigismember(&pending_before, SIGPIPE) == 1;
+    const ssize_t result = ::write(fd, data, size);
+    const int write_errno = errno;
+    if (result < 0 && write_errno == EPIPE && !was_pending) {
+        timespec timeout{};
+        while (::sigtimedwait(&sigpipe_set, nullptr, &timeout) < 0 && errno == EINTR) {
+        }
+    }
+    static_cast<void>(pthread_sigmask(SIG_SETMASK, &previous_mask, nullptr));
+    errno = write_errno;
+    return result;
 }
 
 bool set_nonblocking(int fd) {
@@ -534,7 +564,11 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
         const auto& input = *options.stdin_data;
         std::size_t written = 0;
         while (written < input.size()) {
-            const ssize_t count = ::write(input_pipe[1], input.data() + written, input.size() - written);
+            const ssize_t count = write_without_sigpipe(
+                input_pipe[1],
+                input.data() + written,
+                input.size() - written
+            );
             if (count > 0) {
                 written += static_cast<std::size_t>(count);
                 continue;

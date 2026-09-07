@@ -3,6 +3,7 @@
 #include "core/Command.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -67,6 +68,26 @@ NightLightState load_state() {
     if (temperature < NightLight::kMinimumTemperature ||
         temperature > NightLight::kMaximumTemperature) return default_state();
     return NightLightState{enabled == 1, temperature};
+}
+
+std::optional<int> live_temperature(const realmheart::core::CommandOptions& options) {
+    const auto result = realmheart::core::run_capture(
+        {"hyprctl", "hyprsunset", "temperature"},
+        options
+    );
+    if (!result.succeeded() || result.truncated || result.output.empty()) return std::nullopt;
+
+    const auto value = realmheart::core::trim(result.output);
+    int temperature = 0;
+    const auto [end, error] = std::from_chars(
+        value.data(), value.data() + value.size(), temperature
+    );
+    if (error != std::errc{} || end != value.data() + value.size() ||
+        temperature < NightLight::kMinimumTemperature ||
+        temperature > NightLight::kMaximumTemperature) {
+        return std::nullopt;
+    }
+    return temperature;
 }
 
 bool save_state(const NightLightState& state) {
@@ -228,7 +249,12 @@ std::optional<NightLightState> NightLight::read(
     if (!live_session.succeeded() || live_session.truncated || live_session.output.empty()) {
         return std::nullopt;
     }
-    return load_state();
+    const auto daemon_temperature = live_temperature(options);
+    if (!daemon_temperature) return std::nullopt;
+
+    const auto state = load_state();
+    if (*daemon_temperature != state.temperature) return std::nullopt;
+    return state;
 }
 
 NightLightMutationResult NightLight::set_enabled(
