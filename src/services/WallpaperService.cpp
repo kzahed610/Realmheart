@@ -143,15 +143,27 @@ bool WallpaperService::validate_image(const std::filesystem::path& path) const {
 }
 
 std::optional<std::filesystem::path> WallpaperService::load_path() const {
+    const auto source = load_source();
+    if (!source || !source->is_external()) return std::nullopt;
+    return source->external_path();
+}
+
+std::optional<WallpaperSource> WallpaperService::load_source() const {
     std::ifstream input(state_file_);
     std::string saved_path;
     if (!input || !std::getline(input, saved_path) || saved_path.empty()) {
-        // State file missing or empty — resolve the bundled default through the
-        // same installed/source asset-root policy as every other project asset.
+        // State file missing or empty — open the bundled default through the
+        // descriptor-backed project-asset policy. The path is metadata only;
+        // all consumers must use the retained bytes below.
         constexpr std::string_view default_wallpaper =
             "Showcase/Wallpapers/Arthur_Leywin_Void.png";
-        if (const auto candidate = ui::resolve_project_asset(default_wallpaper)) {
-            if (validate_image(*candidate)) return candidate;
+        if (auto asset = ui::open_project_asset(default_wallpaper)) {
+            constexpr std::size_t kMaxWallpaperSourceBytes =
+                128ULL * 1024ULL * 1024ULL;
+            if (const auto bytes = asset->read_all(kMaxWallpaperSourceBytes);
+                bytes && !bytes->empty()) {
+                return WallpaperSource::owned_bytes(asset->path(), *bytes);
+            }
         }
         std::cerr << "[WallpaperService] Bundled default wallpaper is unavailable\n";
         return std::nullopt;
@@ -161,7 +173,7 @@ std::optional<std::filesystem::path> WallpaperService::load_path() const {
 
     std::filesystem::path path(saved_path);
     if (!validate_image(path)) return std::nullopt;
-    return path;
+    return WallpaperSource(std::move(path));
 }
 
 bool WallpaperService::persist_path(const std::filesystem::path& path) const {

@@ -1,6 +1,7 @@
 #pragma once
 
-#include <filesystem>
+#include "services/WallpaperSource.hpp"
+
 #include <functional>
 #include <optional>
 #include <string>
@@ -16,17 +17,17 @@ class WallpaperTransaction final {
 public:
     using Completion = std::function<void(bool, std::string)>;
     using VisualApply = std::function<void(
-        const std::filesystem::path&,
+        const realmheart::services::WallpaperSource&,
         Completion
     )>;
     using Persist = std::function<bool(
-        const std::filesystem::path&,
+        const realmheart::services::WallpaperSource&,
         std::string*
     )>;
 
     struct Request {
-        std::filesystem::path desired_path;
-        std::optional<std::filesystem::path> previous_path;
+        realmheart::services::WallpaperSource desired_source;
+        std::optional<realmheart::services::WallpaperSource> previous_source;
         VisualApply apply_visual;
         VisualApply rollback_visual;
         Persist persist;

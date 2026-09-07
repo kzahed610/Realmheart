@@ -1,11 +1,15 @@
 #pragma once
 
+#include "services/WallpaperSource.hpp"
+
 #include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
 
 namespace realmheart::ui::wallpaper {
+
+using WallpaperSource = realmheart::services::WallpaperSource;
 
 enum class WallpaperBackendType {
     Gtk,
@@ -43,7 +47,7 @@ public:
     [[nodiscard]] virtual WallpaperBackendType type() const noexcept = 0;
     [[nodiscard]] virtual bool initialize(std::string* error_message = nullptr) = 0;
     [[nodiscard]] virtual bool set_wallpaper(
-        const std::filesystem::path& path,
+        const WallpaperSource& source,
         std::string* error_message = nullptr
     ) = 0;
 
@@ -51,11 +55,11 @@ public:
     // expensive decode/upload work without changing visible pixels;
     // commit_prepared_wallpaper() makes that prepared image authoritative.
     [[nodiscard]] virtual bool prepare_wallpaper(
-        const std::filesystem::path& path,
+        const WallpaperSource& source,
         std::string* error_message = nullptr
     ) = 0;
     [[nodiscard]] virtual bool prepare_wallpaper_for_output(
-        const std::filesystem::path& path,
+        const WallpaperSource& source,
         const WallpaperOutputTarget& target,
         std::string* error_message = nullptr
     ) = 0;

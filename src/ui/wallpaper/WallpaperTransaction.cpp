@@ -31,8 +31,8 @@ void WallpaperTransaction::run(Request request) {
         }
     };
 
-    if (request.desired_path.empty()) {
-        finish(false, "wallpaper path is empty");
+    if (request.desired_source.empty()) {
+        finish(false, "wallpaper source is empty");
         return;
     }
     if (!request.apply_visual) {
@@ -44,15 +44,15 @@ void WallpaperTransaction::run(Request request) {
         return;
     }
 
-    const auto desired_path = std::move(request.desired_path);
-    const auto previous_path = std::move(request.previous_path);
+    const auto desired_source = std::move(request.desired_source);
+    const auto previous_source = std::move(request.previous_source);
     const auto rollback_visual = std::move(request.rollback_visual);
     const auto persist = std::move(request.persist);
 
     const auto on_visual_applied = [
         state,
-        desired_path,
-        previous_path,
+        desired_source,
+        previous_source,
         rollback_visual,
         persist,
         finish
@@ -72,7 +72,7 @@ void WallpaperTransaction::run(Request request) {
         std::string persist_error;
         bool persisted = false;
         try {
-            persisted = persist(desired_path, &persist_error);
+            persisted = persist(desired_source, &persist_error);
         } catch (const std::exception& error) {
             persist_error = error.what();
         } catch (...) {
@@ -84,7 +84,7 @@ void WallpaperTransaction::run(Request request) {
         }
 
         const std::string persistence_failure = persistence_error_message(persist_error);
-        if (!previous_path || previous_path->empty() || !rollback_visual) {
+        if (!previous_source || previous_source->empty() || !rollback_visual) {
             finish(
                 false,
                 persistence_failure +
@@ -94,7 +94,7 @@ void WallpaperTransaction::run(Request request) {
         }
 
         rollback_visual(
-            *previous_path,
+            *previous_source,
             [
                 persistence_failure,
                 finish
@@ -119,7 +119,7 @@ void WallpaperTransaction::run(Request request) {
     };
 
     try {
-        request.apply_visual(desired_path, on_visual_applied);
+        request.apply_visual(desired_source, on_visual_applied);
     } catch (const std::exception& error) {
         finish(false, error.what());
     } catch (...) {

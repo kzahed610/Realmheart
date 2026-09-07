@@ -1,5 +1,7 @@
 #pragma once
 
+#include "services/WallpaperSource.hpp"
+
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -12,6 +14,7 @@ public:
     explicit WallpaperService(std::filesystem::path state_file = {});
 
     [[nodiscard]] bool validate_image(const std::filesystem::path& path) const;
+    [[nodiscard]] std::optional<WallpaperSource> load_source() const;
     [[nodiscard]] std::optional<std::filesystem::path> load_path() const;
     [[nodiscard]] bool persist_path(const std::filesystem::path& path) const;
     [[nodiscard]] std::optional<std::filesystem::path> load_output_path(

@@ -84,7 +84,25 @@ TEST_F(WallpaperServiceTest, EmptyPersistedStateResolvesBundledDefault) {
         "Showcase/Wallpapers/Arthur_Leywin_Void.png"
     );
     ASSERT_TRUE(expected.has_value());
-    EXPECT_EQ(service.load_path(), expected);
+    EXPECT_EQ(service.load_path(), std::nullopt);
+}
+
+TEST_F(WallpaperServiceTest, EmptyPersistedStateReturnsOwnedBundledSource) {
+    std::filesystem::create_directories(state_file_.parent_path());
+    std::ofstream empty_state(state_file_);
+    realmheart::services::WallpaperService service(state_file_);
+
+    const auto expected = realmheart::ui::resolve_project_asset(
+        "Showcase/Wallpapers/Arthur_Leywin_Void.png"
+    );
+    ASSERT_TRUE(expected.has_value());
+    const auto source = service.load_source();
+    ASSERT_TRUE(source.has_value());
+    EXPECT_TRUE(source->is_owned());
+    EXPECT_FALSE(source->external_path().has_value());
+    EXPECT_EQ(source->path(), *expected);
+    ASSERT_NE(source->bytes(), nullptr);
+    EXPECT_FALSE(source->bytes()->empty());
 }
 
 TEST_F(WallpaperServiceTest, InvalidPersistedStateReturnsNoWallpaper) {

@@ -543,8 +543,8 @@ public:
         apply_bar_visibility();
         schedule_workspace_overview_prewarm();
         schedule_right_sidebar_prewarm();
-        const std::string current_path = utilities_->load_wallpaper_path();
-        if (current_path.empty()) {
+        const auto current_source = utilities_->load_wallpaper_source();
+        if (!current_source) {
             // Per-output selections are independent state. They must still be
             // restored when the legacy/global wallpaper state is absent.
             // Keep cached colors when valid, but explicitly repair any malformed
@@ -555,7 +555,7 @@ public:
             return;
         }
         request_wallpaper(
-            current_path,
+            *current_source,
             "Unable to restore wallpaper",
             [this](bool, std::string) {
                 // Restore output-specific overrides even if the global fallback
@@ -1170,7 +1170,10 @@ public:
             return;
         }
 
-        request_wallpaper(path, "Unable to set wallpaper");
+        request_wallpaper(
+            wallpaper::WallpaperSource(std::filesystem::path(path)),
+            "Unable to set wallpaper"
+        );
     }
 
     void switch_wallpaper_backend(const std::string& backend_name) {
@@ -1256,7 +1259,9 @@ public:
     }
 
     void generate_theme() {
-        generate_theme_for(utilities_->load_wallpaper_path());
+        if (const auto source = utilities_->load_wallpaper_source()) {
+            generate_theme_for(*source);
+        }
     }
 
     void start_recording() {
@@ -1909,23 +1914,24 @@ private:
             }
             if (wallpaper_controller_) {
                 const auto utilities = utilities_;
-                const std::optional<std::filesystem::path> previous_path =
-                    [&utilities, wallpaper_target] {
+                const std::optional<wallpaper::WallpaperSource> previous_source =
+                    [&utilities, wallpaper_target]() ->
+                        std::optional<wallpaper::WallpaperSource> {
                         if (services::WallpaperService* service =
                                 utilities->get_wallpaper_service()) {
                             if (!wallpaper_target.connector.empty()) {
                                 if (const auto output_path = service->load_output_path(
                                         wallpaper_target.connector
                                     )) {
-                                    return output_path;
+                                    return wallpaper::WallpaperSource(*output_path);
                                 }
                             }
-                            return service->load_path();
+                            return service->load_source();
                         }
-                        return std::optional<std::filesystem::path>{};
+                        return std::optional<wallpaper::WallpaperSource>{};
                     }();
                 const auto apply_output = [this, wallpaper_target](
-                    const std::filesystem::path& requested_path,
+                    const wallpaper::WallpaperSource& requested_source,
                     wallpaper::WallpaperTransaction::Completion callback
                 ) {
                     if (wallpaper_controller_ == nullptr) {
@@ -1933,7 +1939,7 @@ private:
                         return;
                     }
                     wallpaper_controller_->prepare_wallpaper_for_output_async(
-                        requested_path,
+                        requested_source,
                         wallpaper_target,
                         [this, callback = std::move(callback)](
                             bool prepared,
@@ -1950,12 +1956,12 @@ private:
                     );
                 };
                 wallpaper::WallpaperTransaction::run({
-                    std::filesystem::path(path),
-                    previous_path,
+                    wallpaper::WallpaperSource(std::filesystem::path(path)),
+                    previous_source,
                     apply_output,
                     apply_output,
                     [utilities, wallpaper_target](
-                        const std::filesystem::path& requested_path,
+                        const wallpaper::WallpaperSource& requested_source,
                         std::string* error_message
                     ) {
                         services::WallpaperService* service =
@@ -1973,9 +1979,10 @@ private:
                             }
                             return false;
                         }
-                        if (service->persist_output_path(
+                        const auto requested_path = requested_source.external_path();
+                        if (requested_path && service->persist_output_path(
                                 wallpaper_target.connector,
-                                requested_path
+                                *requested_path
                             )) {
                             return true;
                         }
@@ -1992,7 +1999,9 @@ private:
                                 << error_msg << "\n";
                             return;
                         }
-                        generate_theme_for(path);
+                        generate_theme_for(
+                            wallpaper::WallpaperSource(std::filesystem::path(path))
+                        );
                     }
                 });
             }
@@ -2157,48 +2166,48 @@ private:
         std::function<void(bool, std::string)>;
 
     void request_wallpaper(
-        const std::string& path,
+        const wallpaper::WallpaperSource& source,
         const char* failure_prefix,
         WallpaperRequestCompletion completion = {}
     ) {
-        if (path.empty() || wallpaper_controller_ == nullptr) {
+        if (source.empty() || wallpaper_controller_ == nullptr) {
             if (completion) completion(false, "wallpaper controller is unavailable");
             return;
         }
         const auto utilities = utilities_;
-        const std::optional<std::filesystem::path> previous_path = [&utilities] {
+        const std::optional<wallpaper::WallpaperSource> previous_source = [&utilities] {
             if (services::WallpaperService* service = utilities->get_wallpaper_service()) {
-                return service->load_path();
+                return service->load_source();
             }
-            return std::optional<std::filesystem::path>{};
+            return std::optional<wallpaper::WallpaperSource>{};
         }();
         const std::string failure_prefix_copy = failure_prefix;
         wallpaper::WallpaperTransaction::run({
-            std::filesystem::path(path),
-            previous_path,
-            [this](const std::filesystem::path& requested_path,
+            source,
+            previous_source,
+            [this](const wallpaper::WallpaperSource& requested_source,
                    wallpaper::WallpaperTransaction::Completion callback) {
                 if (wallpaper_controller_ == nullptr) {
                     callback(false, "wallpaper controller is unavailable");
                     return;
                 }
                 wallpaper_controller_->set_wallpaper_async(
-                    requested_path,
+                    requested_source,
                     std::move(callback)
                 );
             },
-            [this](const std::filesystem::path& rollback_path,
+            [this](const wallpaper::WallpaperSource& rollback_source,
                    wallpaper::WallpaperTransaction::Completion callback) {
                 if (wallpaper_controller_ == nullptr) {
                     callback(false, "wallpaper controller is unavailable");
                     return;
                 }
                 wallpaper_controller_->set_wallpaper_async(
-                    rollback_path,
+                    rollback_source,
                     std::move(callback)
                 );
             },
-            [utilities](const std::filesystem::path& requested_path,
+            [utilities](const wallpaper::WallpaperSource& requested_source,
                         std::string* error_message) {
                 services::WallpaperService* service =
                     utilities->get_wallpaper_service();
@@ -2208,13 +2217,14 @@ private:
                     }
                     return false;
                 }
-                if (service->update_state(requested_path)) return true;
+                const auto requested_path = requested_source.external_path();
+                if (requested_path && service->update_state(*requested_path)) return true;
                 if (error_message != nullptr) {
                     *error_message = "wallpaper path could not be persisted";
                 }
                 return false;
             },
-            [this, failure_prefix_copy, completion = std::move(completion), path](
+            [this, failure_prefix_copy, completion = std::move(completion), source](
                 bool success,
                 std::string error_message
             ) mutable {
@@ -2225,21 +2235,21 @@ private:
                     }
                     return;
                 }
-                generate_theme_for(path);
+                generate_theme_for(source);
                 if (completion) completion(true, {});
             }
         });
     }
 
-    void generate_theme_for(const std::string& path) {
-        if (path.empty()) return;
+    void generate_theme_for(const wallpaper::WallpaperSource& source) {
+        if (source.empty()) return;
         const auto state = runtime_async_state_;
         const auto utilities = utilities_;
         const auto theme_service = theme_service_;
         const std::uint64_t generation = state->theme_generation.fetch_add(1) + 1;
         const bool posted = core::shared_task_executor().post(
-        [state, utilities, theme_service, path, generation] {
-            auto palette = utilities->generate_palette(path, [state, generation] {
+        [state, utilities, theme_service, source, generation] {
+            auto palette = utilities->generate_palette(source, [state, generation] {
                 return !state->alive.load() ||
                        state->theme_generation.load() != generation;
             });

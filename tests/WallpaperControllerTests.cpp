@@ -29,11 +29,14 @@ public:
     }
 
     bool set_wallpaper(
-        const std::filesystem::path& path,
+        const WallpaperSource& source,
         std::string* error_message
     ) override {
         if (error_message != nullptr) error_message->clear();
-        if (block_first_set && path.filename() == "first.png") {
+        if (source.is_owned() && source.bytes() != nullptr) {
+            observed_source_bytes = *source.bytes();
+        }
+        if (block_first_set && source.path().filename() == "first.png") {
             std::unique_lock lock(mutex);
             first_set_started = true;
             condition.notify_all();
@@ -46,7 +49,7 @@ public:
     }
 
     bool prepare_wallpaper(
-        const std::filesystem::path&,
+        const WallpaperSource&,
         std::string* error_message
     ) override {
         if (error_message != nullptr) error_message->clear();
@@ -58,7 +61,7 @@ public:
     }
 
     bool prepare_wallpaper_for_output(
-        const std::filesystem::path&,
+        const WallpaperSource&,
         const WallpaperOutputTarget& target,
         std::string* error_message
     ) override {
@@ -91,6 +94,7 @@ public:
     bool block_first_set = false;
     bool first_set_started = false;
     bool release_first_set = false;
+    std::string observed_source_bytes;
     std::mutex mutex;
     std::condition_variable condition;
 };
@@ -207,6 +211,41 @@ TEST(WallpaperControllerTest, RapidReplacementSuppressesStaleCallback) {
     EXPECT_EQ(second_callbacks, 1);
 }
 
+TEST(WallpaperControllerTest, OwnedSourceSurvivesAsyncWorkerLifetime) {
+    auto backend = std::make_shared<FakeWallpaperBackend>(WallpaperBackendType::Native);
+    backend->block_first_set = true;
+    WallpaperController controller(
+        nullptr,
+        WallpaperBackendType::Native,
+        [backend](GtkApplication*, WallpaperBackendType) { return backend; }
+    );
+    ASSERT_TRUE(controller.initialize());
+
+    int callbacks = 0;
+    controller.set_wallpaper_async(
+        WallpaperSource::owned_bytes("/project/first.png", "immutable-pixels"),
+        [&callbacks](bool success, std::string) {
+            if (success) ++callbacks;
+        }
+    );
+    {
+        std::unique_lock lock(backend->mutex);
+        ASSERT_TRUE(backend->condition.wait_for(
+            lock,
+            std::chrono::seconds(2),
+            [&backend] { return backend->first_set_started; }
+        ));
+    }
+    {
+        std::lock_guard lock(backend->mutex);
+        backend->release_first_set = true;
+    }
+    backend->condition.notify_all();
+
+    ASSERT_TRUE(wait_for_callback([&callbacks] { return callbacks == 1; }));
+    EXPECT_EQ(backend->observed_source_bytes, "immutable-pixels");
+}
+
 TEST(WallpaperControllerTest, PrepareFailureClearsControllerTransactionState) {
     auto backend = std::make_shared<FakeWallpaperBackend>(WallpaperBackendType::Native);
     WallpaperController controller(
@@ -220,7 +259,7 @@ TEST(WallpaperControllerTest, PrepareFailureClearsControllerTransactionState) {
     bool callback_called = false;
     bool callback_success = true;
     controller.prepare_wallpaper_async(
-        "/wallpapers/broken.png",
+        WallpaperSource(std::filesystem::path("/wallpapers/broken.png")),
         [&callback_called, &callback_success](bool success, std::string) {
             callback_called = true;
             callback_success = success;

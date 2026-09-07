@@ -41,15 +41,15 @@ public:
 
     [[nodiscard]] bool initialize(std::string* error_message = nullptr) override;
     [[nodiscard]] bool set_wallpaper(
-        const std::filesystem::path& path,
+        const WallpaperSource& source,
         std::string* error_message = nullptr
     ) override;
     [[nodiscard]] bool prepare_wallpaper(
-        const std::filesystem::path& path,
+        const WallpaperSource& source,
         std::string* error_message = nullptr
     ) override;
     [[nodiscard]] bool prepare_wallpaper_for_output(
-        const std::filesystem::path& path,
+        const WallpaperSource& source,
         const WallpaperOutputTarget& target,
         std::string* error_message = nullptr
     ) override;
@@ -58,6 +58,10 @@ public:
     ) override;
     void discard_prepared_wallpaper() noexcept override;
 
+    [[nodiscard]] static std::optional<DecodedWallpaper> decode_wallpaper(
+        const WallpaperSource& source,
+        std::string* error_message = nullptr
+    );
     [[nodiscard]] static std::optional<DecodedWallpaper> decode_wallpaper(
         const std::filesystem::path& path,
         std::string* error_message = nullptr

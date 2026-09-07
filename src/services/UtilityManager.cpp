@@ -8,8 +8,11 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <linux/memfd.h>
 #include <limits>
 #include <sstream>
+#include <sys/syscall.h>
+#include <fcntl.h>
 #include <thread>
 #include <unistd.h>
 
@@ -60,6 +63,81 @@ std::string screenshot_helper_command() {
     return "realmheart-screenshot";
 }
 
+struct MatugenSourceLease {
+    int descriptor = -1;
+
+    MatugenSourceLease() = default;
+
+    ~MatugenSourceLease() {
+        if (descriptor >= 0) ::close(descriptor);
+    }
+
+    MatugenSourceLease(const MatugenSourceLease&) = delete;
+    MatugenSourceLease& operator=(const MatugenSourceLease&) = delete;
+};
+
+std::optional<std::string> matugen_input_path(
+    const WallpaperSource& source,
+    MatugenSourceLease& lease,
+    std::string* error_message
+) {
+    constexpr std::size_t kMaxWallpaperSourceBytes = 128ULL * 1024ULL * 1024ULL;
+    if (const auto path = source.external_path()) {
+        std::error_code error;
+        if (path->empty() || !std::filesystem::is_regular_file(*path, error) || error) {
+            if (error_message != nullptr) *error_message = "wallpaper source path is invalid";
+            return std::nullopt;
+        }
+        const auto file_size = std::filesystem::file_size(*path, error);
+        if (error || file_size > kMaxWallpaperSourceBytes) {
+            if (error_message != nullptr) *error_message = "wallpaper source exceeds the Matugen budget";
+            return std::nullopt;
+        }
+        return path->string();
+    }
+    const std::string* bytes = source.bytes();
+    if (bytes == nullptr || bytes->empty() || bytes->size() > kMaxWallpaperSourceBytes) {
+        if (error_message != nullptr) *error_message = "wallpaper source exceeds the Matugen budget";
+        return std::nullopt;
+    }
+
+    lease.descriptor = static_cast<int>(::syscall(
+        SYS_memfd_create,
+        "realmheart-wallpaper",
+        MFD_ALLOW_SEALING
+    ));
+    if (lease.descriptor < 0) {
+        if (error_message != nullptr) *error_message = "unable to create an owned Matugen input";
+        return std::nullopt;
+    }
+
+    std::size_t written = 0;
+    while (written < bytes->size()) {
+        const ssize_t result = ::write(
+            lease.descriptor,
+            bytes->data() + written,
+            bytes->size() - written
+        );
+        if (result > 0) {
+            written += static_cast<std::size_t>(result);
+        } else if (result < 0 && errno == EINTR) {
+            continue;
+        } else {
+            if (error_message != nullptr) *error_message = "unable to populate owned Matugen input";
+            return std::nullopt;
+        }
+    }
+    if (::fcntl(
+            lease.descriptor,
+            F_ADD_SEALS,
+            F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL
+        ) != 0) {
+        if (error_message != nullptr) *error_message = "unable to seal owned Matugen input";
+        return std::nullopt;
+    }
+    return "/proc/self/fd/" + std::to_string(lease.descriptor);
+}
+
 } // namespace
 
 
@@ -106,14 +184,15 @@ bool UtilityManager::choose_wallpaper() {
 }
 
 std::optional<services::Palette> UtilityManager::generate_palette(
-    const std::string& path,
+    const services::WallpaperSource& source,
     std::function<bool()> cancelled
 ) {
-    const std::filesystem::path image_path(path);
-    std::error_code error;
-    if (path.empty() || !std::filesystem::is_regular_file(image_path, error) || error) {
-        std::cerr << "[Theme] Refusing to generate colors for an invalid wallpaper path: "
-                  << path << '\n';
+    MatugenSourceLease source_lease;
+    std::string source_error;
+    const auto image_path = matugen_input_path(source, source_lease, &source_error);
+    if (!image_path) {
+        std::cerr << "[Theme] Refusing to generate colors for an invalid wallpaper source: "
+                  << source_error << '\n';
         return std::nullopt;
     }
 
@@ -131,7 +210,7 @@ std::optional<services::Palette> UtilityManager::generate_palette(
     const auto result = executor_->run_capture({
         "matugen",
         "image",
-        image_path.string(),
+        *image_path,
         "--dry-run",
         "--json",
         "hex",
@@ -168,6 +247,13 @@ std::optional<services::Palette> UtilityManager::generate_palette(
     return palette;
 }
 
+std::optional<services::Palette> UtilityManager::generate_palette(
+    const std::string& path,
+    std::function<bool()> cancelled
+) {
+    return generate_palette(services::WallpaperSource(path), std::move(cancelled));
+}
+
 bool UtilityManager::generate_colors(const std::string& path) {
     auto palette = generate_palette(path);
     if (!palette) return false;
@@ -175,15 +261,13 @@ bool UtilityManager::generate_colors(const std::string& path) {
     return true;
 }
 
+std::optional<services::WallpaperSource> UtilityManager::load_wallpaper_source() {
+    return wallpaper_service_->load_source();
+}
+
 std::string UtilityManager::load_wallpaper_path() {
-    auto path = wallpaper_service_->load_path();
-    if (path) {
-        // Persist the default wallpaper path so we don't re-scan assets on
-        // subsequent startup attempts.
-        static_cast<void>(wallpaper_service_->persist_path(*path));
-        return path->string();
-    }
-    return "";
+    const auto source = load_wallpaper_source();
+    return source ? source->string() : std::string{};
 }
 
 bool UtilityManager::start_recording(const std::string& path) {

@@ -25,15 +25,15 @@ public:
 
     [[nodiscard]] bool initialize(std::string* error_message = nullptr) override;
     [[nodiscard]] bool set_wallpaper(
-        const std::filesystem::path& path,
+        const WallpaperSource& source,
         std::string* error_message = nullptr
     ) override;
     [[nodiscard]] bool prepare_wallpaper(
-        const std::filesystem::path& path,
+        const WallpaperSource& source,
         std::string* error_message = nullptr
     ) override;
     [[nodiscard]] bool prepare_wallpaper_for_output(
-        const std::filesystem::path& path,
+        const WallpaperSource& source,
         const WallpaperOutputTarget& target,
         std::string* error_message = nullptr
     ) override;

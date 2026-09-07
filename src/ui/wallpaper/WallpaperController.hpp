@@ -37,15 +37,32 @@ public:
 
     [[nodiscard]] bool initialize(std::string* error_message = nullptr);
     [[nodiscard]] bool set_wallpaper(
+        const WallpaperSource& source,
+        std::string* error_message = nullptr
+    );
+    [[nodiscard]] bool set_wallpaper(
         const std::filesystem::path& path,
         std::string* error_message = nullptr
+    );
+    void set_wallpaper_async(
+        WallpaperSource source,
+        SetWallpaperCallback callback = {}
     );
     void set_wallpaper_async(
         std::filesystem::path path,
         SetWallpaperCallback callback = {}
     );
     void prepare_wallpaper_async(
+        WallpaperSource source,
+        SetWallpaperCallback callback = {}
+    );
+    void prepare_wallpaper_async(
         std::filesystem::path path,
+        SetWallpaperCallback callback = {}
+    );
+    void prepare_wallpaper_for_output_async(
+        WallpaperSource source,
+        WallpaperOutputTarget target,
         SetWallpaperCallback callback = {}
     );
     void prepare_wallpaper_for_output_async(
@@ -88,12 +105,12 @@ private:
     void clear_prepared_state() noexcept;
     void start_gtk_request(
         std::shared_ptr<WallpaperBackend> backend,
-        std::filesystem::path path,
+        WallpaperSource source,
         std::uint64_t generation,
         SetWallpaperCallback callback
     );
     void start_gtk_prepare_request(
-        std::filesystem::path path,
+        WallpaperSource source,
         std::optional<WallpaperOutputTarget> target,
         std::uint64_t generation,
         bool commit_after_prepare,
@@ -104,8 +121,8 @@ private:
     WallpaperBackendType requested_backend_ = WallpaperBackendType::Gtk;
     BackendFactory backend_factory_;
     std::shared_ptr<WallpaperBackend> backend_;
-    std::filesystem::path current_wallpaper_;
-    std::filesystem::path prepared_wallpaper_;
+    WallpaperSource current_wallpaper_;
+    WallpaperSource prepared_wallpaper_;
     std::optional<WallpaperOutputTarget> prepared_target_;
     std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
 };

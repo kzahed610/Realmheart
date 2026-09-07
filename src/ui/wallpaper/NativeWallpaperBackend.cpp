@@ -276,28 +276,52 @@ bool NativeWallpaperBackend::replay_last_committed_locked(
 }
 
 bool NativeWallpaperBackend::set_wallpaper(
-    const std::filesystem::path& path,
+    const WallpaperSource& source,
     std::string* error_message
 ) {
+    const auto path = source.external_path();
+    if (!path) {
+        set_error(
+            error_message,
+            "native wallpaper helper cannot consume owned bytes; Stage B protocol residual"
+        );
+        return false;
+    }
     std::lock_guard lock(operation_mutex_);
-    return set_wallpaper_locked(path, error_message);
+    return set_wallpaper_locked(*path, error_message);
 }
 
 bool NativeWallpaperBackend::prepare_wallpaper(
-    const std::filesystem::path& path,
+    const WallpaperSource& source,
     std::string* error_message
 ) {
+    const auto path = source.external_path();
+    if (!path) {
+        set_error(
+            error_message,
+            "native wallpaper helper cannot consume owned bytes; Stage B protocol residual"
+        );
+        return false;
+    }
     std::lock_guard lock(operation_mutex_);
-    return prepare_wallpaper_locked(path, error_message);
+    return prepare_wallpaper_locked(*path, error_message);
 }
 
 bool NativeWallpaperBackend::prepare_wallpaper_for_output(
-    const std::filesystem::path& path,
+    const WallpaperSource& source,
     const WallpaperOutputTarget& target,
     std::string* error_message
 ) {
+    const auto path = source.external_path();
+    if (!path) {
+        set_error(
+            error_message,
+            "native wallpaper helper cannot consume owned bytes; Stage B protocol residual"
+        );
+        return false;
+    }
     std::lock_guard lock(operation_mutex_);
-    return prepare_wallpaper_for_output_locked(path, target, error_message);
+    return prepare_wallpaper_for_output_locked(*path, target, error_message);
 }
 
 bool NativeWallpaperBackend::commit_prepared_wallpaper(

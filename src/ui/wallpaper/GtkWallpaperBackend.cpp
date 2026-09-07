@@ -2,6 +2,7 @@
 
 #include <gdk/gdk.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
+#include <gio/gio.h>
 
 #include <algorithm>
 #include <cstring>
@@ -95,7 +96,7 @@ bool GtkWallpaperBackend::initialize(std::string* error_message) {
 }
 
 bool GtkWallpaperBackend::set_wallpaper(
-    const std::filesystem::path& path,
+    const WallpaperSource& source,
     std::string* error_message
 ) {
     if (error_message != nullptr) error_message->clear();
@@ -103,12 +104,12 @@ bool GtkWallpaperBackend::set_wallpaper(
 
     prepared_wallpaper_.reset();
     prepared_target_.reset();
-    auto decoded = decode_wallpaper(path, error_message);
+    auto decoded = decode_wallpaper(source, error_message);
     return decoded && apply_decoded_wallpaper(std::move(*decoded), error_message);
 }
 
 bool GtkWallpaperBackend::prepare_wallpaper(
-    const std::filesystem::path& path,
+    const WallpaperSource& source,
     std::string* error_message
 ) {
     if (error_message != nullptr) error_message->clear();
@@ -116,13 +117,13 @@ bool GtkWallpaperBackend::prepare_wallpaper(
 
     prepared_wallpaper_.reset();
     prepared_target_.reset();
-    auto decoded = decode_wallpaper(path, error_message);
+    auto decoded = decode_wallpaper(source, error_message);
     if (!decoded) return false;
     return prepare_decoded_wallpaper(std::move(*decoded), error_message);
 }
 
 bool GtkWallpaperBackend::prepare_wallpaper_for_output(
-    const std::filesystem::path& path,
+    const WallpaperSource& source,
     const WallpaperOutputTarget& target,
     std::string* error_message
 ) {
@@ -135,7 +136,7 @@ bool GtkWallpaperBackend::prepare_wallpaper_for_output(
 
     prepared_wallpaper_.reset();
     prepared_target_.reset();
-    auto decoded = decode_wallpaper(path, error_message);
+    auto decoded = decode_wallpaper(source, error_message);
     if (!decoded) return false;
     return prepare_decoded_wallpaper_for_output(
         std::move(*decoded), target, error_message
@@ -172,27 +173,57 @@ GtkWallpaperBackend::decode_wallpaper(
     const std::filesystem::path& path,
     std::string* error_message
 ) {
-    if (error_message != nullptr) error_message->clear();
-    std::error_code file_error;
-    const auto file_size = std::filesystem::file_size(path, file_error);
-    if (file_error || file_size > kMaxSourceFileBytes) {
-        set_error(error_message, "wallpaper file exceeds the decode budget");
-        return std::nullopt;
-    }
+    return decode_wallpaper(WallpaperSource(path), error_message);
+}
 
-    int header_width = 0;
-    int header_height = 0;
-    if (gdk_pixbuf_get_file_info(
-            path.c_str(), &header_width, &header_height
-        ) == nullptr || header_width <= 0 || header_height <= 0 ||
-        static_cast<std::uintmax_t>(header_width) >
-            kMaxDecodedPixels / static_cast<std::uintmax_t>(header_height)) {
-        set_error(error_message, "wallpaper dimensions exceed the decode budget");
+std::optional<GtkWallpaperBackend::DecodedWallpaper>
+GtkWallpaperBackend::decode_wallpaper(
+    const WallpaperSource& source,
+    std::string* error_message
+) {
+    if (error_message != nullptr) error_message->clear();
+    if (source.empty()) {
+        set_error(error_message, "wallpaper source is empty");
         return std::nullopt;
     }
 
     GError* error = nullptr;
-    GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file(path.c_str(), &error);
+    GdkPixbuf* pixbuf = nullptr;
+    if (source.is_owned()) {
+        const std::string* bytes = source.bytes();
+        if (bytes == nullptr || bytes->empty() ||
+            bytes->size() > kMaxSourceFileBytes) {
+            set_error(error_message, "wallpaper source exceeds the decode budget");
+            return std::nullopt;
+        }
+        GBytes* encoded = g_bytes_new_static(bytes->data(), bytes->size());
+        GInputStream* stream = g_memory_input_stream_new_from_bytes(encoded);
+        pixbuf = gdk_pixbuf_new_from_stream(stream, nullptr, &error);
+        g_object_unref(stream);
+        g_bytes_unref(encoded);
+    } else if (const auto path = source.external_path()) {
+        std::error_code file_error;
+        const auto file_size = std::filesystem::file_size(*path, file_error);
+        if (file_error || file_size > kMaxSourceFileBytes) {
+            set_error(error_message, "wallpaper file exceeds the decode budget");
+            return std::nullopt;
+        }
+
+        int header_width = 0;
+        int header_height = 0;
+        if (gdk_pixbuf_get_file_info(
+                path->c_str(), &header_width, &header_height
+            ) == nullptr || header_width <= 0 || header_height <= 0 ||
+            static_cast<std::uintmax_t>(header_width) >
+                kMaxDecodedPixels / static_cast<std::uintmax_t>(header_height)) {
+            set_error(error_message, "wallpaper dimensions exceed the decode budget");
+            return std::nullopt;
+        }
+        pixbuf = gdk_pixbuf_new_from_file(path->c_str(), &error);
+    } else {
+        set_error(error_message, "wallpaper source is invalid");
+        return std::nullopt;
+    }
     if (pixbuf == nullptr) {
         set_error(
             error_message,

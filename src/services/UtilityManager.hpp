@@ -62,10 +62,15 @@ public:
     bool set_wallpaper(const std::string& path);
     bool choose_wallpaper();
     std::optional<services::Palette> generate_palette(
+        const services::WallpaperSource& source,
+        std::function<bool()> cancelled = {}
+    );
+    std::optional<services::Palette> generate_palette(
         const std::string& path,
         std::function<bool()> cancelled = {}
     );
     bool generate_colors(const std::string& path);
+    std::optional<services::WallpaperSource> load_wallpaper_source();
     std::string load_wallpaper_path();
 
     bool start_recording(const std::string& path);

@@ -2,12 +2,22 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
 namespace {
 
 using realmheart::ui::wallpaper::WallpaperTransaction;
+using realmheart::services::WallpaperSource;
+
+WallpaperSource source(const char* path) {
+    return WallpaperSource(std::filesystem::path(path));
+}
+
+std::string path_string(const WallpaperSource& value) {
+    return value.external_path()->string();
+}
 
 TEST(WallpaperTransactionTest, ReportsSuccessOnlyAfterPersistence) {
     std::vector<std::string> steps;
@@ -17,19 +27,19 @@ TEST(WallpaperTransactionTest, ReportsSuccessOnlyAfterPersistence) {
     int persist_calls = 0;
 
     WallpaperTransaction::run({
-        "/wallpapers/new.png",
-        "/wallpapers/old.png",
+        source("/wallpapers/new.png"),
+        source("/wallpapers/old.png"),
         [&steps](const auto& path, auto callback) {
-            steps.push_back("apply:" + path.string());
+            steps.push_back("apply:" + path_string(path));
             callback(true, {});
         },
         [&steps](const auto& path, auto callback) {
-            steps.push_back("rollback:" + path.string());
+            steps.push_back("rollback:" + path_string(path));
             callback(true, {});
         },
         [&steps, &persist_calls](const auto& path, std::string* error_message) {
             ++persist_calls;
-            steps.push_back("persist:" + path.string());
+            steps.push_back("persist:" + path_string(path));
             if (error_message != nullptr) error_message->clear();
             return true;
         },
@@ -56,14 +66,14 @@ TEST(WallpaperTransactionTest, PersistenceFailureRollsBackAndStillReportsFailure
     std::string error;
 
     WallpaperTransaction::run({
-        "/wallpapers/new.png",
-        "/wallpapers/old.png",
+        source("/wallpapers/new.png"),
+        source("/wallpapers/old.png"),
         [&steps](const auto&, auto callback) {
             steps.push_back("apply");
             callback(true, {});
         },
         [&steps](const auto& path, auto callback) {
-            steps.push_back("rollback:" + path.string());
+            steps.push_back("rollback:" + path_string(path));
             callback(true, {});
         },
         [](const auto&, std::string* error_message) {
@@ -92,7 +102,7 @@ TEST(WallpaperTransactionTest, PersistenceFailureWithoutPreviousStateIsExplicit)
     std::string error;
 
     WallpaperTransaction::run({
-        "/wallpapers/new.png",
+        source("/wallpapers/new.png"),
         std::nullopt,
         [](const auto&, auto callback) { callback(true, {}); },
         [&rollback_calls](const auto&, auto callback) {
@@ -117,7 +127,7 @@ TEST(WallpaperTransactionTest, DuplicateVisualCallbacksAreExplicitlySuppressed) 
     int completion_calls = 0;
 
     WallpaperTransaction::run({
-        "/wallpapers/new.png",
+        source("/wallpapers/new.png"),
         std::nullopt,
         [](const auto&, auto callback) {
             callback(true, {});
