@@ -3,6 +3,7 @@
 #include "services/Notifications.hpp"
 
 #include <deque>
+#include <functional>
 #include <gtk/gtk.h>
 #include <memory>
 
@@ -17,7 +18,11 @@ public:
     explicit NotificationToast(GtkApplication* app, int monitor_index = -1);
     ~NotificationToast();
 
+    using CloseHandler = std::function<bool(std::uint32_t, std::uint32_t)>;
+
     void show(const services::NotificationEntry& entry, int timeout_ms);
+    void close(std::uint32_t id, std::uint32_t reason);
+    void set_close_handler(CloseHandler handler) { close_handler_ = std::move(handler); }
     void dismiss();
 
     GtkWidget* get_window() const { return window_; }
@@ -30,6 +35,8 @@ private:
 
     void show_next();
     void hide_current();
+    void update_current(const QueuedToast& toast);
+    void request_close(std::uint32_t reason);
     void schedule_timeout();
 
     static gboolean dismiss_timeout(gpointer data);
@@ -46,7 +53,9 @@ private:
 
     guint timeout_id_ = 0;
     int current_timeout_ms_ = 4000;
+    std::uint32_t current_id_ = 0;
     std::deque<QueuedToast> queue_;
+    CloseHandler close_handler_;
     bool visible_ = false;
     bool closing_ = false;
     bool destroying_ = false;

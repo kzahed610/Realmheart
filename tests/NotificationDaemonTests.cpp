@@ -100,9 +100,9 @@ int main() {
             nullptr,
             &error
         );
-        require(reply != nullptr, error != nullptr ? error->message : "CloseNotification failed");
+        require(reply == nullptr, "CloseNotification must reject an expired id");
+        require(error != nullptr, "invalid CloseNotification must return a D-Bus error");
         g_clear_error(&error);
-        g_variant_unref(reply);
         require(history.snapshot().entries.size() == 1, "CloseNotification must preserve sidebar history");
 
         g_object_unref(connection);

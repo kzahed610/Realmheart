@@ -11,6 +11,8 @@
 
 struct _GDBusConnection;
 using GDBusConnection = _GDBusConnection;
+struct _GMainContext;
+using GMainContext = _GMainContext;
 
 namespace realmheart::services {
 
@@ -77,6 +79,7 @@ public:
     // subscribers immediately. A caller may still keep a slow fallback poll
     // for bus reconnect edge cases.
     Subscription subscribe(ChangedCallback callback);
+    [[nodiscard]] bool signal_monitor_active() const;
 
 private:
     struct SubscriberRegistry {
@@ -101,6 +104,7 @@ private:
     unsigned int signal_reconnect_attempts_ = 0;
     unsigned int properties_subscription_id_ = 0;
     unsigned int names_subscription_id_ = 0;
+    GMainContext* signal_context_ = nullptr;
     std::shared_ptr<SubscriberRegistry> subscribers_ = std::make_shared<SubscriberRegistry>();
 };
 

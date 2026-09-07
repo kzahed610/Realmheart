@@ -405,10 +405,13 @@ public:
         runtime_async_state_->owner.store(this);
         now_playing_async_state_->owner.store(this);
 
-        notification_server_.set_notification_handler([this](const auto& entry) {
+        notification_server_.set_transient_handler([this](const auto& entry, int timeout_ms) {
             const int monitor_index = invocation_monitor_index();
             ensure_toast_overlay(monitor_index);
-            toast_->show(entry, 4000);
+            toast_->show(entry, timeout_ms);
+        });
+        notification_server_.set_closed_observer([this](std::uint32_t id, std::uint32_t reason) {
+            if (toast_ != nullptr) toast_->close(id, reason);
         });
 
         if (!notification_daemon_.start()) {
@@ -478,8 +481,14 @@ public:
         ++runtime_async_state_->theme_generation;
         now_playing_async_state_->alive.store(false);
         now_playing_async_state_->owner.store(nullptr);
+        if (now_playing_monitor_retry_id_ != 0) {
+            g_source_remove(now_playing_monitor_retry_id_);
+            now_playing_monitor_retry_id_ = 0;
+        }
         now_playing_subscription_.reset();
         notification_server_.set_notification_handler({});
+        notification_server_.set_transient_handler({});
+        notification_server_.set_closed_observer({});
         notification_daemon_.stop();
         ++mana_cores_launch_generation_;
         if (mana_cores_selector_ != nullptr) {
@@ -1787,13 +1796,49 @@ private:
 
     void start_now_playing_monitor() {
         if (now_playing_monitor_started_) return;
-        now_playing_monitor_started_ = true;
         now_playing_subscription_ = media_->subscribe([state = now_playing_async_state_] {
             ShellRuntime* owner = state->owner.load();
             if (!state->alive.load() || owner == nullptr) return;
             owner->request_now_playing_refresh();
         });
+        now_playing_monitor_started_ = media_->signal_monitor_active();
+        if (now_playing_monitor_started_) {
+            now_playing_monitor_retry_attempts_ = 0;
+        } else {
+            schedule_now_playing_monitor_retry();
+        }
         request_now_playing_refresh();
+    }
+
+    void schedule_now_playing_monitor_retry() {
+        if (now_playing_monitor_retry_id_ != 0 ||
+            now_playing_monitor_retry_attempts_ >= 5) {
+            return;
+        }
+        const guint delay_ms = std::min(
+            8000U,
+            1000U << std::min(now_playing_monitor_retry_attempts_, 3U)
+        );
+        now_playing_monitor_retry_id_ = g_timeout_add_full(
+            G_PRIORITY_DEFAULT,
+            delay_ms,
+            +[](gpointer raw) -> gboolean {
+                auto* self = static_cast<ShellRuntime*>(raw);
+                self->now_playing_monitor_retry_id_ = 0;
+                if (!self->now_playing_async_state_->alive.load()) {
+                    return G_SOURCE_REMOVE;
+                }
+                ++self->now_playing_monitor_retry_attempts_;
+                self->now_playing_monitor_started_ = false;
+                self->start_now_playing_monitor();
+                if (!self->now_playing_monitor_started_) {
+                    self->schedule_now_playing_monitor_retry();
+                }
+                return G_SOURCE_REMOVE;
+            },
+            this,
+            nullptr
+        );
     }
 
     void apply_now_playing_media(std::optional<services::MediaInfo> info) {
@@ -2334,6 +2379,9 @@ private:
         if (!toast_) {
             toast_monitor_index_ = monitor_index;
             toast_ = std::make_unique<NotificationToast>(application_, monitor_index);
+            toast_->set_close_handler([this](std::uint32_t id, std::uint32_t reason) {
+                return notification_server_.close(id, reason);
+            });
         }
     }
 
@@ -3060,6 +3108,8 @@ private:
     std::shared_ptr<RuntimeAsyncState> runtime_async_state_ =
         std::make_shared<RuntimeAsyncState>();
     bool now_playing_monitor_started_ = false;
+    guint now_playing_monitor_retry_id_ = 0;
+    unsigned int now_playing_monitor_retry_attempts_ = 0;
     bool now_playing_seeded_ = false;
     bool system_osd_visible_ = false;
     std::string last_now_playing_identity_;

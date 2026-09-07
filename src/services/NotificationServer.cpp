@@ -14,11 +14,13 @@ std::uint32_t NotificationServer::notify(
     std::string app_name,
     std::uint32_t replaces_id,
     std::string summary,
-    std::string body
+    std::string body,
+    int timeout_ms
 ) {
-    const std::uint32_t id = replaces_id != 0 && contains(replaces_id)
-        ? replaces_id
-        : allocate_id();
+    // Freedesktop notification clients own the replacement identity: a
+    // non-zero replaces_id is returned unchanged even when the old entry has
+    // already expired or been evicted.
+    const std::uint32_t id = replaces_id != 0 ? replaces_id : allocate_id();
 
     if (const auto existing = active_ids_.find(id); existing != active_ids_.end()) {
         active_order_.erase(existing->second);
@@ -28,6 +30,7 @@ std::uint32_t NotificationServer::notify(
         active_order_.pop_front();
         active_ids_.erase(retired);
         if (closed_handler_) closed_handler_(retired, 4);
+        if (closed_observer_) closed_observer_(retired, 4);
     }
 
     if (max_active_ != 0) {
@@ -44,10 +47,13 @@ std::uint32_t NotificationServer::notify(
     bound_notification_payload(entry);
     history_.upsert(entry);
     if (notification_handler_) notification_handler_(entry);
+    if (transient_handler_) {
+        transient_handler_(entry, timeout_ms < 0 ? 5000 : timeout_ms);
+    }
     return id;
 }
 
-bool NotificationServer::close(std::uint32_t id) {
+bool NotificationServer::close(std::uint32_t id, std::uint32_t reason) {
     // Closing a desktop notification ends its transient toast lifecycle, but
     // Realmheart's sidebar is notification history. History is only removed
     // by the user's dismiss/clear actions inside the sidebar.
@@ -55,6 +61,8 @@ bool NotificationServer::close(std::uint32_t id) {
     if (existing == active_ids_.end()) return false;
     active_order_.erase(existing->second);
     active_ids_.erase(existing);
+    if (closed_handler_) closed_handler_(id, reason);
+    if (closed_observer_) closed_observer_(id, reason);
     return true;
 }
 
@@ -62,8 +70,16 @@ void NotificationServer::set_notification_handler(NotificationHandler handler) {
     notification_handler_ = std::move(handler);
 }
 
+void NotificationServer::set_transient_handler(TransientHandler handler) {
+    transient_handler_ = std::move(handler);
+}
+
 void NotificationServer::set_closed_handler(ClosedHandler handler) {
     closed_handler_ = std::move(handler);
+}
+
+void NotificationServer::set_closed_observer(ClosedHandler observer) {
+    closed_observer_ = std::move(observer);
 }
 
 bool NotificationServer::contains(std::uint32_t id) const {

@@ -6,6 +6,8 @@
 #include <gio/gio.h>
 
 #include <cstdint>
+#include <condition_variable>
+#include <mutex>
 #include <unordered_map>
 
 namespace realmheart::services {
@@ -18,6 +20,8 @@ public:
     NotificationDaemon(const NotificationDaemon&) = delete;
     NotificationDaemon& operator=(const NotificationDaemon&) = delete;
 
+    // start() captures the caller's thread-default context. stop() marshals
+    // cleanup to that same context when invoked from another thread.
     bool start();
     void stop();
 
@@ -49,6 +53,8 @@ private:
     );
 
     void register_object(GDBusConnection* connection);
+    void reset_connection(GDBusConnection* connection = nullptr);
+    void stop_on_context();
     void handle_method_call(
         GDBusConnection* connection,
         const gchar* method_name,
@@ -66,6 +72,9 @@ private:
     GDBusConnection* connection_ = nullptr;
     GDBusNodeInfo* node_info_ = nullptr;
     std::unordered_map<std::uint32_t, guint> expiration_sources_;
+    GMainContext* context_ = nullptr;
+    std::mutex lifecycle_mutex_;
+    bool stopping_ = false;
 };
 
 } // namespace realmheart::services

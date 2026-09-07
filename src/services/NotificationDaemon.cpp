@@ -61,10 +61,19 @@ NotificationDaemon::NotificationDaemon(NotificationServer& server, NotificationH
 NotificationDaemon::~NotificationDaemon() {
     server_.set_closed_handler({});
     stop();
+    if (context_ != nullptr) {
+        g_main_context_unref(context_);
+        context_ = nullptr;
+    }
 }
 
 bool NotificationDaemon::start() {
     if (owner_id_ != 0) return true;
+
+    std::lock_guard lifecycle_lock(lifecycle_mutex_);
+    if (owner_id_ != 0) return true;
+    stopping_ = false;
+    if (context_ == nullptr) context_ = g_main_context_ref_thread_default();
 
     GError* error = nullptr;
     node_info_ = g_dbus_node_info_new_for_xml(kIntrospectionXml, &error);
@@ -72,6 +81,7 @@ bool NotificationDaemon::start() {
         std::cerr << "Notification DBus introspection parse failed: "
                   << (error != nullptr ? error->message : "unknown error") << '\n';
         g_clear_error(&error);
+        g_clear_pointer(&context_, g_main_context_unref);
         return false;
     }
 
@@ -85,10 +95,55 @@ bool NotificationDaemon::start() {
         this,
         nullptr
     );
-    return owner_id_ != 0;
+    if (owner_id_ == 0) {
+        g_clear_pointer(&node_info_, g_dbus_node_info_unref);
+        g_clear_pointer(&context_, g_main_context_unref);
+        return false;
+    }
+    return true;
 }
 
 void NotificationDaemon::stop() {
+    GMainContext* context = nullptr;
+    {
+        std::lock_guard lifecycle_lock(lifecycle_mutex_);
+        context = context_;
+        if (owner_id_ == 0 && node_info_ == nullptr) return;
+    }
+
+    if (context == nullptr || g_main_context_is_owner(context)) {
+        stop_on_context();
+        return;
+    }
+
+    struct StopRequest {
+        explicit StopRequest(NotificationDaemon* owner) : daemon(owner) {}
+        NotificationDaemon* daemon = nullptr;
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool complete = false;
+    } request(this);
+    g_main_context_invoke_full(
+        context,
+        G_PRIORITY_DEFAULT,
+        +[](gpointer raw) -> gboolean {
+            auto* request = static_cast<StopRequest*>(raw);
+            request->daemon->stop_on_context();
+            {
+                std::lock_guard lock(request->mutex);
+                request->complete = true;
+            }
+            request->condition.notify_one();
+            return G_SOURCE_REMOVE;
+        },
+        &request,
+        nullptr
+    );
+    std::unique_lock lock(request.mutex);
+    request.condition.wait(lock, [&request] { return request.complete; });
+}
+
+void NotificationDaemon::stop_on_context() {
     for (const auto& [_, source] : expiration_sources_) {
         if (source != 0) g_source_remove(source);
     }
@@ -100,10 +155,14 @@ void NotificationDaemon::stop() {
     }
     if (connection_ != nullptr && registration_id_ != 0) {
         g_dbus_connection_unregister_object(connection_, registration_id_);
-        registration_id_ = 0;
     }
-    g_clear_object(&connection_);
+    registration_id_ = 0;
+    reset_connection();
     g_clear_pointer(&node_info_, g_dbus_node_info_unref);
+    std::lock_guard lifecycle_lock(lifecycle_mutex_);
+    stopping_ = true;
+    GMainContext* context = std::exchange(context_, nullptr);
+    if (context != nullptr) g_main_context_unref(context);
 }
 
 void NotificationDaemon::on_bus_acquired(
@@ -115,19 +174,25 @@ void NotificationDaemon::on_bus_acquired(
 }
 
 void NotificationDaemon::on_name_acquired(
-    GDBusConnection*,
+    GDBusConnection* connection,
     const gchar*,
     gpointer user_data
 ) {
-    static_cast<NotificationDaemon*>(user_data)->history_.set_capture_active(true);
+    auto* daemon = static_cast<NotificationDaemon*>(user_data);
+    if (!daemon->stopping_ && daemon->connection_ == connection &&
+        daemon->registration_id_ != 0) {
+        daemon->history_.set_capture_active(true);
+    }
 }
 
 void NotificationDaemon::on_name_lost(
-    GDBusConnection*,
+    GDBusConnection* connection,
     const gchar*,
     gpointer user_data
 ) {
-    static_cast<NotificationDaemon*>(user_data)->history_.set_capture_active(false);
+    auto* daemon = static_cast<NotificationDaemon*>(user_data);
+    daemon->history_.set_capture_active(false);
+    if (!daemon->stopping_) daemon->reset_connection(connection);
 }
 
 void NotificationDaemon::on_method_call(
@@ -149,7 +214,12 @@ void NotificationDaemon::on_method_call(
 }
 
 void NotificationDaemon::register_object(GDBusConnection* connection) {
-    if (registration_id_ != 0 || node_info_ == nullptr) return;
+    if (stopping_ || connection == nullptr || node_info_ == nullptr) return;
+
+    // A bus-acquired callback is a fresh registration opportunity. The old
+    // registration ID is scoped to the old connection and must never gate the
+    // new one.
+    reset_connection();
 
     static const GDBusInterfaceVTable interface_vtable = {
         on_method_call,
@@ -178,14 +248,40 @@ void NotificationDaemon::register_object(GDBusConnection* connection) {
     connection_ = G_DBUS_CONNECTION(g_object_ref(connection));
 }
 
+void NotificationDaemon::reset_connection(GDBusConnection* connection) {
+    if (connection != nullptr && connection_ != connection) return;
+    if (connection_ != nullptr && registration_id_ != 0) {
+        g_dbus_connection_unregister_object(connection_, registration_id_);
+    }
+    registration_id_ = 0;
+    g_clear_object(&connection_);
+}
+
 void NotificationDaemon::handle_method_call(
     GDBusConnection* connection,
     const gchar* method_name,
     GVariant* parameters,
     GDBusMethodInvocation* invocation
 ) {
+    static_cast<void>(connection);
+    if (parameters == nullptr || method_name == nullptr) {
+        g_dbus_method_invocation_return_dbus_error(
+            invocation,
+            "org.freedesktop.DBus.Error.InvalidArgs",
+            "Malformed notification method call"
+        );
+        return;
+    }
     const std::string_view method(method_name);
     if (method == "GetCapabilities") {
+        if (!g_variant_is_of_type(parameters, G_VARIANT_TYPE("()"))) {
+            g_dbus_method_invocation_return_dbus_error(
+                invocation,
+                "org.freedesktop.DBus.Error.InvalidArgs",
+                "GetCapabilities expects no arguments"
+            );
+            return;
+        }
         const gchar* capabilities[] = {"body", nullptr};
         g_dbus_method_invocation_return_value(
             invocation,
@@ -195,6 +291,14 @@ void NotificationDaemon::handle_method_call(
     }
 
     if (method == "GetServerInformation") {
+        if (!g_variant_is_of_type(parameters, G_VARIANT_TYPE("()"))) {
+            g_dbus_method_invocation_return_dbus_error(
+                invocation,
+                "org.freedesktop.DBus.Error.InvalidArgs",
+                "GetServerInformation expects no arguments"
+            );
+            return;
+        }
         g_dbus_method_invocation_return_value(
             invocation,
             g_variant_new("(ssss)", "Realmheart", "Zahed", "0.1.0", "1.2")
@@ -203,6 +307,14 @@ void NotificationDaemon::handle_method_call(
     }
 
     if (method == "Notify") {
+        if (!g_variant_is_of_type(parameters, G_VARIANT_TYPE("(susssasa{sv}i)"))) {
+            g_dbus_method_invocation_return_dbus_error(
+                invocation,
+                "org.freedesktop.DBus.Error.InvalidArgs",
+                "Notify arguments have an invalid signature"
+            );
+            return;
+        }
         const gchar* app_name = nullptr;
         const gchar* app_icon = nullptr;
         const gchar* summary = nullptr;
@@ -227,19 +339,39 @@ void NotificationDaemon::handle_method_call(
         g_variant_unref(actions);
         g_variant_unref(hints);
 
-        const auto id = server_.notify(app_name, replaces_id, summary, body);
-        cancel_expiration(id);
         const int effective_timeout = expire_timeout < 0 ? 5000 : expire_timeout;
+        const auto id = server_.notify(
+            app_name,
+            replaces_id,
+            summary,
+            body,
+            effective_timeout
+        );
+        cancel_expiration(id);
         if (effective_timeout > 0) schedule_expiration(id, effective_timeout);
         g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", id));
         return;
     }
 
     if (method == "CloseNotification") {
+        if (!g_variant_is_of_type(parameters, G_VARIANT_TYPE("(u)"))) {
+            g_dbus_method_invocation_return_dbus_error(
+                invocation,
+                "org.freedesktop.DBus.Error.InvalidArgs",
+                "CloseNotification expects one notification id"
+            );
+            return;
+        }
         guint32 id = 0;
         g_variant_get(parameters, "(u)", &id);
-        cancel_expiration(id);
-        if (server_.close(id)) emit_closed(connection, id, 3);
+        if (!server_.close(id, 3)) {
+            g_dbus_method_invocation_return_dbus_error(
+                invocation,
+                "org.freedesktop.DBus.Error.InvalidArgs",
+                "Notification id is not active"
+            );
+            return;
+        }
         g_dbus_method_invocation_return_value(invocation, nullptr);
         return;
     }
@@ -257,22 +389,24 @@ void NotificationDaemon::schedule_expiration(std::uint32_t id, int timeout_ms) {
         NotificationDaemon* daemon;
         std::uint32_t id;
     };
-    const guint source = g_timeout_add_full(
-        G_PRIORITY_DEFAULT,
-        static_cast<guint>(timeout_ms),
+    GSource* source = g_timeout_source_new(static_cast<guint>(timeout_ms));
+    g_source_set_priority(source, G_PRIORITY_DEFAULT);
+    g_source_set_callback(
+        source,
         +[](gpointer raw) -> gboolean {
             auto* expiration = static_cast<Expiration*>(raw);
             auto* daemon = expiration->daemon;
             daemon->expiration_sources_.erase(expiration->id);
-            if (daemon->server_.close(expiration->id) && daemon->connection_ != nullptr) {
-                daemon->emit_closed(daemon->connection_, expiration->id, 1);
-            }
+            if (!daemon->stopping_) daemon->server_.close(expiration->id, 1);
             return G_SOURCE_REMOVE;
         },
         new Expiration{this, id},
         +[](gpointer raw) { delete static_cast<Expiration*>(raw); }
     );
-    expiration_sources_[id] = source;
+    const guint source_id = g_source_attach(source, context_);
+    g_source_unref(source);
+    if (source_id == 0) return;
+    expiration_sources_[id] = source_id;
 }
 
 void NotificationDaemon::cancel_expiration(std::uint32_t id) {
@@ -287,6 +421,10 @@ void NotificationDaemon::emit_closed(
     std::uint32_t id,
     std::uint32_t reason
 ) {
+    if (connection == nullptr || connection != connection_ ||
+        registration_id_ == 0 || g_dbus_connection_is_closed(connection)) {
+        return;
+    }
     g_dbus_connection_emit_signal(
         connection,
         nullptr,

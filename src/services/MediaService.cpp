@@ -18,6 +18,7 @@ constexpr const char* kObjectPath = "/org/mpris/MediaPlayer2";
 constexpr const char* kPlayerInterface = "org.mpris.MediaPlayer2.Player";
 constexpr int kDbusTimeoutMs = 750;
 constexpr guint kSignalReconnectDelayMs = 1000;
+constexpr guint kMaxSignalReconnectDelayMs = 8000;
 constexpr unsigned int kMaxSignalReconnectAttempts = 5;
 constexpr std::size_t kMaxPlayers = 16;
 constexpr auto kDiscoveryBudget = std::chrono::milliseconds(1500);
@@ -390,9 +391,14 @@ void MediaService::schedule_signal_reconnect() {
         signal_reconnect_attempts_ >= kMaxSignalReconnectAttempts) {
         return;
     }
-    signal_reconnect_id_ = g_timeout_add_full(
-        G_PRIORITY_DEFAULT,
-        kSignalReconnectDelayMs,
+    const guint delay_ms = std::min(
+        kMaxSignalReconnectDelayMs,
+        kSignalReconnectDelayMs << std::min(signal_reconnect_attempts_, 3U)
+    );
+    GSource* source = g_timeout_source_new(delay_ms);
+    g_source_set_priority(source, G_PRIORITY_DEFAULT);
+    g_source_set_callback(
+        source,
         +[](gpointer raw) -> gboolean {
             auto* self = static_cast<MediaService*>(raw);
             self->signal_reconnect_id_ = 0;
@@ -407,6 +413,8 @@ void MediaService::schedule_signal_reconnect() {
         this,
         nullptr
     );
+    signal_reconnect_id_ = g_source_attach(source, signal_context_);
+    g_source_unref(source);
 }
 
 MediaService::~MediaService() {
@@ -415,6 +423,10 @@ MediaService::~MediaService() {
         signal_reconnect_id_ = 0;
     }
     reset_signal_monitor();
+    if (signal_context_ != nullptr) {
+        g_main_context_unref(signal_context_);
+        signal_context_ = nullptr;
+    }
 }
 
 bool MediaService::ensure_signal_monitor() {
@@ -442,7 +454,8 @@ bool MediaService::ensure_signal_monitor() {
 
     GError* error = nullptr;
     signal_connection_ = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
-    if (signal_connection_ == nullptr) {
+    if (signal_connection_ == nullptr || g_dbus_connection_is_closed(signal_connection_)) {
+        if (signal_connection_ != nullptr) reset_signal_monitor();
         g_clear_error(&error);
         schedule_signal_reconnect();
         return false;
@@ -539,11 +552,19 @@ bool MediaService::ensure_signal_monitor() {
 
 MediaService::Subscription MediaService::subscribe(ChangedCallback callback) {
     if (!callback) return {};
+    if (signal_context_ == nullptr) signal_context_ = g_main_context_ref_thread_default();
     static_cast<void>(ensure_signal_monitor());
     std::lock_guard lock(subscribers_->mutex);
     const std::size_t id = subscribers_->next_id++;
     subscribers_->callbacks.emplace(id, std::move(callback));
     return Subscription{subscribers_, id};
+}
+
+bool MediaService::signal_monitor_active() const {
+    return signal_connection_ != nullptr &&
+        !g_dbus_connection_is_closed(signal_connection_) &&
+        properties_subscription_id_ != 0 &&
+        names_subscription_id_ != 0;
 }
 
 void MediaService::notify_changed() {

@@ -600,7 +600,7 @@ NotificationToast::NotificationToast(GtkApplication* app, int monitor_index)
         close_button_,
         "clicked",
         G_CALLBACK(+[](GtkButton*, gpointer data) {
-            static_cast<NotificationToast*>(data)->dismiss();
+            static_cast<NotificationToast*>(data)->request_close(2);
         }),
         this
     );
@@ -674,9 +674,42 @@ void NotificationToast::show(
     int timeout_ms
 ) {
     constexpr std::size_t max_queue = 20;
+
+    if (visible_ && current_id_ == entry.id) {
+        update_current({entry, timeout_ms});
+        closing_ = false;
+        notification_reveal_set_revealed(as_notification_reveal(reveal_), true);
+        schedule_timeout();
+        return;
+    }
+    for (auto& queued : queue_) {
+        if (queued.entry.id == entry.id) {
+            queued = {entry, timeout_ms};
+            return;
+        }
+    }
     if (queue_.size() >= max_queue) queue_.pop_front();
     queue_.push_back({entry, timeout_ms});
     if (!visible_) show_next();
+}
+
+void NotificationToast::close(std::uint32_t id, std::uint32_t) {
+    queue_.erase(
+        std::remove_if(
+            queue_.begin(),
+            queue_.end(),
+            [id](const QueuedToast& queued) { return queued.entry.id == id; }
+        ),
+        queue_.end()
+    );
+    if (!visible_ || current_id_ != id || closing_ || reveal_ == nullptr) return;
+
+    if (timeout_id_ != 0) {
+        g_source_remove(timeout_id_);
+        timeout_id_ = 0;
+    }
+    closing_ = true;
+    notification_reveal_set_revealed(as_notification_reveal(reveal_), false);
 }
 
 void NotificationToast::show_next() {
@@ -684,15 +717,10 @@ void NotificationToast::show_next() {
 
     QueuedToast toast = std::move(queue_.front());
     queue_.pop_front();
+    current_id_ = toast.entry.id;
     current_timeout_ms_ = toast.timeout_ms;
 
-    const std::string app_name = display_app_name(toast.entry);
-    const std::string summary = display_summary(toast.entry);
-    gtk_label_set_text(GTK_LABEL(label_app_), app_name.c_str());
-    gtk_label_set_text(GTK_LABEL(label_summary_), summary.c_str());
-    gtk_label_set_text(GTK_LABEL(label_body_), toast.entry.body.c_str());
-    gtk_widget_set_visible(label_body_, !toast.entry.body.empty());
-
+    update_current(toast);
     notification_reveal_set_revealed_immediately(
         as_notification_reveal(reveal_),
         false
@@ -701,6 +729,17 @@ void NotificationToast::show_next() {
     closing_ = false;
     gtk_window_present(GTK_WINDOW(window_));
     notification_reveal_set_revealed(as_notification_reveal(reveal_), true);
+}
+
+void NotificationToast::update_current(const QueuedToast& toast) {
+    current_id_ = toast.entry.id;
+    current_timeout_ms_ = toast.timeout_ms;
+    const std::string app_name = display_app_name(toast.entry);
+    const std::string summary = display_summary(toast.entry);
+    gtk_label_set_text(GTK_LABEL(label_app_), app_name.c_str());
+    gtk_label_set_text(GTK_LABEL(label_summary_), summary.c_str());
+    gtk_label_set_text(GTK_LABEL(label_body_), toast.entry.body.c_str());
+    gtk_widget_set_visible(label_body_, !toast.entry.body.empty());
 }
 
 void NotificationToast::schedule_timeout() {
@@ -720,7 +759,7 @@ void NotificationToast::schedule_timeout() {
 gboolean NotificationToast::dismiss_timeout(gpointer data) {
     auto* self = static_cast<NotificationToast*>(data);
     self->timeout_id_ = 0;
-    self->dismiss();
+    self->request_close(1);
     return G_SOURCE_REMOVE;
 }
 
@@ -731,6 +770,7 @@ void NotificationToast::hide_current() {
     }
     visible_ = false;
     closing_ = false;
+    current_id_ = 0;
     if (reveal_ != nullptr) {
         notification_reveal_set_revealed_immediately(
             as_notification_reveal(reveal_),
@@ -741,6 +781,10 @@ void NotificationToast::hide_current() {
 }
 
 void NotificationToast::dismiss() {
+    request_close(2);
+}
+
+void NotificationToast::request_close(std::uint32_t reason) {
     if (timeout_id_ != 0) {
         g_source_remove(timeout_id_);
         timeout_id_ = 0;
@@ -750,6 +794,11 @@ void NotificationToast::dismiss() {
         return;
     }
     if (!visible_ || closing_ || reveal_ == nullptr) return;
+
+    if (current_id_ != 0 && close_handler_ &&
+        close_handler_(current_id_, reason)) {
+        return;
+    }
 
     closing_ = true;
     notification_reveal_set_revealed(as_notification_reveal(reveal_), false);
