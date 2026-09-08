@@ -19,6 +19,7 @@ namespace realmheart::services {
 namespace {
 
 std::atomic<std::uint64_t> temporary_sequence{0};
+constexpr auto shutdown_grace = std::chrono::milliseconds{300};
 
 enum class WriteResult {
     Committed,
@@ -108,7 +109,10 @@ LoadResult read_note_file(
     content.clear();
     if (!path.is_absolute() || path.filename().empty()) return LoadResult::Failed;
 
-    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    const int fd = ::open(
+        path.c_str(),
+        O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW
+    );
     if (fd < 0) return errno == ENOENT ? LoadResult::Missing : LoadResult::Failed;
 
     struct stat metadata{};
@@ -348,9 +352,13 @@ NotesService::~NotesService() {
 
     if (worker_.joinable()) {
         std::unique_lock lock(state->mutex);
+        // POSIX filesystem calls do not provide cancellation. Keep the shared
+        // state alive if the worker exceeds this grace period so a pending
+        // generation can still finish; process termination remains an explicit
+        // durability boundary rather than a falsely claimed cancellation.
         const bool exited = state->stopped_cv.wait_for(
             lock,
-            std::chrono::milliseconds{300},
+            shutdown_grace,
             [&] { return state->worker_exited; }
         );
         lock.unlock();

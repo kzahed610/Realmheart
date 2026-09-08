@@ -2,13 +2,17 @@
 
 #include <chrono>
 #include <atomic>
+#include <cerrno>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
+#include <signal.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace {
 
@@ -54,9 +58,13 @@ void test_destructor_flushes_pending_content() {
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root);
 
+    const auto shutdown_start = std::chrono::steady_clock::now();
     {
         realmheart::services::NotesService service(path, 5s);
         service.set_content("survives shutdown");
+    }
+    if (std::chrono::steady_clock::now() - shutdown_start > 1s) {
+        fail("normal pending shutdown exceeded its bounded teardown contract");
     }
 
     if (read_file(path) != "survives shutdown") {
@@ -160,6 +168,45 @@ void test_load_failures_never_become_empty_overwrites() {
     std::filesystem::remove_all(root);
 }
 
+void test_non_regular_paths_return_promptly() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-notes-non-regular-test";
+    const auto fifo = root / "notes.fifo";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    if (::mkfifo(fifo.c_str(), 0600) != 0) fail("could not create FIFO fixture");
+
+    const pid_t child = ::fork();
+    if (child < 0) fail("could not fork bounded FIFO probe");
+    if (child == 0) {
+        realmheart::services::NotesService service(fifo, 20ms);
+        _exit(service.save_state() == realmheart::services::NotesSaveState::LoadFailed ? 0 : 1);
+    }
+
+    int status = 0;
+    bool exited = false;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        const pid_t result = ::waitpid(child, &status, WNOHANG);
+        if (result == child) {
+            exited = true;
+            break;
+        }
+        if (result < 0 && errno != EINTR) break;
+        std::this_thread::sleep_for(10ms);
+    }
+    if (!exited) {
+        ::kill(child, SIGKILL);
+        ::waitpid(child, &status, 0);
+        std::filesystem::remove_all(root);
+        fail("NotesService construction blocked on a FIFO");
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        std::filesystem::remove_all(root);
+        fail("FIFO activation did not report a bounded load failure");
+    }
+
+    std::filesystem::remove_all(root);
+}
+
 void test_malformed_and_oversized_notes_are_rejected() {
     const auto root = std::filesystem::temp_directory_path() / "realmheart-notes-validation-test";
     const auto malformed = root / "malformed.txt";
@@ -223,6 +270,36 @@ void test_relative_note_paths_are_rejected() {
     if (service.set_content("must not escape")) {
         fail("relative note path accepted content");
     }
+}
+
+void test_newer_generation_wins_over_concurrent_save() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-notes-generation-test";
+    const auto path = root / "notes.txt";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    std::ofstream(path) << "seed";
+
+    const std::string older_content(256 * 1024, 'o');
+    for (int attempt = 0; attempt < 6; ++attempt) {
+        realmheart::services::NotesService service(path, 10ms);
+        if (!service.set_content(older_content)) fail("could not prepare stale-generation save");
+
+        std::atomic<bool> save_started{false};
+        std::thread saver([&] {
+            save_started.store(true, std::memory_order_release);
+            (void)service.save();
+        });
+        while (!save_started.load(std::memory_order_acquire)) std::this_thread::yield();
+        if (!service.set_content("newest")) fail("new generation edit was rejected");
+        saver.join();
+
+        std::this_thread::sleep_for(120ms);
+        if (read_file(path) != "newest") {
+            fail("a stale save committed over a newer generation");
+        }
+    }
+
+    std::filesystem::remove_all(root);
 }
 
 void test_permanent_failure_is_latched_until_new_edit() {
@@ -294,9 +371,11 @@ int main() {
     test_save_replaces_existing_file();
     test_save_state_reports_success_and_failure();
     test_load_failures_never_become_empty_overwrites();
+    test_non_regular_paths_return_promptly();
     test_malformed_and_oversized_notes_are_rejected();
     test_unique_temporary_files_do_not_follow_predictable_entries();
     test_relative_note_paths_are_rejected();
+    test_newer_generation_wins_over_concurrent_save();
     test_permanent_failure_is_latched_until_new_edit();
     test_edited_text_is_bounded_and_validated();
     test_default_path_rejects_relative_xdg_configuration();
