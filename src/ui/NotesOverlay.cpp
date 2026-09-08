@@ -1,9 +1,23 @@
 #include "ui/NotesOverlay.hpp"
+
 #include "ui/LayerSurface.hpp"
-#include <gtk/gtk.h>
-#include <iostream>
+
+#include <algorithm>
 
 namespace realmheart::ui {
+
+namespace {
+
+constexpr unsigned max_geometry_retries = 8;
+
+unsigned geometry_retry_delay(unsigned attempt) {
+    constexpr unsigned initial_delay_ms = 50;
+    constexpr unsigned max_delay_ms = 2000;
+    const unsigned shift = std::min(attempt, 5U);
+    return std::min(initial_delay_ms << shift, max_delay_ms);
+}
+
+} // namespace
 
 NotesOverlay::NotesOverlay(
     GtkApplication* app,
@@ -36,8 +50,6 @@ NotesOverlay::NotesOverlay(
     text_view_ = gtk_text_view_new_with_buffer(buffer_);
     gtk_widget_add_css_class(text_view_, "realmheart-notes-editor");
     gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(text_view_), GTK_WRAP_WORD);
-    // Keep the text off the frame edges; CSS padding is unreliable on
-    // GtkTextView, margins are the supported route.
     gtk_text_view_set_left_margin(
         GTK_TEXT_VIEW(text_view_), layout_.text_margin_horizontal
     );
@@ -49,7 +61,14 @@ NotesOverlay::NotesOverlay(
         GTK_TEXT_VIEW(text_view_), layout_.text_margin_bottom
     );
 
-    gtk_text_buffer_set_text(buffer_, notes_service_->get_content().c_str(), -1);
+    if (notes_service_ != nullptr) {
+        const std::string content = notes_service_->get_content();
+        gtk_text_buffer_set_text(
+            buffer_,
+            content.data(),
+            static_cast<gint>(content.size())
+        );
+    }
 
     GtkWidget* scrolled = gtk_scrolled_window_new();
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled), text_view_);
@@ -75,45 +94,57 @@ NotesOverlay::NotesOverlay(
 
     g_signal_connect(buffer_, "changed", G_CALLBACK(on_text_changed_callback), this);
 
-    const auto lifetime = lifetime_;
-    notes_service_->set_save_state_callback([lifetime](services::NotesSaveState state) {
-        struct Payload {
-            std::shared_ptr<LifetimeState> lifetime;
-            services::NotesSaveState state;
-        };
-        g_idle_add_full(
-            G_PRIORITY_DEFAULT_IDLE,
-            +[](gpointer raw) -> gboolean {
-                auto* payload = static_cast<Payload*>(raw);
-                if (payload->lifetime->alive.load() &&
-                    payload->lifetime->owner != nullptr) {
-                    payload->lifetime->owner->apply_save_state(payload->state);
-                }
-                return G_SOURCE_REMOVE;
-            },
-            new Payload{lifetime, state},
-            +[](gpointer raw) { delete static_cast<Payload*>(raw); }
-        );
-    });
+    if (notes_service_ != nullptr) {
+        const auto lifetime = lifetime_;
+        notes_service_->set_save_state_callback([lifetime](services::NotesSaveState state) {
+            struct Payload {
+                std::shared_ptr<LifetimeState> lifetime;
+                services::NotesSaveState state;
+            };
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,
+                +[](gpointer raw) -> gboolean {
+                    auto* payload = static_cast<Payload*>(raw);
+                    if (payload->lifetime->alive.load() &&
+                        payload->lifetime->owner != nullptr) {
+                        payload->lifetime->owner->apply_save_state(payload->state);
+                    }
+                    return G_SOURCE_REMOVE;
+                },
+                new Payload{lifetime, state},
+                +[](gpointer raw) { delete static_cast<Payload*>(raw); }
+            );
+        });
+        apply_save_state(notes_service_->save_state());
+    }
 
     gtk_widget_set_visible(window_, FALSE);
 }
 
 NotesOverlay::~NotesOverlay() {
-    if (geometry_retry_id_ != 0) {
-        g_source_remove(geometry_retry_id_);
-        geometry_retry_id_ = 0;
-    }
-    notes_service_->set_save_state_callback({});
+    cancel_geometry_retry();
+    if (notes_service_ != nullptr) notes_service_->set_save_state_callback({});
     lifetime_->alive = false;
     lifetime_->owner = nullptr;
-    if (buffer_ != nullptr) {
-        g_signal_handlers_disconnect_by_data(buffer_, this);
-    }
+    if (buffer_ != nullptr) g_signal_handlers_disconnect_by_data(buffer_, this);
     if (window_ != nullptr) {
         gtk_window_destroy(GTK_WINDOW(window_));
         window_ = nullptr;
     }
+    // gtk_text_view_new_with_buffer() retains its own reference; release the
+    // caller-owned reference returned by gtk_text_buffer_new() exactly once.
+    if (buffer_ != nullptr) {
+        g_object_unref(buffer_);
+        buffer_ = nullptr;
+    }
+}
+
+void NotesOverlay::cancel_geometry_retry() {
+    if (geometry_retry_id_ != 0) {
+        g_source_remove(geometry_retry_id_);
+        geometry_retry_id_ = 0;
+    }
+    geometry_retry_attempts_ = 0;
 }
 
 gboolean NotesOverlay::retry_geometry(gpointer data) {
@@ -124,8 +155,12 @@ gboolean NotesOverlay::retry_geometry(gpointer data) {
 }
 
 void NotesOverlay::schedule_geometry_retry() {
-    if (window_ == nullptr || geometry_retry_id_ != 0) return;
-    geometry_retry_id_ = g_timeout_add(50, &NotesOverlay::retry_geometry, this);
+    if (window_ == nullptr || !gtk_widget_get_visible(window_) || geometry_retry_id_ != 0 ||
+        geometry_retry_attempts_ >= max_geometry_retries) {
+        return;
+    }
+    const unsigned delay = geometry_retry_delay(geometry_retry_attempts_++);
+    geometry_retry_id_ = g_timeout_add(delay, &NotesOverlay::retry_geometry, this);
 }
 
 void NotesOverlay::apply_geometry() {
@@ -133,7 +168,7 @@ void NotesOverlay::apply_geometry() {
 
     GdkMonitor* monitor = resolve_layer_surface_monitor(window_, monitor_index_);
     if (monitor == nullptr) {
-        if (gtk_widget_get_visible(window_)) schedule_geometry_retry();
+        schedule_geometry_retry();
         return;
     }
 
@@ -141,7 +176,7 @@ void NotesOverlay::apply_geometry() {
     gdk_monitor_get_geometry(monitor, &monitor_geometry);
     g_object_unref(monitor);
     if (monitor_geometry.width <= 0 || monitor_geometry.height <= 0) {
-        if (gtk_widget_get_visible(window_)) schedule_geometry_retry();
+        schedule_geometry_retry();
         return;
     }
 
@@ -162,6 +197,7 @@ void NotesOverlay::apply_geometry() {
         GTK_TEXT_VIEW(text_view_), layout_.text_margin_bottom
     );
     geometry_initialized_ = true;
+    geometry_retry_attempts_ = 0;
     gtk_widget_queue_resize(window_);
     if (gtk_widget_get_visible(window_)) gtk_widget_set_opacity(window_, 1.0);
 }
@@ -182,19 +218,49 @@ void NotesOverlay::apply_save_state(services::NotesSaveState state) {
         gtk_label_set_text(GTK_LABEL(status_label_), "Save failed");
         gtk_widget_add_css_class(status_label_, "failed");
         break;
+    case services::NotesSaveState::DurabilityUncertain:
+        gtk_label_set_text(GTK_LABEL(status_label_), "Durability uncertain");
+        gtk_widget_add_css_class(status_label_, "failed");
+        break;
+    case services::NotesSaveState::LoadFailed:
+        gtk_label_set_text(GTK_LABEL(status_label_), "Load failed");
+        gtk_widget_add_css_class(status_label_, "failed");
+        break;
+    case services::NotesSaveState::Rejected:
+        gtk_label_set_text(GTK_LABEL(status_label_), "Note too large");
+        gtk_widget_add_css_class(status_label_, "failed");
+        break;
     }
 }
 
 void NotesOverlay::on_text_changed_callback(GtkTextBuffer* buf, gpointer data) {
     auto* self = static_cast<NotesOverlay*>(data);
+    if (self == nullptr || self->notes_service_ == nullptr || self->suppress_buffer_change_) return;
+
     GtkTextIter start, end;
     gtk_text_buffer_get_bounds(buf, &start, &end);
     char* text = gtk_text_buffer_get_text(buf, &start, &end, FALSE);
-    self->notes_service_->set_content(text);
+    const std::string content = text != nullptr ? text : "";
     g_free(text);
+
+    if (self->notes_service_->save_state() == services::NotesSaveState::LoadFailed) {
+        self->notes_service_->acknowledge_load_failure();
+    }
+    if (self->notes_service_->set_content(content)) return;
+
+    self->suppress_buffer_change_ = true;
+    const std::string accepted = self->notes_service_->get_content();
+    gtk_text_buffer_set_text(
+        buf,
+        accepted.data(),
+        static_cast<gint>(accepted.size())
+    );
+    self->suppress_buffer_change_ = false;
+    self->apply_save_state(self->notes_service_->save_state());
 }
 
 void NotesOverlay::show() {
+    if (window_ == nullptr) return;
     if (!geometry_initialized_) gtk_widget_set_opacity(window_, 0.0);
     gtk_widget_set_visible(window_, TRUE);
     gtk_window_present(GTK_WINDOW(window_));
@@ -202,12 +268,18 @@ void NotesOverlay::show() {
 }
 
 void NotesOverlay::hide() {
+    if (window_ == nullptr) return;
     gtk_widget_set_visible(window_, FALSE);
+    cancel_geometry_retry();
 }
 
 void NotesOverlay::toggle() {
-    if (gtk_widget_get_visible(window_)) hide();
+    if (visible()) hide();
     else show();
+}
+
+bool NotesOverlay::visible() const {
+    return window_ != nullptr && gtk_widget_get_visible(window_);
 }
 
 } // namespace realmheart::ui

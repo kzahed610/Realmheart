@@ -2764,6 +2764,7 @@ private:
         clear_monitor_property_watchers();
         GdkDisplay* display = gdk_display_get_default();
         const int count = std::max(monitor_count(display), 1);
+        const bool notes_was_visible = notes_overlay_ != nullptr && notes_overlay_->visible();
 
         // A wl_output appearing/disappearing while native Broken Seal is up
         // invalidates the exact set of fullscreen security surfaces. Keep the
@@ -2876,6 +2877,10 @@ private:
         }
         apply_bar_visibility();
         bind_monitor_property_watchers();
+        if (notes_was_visible) {
+            ensure_notes_overlay(active_monitor_index_);
+            notes_overlay_->show();
+        }
     }
 
     void schedule_monitor_surface_rebuild() {

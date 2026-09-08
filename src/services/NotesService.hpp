@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -14,11 +15,17 @@ enum class NotesSaveState {
     Saved,
     Pending,
     Failed,
+    DurabilityUncertain,
+    LoadFailed,
+    Rejected,
 };
 
 class NotesService {
 public:
+    struct State;
+    static constexpr std::size_t max_note_bytes = 1024 * 1024;
     using SaveStateCallback = std::function<void(NotesSaveState)>;
+
     NotesService();
     explicit NotesService(
         std::filesystem::path notes_path,
@@ -29,37 +36,32 @@ public:
     NotesService(const NotesService&) = delete;
     NotesService& operator=(const NotesService&) = delete;
 
-    std::string get_content();
+    std::string get_content() const;
 
-    // Updates the in-memory note immediately and schedules one debounced,
-    // atomic disk write. Repeated edits coalesce into the latest content.
-    void set_content(const std::string& content);
+    // Accepts valid UTF-8 text up to max_note_bytes and schedules one
+    // debounced atomic disk write. Returns false without changing the note when
+    // validation or an unacknowledged load failure rejects the edit.
+    bool set_content(const std::string& content);
 
-    // Flushes the current content immediately using atomic replacement.
+    // Explicitly permits replacing content after a load failure. No content is
+    // changed by this call; it only records user acknowledgement.
+    bool acknowledge_load_failure();
+
+    // Flushes the current generation immediately. A stale snapshot is never
+    // committed over a newer edit.
     bool save();
 
     void set_save_state_callback(SaveStateCallback callback);
     [[nodiscard]] NotesSaveState save_state() const;
 
-    std::string get_file_path() const { return notes_path_.string(); }
+    std::string get_file_path() const;
 
 private:
-    std::filesystem::path notes_path_;
-    std::string cached_content_;
-    std::chrono::milliseconds debounce_;
-    mutable std::mutex mutex_;
-    std::mutex io_mutex_;
-    std::condition_variable cv_;
+    std::shared_ptr<State> state_;
     std::thread worker_;
-    bool dirty_ = false;
-    bool stopping_ = false;
-    std::size_t edit_generation_ = 0;
-    NotesSaveState save_state_ = NotesSaveState::Saved;
-    SaveStateCallback save_state_callback_;
 
     void load_from_disk();
-    void worker_loop();
-    bool write_atomically(const std::string& content);
+    static void worker_loop(std::shared_ptr<State> state);
 };
 
 } // namespace realmheart::services

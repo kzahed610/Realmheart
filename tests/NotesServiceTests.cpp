@@ -8,6 +8,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <sys/stat.h>
 
 namespace {
 
@@ -122,6 +123,9 @@ void test_save_state_reports_success_and_failure() {
         service.set_save_state_callback([&](realmheart::services::NotesSaveState next) {
             state.store(static_cast<int>(next));
         });
+        if (!service.acknowledge_load_failure()) {
+            fail("failed-path test could not acknowledge its intentional load failure");
+        }
         service.set_content("cannot persist");
         std::this_thread::sleep_for(160ms);
         if (state.load() != static_cast<int>(realmheart::services::NotesSaveState::Failed)) {
@@ -132,6 +136,156 @@ void test_save_state_reports_success_and_failure() {
     std::filesystem::remove_all(root);
 }
 
+void test_load_failures_never_become_empty_overwrites() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-notes-load-failure-test";
+    const auto blocked_parent = root / "blocked";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    std::ofstream(blocked_parent) << "preserved";
+
+    realmheart::services::NotesService service(blocked_parent / "notes.txt", 20ms);
+    if (service.save_state() != realmheart::services::NotesSaveState::LoadFailed) {
+        fail("non-directory note parent was not reported as a load failure");
+    }
+    if (!service.get_content().empty()) {
+        fail("failed note load exposed fabricated content");
+    }
+    if (service.set_content("replacement")) {
+        fail("content edit bypassed an unacknowledged load failure");
+    }
+    if (read_file(blocked_parent) != "preserved") {
+        fail("load failure path was overwritten");
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+void test_malformed_and_oversized_notes_are_rejected() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-notes-validation-test";
+    const auto malformed = root / "malformed.txt";
+    const auto oversized = root / "oversized.txt";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    {
+        std::ofstream file(malformed, std::ios::binary);
+        const char malformed_bytes[] = "prefix\0suffix";
+        file.write(malformed_bytes, sizeof(malformed_bytes) - 1);
+    }
+    {
+        std::ofstream file(oversized, std::ios::binary);
+        std::string content(realmheart::services::NotesService::max_note_bytes + 1, 'x');
+        file.write(content.data(), static_cast<std::streamsize>(content.size()));
+    }
+
+    realmheart::services::NotesService malformed_service(malformed, 20ms);
+    realmheart::services::NotesService oversized_service(oversized, 20ms);
+    if (malformed_service.save_state() != realmheart::services::NotesSaveState::LoadFailed ||
+        oversized_service.save_state() != realmheart::services::NotesSaveState::LoadFailed) {
+        fail("malformed or oversized note was accepted as loaded text");
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+void test_unique_temporary_files_do_not_follow_predictable_entries() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-notes-secure-file-test";
+    const auto path = root / "notes.txt";
+    const auto target = root / "unrelated.txt";
+    const auto predictable = root / "notes.txt.tmp";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    std::ofstream(target) << "must remain";
+    std::ofstream(path) << "old";
+    std::filesystem::create_symlink(target, predictable);
+
+    {
+        realmheart::services::NotesService service(path, 20ms);
+        service.set_content("new");
+        if (!service.save()) fail("secure atomic save rejected a valid note");
+    }
+
+    if (read_file(path) != "new" || read_file(target) != "must remain") {
+        fail("atomic save followed a predictable temporary symlink");
+    }
+    if (!std::filesystem::is_symlink(predictable)) {
+        fail("secure save consumed the pre-existing temporary entry");
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+void test_relative_note_paths_are_rejected() {
+    realmheart::services::NotesService service("relative-notes.txt", 20ms);
+    if (service.save_state() != realmheart::services::NotesSaveState::LoadFailed) {
+        fail("relative note path was accepted");
+    }
+    if (service.set_content("must not escape")) {
+        fail("relative note path accepted content");
+    }
+}
+
+void test_permanent_failure_is_latched_until_new_edit() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-notes-failure-latch-test";
+    const auto blocked_parent = root / "blocked";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    std::ofstream(blocked_parent) << "blocking parent";
+
+    realmheart::services::NotesService service(blocked_parent / "notes.txt", 20ms);
+    service.acknowledge_load_failure();
+    if (!service.set_content("cannot persist")) fail("failed to prepare retry latch test");
+    std::this_thread::sleep_for(100ms);
+    if (service.save_state() != realmheart::services::NotesSaveState::Failed) {
+        fail("permanent persistence failure was not reported");
+    }
+    std::this_thread::sleep_for(120ms);
+    if (service.save_state() != realmheart::services::NotesSaveState::Failed) {
+        fail("permanent persistence failure was retried without an explicit action");
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+void test_edited_text_is_bounded_and_validated() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-notes-edit-validation-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    realmheart::services::NotesService service(root / "notes.txt", 20ms);
+
+    std::string oversized(realmheart::services::NotesService::max_note_bytes + 1, 'x');
+    if (service.set_content(oversized)) fail("oversized edit was accepted");
+    const std::string invalid_utf8("bad\xfftext", 8);
+    if (service.set_content(invalid_utf8)) fail("invalid UTF-8 edit was accepted");
+    if (!service.set_content("valid")) fail("valid bounded edit was rejected");
+    if (!service.save() || read_file(root / "notes.txt") != "valid") {
+        fail("valid bounded edit was not persisted");
+    }
+
+    std::filesystem::remove_all(root);
+}
+
+void test_default_path_rejects_relative_xdg_configuration() {
+    const char* old_xdg = std::getenv("XDG_CONFIG_HOME");
+    const char* old_home = std::getenv("HOME");
+    const std::string saved_xdg = old_xdg != nullptr ? old_xdg : "";
+    const std::string saved_home = old_home != nullptr ? old_home : "";
+    const bool had_xdg = old_xdg != nullptr;
+    const bool had_home = old_home != nullptr;
+
+    setenv("XDG_CONFIG_HOME", "relative-config", 1);
+    setenv("HOME", "relative-home", 1);
+    realmheart::services::NotesService service;
+    if (!std::filesystem::path(service.get_file_path()).is_absolute()) {
+        fail("relative XDG/HOME values redirected the default notes path");
+    }
+
+    if (had_xdg) setenv("XDG_CONFIG_HOME", saved_xdg.c_str(), 1);
+    else unsetenv("XDG_CONFIG_HOME");
+    if (had_home) setenv("HOME", saved_home.c_str(), 1);
+    else unsetenv("HOME");
+}
+
 } // namespace
 
 int main() {
@@ -139,6 +293,13 @@ int main() {
     test_destructor_flushes_pending_content();
     test_save_replaces_existing_file();
     test_save_state_reports_success_and_failure();
+    test_load_failures_never_become_empty_overwrites();
+    test_malformed_and_oversized_notes_are_rejected();
+    test_unique_temporary_files_do_not_follow_predictable_entries();
+    test_relative_note_paths_are_rejected();
+    test_permanent_failure_is_latched_until_new_edit();
+    test_edited_text_is_bounded_and_validated();
+    test_default_path_rejects_relative_xdg_configuration();
     std::cout << "NotesService tests PASSED\n";
     return 0;
 }

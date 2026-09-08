@@ -18,6 +18,7 @@ public:
     void show();
     void hide();
     void toggle();
+    [[nodiscard]] bool visible() const;
 
 private:
     struct LifetimeState {
@@ -34,13 +35,16 @@ private:
     std::shared_ptr<LifetimeState> lifetime_ = std::make_shared<LifetimeState>();
     NotesLayout layout_{};
     guint geometry_retry_id_ = 0;
+    unsigned geometry_retry_attempts_ = 0;
     bool geometry_initialized_ = false;
+    bool suppress_buffer_change_ = false;
 
     static void on_text_changed_callback(GtkTextBuffer* buf, gpointer data);
     static gboolean retry_geometry(gpointer data);
     void apply_save_state(services::NotesSaveState state);
     void apply_geometry();
     void schedule_geometry_retry();
+    void cancel_geometry_retry();
 };
 
 } // namespace realmheart::ui
