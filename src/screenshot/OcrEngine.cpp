@@ -1,5 +1,7 @@
 #include "screenshot/OcrEngine.hpp"
 
+#include "screenshot/ScreenshotSafety.hpp"
+
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <gio/gio.h>
 #include <glib.h>
@@ -11,6 +13,9 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -18,6 +23,8 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace realmheart::screenshot {
 namespace {
@@ -68,19 +75,20 @@ bool encode_region_png(
     std::vector<std::uint8_t>& png,
     std::string& error
 ) {
-    if (
-        frame.width <= 0 || frame.height <= 0 || frame.stride <= 0 || frame.rgba.empty() ||
-        region.width <= 0 || region.height <= 0 || region.x < 0 || region.y < 0 ||
-        region.x + region.width > frame.width || region.y + region.height > frame.height
-    ) {
-        error = "OCR region is outside the frozen frame";
+    if (!validate_pixel_rect(frame, region, error)) {
+        error = "OCR " + error;
         return false;
     }
 
-    const int crop_stride = region.width * 4;
-    std::vector<std::uint8_t> cropped(
-        static_cast<std::size_t>(crop_stride) * static_cast<std::size_t>(region.height)
-    );
+    const std::size_t crop_stride_size = static_cast<std::size_t>(region.width) * 4u;
+    const int crop_stride = static_cast<int>(crop_stride_size);
+    std::vector<std::uint8_t> cropped;
+    try {
+        cropped.resize(crop_stride_size * static_cast<std::size_t>(region.height));
+    } catch (const std::bad_alloc&) {
+        error = "unable to allocate bounded OCR crop";
+        return false;
+    }
 
     for (int row = 0; row < region.height; ++row) {
         const auto* source = frame.rgba.data() +
@@ -128,16 +136,37 @@ bool encode_region_png(
         return false;
     }
 
-    png.assign(
-        reinterpret_cast<const std::uint8_t*>(png_data),
-        reinterpret_cast<const std::uint8_t*>(png_data) + png_size
-    );
+    try {
+        png.assign(
+            reinterpret_cast<const std::uint8_t*>(png_data),
+            reinterpret_cast<const std::uint8_t*>(png_data) + png_size
+        );
+    } catch (const std::bad_alloc&) {
+        g_free(png_data);
+        error = "unable to allocate bounded OCR PNG";
+        return false;
+    }
     g_free(png_data);
     return true;
 }
 
-OcrResult parse_tsv(std::string_view tsv, const PixelRect& region) {
+OcrResult parse_tsv(
+    std::string_view tsv,
+    const PixelRect& region,
+    int frame_width,
+    int frame_height
+) {
     OcrResult result;
+
+    if (
+        frame_width <= 0 || frame_height <= 0 ||
+        region.x < 0 || region.y < 0 || region.width <= 0 || region.height <= 0 ||
+        static_cast<std::int64_t>(region.x) + region.width > frame_width ||
+        static_cast<std::int64_t>(region.y) + region.height > frame_height
+    ) {
+        result.error = "OCR region is outside the frozen frame";
+        return result;
+    }
 
     std::size_t line_start = 0;
     while (line_start < tsv.size()) {
@@ -180,12 +209,34 @@ OcrResult parse_tsv(std::string_view tsv, const PixelRect& region) {
             text.push_back('\t');
             text.append(fields[index]);
         }
-        if (text.empty() || width <= 0 || height <= 0 || confidence < 15.0f) continue;
+        if (
+            text.empty() || text.size() > 4096u || width <= 0 || height <= 0 ||
+            left < 0 || top < 0 || !std::isfinite(confidence) || confidence < 15.0f
+        ) continue;
+
+        const std::int64_t right = static_cast<std::int64_t>(left) + width;
+        const std::int64_t bottom = static_cast<std::int64_t>(top) + height;
+        if (
+            right > region.width || bottom > region.height ||
+            right < 0 || bottom < 0
+        ) continue;
+
+        const std::int64_t frame_left = static_cast<std::int64_t>(region.x) + left;
+        const std::int64_t frame_top = static_cast<std::int64_t>(region.y) + top;
+        const std::int64_t frame_right = frame_left + width;
+        const std::int64_t frame_bottom = frame_top + height;
+        if (
+            frame_left < 0 || frame_top < 0 ||
+            frame_right > frame_width || frame_bottom > frame_height ||
+            frame_right < 0 || frame_bottom < 0
+        ) continue;
+
+        if (result.words.size() >= kMaxOcrWords) break;
 
         result.words.push_back(OcrWord{
             .rect = PixelRect{
-                .x = region.x + std::max(0, left),
-                .y = region.y + std::max(0, top),
+                .x = static_cast<int>(frame_left),
+                .y = static_cast<int>(frame_top),
                 .width = width,
                 .height = height,
             },
@@ -216,6 +267,234 @@ OcrResult parse_tsv(std::string_view tsv, const PixelRect& region) {
     return result;
 }
 
+struct BoundedTesseractResult {
+    bool ok = false;
+    bool cancelled = false;
+    bool timed_out = false;
+    bool output_overflow = false;
+    std::string stdout_data;
+    std::string stderr_data;
+    std::string error;
+};
+
+void terminate_and_reap(pid_t pid) {
+    if (pid <= 0) return;
+    ::kill(pid, SIGKILL);
+    while (::waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {}
+}
+
+void close_fd(int& fd) {
+    if (fd >= 0) {
+        ::close(fd);
+        fd = -1;
+    }
+}
+
+BoundedTesseractResult run_tesseract_bounded(
+    const std::vector<std::uint8_t>& png,
+    const std::atomic_bool* cancel_requested
+) {
+    BoundedTesseractResult result;
+    gchar* tesseract_path = g_find_program_in_path("tesseract");
+    if (tesseract_path == nullptr) {
+        result.error = "tesseract not found; install tesseract for OCR";
+        return result;
+    }
+
+    int stdin_pipe[2] = {-1, -1};
+    int stdout_pipe[2] = {-1, -1};
+    int stderr_pipe[2] = {-1, -1};
+    if (
+        ::pipe(stdin_pipe) != 0 || ::pipe(stdout_pipe) != 0 ||
+        ::pipe(stderr_pipe) != 0
+    ) {
+        close_fd(stdin_pipe[0]);
+        close_fd(stdin_pipe[1]);
+        close_fd(stdout_pipe[0]);
+        close_fd(stdout_pipe[1]);
+        close_fd(stderr_pipe[0]);
+        close_fd(stderr_pipe[1]);
+        g_free(tesseract_path);
+        result.error = "unable to create tesseract pipes";
+        return result;
+    }
+
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        close_fd(stdin_pipe[0]);
+        close_fd(stdin_pipe[1]);
+        close_fd(stdout_pipe[0]);
+        close_fd(stdout_pipe[1]);
+        close_fd(stderr_pipe[0]);
+        close_fd(stderr_pipe[1]);
+        g_free(tesseract_path);
+        result.error = "unable to start tesseract";
+        return result;
+    }
+
+    if (pid == 0) {
+        ::dup2(stdin_pipe[0], STDIN_FILENO);
+        ::dup2(stdout_pipe[1], STDOUT_FILENO);
+        ::dup2(stderr_pipe[1], STDERR_FILENO);
+        close_fd(stdin_pipe[0]);
+        close_fd(stdin_pipe[1]);
+        close_fd(stdout_pipe[0]);
+        close_fd(stdout_pipe[1]);
+        close_fd(stderr_pipe[0]);
+        close_fd(stderr_pipe[1]);
+        ::execl(tesseract_path, tesseract_path, "stdin", "stdout", "-l", "eng", "tsv", nullptr);
+        _exit(127);
+    }
+
+    g_free(tesseract_path);
+    close_fd(stdin_pipe[0]);
+    close_fd(stdout_pipe[1]);
+    close_fd(stderr_pipe[1]);
+
+    auto make_nonblocking = [](int fd) {
+        const int flags = ::fcntl(fd, F_GETFL, 0);
+        return flags >= 0 && ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+    };
+    if (!make_nonblocking(stdin_pipe[1]) || !make_nonblocking(stdout_pipe[0]) ||
+        !make_nonblocking(stderr_pipe[0])) {
+        terminate_and_reap(pid);
+        close_fd(stdin_pipe[1]);
+        close_fd(stdout_pipe[0]);
+        close_fd(stderr_pipe[0]);
+        result.error = "unable to configure bounded tesseract pipes";
+        return result;
+    }
+
+    std::size_t input_offset = 0;
+    bool child_reaped = false;
+    int child_status = 0;
+    const auto deadline = std::chrono::steady_clock::now() + kTesseractTimeout;
+
+    auto read_output = [&](int& fd, std::string& output, std::size_t limit) {
+        std::array<char, 8192> buffer{};
+        for (;;) {
+            const ssize_t count = ::read(fd, buffer.data(), buffer.size());
+            if (count > 0) {
+                const std::size_t bytes = static_cast<std::size_t>(count);
+                if (bytes > limit - std::min(output.size(), limit)) {
+                    result.output_overflow = true;
+                    return;
+                }
+                try {
+                    output.append(buffer.data(), bytes);
+                } catch (const std::bad_alloc&) {
+                    result.output_overflow = true;
+                    return;
+                }
+                continue;
+            }
+            if (count == 0) {
+                close_fd(fd);
+                return;
+            }
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+            close_fd(fd);
+            return;
+        }
+    };
+
+    while (stdin_pipe[1] >= 0 || stdout_pipe[0] >= 0 || stderr_pipe[0] >= 0) {
+        if (cancel_requested != nullptr && cancel_requested->load(std::memory_order_acquire)) {
+            result.cancelled = true;
+            if (!child_reaped) terminate_and_reap(pid);
+            child_reaped = true;
+            break;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            result.timed_out = true;
+            if (!child_reaped) terminate_and_reap(pid);
+            child_reaped = true;
+            break;
+        }
+
+        if (!child_reaped) {
+            const pid_t waited = ::waitpid(pid, &child_status, WNOHANG);
+            if (waited == pid) child_reaped = true;
+        }
+        if (child_reaped) close_fd(stdin_pipe[1]);
+
+        pollfd fds[3]{};
+        nfds_t count = 0;
+        int stdin_index = -1;
+        int stdout_index = -1;
+        int stderr_index = -1;
+        if (stdin_pipe[1] >= 0 && input_offset < png.size()) {
+            stdin_index = static_cast<int>(count);
+            fds[count++] = pollfd{stdin_pipe[1], POLLOUT, 0};
+        } else {
+            close_fd(stdin_pipe[1]);
+        }
+        if (stdout_pipe[0] >= 0) {
+            stdout_index = static_cast<int>(count);
+            fds[count++] = pollfd{stdout_pipe[0], POLLIN, 0};
+        }
+        if (stderr_pipe[0] >= 0) {
+            stderr_index = static_cast<int>(count);
+            fds[count++] = pollfd{stderr_pipe[0], POLLIN, 0};
+        }
+
+        if (count == 0) break;
+        const int polled = ::poll(fds, count, 25);
+        if (polled < 0 && errno != EINTR) {
+            result.error = "poll failed while reading tesseract output";
+            if (!child_reaped) terminate_and_reap(pid);
+            child_reaped = true;
+            break;
+        }
+        if (polled <= 0) continue;
+
+        if (stdin_index >= 0 && (fds[stdin_index].revents & POLLOUT) != 0) {
+            const std::size_t remaining = png.size() - input_offset;
+            const ssize_t written = ::write(
+                stdin_pipe[1],
+                png.data() + input_offset,
+                std::min<std::size_t>(remaining, 64u * 1024u)
+            );
+            if (written > 0) input_offset += static_cast<std::size_t>(written);
+            else if (written < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+                close_fd(stdin_pipe[1]);
+            }
+        }
+        if (input_offset == png.size()) close_fd(stdin_pipe[1]);
+        if (stdout_index >= 0 && fds[stdout_index].revents != 0) {
+            read_output(stdout_pipe[0], result.stdout_data, kMaxOcrStdoutBytes);
+        }
+        if (stderr_index >= 0 && fds[stderr_index].revents != 0) {
+            read_output(stderr_pipe[0], result.stderr_data, kMaxOcrStderrBytes);
+        }
+        if (result.output_overflow) {
+            if (!child_reaped) terminate_and_reap(pid);
+            child_reaped = true;
+            break;
+        }
+    }
+
+    close_fd(stdin_pipe[1]);
+    close_fd(stdout_pipe[0]);
+    close_fd(stderr_pipe[0]);
+    if (!child_reaped) {
+        while (::waitpid(pid, &child_status, 0) < 0 && errno == EINTR) {}
+        child_reaped = true;
+    }
+
+    if (result.cancelled) result.error = "OCR cancelled";
+    else if (result.timed_out) result.error = "tesseract timed out after 12 seconds";
+    else if (result.output_overflow) result.error = "tesseract output exceeded the bounded limit";
+    else if (!result.error.empty()) {}
+    else if (!WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        result.error = "tesseract failed";
+    } else {
+        result.ok = true;
+    }
+    return result;
+}
+
 } // namespace
 
 bool OcrEngine::available(std::string& error) {
@@ -227,6 +506,15 @@ bool OcrEngine::available(std::string& error) {
     }
     g_free(tesseract_path);
     return true;
+}
+
+OcrResult OcrEngine::parse_tsv_for_test(
+    std::string_view tsv,
+    const PixelRect& region,
+    int frame_width,
+    int frame_height
+) {
+    return parse_tsv(tsv, region, frame_width, frame_height);
 }
 
 OcrResult OcrEngine::recognize(
@@ -255,130 +543,31 @@ OcrResult OcrEngine::recognize(
         return result;
     }
 
-    GError* spawn_error = nullptr;
-    GSubprocess* process = g_subprocess_new(
-        static_cast<GSubprocessFlags>(
-            G_SUBPROCESS_FLAGS_STDIN_PIPE |
-            G_SUBPROCESS_FLAGS_STDOUT_PIPE |
-            G_SUBPROCESS_FLAGS_STDERR_PIPE
-        ),
-        &spawn_error,
-        "tesseract",
-        "stdin",
-        "stdout",
-        "-l",
-        "eng",
-        "tsv",
-        nullptr
-    );
-    if (process == nullptr) {
-        OcrResult result;
-        result.error = spawn_error != nullptr
-            ? std::string{"unable to start tesseract: "} + spawn_error->message
-            : "unable to start tesseract";
-        if (spawn_error != nullptr) g_error_free(spawn_error);
-        return result;
-    }
-
-    GBytes* input = g_bytes_new(png.data(), png.size());
-    GBytes* stdout_bytes = nullptr;
-    GBytes* stderr_bytes = nullptr;
-    GError* communicate_error = nullptr;
-    GCancellable* cancellable = g_cancellable_new();
-    std::atomic_bool watchdog_timeout{false};
-    std::atomic_bool watchdog_external_cancel{false};
-
-    std::jthread watchdog;
-    try {
-        watchdog = std::jthread([&](std::stop_token stop_token) {
-            const auto deadline = std::chrono::steady_clock::now() + kTesseractTimeout;
-            while (!stop_token.stop_requested()) {
-                if (cancellation_requested(cancel_requested)) {
-                    watchdog_external_cancel.store(true, std::memory_order_release);
-                    g_cancellable_cancel(cancellable);
-                    return;
-                }
-                if (std::chrono::steady_clock::now() >= deadline) {
-                    watchdog_timeout.store(true, std::memory_order_release);
-                    g_cancellable_cancel(cancellable);
-                    return;
-                }
-                std::this_thread::sleep_for(kWatchdogPoll);
-            }
-        });
-    } catch (const std::exception& exception) {
-        g_subprocess_force_exit(process);
-        g_subprocess_wait(process, nullptr, nullptr);
-        g_bytes_unref(input);
-        g_object_unref(cancellable);
-        g_object_unref(process);
-        OcrResult result;
-        result.error = std::string{"unable to start OCR watchdog: "} + exception.what();
-        return result;
-    }
-
-    const gboolean communicated = g_subprocess_communicate(
-        process,
-        input,
-        cancellable,
-        &stdout_bytes,
-        &stderr_bytes,
-        &communicate_error
-    );
-    watchdog.request_stop();
-    watchdog.join();
-    g_bytes_unref(input);
-    g_object_unref(cancellable);
-
-    if (!communicated || !g_subprocess_get_successful(process)) {
-        OcrResult result;
-        if (watchdog_external_cancel.load(std::memory_order_acquire)) {
-            result.error = "OCR cancelled";
-        } else if (watchdog_timeout.load(std::memory_order_acquire)) {
-            result.error = "tesseract timed out after 12 seconds";
-        } else if (communicate_error != nullptr) {
-            result.error = std::string{"tesseract failed: "} + communicate_error->message;
-        } else if (stderr_bytes != nullptr) {
-            gsize stderr_size = 0;
-            const char* stderr_data = static_cast<const char*>(
-                g_bytes_get_data(stderr_bytes, &stderr_size)
-            );
-            result.error = "tesseract failed";
-            if (stderr_data != nullptr && stderr_size > 0) {
-                result.error += ": ";
-                result.error.append(stderr_data, stderr_size);
-            }
-        } else {
-            result.error = "tesseract failed";
-        }
-        if (!communicated) {
-            g_subprocess_force_exit(process);
-            g_subprocess_wait(process, nullptr, nullptr);
-        }
-        if (communicate_error != nullptr) g_error_free(communicate_error);
-        if (stdout_bytes != nullptr) g_bytes_unref(stdout_bytes);
-        if (stderr_bytes != nullptr) g_bytes_unref(stderr_bytes);
-        g_object_unref(process);
-        return result;
-    }
-
-    if (communicate_error != nullptr) g_error_free(communicate_error);
-
-    gsize stdout_size = 0;
-    const char* stdout_data = stdout_bytes != nullptr
-        ? static_cast<const char*>(g_bytes_get_data(stdout_bytes, &stdout_size))
-        : nullptr;
-
     OcrResult result;
-    if (stdout_data == nullptr || stdout_size == 0) {
+    const auto process = run_tesseract_bounded(png, cancel_requested);
+    if (!process.ok) {
+        result.error = process.error.empty() ? "tesseract failed" : process.error;
+        if (!process.stderr_data.empty() && result.error != "OCR cancelled") {
+            result.error += ": ";
+            result.error.append(
+                process.stderr_data.data(),
+                std::min(process.stderr_data.size(), kMaxOcrDiagnosticBytes)
+            );
+        }
+        if (result.error.size() > kMaxOcrDiagnosticBytes) {
+            result.error.resize(kMaxOcrDiagnosticBytes);
+            result.error += "…";
+        }
+    } else if (process.stdout_data.empty()) {
         result.error = "tesseract returned empty TSV output";
     } else {
-        result = parse_tsv(std::string_view{stdout_data, stdout_size}, region);
+        result = parse_tsv(
+            process.stdout_data,
+            region,
+            frame.width,
+            frame.height
+        );
     }
-
-    if (stdout_bytes != nullptr) g_bytes_unref(stdout_bytes);
-    if (stderr_bytes != nullptr) g_bytes_unref(stderr_bytes);
-    g_object_unref(process);
     return result;
 }
 

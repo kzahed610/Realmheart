@@ -612,6 +612,25 @@ if(BUILD_TESTING)
     realmheart_register_test(realmheart_command_tests)
 
     add_executable(
+        realmheart_screenshot_contract_tests
+        tests/ScreenshotContractTests.cpp
+        src/screenshot/OcrEngine.cpp
+    )
+    target_link_libraries(
+        realmheart_screenshot_contract_tests
+        PRIVATE
+        PkgConfig::GIO
+        PkgConfig::GDK_PIXBUF
+    )
+    realmheart_register_test(realmheart_screenshot_contract_tests)
+
+    add_test(
+        NAME realmheart_screenshot_utility_contracts
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/ScreenshotUtilityTests.sh ${CMAKE_SOURCE_DIR}
+    )
+    set_tests_properties(realmheart_screenshot_utility_contracts PROPERTIES TIMEOUT 30)
+
+    add_executable(
         realmheart_auth_protocol_tests
         tests/AuthPamTests.cpp
         src/ui/lockscreen/AuthPam.cpp

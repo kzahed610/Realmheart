@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace realmheart::screenshot {
@@ -28,6 +29,13 @@ struct OcrResult {
 class OcrEngine {
 public:
     static bool available(std::string& error);
+
+    static OcrResult parse_tsv_for_test(
+        std::string_view tsv,
+        const PixelRect& region,
+        int frame_width,
+        int frame_height
+    );
 
     static OcrResult recognize(
         const FrozenFrame& frame,

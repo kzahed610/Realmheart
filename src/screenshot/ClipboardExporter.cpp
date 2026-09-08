@@ -1,5 +1,7 @@
 #include "screenshot/ClipboardExporter.hpp"
 
+#include "screenshot/ScreenshotSafety.hpp"
+
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <gio/gio.h>
 #include <glib.h>
@@ -10,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <new>
 #include <string>
 #include <thread>
 #include <vector>
@@ -24,7 +27,8 @@ bool copy_bytes_to_clipboard(
     const void* data,
     std::size_t size,
     const char* mime_type,
-    std::string& error
+    std::string& error,
+    const std::atomic_bool* cancel_requested
 ) {
     if (data == nullptr || size == 0) {
         error = "clipboard payload is empty";
@@ -65,6 +69,11 @@ bool copy_bytes_to_clipboard(
         watchdog = std::jthread([&](std::stop_token stop_token) {
             const auto deadline = std::chrono::steady_clock::now() + kClipboardTimeout;
             while (!stop_token.stop_requested()) {
+                if (cancel_requested != nullptr &&
+                    cancel_requested->load(std::memory_order_acquire)) {
+                    g_cancellable_cancel(cancellable);
+                    return;
+                }
                 if (std::chrono::steady_clock::now() >= deadline) {
                     timed_out.store(true, std::memory_order_release);
                     g_cancellable_cancel(cancellable);
@@ -100,9 +109,13 @@ bool copy_bytes_to_clipboard(
     g_object_unref(cancellable);
     g_bytes_unref(input);
 
-    bool ok = communicated && g_subprocess_get_successful(process);
+    const bool cancelled = cancel_requested != nullptr &&
+        cancel_requested->load(std::memory_order_acquire);
+    bool ok = communicated && g_subprocess_get_successful(process) && !cancelled;
     if (!ok) {
-        if (timed_out.load(std::memory_order_acquire)) {
+        if (cancelled) {
+            error = "clipboard copy cancelled";
+        } else if (timed_out.load(std::memory_order_acquire)) {
             error = "wl-copy timed out after 3 seconds";
         } else if (communicate_error != nullptr) {
             error = std::string{"wl-copy failed: "} + communicate_error->message;
@@ -125,31 +138,26 @@ bool copy_bytes_to_clipboard(
 bool ClipboardExporter::copy_png(
     const FrozenFrame& frame,
     const PixelRect& region,
-    std::string& error
+    std::string& error,
+    const std::atomic_bool* cancel_requested
 ) {
     error.clear();
 
-    if (
-        frame.width <= 0 || frame.height <= 0 || frame.stride <= 0 ||
-        frame.rgba.empty()
-    ) {
-        error = "frozen frame is empty";
-        return false;
-    }
-    if (
-        region.width <= 0 || region.height <= 0 ||
-        region.x < 0 || region.y < 0 ||
-        region.x + region.width > frame.width ||
-        region.y + region.height > frame.height
-    ) {
-        error = "selection is outside the frozen frame";
+    if (!validate_pixel_rect(frame, region, error)) return false;
+    if (cancel_requested != nullptr && cancel_requested->load(std::memory_order_acquire)) {
+        error = "clipboard copy cancelled";
         return false;
     }
 
-    const int crop_stride = region.width * 4;
-    std::vector<std::uint8_t> cropped(
-        static_cast<std::size_t>(crop_stride) * static_cast<std::size_t>(region.height)
-    );
+    const std::size_t crop_stride_size = static_cast<std::size_t>(region.width) * 4u;
+    const int crop_stride = static_cast<int>(crop_stride_size);
+    std::vector<std::uint8_t> cropped;
+    try {
+        cropped.resize(crop_stride_size * static_cast<std::size_t>(region.height));
+    } catch (const std::bad_alloc&) {
+        error = "unable to allocate bounded clipboard crop";
+        return false;
+    }
 
     for (int row = 0; row < region.height; ++row) {
         const auto* source = frame.rgba.data() +
@@ -201,7 +209,8 @@ bool ClipboardExporter::copy_png(
         png_data,
         static_cast<std::size_t>(png_size),
         "image/png",
-        error
+        error,
+        cancel_requested
     );
     g_free(png_data);
     return copied;
@@ -210,7 +219,8 @@ bool ClipboardExporter::copy_png(
 
 bool ClipboardExporter::copy_text(
     const std::string& text,
-    std::string& error
+    std::string& error,
+    const std::atomic_bool* cancel_requested
 ) {
     error.clear();
     if (text.empty()) {
@@ -222,7 +232,8 @@ bool ClipboardExporter::copy_text(
         text.data(),
         text.size(),
         "text/plain;charset=utf-8",
-        error
+        error,
+        cancel_requested
     );
 }
 

@@ -1,5 +1,7 @@
 #include "screenshot/WaylandScreencopy.hpp"
 
+#include "screenshot/ScreenshotSafety.hpp"
+
 #include "wlr-screencopy-unstable-v1-client-protocol.h"
 
 #include <wayland-client.h>
@@ -10,6 +12,9 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <limits>
+#include <new>
+#include <optional>
 #include <poll.h>
 #include <string>
 #include <sys/mman.h>
@@ -36,6 +41,7 @@ struct RegistryState {
     zwlr_screencopy_manager_v1* manager = nullptr;
     wl_shm* shm = nullptr;
     std::vector<std::unique_ptr<OutputInfo>> outputs;
+    bool allocation_failed = false;
 };
 
 struct FrameState {
@@ -65,6 +71,9 @@ ScreencopyResult failure(std::string message) {
 
 int create_memfd(std::size_t size) {
 #if defined(__linux__) && defined(SYS_memfd_create)
+    if (size == 0 || size > static_cast<std::size_t>(std::numeric_limits<off_t>::max())) {
+        return -1;
+    }
     const int fd = static_cast<int>(::syscall(
         SYS_memfd_create,
         "realmheart-screenshot",
@@ -146,13 +155,17 @@ void registry_global(
         // exposes it, and it lets us match the exact connector chosen under the
         // cursor without relying on compositor-private registry IDs.
         const std::uint32_t bind_version = std::min(version, 4u);
-        auto info = std::make_unique<OutputInfo>();
-        info->output = static_cast<wl_output*>(
-            wl_registry_bind(registry, name, &wl_output_interface, bind_version)
-        );
-        if (info->output != nullptr) {
-            wl_output_add_listener(info->output, &kOutputListener, info.get());
-            state->outputs.push_back(std::move(info));
+        try {
+            auto info = std::make_unique<OutputInfo>();
+            info->output = static_cast<wl_output*>(
+                wl_registry_bind(registry, name, &wl_output_interface, bind_version)
+            );
+            if (info->output != nullptr) {
+                wl_output_add_listener(info->output, &kOutputListener, info.get());
+                state->outputs.push_back(std::move(info));
+            }
+        } catch (const std::bad_alloc&) {
+            state->allocation_failed = true;
         }
     }
 }
@@ -181,13 +194,20 @@ void frame_buffer(
         return;
     }
 
-    if (width == 0 || height == 0 || stride < width * 4u) {
+    std::string dimensions_error;
+    const auto dimensions = validate_screencopy_dimensions(
+        width,
+        height,
+        stride,
+        dimensions_error
+    );
+    if (!dimensions) {
         state->failed = true;
-        state->error = "compositor offered invalid screencopy dimensions";
+        state->error = std::move(dimensions_error);
         return;
     }
 
-    const std::size_t size = static_cast<std::size_t>(stride) * height;
+    const std::size_t size = dimensions->total_bytes;
     const int fd = create_memfd(size);
     if (fd < 0) {
         state->failed = true;
@@ -360,12 +380,32 @@ bool dispatch_until_complete(wl_display* display, FrameState& state) {
     return state.ready && !state.failed;
 }
 
-FrozenFrame normalize_frame(const FrameState& state) {
+std::optional<FrozenFrame> normalize_frame(
+    const FrameState& state,
+    std::string& error
+) {
+    std::string dimensions_error;
+    const auto dimensions = validate_screencopy_dimensions(
+        state.width,
+        state.height,
+        state.stride,
+        dimensions_error
+    );
+    if (!dimensions) {
+        error = std::move(dimensions_error);
+        return std::nullopt;
+    }
+
     FrozenFrame result;
     result.width = static_cast<int>(state.width);
     result.height = static_cast<int>(state.height);
-    result.stride = static_cast<int>(state.width * 4u);
-    result.rgba.resize(static_cast<std::size_t>(result.stride) * state.height);
+    result.stride = static_cast<int>(dimensions->row_bytes);
+    try {
+        result.rgba.resize(dimensions->rgba_bytes);
+    } catch (const std::bad_alloc&) {
+        error = "unable to allocate normalized screenshot frame";
+        return std::nullopt;
+    }
 
     const auto* source = static_cast<const std::uint8_t*>(state.mapping);
     for (std::uint32_t y = 0; y < state.height; ++y) {
@@ -433,6 +473,12 @@ ScreencopyResult WaylandScreencopy::capture_output(const std::string& monitor_co
         wl_display_disconnect(display);
         return failure("Wayland registry discovery failed");
     }
+    if (registry_state.allocation_failed) {
+        cleanup_registry_state(registry_state);
+        wl_registry_destroy(registry);
+        wl_display_disconnect(display);
+        return failure("unable to allocate Wayland output metadata");
+    }
 
     if (registry_state.manager == nullptr) {
         cleanup_registry_state(registry_state);
@@ -490,7 +536,15 @@ ScreencopyResult WaylandScreencopy::capture_output(const std::string& monitor_co
         // Normalize before unmapping the wl_shm buffer. Keep the result type
         // deliberately simple: GCC 16 can false-positive on move-assignment
         // into std::optional<FrozenFrame> under Realmheart's -Werror build.
-        captured_frame = normalize_frame(frame_state);
+        auto normalized = normalize_frame(frame_state, capture_error);
+        if (!normalized) {
+            cleanup_frame_state(frame_state);
+            cleanup_registry_state(registry_state);
+            wl_registry_destroy(registry);
+            wl_display_disconnect(display);
+            return failure(capture_error);
+        }
+        captured_frame = std::move(*normalized);
     } else {
         capture_error = frame_state.error.empty()
             ? "Hyprland screencopy failed"

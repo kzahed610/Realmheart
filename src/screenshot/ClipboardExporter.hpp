@@ -3,6 +3,7 @@
 #include "screenshot/SelectionGeometry.hpp"
 #include "screenshot/WaylandScreencopy.hpp"
 
+#include <atomic>
 #include <string>
 
 namespace realmheart::screenshot {
@@ -12,12 +13,14 @@ public:
     static bool copy_png(
         const FrozenFrame& frame,
         const PixelRect& region,
-        std::string& error
+        std::string& error,
+        const std::atomic_bool* cancel_requested = nullptr
     );
 
     static bool copy_text(
         const std::string& text,
-        std::string& error
+        std::string& error,
+        const std::atomic_bool* cancel_requested = nullptr
     );
 };
 
