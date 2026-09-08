@@ -5,6 +5,7 @@
 #include "animation/character/CharacterCompositor.hpp"
 #include "ui/sidebar/ConnectivityPanel.hpp"
 #include "ui/sidebar/NightLightPanel.hpp"
+#include "ui/sidebar/NightLightTileState.hpp"
 #include "ui/sidebar/SidebarPreferences.hpp"
 #include "ui/sidebar/SidebarFrame.hpp"
 
@@ -949,8 +950,13 @@ void RightSidebar::build_quick_controls() {
         [this] {
             post_control_action([] {
                 const auto state = services::NightLight::read();
-                if (!state) return;
-                static_cast<void>(services::NightLight::set_enabled(!state->enabled));
+                if (state) {
+                    static_cast<void>(services::NightLight::set_enabled(!state->enabled));
+                    return;
+                }
+                if (services::NightLight::recovery_available()) {
+                    static_cast<void>(services::NightLight::set_enabled(true));
+                }
             });
         },
         [this] {
@@ -1218,6 +1224,8 @@ void RightSidebar::refresh_controls() {
             .night_light_enabled = night_light
                 ? std::optional<bool>{night_light->enabled}
                 : std::nullopt,
+            .night_light_recovery_available = !night_light &&
+                services::NightLight::recovery_available(),
             .active_profile = std::move(active_profile),
             .brightness_percent = brightness
                 ? std::optional<double>{brightness->percent}
@@ -1268,15 +1276,16 @@ gboolean RightSidebar::finish_control_refresh(gpointer raw) {
             owner->bluetooth_tile_->set_state("Unavailable", false, false);
         }
 
-        if (result->night_light_enabled) {
-            owner->night_light_tile_->set_state(
-                *result->night_light_enabled ? "On" : "Off",
-                *result->night_light_enabled,
-                true
+        const auto [night_light_status, night_light_active, night_light_available] =
+            night_light_tile_presentation(
+                result->night_light_enabled,
+                result->night_light_recovery_available
             );
-        } else {
-            owner->night_light_tile_->set_state("Unavailable", false, false);
-        }
+        owner->night_light_tile_->set_state(
+            std::string(night_light_status),
+            night_light_active,
+            night_light_available
+        );
 
         if (owner->brightness_slider_ != nullptr) {
             owner->brightness_slider_->apply_refresh(

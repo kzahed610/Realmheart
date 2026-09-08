@@ -272,4 +272,28 @@ TEST(WallpaperControllerTest, PrepareFailureClearsControllerTransactionState) {
     EXPECT_FALSE(controller.has_prepared_output_target());
 }
 
+TEST(WallpaperControllerTest, NativeFailureFallsBackToGtkWithoutDroppingOwnedSource) {
+    auto native_backend = std::make_shared<FakeWallpaperBackend>(WallpaperBackendType::Native);
+    native_backend->set_success = false;
+    auto gtk_backend = std::make_shared<FakeWallpaperBackend>(WallpaperBackendType::Gtk);
+    WallpaperController controller(
+        nullptr,
+        WallpaperBackendType::Native,
+        [native_backend, gtk_backend](GtkApplication*, WallpaperBackendType type) {
+            return type == WallpaperBackendType::Native
+                ? native_backend
+                : gtk_backend;
+        }
+    );
+    ASSERT_TRUE(controller.initialize());
+
+    std::string error;
+    const auto source = WallpaperSource::owned_bytes(
+        "/project/fallback.png", "fallback-pixels"
+    );
+    ASSERT_TRUE(controller.set_wallpaper(source, &error)) << error;
+    EXPECT_EQ(controller.active_backend(), WallpaperBackendType::Gtk);
+    EXPECT_EQ(gtk_backend->observed_source_bytes, "fallback-pixels");
+}
+
 } // namespace

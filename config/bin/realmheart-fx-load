@@ -1,22 +1,91 @@
 #!/usr/bin/env bash
 # Realmheart FX plugin loader.
 #
-# Loads the compositor plugin (realmheart-fx.so) into Hyprland. The plugin is
-# ABI-coupled to Hyprland, so it only exists if it was built against matching
-# headers. This loader resolves the shared library from the build tree or an
-# installed location and never double-loads.
+# The plugin is ABI-coupled to the exact Hyprland commit it was built against.
+# The plugin API's dirty bit is unreliable in the installed Hyprland 0.56.2
+# package, so this loader performs the authoritative version preflight before
+# asking Hyprland to mmap the plugin. Plugin.cpp still retains its exact hash
+# check and Hyprland retains the PLUGIN_API_VERSION ABI check.
 #
-# Override the search with REALMHEART_FX_SO=/path/to/realmheart-fx.so
+# Override the search with REALMHEART_FX_SO=/path/to/realmheart-fx.so.
+# The hyprctl and runtime-directory overrides are test/deployment hooks; the
+# defaults are the live compositor command and the user's private runtime dir.
 
 set -uo pipefail
 
-if command -v hyprctl >/dev/null 2>&1; then
-    if hyprctl plugin list 2>/dev/null | grep -q -i "realmheart-fx"; then
-        echo "realmheart-fx: already loaded"
-        exit 0
-    fi
-else
+readonly expected_commit="${REALMHEART_FX_HYPRLAND_COMMIT:-efb50993780079460b0cbed1363e2166a2de1d9f}"
+readonly expected_abi="${REALMHEART_FX_HYPRLAND_ABI:-efb50993780079460b0cbed1363e2166a2de1d9f_aq_0.14_hu_0.14_hg_0.5_hc_0.1_hlg_0.6}"
+readonly hyprctl_name="${REALMHEART_FX_HYPRCTL:-hyprctl}"
+readonly runtime_dir="${REALMHEART_FX_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/realmheart-fx}"
+
+hyprctl_bin="$(command -v "$hyprctl_name" 2>/dev/null || true)"
+if [[ -z "$hyprctl_bin" ]]; then
     echo "realmheart-fx: hyprctl not found — is Hyprland running?" >&2
+    exit 1
+fi
+
+if ! plugin_list_output="$($hyprctl_bin plugin list 2>&1)"; then
+    printf '%s\n' "$plugin_list_output" >&2
+    echo "realmheart-fx: unable to query the compositor plugin list" >&2
+    exit 1
+fi
+if grep -Eiq 'realmheart[-_ ]?fx' <<<"$plugin_list_output"; then
+    echo "realmheart-fx: already loaded"
+    exit 0
+fi
+
+if ! version_json="$($hyprctl_bin version -j 2>&1)"; then
+    printf '%s\n' "$version_json" >&2
+    echo "realmheart-fx: unable to query the authoritative Hyprland version" >&2
+    exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "realmheart-fx: python3 is required to parse hyprctl version -j safely" >&2
+    exit 1
+fi
+
+if ! version_fields="$(printf '%s' "$version_json" | python3 -c '
+import json
+import sys
+
+try:
+    version = json.load(sys.stdin)
+    commit = version.get("commit")
+    abi = version.get("abiHash")
+    dirty = version.get("dirty")
+    if not isinstance(commit, str) or not commit:
+        raise ValueError("missing commit")
+    if not isinstance(abi, str) or not abi:
+        raise ValueError("missing abiHash")
+    if type(dirty) is not bool:
+        raise ValueError("missing boolean dirty flag")
+    print(commit)
+    print(str(dirty).lower())
+    print(abi)
+except (json.JSONDecodeError, TypeError, ValueError) as error:
+    print(f"invalid version response: {error}", file=sys.stderr)
+    raise SystemExit(1)
+' )"; then
+    echo "realmheart-fx: hyprctl version -j was invalid; refusing to load" >&2
+    exit 1
+fi
+
+mapfile -t version_values <<<"$version_fields"
+runtime_commit="${version_values[0]:-}"
+runtime_dirty="${version_values[1]:-}"
+runtime_abi="${version_values[2]:-}"
+
+if [[ "$runtime_commit" != "$expected_commit" ]]; then
+    echo "realmheart-fx: Hyprland commit mismatch; expected $expected_commit, got ${runtime_commit:-<missing>}" >&2
+    exit 1
+fi
+if [[ "$runtime_abi" != "$expected_abi" ]]; then
+    echo "realmheart-fx: Hyprland ABI mismatch; expected $expected_abi, got ${runtime_abi:-<missing>}" >&2
+    exit 1
+fi
+if [[ "$runtime_dirty" != false ]]; then
+    echo "realmheart-fx: Hyprland reports a dirty build; refusing to load" >&2
     exit 1
 fi
 
@@ -30,7 +99,7 @@ candidates=(
 
 so=""
 for candidate in "${candidates[@]}"; do
-    if [[ -n "$candidate" && -f "$candidate" ]]; then
+    if [[ -n "$candidate" && -f "$candidate" && -r "$candidate" ]]; then
         so="$candidate"
         break
     fi
@@ -41,15 +110,42 @@ if [[ -z "$so" ]]; then
     exit 1
 fi
 
-if ! load_output=$(hyprctl plugin load "$so" 2>&1); then
+if ! mkdir -p "$runtime_dir" || ! chmod 700 "$runtime_dir"; then
+    echo "realmheart-fx: unable to create private runtime directory: $runtime_dir" >&2
+    exit 1
+fi
+if [[ ! -O "$runtime_dir" ]]; then
+    echo "realmheart-fx: runtime directory is not owned by the current user: $runtime_dir" >&2
+    exit 1
+fi
+
+# Every load gets a fresh inode. Never overwrite or remove a prior copy: it
+# may still be mmap'd by Hyprland after a failed plugin-init or an unload race.
+if ! runtime_plugin="$(mktemp "$runtime_dir/realmheart-fx.XXXXXX.so")"; then
+    echo "realmheart-fx: unable to allocate a unique runtime plugin copy" >&2
+    exit 1
+fi
+if ! cp --reflink=auto -- "$so" "$runtime_plugin" || ! chmod 755 "$runtime_plugin"; then
+    echo "realmheart-fx: unable to prepare runtime plugin copy: $runtime_plugin" >&2
+    exit 1
+fi
+
+if ! load_output="$($hyprctl_bin plugin load "$runtime_plugin" 2>&1)"; then
     printf '%s\n' "$load_output" >&2
-    echo "realmheart-fx: plugin load failed: $so" >&2
+    echo "realmheart-fx: plugin initialization/load failed: $runtime_plugin" >&2
     exit 1
 fi
 
-if ! hyprctl plugin list 2>/dev/null | grep -q -i "realmheart-fx"; then
-    echo "realmheart-fx: compositor did not report the plugin as loaded: $so" >&2
+if ! plugin_list_output="$($hyprctl_bin plugin list 2>&1)"; then
+    printf '%s\n' "$plugin_list_output" >&2
+    echo "realmheart-fx: plugin load returned success but plugin list could not be read" >&2
+    exit 1
+fi
+if ! grep -Eiq 'realmheart[-_ ]?fx' <<<"$plugin_list_output"; then
+    printf '%s\n' "$load_output" >&2
+    printf '%s\n' "$plugin_list_output" >&2
+    echo "realmheart-fx: compositor did not confirm Realmheart-FX after load: $runtime_plugin" >&2
     exit 1
 fi
 
-echo "realmheart-fx: loaded $so"
+echo "realmheart-fx: loaded $runtime_plugin (source: $so)"

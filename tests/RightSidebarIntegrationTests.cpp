@@ -1,5 +1,6 @@
 #include "services/Notifications.hpp"
 #include "services/RightSidebarServices.hpp"
+#include "ui/sidebar/NightLightTileState.hpp"
 #include "ui/sidebar/SidebarPreferences.hpp"
 
 #include <sys/stat.h>
@@ -122,11 +123,43 @@ void test_notification_status_uses_live_history_contract() {
             "notification status must report live history size");
 }
 
+void test_stopped_night_light_tile_remains_actionable() {
+    const auto [stopped_status, stopped_active, stopped_available] =
+        realmheart::ui::sidebar::night_light_tile_presentation(
+            std::nullopt,
+            true
+        );
+    require(stopped_status == "Start",
+            "installed but stopped Night Light must expose a Start tile action");
+    require(!stopped_active, "stopped Night Light tile must not appear active");
+    require(stopped_available,
+            "installed but stopped Night Light tile must remain clickable");
+
+    const auto [unavailable_status, unavailable_active, unavailable_available] =
+        realmheart::ui::sidebar::night_light_tile_presentation(
+            std::nullopt,
+            false
+        );
+    require(unavailable_status == "Unavailable",
+            "missing Night Light backend must remain unavailable");
+    require(!unavailable_active && !unavailable_available,
+            "missing Night Light backend must remain inactive and disabled");
+
+    const auto [live_status, live_active, live_available] =
+        realmheart::ui::sidebar::night_light_tile_presentation(
+            false,
+            true
+        );
+    require(live_status == "Off" && !live_active && live_available,
+            "verified live Night Light state must retain normal tile semantics");
+}
+
 } // namespace
 
 int main() {
     test_private_atomic_preferences_and_symlink_rejection();
     test_notification_status_uses_live_history_contract();
+    test_stopped_night_light_tile_remains_actionable();
     std::cout << "Right sidebar integration tests passed\n";
     return 0;
 }

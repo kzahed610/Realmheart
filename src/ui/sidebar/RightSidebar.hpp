@@ -113,6 +113,7 @@ private:
         bool wifi_active = false;
         std::optional<bool> bluetooth_powered;
         std::optional<bool> night_light_enabled;
+        bool night_light_recovery_available = false;
         std::optional<std::string> active_profile;
         std::optional<double> brightness_percent;
         std::optional<double> volume_percent;

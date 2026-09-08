@@ -2590,11 +2590,12 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
                 " but the running compositor is " + runtime.hash
             );
         }
-        if (runtime.dirty) {
-            throw std::runtime_error(
-                "Realmheart FX refuses to load against a dirty Hyprland build"
-            );
-        }
+        // Hyprland 0.56.2's plugin API reports the dirty bit as true for its
+        // clean packaged binary. The supported loader performs the
+        // authoritative `hyprctl version -j` commit, ABI, and dirty preflight
+        // before this library is mapped. Keep the exact hash gate above and
+        // leave the API-version gate to Hyprland's plugin loader; rejecting
+        // this unreliable field here would make a clean runtime unloadable.
 
         const auto registry = loadWindowEffectRegistry(defaultWindowEffectAssetRoot());
         if (!registry.success)

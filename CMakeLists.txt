@@ -731,6 +731,12 @@ if(BUILD_TESTING)
     )
     realmheart_register_test(realmheart_window_effect_policy_tests)
 
+    add_test(
+        NAME realmheart_fx_loader_contracts
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/RealmheartFxLoaderTests.sh ${CMAKE_SOURCE_DIR}
+    )
+    set_tests_properties(realmheart_fx_loader_contracts PROPERTIES TIMEOUT 20)
+
 
     add_executable(
         realmheart_shader_playback_tests
