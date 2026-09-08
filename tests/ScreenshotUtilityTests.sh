@@ -59,7 +59,41 @@ if "$root/config/realmheart/scripts/search_image.sh" "$tmp/input.png"; then
 fi
 
 unset REALMHEART_TEST_XDG_STATUS REALMHEART_TEST_GIO_STATUS
+
+runtime="$tmp/runtime"
+mkdir -p "$runtime"
+cat > "$tmp/home/.config/realmheart/scripts/search_image.sh" <<'FAKESEARCH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ $# -ne 1 || ! -s "$1" ]]; then
+    exit 42
+fi
+printf '%s\n' 'captured-image-was-present' > "${REALMHEART_TEST_CHILD_LOG:?}"
+exit "${REALMHEART_TEST_CHILD_STATUS:-0}"
+FAKESEARCH
+chmod +x "$tmp/home/.config/realmheart/scripts/search_image.sh"
+export XDG_RUNTIME_DIR="$runtime"
+export REALMHEART_TEST_CHILD_LOG="$tmp/child.log"
+export REALMHEART_TEST_CHILD_STATUS=0
 "$root/config/hypr/hyprland/scripts/snip_to_search.sh"
+[[ "$(<"$tmp/child.log")" == captured-image-was-present ]]
+if compgen -G "$runtime/realmheart-lens.*.png" > /dev/null; then
+    printf '%s\n' 'temporary Lens image survived successful handoff' >&2
+    exit 1
+fi
+
+export REALMHEART_TEST_CHILD_STATUS=13
+if "$root/config/hypr/hyprland/scripts/snip_to_search.sh"; then
+    printf '%s\n' 'expected child failure to propagate' >&2
+    exit 1
+else
+    child_status=$?
+    [[ "$child_status" -eq 13 ]]
+fi
+if compgen -G "$runtime/realmheart-lens.*.png" > /dev/null; then
+    printf '%s\n' 'temporary Lens image survived failed handoff' >&2
+    exit 1
+fi
 
 cat > "$bin/slurp" <<'FAILSLURP'
 #!/usr/bin/env bash

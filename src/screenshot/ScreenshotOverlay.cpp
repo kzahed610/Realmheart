@@ -95,6 +95,21 @@ struct OcrState {
     std::atomic_bool cancel_requested{false};
 };
 
+struct ClipboardResult {
+    bool ok = false;
+    std::string error;
+    std::string kind;
+    PixelRect pixels{};
+    std::size_t text_bytes = 0;
+};
+
+struct ClipboardState {
+    std::mutex mutex;
+    std::optional<ClipboardResult> result;
+    std::atomic_bool ready{false};
+    std::atomic_bool cancel_requested{false};
+};
+
 struct OverlayContext {
     const FrozenFrame* frame = nullptr;
     MonitorTarget monitor;
@@ -103,6 +118,7 @@ struct OverlayContext {
     std::chrono::steady_clock::time_point process_start{};
     GtkWindow* window = nullptr;
     GtkWidget* canvas = nullptr;
+    int failure_status = 0;
 
     DetectionState detection_state;
     std::thread detection_thread;
@@ -112,6 +128,11 @@ struct OverlayContext {
     OcrState ocr_state;
     std::thread ocr_thread;
     guint ocr_poll_source = 0;
+
+    ClipboardState clipboard_state;
+    std::thread clipboard_thread;
+    guint clipboard_poll_source = 0;
+    bool clipboard_processing = false;
 
     bool pointer_inside = false;
     bool selecting = false;
@@ -176,6 +197,13 @@ void show_transient_error(OverlayContext* context, std::string message);
 void request_async_cancellation(OverlayContext* context);
 void remove_async_sources(OverlayContext* context);
 bool reap_finished_ocr_worker(OverlayContext* context);
+gboolean poll_clipboard_result(gpointer user_data);
+bool start_png_clipboard_export(
+    OverlayContext* context,
+    const PixelRect& pixels,
+    const char* kind
+);
+bool start_text_clipboard_export(OverlayContext* context, const std::string& text);
 void rounded_rectangle(
     cairo_t* cr,
     double x,
@@ -323,6 +351,7 @@ void request_async_cancellation(OverlayContext* context) {
     if (context == nullptr) return;
     context->detection_state.cancel_requested.store(true, std::memory_order_release);
     context->ocr_state.cancel_requested.store(true, std::memory_order_release);
+    context->clipboard_state.cancel_requested.store(true, std::memory_order_release);
 }
 
 void remove_async_sources(OverlayContext* context) {
@@ -338,6 +367,10 @@ void remove_async_sources(OverlayContext* context) {
     if (context->ocr_poll_source != 0) {
         g_source_remove(context->ocr_poll_source);
         context->ocr_poll_source = 0;
+    }
+    if (context->clipboard_poll_source != 0) {
+        g_source_remove(context->clipboard_poll_source);
+        context->clipboard_poll_source = 0;
     }
 }
 
@@ -923,19 +956,7 @@ bool copy_selected_ocr_and_close(OverlayContext* context) {
     if (context == nullptr || context->window == nullptr || context->completed) return false;
     const std::string text = selected_ocr_text(*context);
     if (text.empty()) return false;
-
-    std::string error;
-    if (!ClipboardExporter::copy_text(text, error)) {
-        std::cerr << "[Screenshot] " << error << '\n';
-        show_transient_error(context, "Copy failed · " + error);
-        return false;
-    }
-
-    context->completed = true;
-    std::cout << "[Screenshot] Copied OCR text (" << text.size()
-              << " bytes) to clipboard\n";
-    gtk_window_destroy(context->window);
-    return true;
+    return start_text_clipboard_export(context, text);
 }
 
 SelectionRect current_ocr_region(const OverlayContext& context) {
@@ -1856,19 +1877,178 @@ bool copy_selection_and_close(
     );
     if (pixels.width <= 1 || pixels.height <= 1) return false;
 
-    std::string error;
-    if (!ClipboardExporter::copy_png(*context->frame, pixels, error)) {
-        std::cerr << "[Screenshot] " << error << '\n';
-        show_transient_error(context, "Copy failed · " + error);
+    return start_png_clipboard_export(context, pixels, kind);
+}
+
+bool start_png_clipboard_export(
+    OverlayContext* context,
+    const PixelRect& pixels,
+    const char* kind
+) {
+    if (
+        context == nullptr || context->frame == nullptr || context->window == nullptr ||
+        context->shutting_down || context->clipboard_processing || kind == nullptr
+    ) return false;
+
+    context->clipboard_processing = true;
+    context->clipboard_state.ready.store(false, std::memory_order_release);
+    context->clipboard_state.cancel_requested.store(false, std::memory_order_release);
+    {
+        std::lock_guard lock(context->clipboard_state.mutex);
+        context->clipboard_state.result.reset();
+    }
+
+    const FrozenFrame* frame = context->frame;
+    ClipboardState* state = &context->clipboard_state;
+    const std::string operation = kind;
+    try {
+        context->clipboard_thread = std::thread([state, frame, pixels, operation]() {
+            ClipboardResult result;
+            result.kind = operation;
+            result.pixels = pixels;
+            result.ok = ClipboardExporter::copy_png(
+                *frame,
+                pixels,
+                result.error,
+                &state->cancel_requested
+            );
+            {
+                std::lock_guard lock(state->mutex);
+                state->result = std::move(result);
+            }
+            state->ready.store(true, std::memory_order_release);
+        });
+    } catch (const std::exception& exception) {
+        context->clipboard_processing = false;
+        show_transient_error(
+            context,
+            std::string{"Unable to start clipboard worker · "} + exception.what()
+        );
         return false;
     }
 
-    context->completed = true;
-    std::cout << "[Screenshot] Copied "
-              << pixels.width << 'x' << pixels.height << ' '
-              << kind << " to clipboard\n";
-    gtk_window_destroy(context->window);
+    context->clipboard_poll_source = g_timeout_add(12, poll_clipboard_result, context);
+    if (context->clipboard_poll_source == 0) {
+        request_async_cancellation(context);
+        context->clipboard_thread.join();
+        context->clipboard_processing = false;
+        context->clipboard_state.ready.store(false, std::memory_order_release);
+        {
+            std::lock_guard lock(context->clipboard_state.mutex);
+            context->clipboard_state.result.reset();
+        }
+        show_transient_error(context, "Unable to schedule clipboard completion handler");
+        return false;
+    }
+    context->selecting = false;
+    refresh_hint(context);
+    queue_canvas(context);
     return true;
+}
+
+bool start_text_clipboard_export(OverlayContext* context, const std::string& text) {
+    if (
+        context == nullptr || context->window == nullptr || context->shutting_down ||
+        context->clipboard_processing || text.empty()
+    ) return false;
+
+    context->clipboard_processing = true;
+    context->clipboard_state.ready.store(false, std::memory_order_release);
+    context->clipboard_state.cancel_requested.store(false, std::memory_order_release);
+    {
+        std::lock_guard lock(context->clipboard_state.mutex);
+        context->clipboard_state.result.reset();
+    }
+
+    ClipboardState* state = &context->clipboard_state;
+    try {
+        context->clipboard_thread = std::thread([state, text]() {
+            ClipboardResult result;
+            result.kind = "OCR text";
+            result.text_bytes = text.size();
+            result.ok = ClipboardExporter::copy_text(
+                text,
+                result.error,
+                &state->cancel_requested
+            );
+            {
+                std::lock_guard lock(state->mutex);
+                state->result = std::move(result);
+            }
+            state->ready.store(true, std::memory_order_release);
+        });
+    } catch (const std::exception& exception) {
+        context->clipboard_processing = false;
+        show_transient_error(
+            context,
+            std::string{"Unable to start clipboard worker · "} + exception.what()
+        );
+        return false;
+    }
+
+    context->clipboard_poll_source = g_timeout_add(12, poll_clipboard_result, context);
+    if (context->clipboard_poll_source == 0) {
+        request_async_cancellation(context);
+        context->clipboard_thread.join();
+        context->clipboard_processing = false;
+        context->clipboard_state.ready.store(false, std::memory_order_release);
+        {
+            std::lock_guard lock(context->clipboard_state.mutex);
+            context->clipboard_state.result.reset();
+        }
+        show_transient_error(context, "Unable to schedule clipboard completion handler");
+        return false;
+    }
+    refresh_hint(context);
+    queue_canvas(context);
+    return true;
+}
+
+gboolean poll_clipboard_result(gpointer user_data) {
+    auto* context = static_cast<OverlayContext*>(user_data);
+    if (context == nullptr) return G_SOURCE_REMOVE;
+    if (!context->clipboard_state.ready.load(std::memory_order_acquire)) {
+        return G_SOURCE_CONTINUE;
+    }
+
+    std::optional<ClipboardResult> loaded;
+    {
+        std::lock_guard lock(context->clipboard_state.mutex);
+        if (context->clipboard_state.result.has_value()) {
+            loaded = std::move(context->clipboard_state.result);
+            context->clipboard_state.result.reset();
+        }
+    }
+    context->clipboard_poll_source = 0;
+    if (context->clipboard_thread.joinable()) context->clipboard_thread.join();
+    context->clipboard_state.ready.store(false, std::memory_order_release);
+    context->clipboard_processing = false;
+
+    if (!loaded.has_value() || context->shutting_down || context->window == nullptr) {
+        return G_SOURCE_REMOVE;
+    }
+    if (context->clipboard_state.cancel_requested.load(std::memory_order_acquire)) {
+        context->clipboard_state.cancel_requested.store(false, std::memory_order_release);
+        return G_SOURCE_REMOVE;
+    }
+    context->clipboard_state.cancel_requested.store(false, std::memory_order_release);
+    if (!loaded->ok) {
+        std::cerr << "[Screenshot] " << loaded->error << '\n';
+        show_transient_error(context, "Copy failed · " + loaded->error);
+        return G_SOURCE_REMOVE;
+    }
+
+    context->completed = true;
+    if (loaded->kind == "OCR text") {
+        std::cout << "[Screenshot] Copied OCR text (" << loaded->text_bytes
+                  << " bytes) to clipboard\n";
+    } else {
+        std::cout << "[Screenshot] Copied "
+                  << loaded->pixels.width << 'x' << loaded->pixels.height << ' '
+                  << loaded->kind << " to clipboard\n";
+    }
+    gtk_window_destroy(context->window);
+    return G_SOURCE_REMOVE;
 }
 
 
@@ -2129,6 +2309,8 @@ gboolean on_key_pressed(
         }
         return GDK_EVENT_STOP;
     }
+
+    if (context->clipboard_processing) return GDK_EVENT_STOP;
 
     if (context->ocr_ready) {
         const bool control = (state & GDK_CONTROL_MASK) != 0;
@@ -2957,7 +3139,10 @@ void activate(GtkApplication* app, gpointer user_data) {
     } else {
         std::cerr << "[Screenshot] GDK could not resolve monitor connector '"
                   << context->monitor.connector
-                  << "'; compositor monitor selection will be used as fallback\n";
+                  << "'; refusing to show a frame on an arbitrary monitor\n";
+        context->failure_status = 1;
+        gtk_window_destroy(context->window);
+        return;
     }
 
     gtk_widget_set_cursor_from_name(canvas, "crosshair");
@@ -2995,9 +3180,15 @@ int ScreenshotOverlay::run(
     if (context.ocr_thread.joinable()) {
         context.ocr_thread.join();
     }
+    if (context.clipboard_thread.joinable()) {
+        // The worker only owns state and the frozen frame, but both belong to
+        // this stack context. Join after removing its main-context callback so
+        // no completion path can observe the context after this function ends.
+        context.clipboard_thread.join();
+    }
 
     g_object_unref(app);
-    return status;
+    return status != 0 ? status : context.failure_status;
 }
 
 } // namespace realmheart::screenshot

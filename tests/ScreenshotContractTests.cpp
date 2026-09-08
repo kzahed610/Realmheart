@@ -4,7 +4,10 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fcntl.h>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -79,5 +82,40 @@ int main() {
     ::rmdir(directory);
     assert(!overflow.ok);
     assert(overflow.error.find("output exceeded") != std::string::npos);
+
+    std::ifstream overlay_file(
+        std::filesystem::path{REALMHEART_SOURCE_DIR} /
+        "src/screenshot/ScreenshotOverlay.cpp"
+    );
+    assert(overlay_file.good());
+    const std::string overlay_source(
+        std::istreambuf_iterator<char>{overlay_file},
+        std::istreambuf_iterator<char>{}
+    );
+    const std::size_t run_start = overlay_source.find("int ScreenshotOverlay::run(");
+    assert(run_start != std::string::npos);
+    const std::size_t run_end = overlay_source.find(
+        "\n}\n\n} // namespace realmheart::screenshot",
+        run_start
+    );
+    assert(run_end != std::string::npos);
+    const std::string run_source = overlay_source.substr(0, run_end);
+    const std::size_t cancellation = run_source.find(
+        "request_async_cancellation(&context);",
+        run_start
+    );
+    const std::size_t source_removal = run_source.find(
+        "remove_async_sources(&context);",
+        run_start
+    );
+    const std::size_t clipboard_join = run_source.find(
+        "if (context.clipboard_thread.joinable())",
+        run_start
+    );
+    assert(cancellation != std::string::npos);
+    assert(source_removal != std::string::npos);
+    assert(clipboard_join != std::string::npos);
+    assert(cancellation < source_removal);
+    assert(source_removal < clipboard_join);
     return 0;
 }

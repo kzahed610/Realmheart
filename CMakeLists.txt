@@ -622,6 +622,10 @@ if(BUILD_TESTING)
         PkgConfig::GIO
         PkgConfig::GDK_PIXBUF
     )
+    target_compile_definitions(
+        realmheart_screenshot_contract_tests
+        PRIVATE REALMHEART_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    )
     realmheart_register_test(realmheart_screenshot_contract_tests)
 
     add_test(
