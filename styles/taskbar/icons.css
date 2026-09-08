@@ -38,6 +38,16 @@
     opacity 120ms ease-out;
 }
 
+.realmheart-themed-svg-fallback {
+  color: @rh_text_muted;
+  font-size: 0.82em;
+  font-weight: 800;
+}
+
+.realmheart-themed-svg-icon.realmheart-themed-svg-unavailable {
+  color: @rh_text_muted;
+}
+
 .realmheart-icon-accent-probe {
   color: @rh_icon_accent;
 }

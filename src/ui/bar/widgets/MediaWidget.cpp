@@ -4,6 +4,7 @@
 #include "ui/LayerSurface.hpp"
 #include "core/TaskExecutor.hpp"
 #include "ui/bar/MediaArtLoader.hpp"
+#include "ui/bar/TaskbarAsyncContracts.hpp"
 #include "ui/bar/widgets/SlideClip.hpp"
 
 #include <gdk-pixbuf/gdk-pixbuf.h>
@@ -16,6 +17,7 @@
 #include <cstring>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace realmheart::ui::bar::widgets {
 namespace {
@@ -910,7 +912,8 @@ void MediaWidget::commit_pending_seek() {
 void MediaWidget::update_art(const std::string& art_url) {
     // Position and playback signals may repeat the same metadata while a
     // remote download is pending. Keep the existing request alive instead of
-    // generating another queued worker for the same identity.
+    // generating another queued worker for the same identity. The registry is
+    // shared by every bar, so mirrored bars also share one resolve/decode job.
     if (art_url == requested_art_url_) return;
 
     requested_art_url_ = art_url;
@@ -920,20 +923,38 @@ void MediaWidget::update_art(const std::string& art_url) {
     gtk_stack_set_visible_child_name(GTK_STACK(album_stack_), "fallback");
     if (art_url.empty()) return;
 
+    struct ArtSubscriber {
+        std::shared_ptr<AsyncState> state;
+        std::uint64_t generation = 0;
+    };
+    struct ArtRequest {
+        using Subscriber = ArtSubscriber;
+        std::vector<ArtSubscriber> subscribers;
+        GdkPixbuf* pixbuf = nullptr;
+
+        ~ArtRequest() {
+            if (pixbuf != nullptr) g_object_unref(pixbuf);
+        }
+    };
+    static PendingRequestRegistry<ArtRequest> registry;
+
     const auto state = async_state_;
     const std::string requested_url = art_url;
-    const std::string task_key = "media-art-" + std::to_string(
-        reinterpret_cast<std::uintptr_t>(state.get())
+    const auto [request, start_request] = registry.subscribe(
+        requested_url,
+        ArtSubscriber{state, generation},
+        [](const ArtSubscriber& existing, const ArtSubscriber& incoming) {
+            return existing.state == incoming.state;
+        }
     );
+    if (!start_request) return;
+
     const bool posted = realmheart::core::shared_task_executor().post(
-        [state, requested_url, generation] {
-            const auto cancelled = [state, generation] {
-                return !state->alive.load() || state->art_generation.load() != generation;
-            };
-            const auto path = MediaArtLoader::resolve(requested_url, cancelled);
+        [request, requested_url] {
+            const auto path = MediaArtLoader::resolve(requested_url, [] { return false; });
 
             GdkPixbuf* pixbuf = nullptr;
-            if (path && !cancelled()) {
+            if (path) {
                 GError* error = nullptr;
                 GdkPixbuf* source = gdk_pixbuf_new_from_file_at_scale(
                     path->string().c_str(),
@@ -951,40 +972,70 @@ void MediaWidget::update_art(const std::string& art_url) {
             }
 
             struct Payload {
-                std::shared_ptr<AsyncState> state;
+                std::shared_ptr<ArtRequest> request;
                 std::string art_url;
-                std::uint64_t generation = 0;
-                GdkPixbuf* pixbuf = nullptr;
-
-                ~Payload() {
-                    if (pixbuf != nullptr) g_object_unref(pixbuf);
-                }
             };
+            request->pixbuf = pixbuf;
+            pixbuf = nullptr;
+            if (pixbuf != nullptr) g_object_unref(pixbuf);
 
-            g_idle_add_full(
+            auto* payload = new Payload{request, requested_url};
+            const guint source_id = g_idle_add_full(
                 G_PRIORITY_DEFAULT_IDLE,
                 +[](gpointer raw) -> gboolean {
                     auto* payload = static_cast<Payload*>(raw);
-                    if (payload->state->alive.load() &&
-                        payload->state->art_generation.load() == payload->generation &&
-                        payload->state->owner != nullptr) {
-                        payload->state->owner->apply_art(
-                            payload->art_url, payload->generation, payload->pixbuf
-                        );
+                    std::vector<ArtSubscriber> subscribers;
+                    GdkPixbuf* pixbuf = nullptr;
+                    subscribers = registry.complete(payload->art_url, payload->request);
+                    pixbuf = payload->request->pixbuf;
+                    payload->request->pixbuf = nullptr;
+                    for (const auto& subscriber : subscribers) {
+                        if (subscriber.state->alive.load() &&
+                            subscriber.state->art_generation.load() == subscriber.generation &&
+                            subscriber.state->owner != nullptr) {
+                            subscriber.state->owner->apply_art(
+                                payload->art_url, subscriber.generation, pixbuf
+                            );
+                        }
                     }
+                    if (pixbuf != nullptr) g_object_unref(pixbuf);
                     return G_SOURCE_REMOVE;
                 },
-                new Payload{state, requested_url, generation, pixbuf},
+                payload,
                 +[](gpointer raw) { delete static_cast<Payload*>(raw); }
             );
+            if (source_id == 0) {
+                registry.discard(requested_url, request);
+                delete payload;
+            }
         },
-        task_key,
-        [state, generation] {
-            return !state->alive.load() || state->art_generation.load() != generation;
+        {},
+        [request, requested_url] {
+            // TaskExecutor skips the task body when this predicate returns
+            // true. Discard atomically with the liveness check so a new
+            // subscriber cannot race cancellation and inherit an orphaned
+            // request after the worker has decided to skip it.
+            return registry.discard_if(
+                requested_url,
+                request,
+                [](const std::vector<ArtSubscriber>& subscribers) {
+                    return std::none_of(
+                        subscribers.begin(),
+                        subscribers.end(),
+                        [](const ArtSubscriber& subscriber) {
+                            return subscriber.state->alive.load() &&
+                                subscriber.state->art_generation.load() == subscriber.generation;
+                        }
+                    );
+                }
+            );
         }
     );
 
-    if (!posted) art_request_complete_ = true;
+    if (!posted) {
+        registry.discard(requested_url, request);
+        art_request_complete_ = true;
+    }
 }
 
 void MediaWidget::apply_art(

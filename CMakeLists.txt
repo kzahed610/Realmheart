@@ -1005,6 +1005,14 @@ if(BUILD_TESTING)
     target_link_libraries(realmheart_bar_services_tests PRIVATE PkgConfig::GIO)
     realmheart_register_dbus_test(realmheart_bar_services_tests)
 
+    add_executable(
+        realmheart_taskbar_contract_tests
+        tests/TaskbarContractsTests.cpp
+        src/core/TaskExecutor.cpp
+    )
+    target_link_libraries(realmheart_taskbar_contract_tests PRIVATE PkgConfig::GTK4)
+    realmheart_register_test(realmheart_taskbar_contract_tests)
+
     add_executable(realmheart_battery_service_tests tests/BatteryServiceTests.cpp src/services/BatteryService.cpp)
     realmheart_register_test(realmheart_battery_service_tests)
 

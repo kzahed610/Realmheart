@@ -112,11 +112,12 @@ VerticalBar::VerticalBar(
     });
 
     media_subscription_ = media_service_.subscribe([state] {
-        if (!state->alive.load()) return;
-        g_idle_add_full(
+        if (!state->alive.load() || !state->media_refresh_queued.claim()) return;
+        const guint source_id = g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,
             +[](gpointer raw) -> gboolean {
                 auto* shared = static_cast<std::shared_ptr<AsyncState>*>(raw);
+                (*shared)->media_refresh_queued.release();
                 if ((*shared)->alive.load() && (*shared)->owner != nullptr) {
                     (*shared)->owner->request_media_refresh();
                 }
@@ -125,17 +126,18 @@ VerticalBar::VerticalBar(
             new std::shared_ptr<AsyncState>(state),
             +[](gpointer raw) { delete static_cast<std::shared_ptr<AsyncState>*>(raw); }
         );
+        if (source_id == 0) state->media_refresh_queued.release();
     });
 
     workspace_monitor_ = std::make_unique<services::HyprlandEventMonitor>([state] {
-        if (!state->alive.load() || state->workspace_refresh_queued.exchange(true)) {
+        if (!state->alive.load() || !state->workspace_refresh_queued.claim()) {
             return;
         }
-        g_idle_add_full(
+        const guint source_id = g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,
             +[](gpointer raw) -> gboolean {
                 auto* shared = static_cast<std::shared_ptr<AsyncState>*>(raw);
-                (*shared)->workspace_refresh_queued = false;
+                (*shared)->workspace_refresh_queued.release();
                 if ((*shared)->alive.load() && (*shared)->owner != nullptr) {
                     (*shared)->owner->request_workspace_refresh();
                 }
@@ -144,6 +146,7 @@ VerticalBar::VerticalBar(
             new std::shared_ptr<AsyncState>(state),
             +[](gpointer raw) { delete static_cast<std::shared_ptr<AsyncState>*>(raw); }
         );
+        if (source_id == 0) state->workspace_refresh_queued.release();
     });
     workspace_monitor_->start();
 
@@ -260,6 +263,10 @@ void VerticalBar::apply_geometry() {
         geometry_.rail_width
     );
     gtk_widget_queue_resize(window_);
+}
+
+void VerticalBar::refresh_geometry() {
+    apply_geometry();
 }
 
 void VerticalBar::apply_layout_metrics() {

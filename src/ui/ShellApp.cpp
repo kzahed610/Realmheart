@@ -2901,6 +2901,7 @@ private:
     }
 
     void refresh_monitor_geometry() {
+        bar::refresh_monitor_bars(bar_.get(), secondary_bars_);
         if (sidebar_ != nullptr && sidebar_monitor_index_ >= 0) {
             sidebar_->apply_geometry();
             if (sidebar_backdrop_ != nullptr) {

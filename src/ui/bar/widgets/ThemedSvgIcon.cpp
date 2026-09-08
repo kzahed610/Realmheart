@@ -83,7 +83,9 @@ std::string read_file(const realmheart::ui::ProjectAsset& asset) {
 } // namespace
 
 struct ThemedSvgRenderState {
+    GtkWidget* root_widget = nullptr;
     GtkWidget* drawing_area = nullptr;
+    GtkWidget* fallback_label = nullptr;
     GtkWidget* accent_probe = nullptr;
     GtkWidget* on_accent_probe = nullptr;
     std::string source;
@@ -104,6 +106,21 @@ namespace {
 
 void destroy_state(gpointer raw) {
     delete static_cast<ThemedSvgRenderState*>(raw);
+}
+
+void set_unavailable(ThemedSvgRenderState& state, bool unavailable) {
+    if (state.fallback_label != nullptr) {
+        gtk_widget_set_visible(state.fallback_label, unavailable);
+    }
+    if (state.root_widget != nullptr) {
+        if (unavailable) {
+            gtk_widget_add_css_class(state.root_widget, ThemedSvgFallback::unavailable_css_class());
+            gtk_widget_set_tooltip_text(state.root_widget, ThemedSvgFallback::tooltip());
+        } else {
+            gtk_widget_remove_css_class(state.root_widget, ThemedSvgFallback::unavailable_css_class());
+            gtk_widget_set_tooltip_text(state.root_widget, nullptr);
+        }
+    }
 }
 
 bool rebuild_surface(
@@ -224,8 +241,18 @@ void draw_icon(
 
     if (!state.cache_valid || state.cached_width != width || state.cached_height != height ||
         !(state.cached_colors == colors)) {
-        if (!rebuild_surface(state, width, height, colors)) return;
+        if (!rebuild_surface(state, width, height, colors)) {
+            set_unavailable(
+                state,
+                ThemedSvgFallback::required(!state.source.empty(), false)
+            );
+            return;
+        }
     }
+    set_unavailable(
+        state,
+        ThemedSvgFallback::required(!state.source.empty(), true)
+    );
 
     cairo_save(cr);
     cairo_set_source_surface(cr, state.surface, 0.0, 0.0);
@@ -243,6 +270,7 @@ ThemedSvgIcon::ThemedSvgIcon(std::string relative_path, int pixels) {
     gtk_widget_set_valign(widget_, GTK_ALIGN_CENTER);
 
     state_ = new ThemedSvgRenderState();
+    state_->root_widget = widget_;
     g_object_set_data_full(
         G_OBJECT(widget_),
         "realmheart-themed-svg-state",
@@ -260,6 +288,14 @@ ThemedSvgIcon::ThemedSvgIcon(std::string relative_path, int pixels) {
         state_,
         nullptr
     );
+
+    state_->fallback_label = gtk_label_new(ThemedSvgFallback::text());
+    gtk_widget_add_css_class(state_->fallback_label, ThemedSvgFallback::css_class());
+    gtk_widget_set_halign(state_->fallback_label, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(state_->fallback_label, GTK_ALIGN_CENTER);
+    gtk_widget_set_can_target(state_->fallback_label, FALSE);
+    gtk_widget_set_visible(state_->fallback_label, FALSE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(widget_), state_->fallback_label);
 
     state_->accent_probe = gtk_label_new(nullptr);
     gtk_widget_add_css_class(state_->accent_probe, "realmheart-icon-accent-probe");
@@ -287,6 +323,7 @@ bool ThemedSvgIcon::set_icon(std::string relative_path) {
     if (const auto asset = realmheart::ui::open_project_asset(state_->relative_path)) {
         state_->source = read_file(*asset);
     }
+    set_unavailable(*state_, ThemedSvgFallback::required(!state_->source.empty(), true));
     gtk_widget_queue_draw(state_->drawing_area);
     return !state_->source.empty();
 }

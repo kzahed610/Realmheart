@@ -7,6 +7,19 @@ namespace realmheart::ui::bar::widgets {
 
 struct ThemedSvgRenderState;
 
+struct ThemedSvgFallback {
+    static constexpr const char* text() { return "?"; }
+    static constexpr const char* css_class() { return "realmheart-themed-svg-fallback"; }
+    static constexpr const char* unavailable_css_class() {
+        return "realmheart-themed-svg-unavailable";
+    }
+    static constexpr const char* tooltip() { return "Icon unavailable"; }
+
+    static constexpr bool required(bool source_loaded, bool render_succeeded) {
+        return !source_loaded || !render_succeeded;
+    }
+};
+
 // Renders the original Realmheart SVG geometry after resolving its semantic
 // color tokens. This deliberately avoids GTK symbolic-icon flattening, which
 // loses the distinction between hollow strokes, solid fills, and accent marks.

@@ -7,6 +7,7 @@
 #include "services/Wifi.hpp"
 #include "ui/bar/WorkspaceWindowTracker.hpp"
 #include "ui/bar/BarGeometry.hpp"
+#include "ui/bar/TaskbarAsyncContracts.hpp"
 #include "ui/bar/widgets/BarBackdrop.hpp"
 #include "ui/bar/widgets/BarIconButton.hpp"
 #include "ui/bar/widgets/BatteryWidget.hpp"
@@ -25,6 +26,14 @@
 #include <vector>
 
 namespace realmheart::ui::bar {
+
+template <typename PrimaryBar, typename SecondaryBars>
+void refresh_monitor_bars(PrimaryBar* primary, const SecondaryBars& secondary) {
+    if (primary != nullptr) primary->refresh_geometry();
+    for (const auto& bar : secondary) {
+        if (bar != nullptr) bar->refresh_geometry();
+    }
+}
 
 class VerticalBar {
 public:
@@ -47,6 +56,7 @@ public:
 
     GtkWidget* get_window() const { return window_; }
     void refresh();
+    void refresh_geometry();
     [[nodiscard]] std::vector<
         workspace::animation::WorkspaceMorphSource
     > workspace_morph_sources() const;
@@ -60,10 +70,11 @@ private:
         std::atomic<bool> workspace_refresh_pending{false};
         std::atomic<bool> media_in_flight{false};
         std::atomic<bool> media_refresh_pending{false};
+        RefreshGate media_refresh_queued;
         std::atomic<bool> battery_in_flight{false};
         std::atomic<bool> wifi_in_flight{false};
         std::atomic<bool> notification_refresh_queued{false};
-        std::atomic<bool> workspace_refresh_queued{false};
+        RefreshGate workspace_refresh_queued;
         VerticalBar* owner = nullptr; // GTK main thread only
     };
 
