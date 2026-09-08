@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <limits>
 #include <string_view>
 
 namespace realmheart::ui::workspace {
@@ -91,9 +92,12 @@ int workspace_id_for_realm_index(
     std::size_t realm_index,
     int first_workspace_id
 ) noexcept {
-    return realm_index < kWorkspaceOverviewRealmCount
-        ? std::max(1, first_workspace_id) + static_cast<int>(realm_index)
-        : 0;
+    if (realm_index >= kWorkspaceOverviewRealmCount) return 0;
+    const int first = std::max(1, first_workspace_id);
+    const auto offset = static_cast<int>(realm_index);
+    const auto last_offset = static_cast<int>(kWorkspaceOverviewRealmCount - 1U);
+    if (first > std::numeric_limits<int>::max() - last_offset) return 0;
+    return first + offset;
 }
 
 int realm_index_for_workspace_id(
@@ -101,11 +105,9 @@ int realm_index_for_workspace_id(
     int first_workspace_id
 ) noexcept {
     const int first = std::max(1, first_workspace_id);
-    const int offset = workspace_id - first;
-    return offset >= 0 &&
-        offset < static_cast<int>(kWorkspaceOverviewRealmCount)
-        ? offset
-        : -1;
+    if (workspace_id < first) return -1;
+    const auto offset = workspace_id - first;
+    return offset < static_cast<int>(kWorkspaceOverviewRealmCount) ? offset : -1;
 }
 
 WorkspaceOverviewState build_workspace_overview_state(
@@ -127,12 +129,25 @@ WorkspaceOverviewState build_workspace_overview_state(
             }
         );
 
-        if (workspace == snapshot.workspaces.end() ||
-            workspace->window_details.empty()) {
+        if (workspace == snapshot.workspaces.end()) {
             realm.card_count = 0;
-            realm.total_windows = workspace == snapshot.workspaces.end()
-                ? 0
-                : workspace->windows;
+            continue;
+        }
+
+        realm.total_windows = std::max(0, workspace->windows);
+        if (!snapshot.clients_available && realm.total_windows > 0) {
+            realm.card_count = 1;
+            realm.cards[0] = {
+                {},
+                "dialog-warning-symbolic",
+                "Window details unavailable",
+                "Hyprland client data is temporarily unavailable",
+                true,
+            };
+            continue;
+        }
+        if (workspace->window_details.empty()) {
+            realm.card_count = 0;
             continue;
         }
 

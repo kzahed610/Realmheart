@@ -1065,6 +1065,13 @@ if(BUILD_TESTING)
     realmheart_register_test(realmheart_workspace_overview_model_tests)
 
     add_executable(
+        realmheart_workspace_overview_runtime_policy_tests
+        tests/WorkspaceOverviewRuntimePolicyTests.cpp
+        src/effects/core/TransitionTimeline.cpp
+    )
+    realmheart_register_test(realmheart_workspace_overview_runtime_policy_tests)
+
+    add_executable(
         realmheart_workspace_morph_model_tests
         tests/WorkspaceMorphModelTests.cpp
         src/ui/workspace/animation/WorkspaceMorphModel.cpp

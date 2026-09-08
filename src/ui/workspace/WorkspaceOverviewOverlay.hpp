@@ -1,13 +1,16 @@
 #pragma once
 
 #include "core/DisplayTier.hpp"
+#include "core/MonitorContext.hpp"
 #include "effects/core/TransitionTimeline.hpp"
 #include "ui/workspace/WorkspaceOverviewModel.hpp"
+#include "ui/workspace/WorkspaceOverviewRuntimePolicy.hpp"
 #include "ui/workspace/animation/WorkspaceMorphDiagnostics.hpp"
 #include "ui/workspace/animation/WorkspaceMorphModel.hpp"
 #include "ui/workspace/animation/WorkspaceOverviewMorphRenderer.hpp"
 
 #include <array>
+#include <deque>
 #include <functional>
 #include <gtk/gtk.h>
 #include <optional>
@@ -153,6 +156,8 @@ private:
     void initialize_separator_nodes();
     void release_separator_nodes() noexcept;
     void synchronize_active_workspace();
+    void apply_pending_workspace_state_for_reversal();
+    void invalidate_monitor_context() noexcept;
     void begin_viewport_transition(int direction);
     [[nodiscard]] std::size_t style_index_for_realm(
         std::size_t realm_index
@@ -162,11 +167,15 @@ private:
         std::string_view requested_icon_name,
         std::string_view app_name
     );
+    void cache_icon_surface(
+        std::string cache_key,
+        cairo_surface_t* surface
+    );
     void clear_icon_cache() noexcept;
     void schedule_asset_retry();
     bool rebuild_dirty_overlays();
     bool ensure_assets();
-    void release_assets() noexcept;
+    void release_assets(bool reset_tier_selection = true) noexcept;
 
     int monitor_index_ = -1;
     GtkWindow* window_ = nullptr;
@@ -196,11 +205,15 @@ private:
     std::function<void(bool)> set_taskbar_morph_active_;
     std::function<void(double)> set_taskbar_morph_progress_;
     std::vector<animation::WorkspaceMorphSource> morph_sources_;
+    std::optional<core::MonitorContext> monitor_context_;
+    GListModel* monitor_list_model_ = nullptr;
+    gulong monitor_items_changed_handler_id_ = 0;
     std::array<int, animation::kWorkspaceMorphBandCount> morph_workspace_ids_{};
     std::array<double, animation::kWorkspaceMorphBandCount>
         morph_destination_heights_{};
     effects::TransitionTimeline morph_timeline_{{0.50, 0.34}};
     std::unordered_map<std::string, cairo_surface_t*> icon_surfaces_;
+    std::deque<std::string> icon_surface_cache_order_;
     DragCard drag_card_{};
     int drag_target_index_ = -1;
     int overflow_workspace_id_ = 0;
@@ -211,6 +224,7 @@ private:
     int active_index_ = 1;
     int selected_card_index_ = -1;
     guint animation_tick_id_ = 0;
+    guint prewarm_tick_id_ = 0;
     bool prewarmed_ = false;
     gint64 animation_start_time_us_ = 0;
     gint64 card_animation_start_time_us_ = 0;
@@ -235,6 +249,9 @@ private:
     bool assets_attempted_ = false;
     bool asset_tier_selected_ = false;
     guint asset_retry_id_ = 0;
+    WorkspaceOverviewAssetRetryPolicy asset_retry_policy_{};
+    std::optional<WorkspaceOverviewState> pending_workspace_state_;
+    int pending_viewport_start_workspace_id_ = 1;
     bool taskbar_morph_active_ = false;
     bool morph_geometry_frozen_ = false;
     bool morph_shader_capture_pending_ = false;

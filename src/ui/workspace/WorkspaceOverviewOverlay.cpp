@@ -146,13 +146,13 @@ constexpr GdkMemoryFormat kCairoArgb32MemoryFormat =
     GDK_MEMORY_A8R8G8B8_PREMULTIPLIED;
 #endif
 
-std::optional<realmheart::core::DisplayTier> assigned_asset_tier(
-    GtkWidget* widget,
-    int monitor_index
-) {
-    const auto context = monitor_context_for_widget(widget, monitor_index);
-    if (!context) return std::nullopt;
-    return context->asset_tier;
+struct PrewarmFrameState {
+    guint tick_id = 0;
+    WorkspaceOverviewOverlay* self = nullptr;
+};
+
+void destroy_prewarm_frame_state(gpointer data) {
+    delete static_cast<PrewarmFrameState*>(data);
 }
 
 struct Point {
@@ -2239,10 +2239,23 @@ WorkspaceOverviewOverlay::WorkspaceOverviewOverlay(
 }
 
 WorkspaceOverviewOverlay::~WorkspaceOverviewOverlay() {
+    if (prewarm_tick_id_ != 0 && canvas_ != nullptr) {
+        gtk_widget_remove_tick_callback(canvas_, prewarm_tick_id_);
+        prewarm_tick_id_ = 0;
+    }
     if (asset_retry_id_ != 0) {
         g_source_remove(asset_retry_id_);
         asset_retry_id_ = 0;
     }
+    if (monitor_list_model_ != nullptr &&
+        monitor_items_changed_handler_id_ != 0) {
+        g_signal_handler_disconnect(
+            monitor_list_model_,
+            monitor_items_changed_handler_id_
+        );
+        monitor_items_changed_handler_id_ = 0;
+    }
+    monitor_list_model_ = nullptr;
     if (set_taskbar_morph_progress_) set_taskbar_morph_progress_(0.0);
     if (taskbar_morph_active_ && set_taskbar_morph_active_) {
         set_taskbar_morph_active_(false);
@@ -2694,6 +2707,34 @@ void WorkspaceOverviewOverlay::synchronize_active_workspace() {
     }
 }
 
+void WorkspaceOverviewOverlay::apply_pending_workspace_state_for_reversal() {
+    if (!pending_workspace_state_.has_value()) return;
+    auto next = std::move(*pending_workspace_state_);
+    pending_workspace_state_.reset();
+    for (std::size_t index = 0; index < next.size(); ++index) {
+        if (!same_workspace_overview_cards(workspace_state_[index], next[index])) {
+            overlay_dirty_[index] = true;
+        }
+    }
+    workspace_state_ = next;
+    viewport_start_workspace_id_ = pending_viewport_start_workspace_id_;
+    synchronize_active_workspace();
+    normalize_selection();
+}
+
+void WorkspaceOverviewOverlay::invalidate_monitor_context() noexcept {
+    monitor_context_.reset();
+    asset_retry_policy_.reset();
+    asset_error_.clear();
+    if (prewarm_tick_id_ == 0) prewarmed_ = false;
+    if (asset_retry_id_ != 0) {
+        g_source_remove(asset_retry_id_);
+        asset_retry_id_ = 0;
+    }
+    release_assets();
+    if (canvas_ != nullptr) gtk_widget_queue_draw(canvas_);
+}
+
 cairo_surface_t* WorkspaceOverviewOverlay::application_icon_surface(
     std::string_view requested_icon_name,
     std::string_view app_name
@@ -2749,7 +2790,7 @@ cairo_surface_t* WorkspaceOverviewOverlay::application_icon_surface(
         ? gtk_icon_theme_get_for_display(display)
         : nullptr;
     if (theme == nullptr) {
-        icon_surfaces_.emplace(cache_key, nullptr);
+        cache_icon_surface(cache_key, nullptr);
         return nullptr;
     }
 
@@ -2800,12 +2841,36 @@ cairo_surface_t* WorkspaceOverviewOverlay::application_icon_surface(
         );
         cairo_surface_mark_dirty(surface);
         g_object_unref(texture);
-        icon_surfaces_.emplace(cache_key, surface);
+        cache_icon_surface(cache_key, surface);
         return surface;
     }
 
-    icon_surfaces_.emplace(cache_key, nullptr);
+    cache_icon_surface(cache_key, nullptr);
     return nullptr;
+}
+
+void WorkspaceOverviewOverlay::cache_icon_surface(
+    std::string cache_key,
+    cairo_surface_t* surface
+) {
+    if (workspace_overview_icon_cache_needs_eviction(icon_surfaces_.size()) &&
+        !icon_surface_cache_order_.empty()) {
+        const std::string& oldest_key = icon_surface_cache_order_.front();
+        const auto oldest = icon_surfaces_.find(oldest_key);
+        if (oldest != icon_surfaces_.end()) {
+            if (oldest->second != nullptr) {
+                cairo_surface_destroy(oldest->second);
+            }
+            icon_surfaces_.erase(oldest);
+        }
+        icon_surface_cache_order_.pop_front();
+    }
+    const auto [entry, inserted] = icon_surfaces_.emplace(cache_key, surface);
+    if (inserted) {
+        icon_surface_cache_order_.push_back(std::move(cache_key));
+    } else if (surface != entry->second && surface != nullptr) {
+        cairo_surface_destroy(surface);
+    }
 }
 
 void WorkspaceOverviewOverlay::clear_icon_cache() noexcept {
@@ -2814,6 +2879,7 @@ void WorkspaceOverviewOverlay::clear_icon_cache() noexcept {
         if (surface != nullptr) cairo_surface_destroy(surface);
     }
     icon_surfaces_.clear();
+    icon_surface_cache_order_.clear();
 }
 
 bool WorkspaceOverviewOverlay::rebuild_dirty_overlays() {
@@ -2987,6 +3053,12 @@ void WorkspaceOverviewOverlay::set_workspace_snapshot(
         snapshot,
         next_viewport_start
     );
+    if (workspace_overview_defers_snapshot_update(morph_timeline_.state())) {
+        pending_workspace_state_ = std::move(next);
+        pending_viewport_start_workspace_id_ = next_viewport_start;
+        if (canvas_ != nullptr) gtk_widget_queue_draw(canvas_);
+        return;
+    }
 
     bool cards_changed = false;
     for (std::size_t index = 0; index < next.size(); ++index) {
@@ -3056,7 +3128,20 @@ void WorkspaceOverviewOverlay::show() {
         return;
     }
 
+    if (state == effects::TransitionState::Closing) {
+        apply_pending_workspace_state_for_reversal();
+        stop_content_animations(true);
+        static_cast<void>(ensure_assets());
+        static_cast<void>(rebuild_dirty_overlays());
+        morph_renderer_.finish();
+        morph_shader_capture_pending_ = false;
+        morph_shader_failed_for_transition_ = false;
+        capture_morph_geometry();
+        schedule_morph_shader_capture();
+    }
+
     if (state == effects::TransitionState::Hidden) {
+        apply_pending_workspace_state_for_reversal();
         if (morph_diagnostics_.enabled()) {
             morph_diagnostics_.begin(
                 true,
@@ -3133,6 +3218,7 @@ void WorkspaceOverviewOverlay::toggle() {
 void WorkspaceOverviewOverlay::prewarm() {
     if (prewarmed_) return;
     if (window_ == nullptr || canvas_ == nullptr) return;
+    if (prewarm_tick_id_ != 0) return;
     if (morph_timeline_.target_visible()) {
         // Real show() already does this work visibly; mark warm.
         prewarmed_ = true;
@@ -3158,10 +3244,6 @@ void WorkspaceOverviewOverlay::prewarm() {
     // perceptible flash even on a fast display.
     gtk_widget_queue_draw(canvas_);
 
-    struct PrewarmFrameState {
-        guint tick_id = 0;
-        WorkspaceOverviewOverlay* self = nullptr;
-    };
     auto* state = new PrewarmFrameState{0, this};
     state->tick_id = gtk_widget_add_tick_callback(
         canvas_,
@@ -3172,11 +3254,7 @@ void WorkspaceOverviewOverlay::prewarm() {
         ) -> gboolean {
             auto* frame_state = static_cast<PrewarmFrameState*>(data);
             auto* overlay = frame_state->self;
-            gtk_widget_remove_tick_callback(
-                GTK_WIDGET(overlay->canvas_),
-                frame_state->tick_id
-            );
-            delete frame_state;
+            overlay->prewarm_tick_id_ = 0;
             // Only unmap when still in the hidden prewarm state — a real
             // toggle that raced us owns the window from here on. Restoring
             // opacity is safe either way: show()/hide() paths set their own
@@ -3190,8 +3268,11 @@ void WorkspaceOverviewOverlay::prewarm() {
             return G_SOURCE_REMOVE;
         },
         state,
-        nullptr
+        &destroy_prewarm_frame_state
     );
+    if (prewarm_tick_id_ == 0) {
+        prewarm_tick_id_ = state->tick_id;
+    }
 }
 
 bool WorkspaceOverviewOverlay::visible() const {
@@ -4826,23 +4907,59 @@ void WorkspaceOverviewOverlay::handle_hover(double x, double y) {
 }
 
 bool WorkspaceOverviewOverlay::ensure_assets() {
-    const auto selected_tier = assigned_asset_tier(
-        window_ != nullptr ? GTK_WIDGET(window_) : nullptr,
-        monitor_index_
-    );
-    if (!selected_tier) {
-        asset_error_ = "Workspace overview assigned monitor is unavailable";
+    const auto now_us = static_cast<gint64>(g_get_monotonic_time());
+    if (!asset_retry_policy_.can_attempt(now_us)) {
         schedule_asset_retry();
         return false;
     }
 
+    if (monitor_context_ == std::nullopt && window_ != nullptr) {
+        GtkWidget* window = GTK_WIDGET(window_);
+        GdkDisplay* display = gtk_widget_get_display(window);
+        GListModel* monitors = display != nullptr
+            ? gdk_display_get_monitors(display)
+            : nullptr;
+        if (monitors != nullptr) {
+            monitor_list_model_ = monitors;
+            if (monitor_items_changed_handler_id_ == 0) {
+                monitor_items_changed_handler_id_ = g_signal_connect(
+                    monitors,
+                    "items-changed",
+                    G_CALLBACK(+[](
+                        GListModel*,
+                        guint,
+                        guint,
+                        guint,
+                        gpointer data
+                    ) {
+                        static_cast<WorkspaceOverviewOverlay*>(data)
+                            ->invalidate_monitor_context();
+                    }),
+                    this
+                );
+            }
+        }
+        monitor_context_ = monitor_context_for_widget(window, monitor_index_);
+    }
+    if (!monitor_context_) {
+        asset_error_ = "Workspace overview assigned monitor is unavailable";
+        asset_retry_policy_.record_failure(now_us);
+        schedule_asset_retry();
+        return false;
+    }
+    const auto selected_tier = monitor_context_->asset_tier;
+
+    bool retrying_failed_assets = false;
     if (assets_attempted_ && asset_tier_selected_ &&
-        asset_tier_ == *selected_tier) {
-        return asset_error_.empty();
+        asset_tier_ == selected_tier) {
+        if (asset_error_.empty()) return true;
+        release_assets(false);
+        asset_error_.clear();
+        retrying_failed_assets = true;
     }
 
-    if (assets_attempted_) release_assets();
-    asset_tier_ = *selected_tier;
+    if (assets_attempted_ && !retrying_failed_assets) release_assets();
+    asset_tier_ = selected_tier;
     asset_tier_selected_ = true;
     asset_error_.clear();
     assets_attempted_ = true;
@@ -4865,7 +4982,9 @@ bool WorkspaceOverviewOverlay::ensure_assets() {
         if (!background_asset || !character_asset) {
             asset_error_ = "Unable to resolve workspace overview assets";
             std::cerr << "[WorkspaceOverview] " << asset_error_ << '\n';
-            release_assets();
+            asset_retry_policy_.record_failure(now_us);
+            release_assets(false);
+            schedule_asset_retry();
             return false;
         }
 
@@ -4932,27 +5051,44 @@ bool WorkspaceOverviewOverlay::ensure_assets() {
                 asset_error_ = "Unable to prepare workspace overview layers";
             }
             std::cerr << "[WorkspaceOverview] " << asset_error_ << '\n';
-            release_assets();
+            asset_retry_policy_.record_failure(now_us);
+            release_assets(false);
+            schedule_asset_retry();
             return false;
         }
     }
 
     if (!rebuild_dirty_overlays()) {
         asset_error_ = "Unable to prepare workspace overview card overlays";
-        release_assets();
+        asset_retry_policy_.record_failure(now_us);
+        release_assets(false);
+        schedule_asset_retry();
         return false;
     }
 
     std::cerr
         << "[WorkspaceOverview] backgrounds, characters, and live card overlays cached\n";
+    asset_retry_policy_.reset();
     return true;
 }
 
 void WorkspaceOverviewOverlay::schedule_asset_retry() {
-    if (asset_retry_id_ != 0 || canvas_ == nullptr) return;
+    if (asset_retry_id_ != 0 || canvas_ == nullptr ||
+        asset_retry_policy_.exhausted) return;
+
+    const auto now_us = static_cast<gint64>(g_get_monotonic_time());
+    const auto remaining_us = asset_retry_policy_.next_retry_us > now_us
+        ? asset_retry_policy_.next_retry_us - now_us
+        : 1;
+    const auto delay_ms = remaining_us > INT64_MAX - 999
+        ? G_MAXUINT
+        : static_cast<guint>(std::min<std::int64_t>(
+            G_MAXUINT,
+            (remaining_us + 999) / 1000
+        ));
 
     asset_retry_id_ = g_timeout_add(
-        50,
+        std::max<guint>(1, delay_ms),
         +[](gpointer data) -> gboolean {
             auto* self = static_cast<WorkspaceOverviewOverlay*>(data);
             self->asset_retry_id_ = 0;
@@ -4963,7 +5099,7 @@ void WorkspaceOverviewOverlay::schedule_asset_retry() {
     );
 }
 
-void WorkspaceOverviewOverlay::release_assets() noexcept {
+void WorkspaceOverviewOverlay::release_assets(bool reset_tier_selection) noexcept {
     finish_card_transition();
     overlay_dirty_.fill(true);
     for (auto& realm : assets_) {
@@ -4982,8 +5118,8 @@ void WorkspaceOverviewOverlay::release_assets() noexcept {
         for (auto*& card : realm.spread_cards) g_clear_object(&card);
         realm.spread_cards.clear();
     }
-    assets_attempted_ = false;
-    asset_tier_selected_ = false;
+    assets_attempted_ = !reset_tier_selection;
+    if (reset_tier_selection) asset_tier_selected_ = false;
 }
 
 } // namespace realmheart::ui::workspace

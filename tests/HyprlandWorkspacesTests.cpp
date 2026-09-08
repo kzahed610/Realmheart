@@ -358,6 +358,8 @@ void test_failed_clients_query_is_marked_partial() {
 
     require(snapshot.available, "workspace state remains usable when client metadata fails");
     require(snapshot.partial, "failed client metadata must be marked partial");
+    require(!snapshot.clients_available,
+            "failed client metadata must not be presented as an empty client list");
     require(!snapshot.error.empty(), "partial workspace state must carry an error");
     std::filesystem::remove_all(root);
 }

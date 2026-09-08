@@ -42,6 +42,14 @@ std::string lua_string_literal(std::string_view value) {
     return escaped;
 }
 
+bool valid_clients_payload(std::string_view payload) {
+    try {
+        return json::parse(payload).is_array();
+    } catch (const json::exception&) {
+        return false;
+    }
+}
+
 } // namespace
 
 bool HyprlandWorkspaces::switch_to(
@@ -220,7 +228,7 @@ WorkspaceSnapshot HyprlandWorkspaces::read(const realmheart::core::CommandOption
     const auto clients_result = realmheart::core::run_capture({"hyprctl", "clients", "-j"}, options);
     const bool clients_available =
         clients_result.succeeded() && !clients_result.output.empty() &&
-        !clients_result.truncated;
+        !clients_result.truncated && valid_clients_payload(clients_result.output);
     WorkspaceSnapshot snapshot = parse(
         active.output,
         workspace_result.output,
@@ -228,6 +236,7 @@ WorkspaceSnapshot HyprlandWorkspaces::read(const realmheart::core::CommandOption
     );
     if (snapshot.available && !clients_available) {
         snapshot.partial = true;
+        snapshot.clients_available = false;
         snapshot.error = realmheart::core::command_failure_detail(
             clients_result,
             "hyprctl clients failed"
@@ -270,7 +279,7 @@ WorkspaceSnapshot HyprlandWorkspaces::read_for_monitor(
     );
     const bool clients_available =
         clients_result.succeeded() && !clients_result.output.empty() &&
-        !clients_result.truncated;
+        !clients_result.truncated && valid_clients_payload(clients_result.output);
     WorkspaceSnapshot snapshot = parse_for_monitor(
         monitor_name,
         monitors_result.output,
@@ -279,6 +288,7 @@ WorkspaceSnapshot HyprlandWorkspaces::read_for_monitor(
     );
     if (snapshot.available && !clients_available) {
         snapshot.partial = true;
+        snapshot.clients_available = false;
         snapshot.error = realmheart::core::command_failure_detail(
             clients_result,
             "hyprctl clients failed"

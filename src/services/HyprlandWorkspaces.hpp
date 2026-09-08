@@ -29,6 +29,7 @@ struct WorkspaceSnapshot {
     int active_id = 1;
     std::string error;
     std::vector<WorkspaceState> workspaces;
+    bool clients_available = true;
 };
 
 class HyprlandWorkspaces {

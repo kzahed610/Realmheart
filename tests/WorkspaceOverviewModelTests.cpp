@@ -1,5 +1,6 @@
 #include "ui/workspace/WorkspaceOverviewModel.hpp"
 
+#include <climits>
 #include <iostream>
 #include <stdexcept>
 
@@ -175,6 +176,36 @@ void test_elemental_styles_and_numerals_cycle() {
             "Roman numerals must support later workspaces");
 }
 
+void test_client_degradation_never_looks_empty() {
+    realmheart::services::WorkspaceSnapshot snapshot;
+    snapshot.available = true;
+    snapshot.partial = true;
+    snapshot.clients_available = false;
+    snapshot.active_id = 1;
+    snapshot.workspaces = {{1, "1", 2, true, {}}};
+
+    const auto state =
+        realmheart::ui::workspace::build_workspace_overview_state(snapshot);
+    require(state[0].total_windows == 2,
+            "degraded client data must retain reported occupancy");
+    require(state[0].card_count == 1 && state[0].cards[0].summary,
+            "degraded client data must render an explicit placeholder card");
+    require(state[0].cards[0].app_name == "Window details unavailable",
+            "degraded client placeholder must be truthful");
+}
+
+void test_workspace_id_boundaries_are_deterministic() {
+    using realmheart::ui::workspace::workspace_id_for_realm_index;
+    require(workspace_id_for_realm_index(0, INT_MAX - 3) == INT_MAX - 3,
+            "the highest representable four-workspace range must be accepted");
+    require(workspace_id_for_realm_index(3, INT_MAX - 3) == INT_MAX,
+            "the final workspace in the highest range must remain representable");
+    require(workspace_id_for_realm_index(0, INT_MAX) == 0,
+            "an unrepresentable four-workspace range must be rejected");
+    require(workspace_id_for_realm_index(3, INT_MAX) == 0,
+            "every slot in an unrepresentable range must be rejected");
+}
+
 } // namespace
 
 int main() {
@@ -185,6 +216,8 @@ int main() {
         test_card_comparison_ignores_active_state();
         test_viewport_tracks_workspaces_beyond_four();
         test_elemental_styles_and_numerals_cycle();
+        test_client_degradation_never_looks_empty();
+        test_workspace_id_boundaries_are_deterministic();
     } catch (const std::exception& error) {
         std::cerr << "WorkspaceOverviewModelTests failed: "
                   << error.what() << '\n';
