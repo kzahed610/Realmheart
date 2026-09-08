@@ -41,6 +41,7 @@ private:
     void update_strength_copy(int strength);
     void set_busy(bool busy);
     void set_available(bool available);
+    void set_recovery_available(bool available);
     void set_status(const std::string& message, bool error = false);
 
     GtkWidget* overlay_host_ = nullptr;
@@ -56,6 +57,7 @@ private:
     bool requested_visible_ = false;
     bool enabled_ = false;
     bool available_ = false;
+    bool recovery_available_ = false;
     int pending_strength_ = 57;
     guint debounce_source_ = 0;
     std::function<void()> state_changed_;

@@ -261,15 +261,18 @@ void NightLightPanel::refresh() {
     set_busy(true);
     realmheart::core::shared_task_executor().post([lifetime, generation] {
         std::optional<services::NightLightState> state;
+        bool recovery_available = false;
         {
             std::lock_guard lock(lifetime->operation_mutex);
             if (!lifetime->alive.load() || lifetime->generation.load() != generation) return;
             state = services::NightLight::read(night_light_options());
+            if (!state) recovery_available = services::NightLight::recovery_available();
         }
         struct Result {
             std::shared_ptr<LifetimeState> lifetime;
             std::uint64_t generation;
             std::optional<services::NightLightState> state;
+            bool recovery_available;
         };
         g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,
@@ -281,14 +284,19 @@ void NightLightPanel::refresh() {
                     if (result->state) {
                         lifetime.owner->render(*result->state);
                     } else {
-                        lifetime.owner->set_available(false);
+                        lifetime.owner->set_recovery_available(result->recovery_available);
                         lifetime.owner->set_busy(false);
-                        lifetime.owner->set_status("hyprsunset is unavailable", true);
+                        lifetime.owner->set_status(
+                            result->recovery_available
+                                ? "Night Light is stopped — click START to recover"
+                                : "hyprsunset is unavailable",
+                            !result->recovery_available
+                        );
                     }
                 }
                 return G_SOURCE_REMOVE;
             },
-            new Result{lifetime, generation, std::move(state)},
+            new Result{lifetime, generation, std::move(state), recovery_available},
             +[](gpointer raw) { delete static_cast<Result*>(raw); }
         );
     });
@@ -320,10 +328,17 @@ void NightLightPanel::render(const services::NightLightState& state) {
 }
 
 void NightLightPanel::set_enabled(bool enabled) {
+    const bool recover_with_remembered_temperature = enabled &&
+        recovery_available_ && !available_;
     const int temperature = services::NightLight::strength_to_temperature(
         pending_strength_
     );
-    run_mutation([enabled, temperature] {
+    run_mutation([enabled, temperature, recover_with_remembered_temperature] {
+        if (recover_with_remembered_temperature) {
+            return services::NightLight::set_enabled(
+                enabled, night_light_options()
+            );
+        }
         return services::NightLight::set_enabled(
             enabled, temperature, night_light_options()
         );
@@ -382,7 +397,12 @@ void NightLightPanel::run_mutation(
                         if (owner->state_changed_) owner->state_changed_();
                     } else {
                         if (result->fallback) owner->render(*result->fallback);
-                        else owner->set_busy(false);
+                        else {
+                            owner->set_recovery_available(
+                                services::NightLight::recovery_available()
+                            );
+                            owner->set_busy(false);
+                        }
                         owner->set_status(
                             result->mutation.error.empty()
                                 ? "Night Light action failed"
@@ -413,7 +433,7 @@ void NightLightPanel::update_strength_copy(int strength) {
 }
 
 void NightLightPanel::set_busy(bool busy) {
-    gtk_widget_set_sensitive(toggle_, !busy && available_);
+    gtk_widget_set_sensitive(toggle_, !busy && (available_ || recovery_available_));
     gtk_widget_set_sensitive(scale_, !busy && enabled_ && available_);
     if (busy) gtk_spinner_start(GTK_SPINNER(spinner_));
     else gtk_spinner_stop(GTK_SPINNER(spinner_));
@@ -421,6 +441,7 @@ void NightLightPanel::set_busy(bool busy) {
 
 void NightLightPanel::set_available(bool available) {
     available_ = available;
+    recovery_available_ = false;
     if (!available_) {
         enabled_ = false;
         updating_ = true;
@@ -431,6 +452,19 @@ void NightLightPanel::set_available(bool available) {
     }
     gtk_widget_set_sensitive(toggle_, available_);
     gtk_widget_set_sensitive(scale_, available_ && enabled_);
+}
+
+void NightLightPanel::set_recovery_available(bool available) {
+    available_ = false;
+    recovery_available_ = available;
+    enabled_ = false;
+    updating_ = true;
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(toggle_), FALSE);
+    gtk_button_set_label(GTK_BUTTON(toggle_), available ? "START" : "OFF");
+    gtk_widget_remove_css_class(toggle_, "active");
+    updating_ = false;
+    gtk_widget_set_sensitive(toggle_, available);
+    gtk_widget_set_sensitive(scale_, FALSE);
 }
 
 void NightLightPanel::set_status(const std::string& message, bool error) {

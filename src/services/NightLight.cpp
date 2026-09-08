@@ -257,6 +257,11 @@ std::optional<NightLightState> NightLight::read(
     return state;
 }
 
+bool NightLight::recovery_available() {
+    return realmheart::core::command_exists("hyprctl") &&
+        realmheart::core::command_exists("hyprsunset");
+}
+
 NightLightMutationResult NightLight::set_enabled(
     bool enabled,
     const realmheart::core::CommandOptions& options

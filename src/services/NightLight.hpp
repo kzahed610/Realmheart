@@ -28,6 +28,9 @@ public:
     static std::optional<NightLightState> read(
         const realmheart::core::CommandOptions& options = {}
     );
+    // True when the installed backend can be asked to start the daemon.
+    // This does not assert that a live daemon session currently exists.
+    [[nodiscard]] static bool recovery_available();
     static NightLightMutationResult set_enabled(
         bool enabled,
         const realmheart::core::CommandOptions& options = {}

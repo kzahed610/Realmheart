@@ -51,6 +51,7 @@ public:
         std::ofstream start_script(systemctl);
         start_script << "#!/bin/sh\n"
                      << "if [ \"$*\" != '--user start hyprsunset.service' ]; then exit 64; fi\n"
+                     << "if [ \"$REALMHEART_NIGHT_TEST_FAIL_START\" = 1 ]; then exit 1; fi\n"
                      << "printf yes > \"$REALMHEART_NIGHT_TEST_RUNNING\"\n"
                      << "printf yes > \"$REALMHEART_NIGHT_TEST_DAEMON\"\n";
         start_script.close();
@@ -69,6 +70,7 @@ public:
         ::setenv("REALMHEART_NIGHT_TEST_TEMPERATURE", temperature_file_.c_str(), 1);
         ::setenv("REALMHEART_NIGHT_TEST_APPLIED", applied_file_.c_str(), 1);
         ::unsetenv("REALMHEART_NIGHT_FAIL_WRITES");
+        ::unsetenv("REALMHEART_NIGHT_TEST_FAIL_START");
     }
 
     ~TemporaryFakeHyprsunset() {
@@ -80,6 +82,7 @@ public:
         ::unsetenv("REALMHEART_NIGHT_TEST_TEMPERATURE");
         ::unsetenv("REALMHEART_NIGHT_TEST_APPLIED");
         ::unsetenv("REALMHEART_NIGHT_FAIL_WRITES");
+        ::unsetenv("REALMHEART_NIGHT_TEST_FAIL_START");
         std::error_code error;
         std::filesystem::remove_all(directory_, error);
     }
@@ -90,6 +93,14 @@ public:
 
     void allow_writes() {
         ::unsetenv("REALMHEART_NIGHT_FAIL_WRITES");
+    }
+
+    void fail_start() {
+        ::setenv("REALMHEART_NIGHT_TEST_FAIL_START", "1", 1);
+    }
+
+    void allow_start() {
+        ::unsetenv("REALMHEART_NIGHT_TEST_FAIL_START");
     }
 
     void stop_daemon() const {
@@ -140,6 +151,10 @@ int main() {
 
         const auto initial = realmheart::services::NightLight::read();
         require(!initial, "Night Light must report unavailable before a live daemon session exists");
+        require(
+            realmheart::services::NightLight::recovery_available(),
+            "installed Night Light backend must expose a recovery action when its daemon is stopped"
+        );
 
         const auto enabled = realmheart::services::NightLight::set_enabled(true);
         require(enabled.success && enabled.state.enabled, "Night Light enable should succeed");
@@ -166,7 +181,20 @@ int main() {
         fake.stop_daemon();
         require(!realmheart::services::NightLight::read(),
                 "persisted Night Light state must be unavailable when the daemon is dead");
-        fake.start_daemon();
+
+        fake.fail_start();
+        const auto failed_recovery = realmheart::services::NightLight::set_enabled(true);
+        require(!failed_recovery.success, "failed daemon recovery must be reported");
+        require(!realmheart::services::NightLight::read(),
+                "failed daemon recovery must not fabricate a live state");
+
+        fake.allow_start();
+        const auto recovered = realmheart::services::NightLight::set_enabled(true);
+        require(recovered.success && recovered.state.enabled,
+                "an installed but inactive daemon must be recoverable through the mutation path");
+        const auto recovered_live = realmheart::services::NightLight::read();
+        require(recovered_live && recovered_live->enabled,
+                "successful recovery must be followed by verified live state");
 
         const auto disabled = realmheart::services::NightLight::set_enabled(false);
         require(disabled.success && !disabled.state.enabled, "Night Light disable should succeed");
