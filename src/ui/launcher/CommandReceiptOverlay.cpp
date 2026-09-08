@@ -1,6 +1,7 @@
 #include "ui/launcher/CommandReceiptOverlay.hpp"
 
 #include "core/Command.hpp"
+#include "core/TaskExecutor.hpp"
 #include "ui/bar/widgets/ThemedSvgIcon.hpp"
 
 #include <algorithm>
@@ -27,6 +28,8 @@ constexpr double kDragSpringStiffness = 245.0;
 constexpr double kDragSpringDamping = 26.0;
 constexpr int kSuccessDismissMs = 5000;
 constexpr int kFailureDismissMs = 11000;
+constexpr auto kCommandDeadline = std::chrono::seconds(30);
+constexpr auto kCommandTerminateGrace = std::chrono::milliseconds(150);
 constexpr std::size_t kSummaryMaximumCharacters = 320;
 constexpr std::size_t kSummaryMaximumLines = 4;
 constexpr std::size_t kMaximumCapturedOutputBytes = 512 * 1024;
@@ -75,18 +78,6 @@ std::string tail_excerpt(std::string_view value) {
 }
 
 
-std::string bounded_output(std::string value) {
-    if (value.size() <= kMaximumCapturedOutputBytes) return value;
-
-    constexpr std::string_view marker =
-        "\n\n… Realmheart truncated the middle of this output …\n\n";
-    const std::size_t remaining = kMaximumCapturedOutputBytes - marker.size();
-    const std::size_t prefix_size = remaining / 3;
-    const std::size_t suffix_size = remaining - prefix_size;
-    return value.substr(0, prefix_size) + std::string(marker) +
-        value.substr(value.size() - suffix_size);
-}
-
 std::string duration_text(double seconds) {
     std::ostringstream stream;
     if (seconds < 10.0) {
@@ -131,14 +122,11 @@ CommandReceiptOverlay::CommandReceiptOverlay() {
 CommandReceiptOverlay::~CommandReceiptOverlay() {
     async_state_->owner.store(nullptr);
     async_state_->generation.fetch_add(1);
+    cancel_active_execution();
     cancel_auto_dismiss();
     if (drag_tick_id_ != 0 && reveal_ != nullptr) {
         gtk_widget_remove_tick_callback(reveal_, drag_tick_id_);
         drag_tick_id_ = 0;
-    }
-    if (active_process_ != nullptr) {
-        g_object_unref(active_process_);
-        active_process_ = nullptr;
     }
     detach();
     if (reveal_ != nullptr) {
@@ -186,6 +174,7 @@ void CommandReceiptOverlay::attach(GtkOverlay* launcher_root) {
 }
 
 void CommandReceiptOverlay::detach() {
+    cancel_active_execution();
     launcher_root_ = nullptr;
     if (drag_tick_id_ != 0 && reveal_ != nullptr) {
         gtk_widget_remove_tick_callback(reveal_, drag_tick_id_);
@@ -540,6 +529,7 @@ bool CommandReceiptOverlay::execute(const services::LauncherResult& result) {
     const std::vector<std::string> argv = execution_argv(result);
     if (argv.empty()) return false;
 
+    cancel_active_execution();
     const std::uint64_t generation = async_state_->generation.fetch_add(1) + 1;
     reset_drag_visuals();
     dismissed_generation_ = 0;
@@ -555,52 +545,98 @@ bool CommandReceiptOverlay::execute(const services::LauncherResult& result) {
     show_running(result, current_command_);
     present_receipt();
 
-    GSubprocessFlags flags = static_cast<GSubprocessFlags>(
-        G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE
-    );
-    GSubprocessLauncher* launcher = g_subprocess_launcher_new(flags);
-    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
-        g_subprocess_launcher_set_cwd(launcher, home);
-    }
-
-    std::vector<const gchar*> arguments;
-    arguments.reserve(argv.size() + 1);
-    for (const auto& argument : argv) arguments.push_back(argument.c_str());
-    arguments.push_back(nullptr);
-
-    GError* error = nullptr;
-    GSubprocess* process = g_subprocess_launcher_spawnv(
-        launcher,
-        arguments.data(),
-        &error
-    );
-    g_object_unref(launcher);
-
-    if (process == nullptr) {
-        const std::string message = error != nullptr && error->message != nullptr
-            ? error->message
-            : "Unable to start command";
-        if (error != nullptr) g_error_free(error);
-        complete_execution(generation, false, -1, 0.0, {}, {}, message);
-        return true;
-    }
-
-    if (active_process_ != nullptr) g_object_unref(active_process_);
-    active_process_ = G_SUBPROCESS(g_object_ref(process));
-
-    auto* payload = new CompletionPayload{
-        async_state_,
-        generation,
-        std::chrono::steady_clock::now(),
+    struct Completion {
+        std::shared_ptr<AsyncState> state;
+        std::uint64_t generation = 0;
+        bool successful = false;
+        int exit_code = -1;
+        double duration_seconds = 0.0;
+        std::string standard_output;
+        std::string standard_error;
+        std::string launch_error;
     };
-    g_subprocess_communicate_utf8_async(
-        process,
-        nullptr,
-        nullptr,
-        &CommandReceiptOverlay::communicate_finished,
-        payload
+
+    const auto cancellation = std::make_shared<std::atomic_bool>(false);
+    active_cancellation_ = cancellation;
+    const auto state = async_state_;
+    const auto started_at = std::chrono::steady_clock::now();
+    const auto callback = +[](gpointer data) -> gboolean {
+        std::unique_ptr<Completion> completion(static_cast<Completion*>(data));
+        CommandReceiptOverlay* owner = completion->state->owner.load();
+        if (owner == nullptr ||
+            completion->generation != completion->state->generation.load()) {
+            return G_SOURCE_REMOVE;
+        }
+        owner->complete_execution(
+            completion->generation,
+            completion->successful,
+            completion->exit_code,
+            completion->duration_seconds,
+            std::move(completion->standard_output),
+            std::move(completion->standard_error),
+            std::move(completion->launch_error)
+        );
+        return G_SOURCE_REMOVE;
+    };
+
+    const bool posted = core::shared_task_executor().post(
+        [state, generation, cancellation, argv, started_at, callback] {
+            core::CommandOptions options;
+            options.deadline = kCommandDeadline;
+            options.terminate_grace = kCommandTerminateGrace;
+            options.max_output_bytes = kMaximumCapturedOutputBytes;
+            options.separate_stderr = true;
+            if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+                options.working_directory = home;
+            }
+            options.cancelled = [cancellation] {
+                return cancellation->load(std::memory_order_acquire);
+            };
+            const core::CommandResult result = core::run_capture(argv, options);
+
+            std::string launch_error;
+            if (result.status != core::CommandStatus::Exited &&
+                result.status != core::CommandStatus::Signaled) {
+                launch_error = core::command_failure_detail(
+                    result,
+                    "Unable to execute command"
+                );
+            }
+            auto* completion = new Completion{
+                state,
+                generation,
+                result.succeeded(),
+                result.status == core::CommandStatus::Signaled
+                    ? 128 + result.term_signal
+                    : result.exit_code,
+                std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - started_at
+                ).count(),
+                result.output,
+                result.standard_error,
+                std::move(launch_error),
+            };
+            g_main_context_invoke(nullptr, callback, completion);
+        },
+        {},
+        [cancellation] {
+            return cancellation->load(std::memory_order_acquire);
+        }
     );
-    g_object_unref(process);
+
+    if (!posted) {
+        cancellation->store(true, std::memory_order_release);
+        if (active_cancellation_ == cancellation) active_cancellation_.reset();
+        complete_execution(
+            generation,
+            false,
+            -1,
+            0.0,
+            {},
+            {},
+            "Unable to queue command execution"
+        );
+    }
     return true;
 }
 
@@ -636,10 +672,7 @@ void CommandReceiptOverlay::complete_execution(
 ) {
     if (generation != async_state_->generation.load()) return;
 
-    if (active_process_ != nullptr) {
-        g_object_unref(active_process_);
-        active_process_ = nullptr;
-    }
+    if (active_cancellation_ != nullptr) active_cancellation_.reset();
 
     standard_output_ = std::move(standard_output);
     standard_error_ = std::move(standard_error);
@@ -790,6 +823,12 @@ void CommandReceiptOverlay::cancel_auto_dismiss() {
     auto_dismiss_id_ = 0;
 }
 
+void CommandReceiptOverlay::cancel_active_execution() noexcept {
+    if (active_cancellation_ == nullptr) return;
+    active_cancellation_->store(true, std::memory_order_release);
+    active_cancellation_.reset();
+}
+
 void CommandReceiptOverlay::present_receipt() {
     if (launcher_root_ == nullptr || reveal_ == nullptr) return;
     if (!dragging_receipt_ && !drag_dismiss_pending_) {
@@ -807,6 +846,7 @@ void CommandReceiptOverlay::present_receipt() {
 void CommandReceiptOverlay::dismiss() {
     if (reveal_ == nullptr) return;
     cancel_auto_dismiss();
+    cancel_active_execution();
     dismissed_generation_ = async_state_->generation.load();
     closing_ = true;
     // Do not collapse the nested full-log revealer while the outer receipt is
@@ -1176,71 +1216,6 @@ std::string CommandReceiptOverlay::compact_output_summary(
         return warning;
     }
     return "Completed successfully.";
-}
-
-void CommandReceiptOverlay::communicate_finished(
-    GObject* source_object,
-    GAsyncResult* result,
-    gpointer user_data
-) {
-    std::unique_ptr<CompletionPayload> payload(
-        static_cast<CompletionPayload*>(user_data)
-    );
-    GSubprocess* process = G_SUBPROCESS(source_object);
-    gchar* standard_output = nullptr;
-    gchar* standard_error = nullptr;
-    GError* error = nullptr;
-    const gboolean communicated = g_subprocess_communicate_utf8_finish(
-        process,
-        result,
-        &standard_output,
-        &standard_error,
-        &error
-    );
-
-    bool successful = false;
-    int exit_code = -1;
-    std::string launch_error;
-    if (communicated) {
-        successful = g_subprocess_get_successful(process);
-        if (g_subprocess_get_if_exited(process)) {
-            exit_code = g_subprocess_get_exit_status(process);
-        } else if (g_subprocess_get_if_signaled(process)) {
-            exit_code = 128 + g_subprocess_get_term_sig(process);
-        }
-    } else {
-        launch_error = error != nullptr && error->message != nullptr
-            ? error->message
-            : "Unable to collect command output";
-    }
-
-    const double duration = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - payload->started_at
-    ).count();
-    std::string output = bounded_output(
-        standard_output != nullptr ? standard_output : ""
-    );
-    std::string errors = bounded_output(
-        standard_error != nullptr ? standard_error : ""
-    );
-    g_free(standard_output);
-    g_free(standard_error);
-    if (error != nullptr) g_error_free(error);
-
-    CommandReceiptOverlay* owner = payload->state->owner.load();
-    if (owner == nullptr ||
-        payload->generation != payload->state->generation.load()) {
-        return;
-    }
-    owner->complete_execution(
-        payload->generation,
-        successful,
-        exit_code,
-        duration,
-        std::move(output),
-        std::move(errors),
-        std::move(launch_error)
-    );
 }
 
 gboolean CommandReceiptOverlay::auto_dismiss_timeout(gpointer user_data) {

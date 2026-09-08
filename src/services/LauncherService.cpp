@@ -579,7 +579,80 @@ std::string session_fallback_title(std::string_view identity) {
     return title;
 }
 
+bool valid_emoji_glyph(std::string_view glyph) {
+    bool has_non_ascii = false;
+    for (std::size_t index = 0; index < glyph.size();) {
+        const auto byte = static_cast<unsigned char>(glyph[index]);
+        if (byte < 0x80) {
+            if (std::iscntrl(byte) != 0 || std::isspace(byte) != 0) return false;
+            ++index;
+            continue;
+        }
+
+        std::size_t length = 0;
+        std::uint32_t codepoint = 0;
+        if (byte >= 0xC2 && byte <= 0xDF) {
+            length = 2;
+            codepoint = byte & 0x1F;
+        } else if (byte >= 0xE0 && byte <= 0xEF) {
+            length = 3;
+            codepoint = byte & 0x0F;
+        } else if (byte >= 0xF0 && byte <= 0xF4) {
+            length = 4;
+            codepoint = byte & 0x07;
+        } else {
+            return false;
+        }
+        if (index + length > glyph.size()) return false;
+        for (std::size_t offset = 1; offset < length; ++offset) {
+            const auto continuation = static_cast<unsigned char>(glyph[index + offset]);
+            if ((continuation & 0xC0) != 0x80) return false;
+            codepoint = (codepoint << 6) | (continuation & 0x3F);
+        }
+        if ((length == 2 && codepoint < 0x80) ||
+            (length == 3 && codepoint < 0x800) ||
+            (length == 4 && codepoint < 0x10000) ||
+            (codepoint > 0x10FFFF) ||
+            (codepoint >= 0xD800 && codepoint <= 0xDFFF)) {
+            return false;
+        }
+        has_non_ascii = true;
+        index += length;
+    }
+    return has_non_ascii;
+}
+
 } // namespace
+
+std::size_t launcher_emoji_data_start(std::string_view emoji_script) {
+    return data_start_after_standalone_marker(emoji_script, "### DATA ###");
+}
+
+std::optional<std::string> read_bounded_emoji_data(
+    const std::filesystem::path& path,
+    std::size_t maximum_bytes
+) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return std::nullopt;
+
+    std::string contents;
+    contents.reserve(std::min<std::size_t>(maximum_bytes, 64U * 1024U));
+    std::array<char, 64U * 1024U> buffer{};
+    while (contents.size() <= maximum_bytes) {
+        const std::size_t remaining = maximum_bytes - contents.size() + 1;
+        const std::size_t request_size = std::min(remaining, buffer.size());
+        stream.read(buffer.data(), static_cast<std::streamsize>(request_size));
+        const std::streamsize count = stream.gcount();
+        if (count > 0) {
+            contents.append(buffer.data(), static_cast<std::size_t>(count));
+            if (contents.size() > maximum_bytes) return std::nullopt;
+        }
+        if (stream.eof()) return contents;
+        if (stream.bad()) return std::nullopt;
+        if (count == 0) return std::nullopt;
+    }
+    return std::nullopt;
+}
 
 std::vector<std::string> launcher_command_argv(std::string_view command) {
     const auto first = command.find_first_not_of(" \t\n\r");
@@ -752,9 +825,9 @@ std::vector<LauncherResult> launcher_emoji_results(
         if (first != std::string_view::npos) {
             line.remove_prefix(first);
             const std::size_t separator = line.find_first_of(" \t");
-            const std::string_view glyph = line.substr(0, separator);
-            std::string_view keywords;
             if (separator != std::string_view::npos) {
+                const std::string_view glyph = line.substr(0, separator);
+                std::string_view keywords;
                 const std::size_t keyword_start = line.find_first_not_of(
                     " \t",
                     separator
@@ -762,35 +835,37 @@ std::vector<LauncherResult> launcher_emoji_results(
                 if (keyword_start != std::string_view::npos) {
                     keywords = line.substr(keyword_start);
                 }
-            }
 
-            if (!glyph.empty()) {
-                const std::string normalized_keywords = normalized_copy(keywords);
-                const bool matches = raw_filter.empty() ||
-                    (filter_terms.empty()
-                        ? glyph == raw_filter
-                        : std::ranges::all_of(
-                            filter_terms,
-                            [&normalized_keywords](const std::string& term) {
-                                return normalized_keywords.find(term) !=
-                                    std::string::npos;
-                            }
-                        ));
-                if (matches) {
-                    LauncherResult result;
-                    result.kind = LauncherResultKind::Emoji;
-                    result.id = std::string(glyph);
-                    result.title = keywords.empty()
-                        ? std::string("Emoji")
-                        : realmheart::core::sanitize_command_detail(keywords, 90);
-                    result.subtitle = "Copy " + std::string(glyph) + " to clipboard";
-                    result.icon_name = "Realmheart-Icons/emoji-picker.svg";
-                    result.description = std::string(keywords);
-                    result.search_terms = {
-                        std::string(glyph),
-                        std::string(keywords),
-                    };
-                    results.push_back(std::move(result));
+                if (!line.starts_with("#") &&
+                    !keywords.empty() &&
+                    valid_emoji_glyph(glyph)) {
+                    const std::string normalized_keywords = normalized_copy(keywords);
+                    const bool matches = raw_filter.empty() ||
+                        (filter_terms.empty()
+                            ? glyph == raw_filter
+                            : std::ranges::all_of(
+                                filter_terms,
+                                [&normalized_keywords](const std::string& term) {
+                                    return normalized_keywords.find(term) !=
+                                        std::string::npos;
+                                }
+                            ));
+                    if (matches) {
+                        LauncherResult result;
+                        result.kind = LauncherResultKind::Emoji;
+                        result.id = std::string(glyph);
+                        result.title = keywords.empty()
+                            ? std::string("Emoji")
+                            : realmheart::core::sanitize_command_detail(keywords, 90);
+                        result.subtitle = "Copy " + std::string(glyph) + " to clipboard";
+                        result.icon_name = "Realmheart-Icons/emoji-picker.svg";
+                        result.description = std::string(keywords);
+                        result.search_terms = {
+                            std::string(glyph),
+                            std::string(keywords),
+                        };
+                        results.push_back(std::move(result));
+                    }
                 }
             }
         }

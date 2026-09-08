@@ -3299,55 +3299,34 @@ void LauncherOverlay::request_emoji_database() {
 
     const bool posted = realmheart::core::shared_task_executor().post(
         [state, generation, callback] {
-            constexpr std::uintmax_t maximum_size = 2U * 1024U * 1024U;
+            constexpr std::size_t maximum_size = 2U * 1024U * 1024U;
             const fs::path path = emoji_script_path();
             std::cerr << "[Launcher] resolving emoji script at " << path << '\n';
-            std::error_code error;
-            const std::uintmax_t size = fs::file_size(path, error);
-            bool succeeded = !error && size <= maximum_size;
+            const auto loaded = services::read_bounded_emoji_data(path, maximum_size);
             std::string contents;
-
-            if (succeeded) {
-                std::ifstream stream(path, std::ios::binary);
-                if (stream) {
-                    contents.assign(
-                        std::istreambuf_iterator<char>(stream),
-                        std::istreambuf_iterator<char>()
-                    );
-                    succeeded = (stream.eof() || stream.good()) &&
-                        contents.find("### DATA ###") != std::string::npos;
-                } else {
-                    succeeded = false;
-                }
-            }
+            const bool succeeded = loaded.has_value() &&
+                services::launcher_emoji_data_start(*loaded) != std::string_view::npos;
+            if (succeeded) contents = *loaded;
 
             // Fall back to the built-in emoji index so the picker works on a
             // fresh account with zero installed data instead of failing
             // opaquely. The external fuzzel-emoji.sh is still read first and
             // still overrides the built-ins when valid.
             if (!succeeded) {
-                std::string reason;
-                if (error) {
-                    reason = "file unavailable (" + error.message() + ")";
-                } else if (size > maximum_size) {
-                    reason = "oversize (" + std::to_string(size) + " bytes)";
-                } else if (!fs::exists(path)) {
-                    reason = "file not found";
-                } else {
-                    std::ifstream probe(path);
-                    reason = probe ? "missing ### DATA ### marker" : "unreadable";
-                }
+                const std::string reason = loaded.has_value()
+                    ? "missing standalone ### DATA ### marker"
+                    : "unavailable, unreadable, or exceeded 2 MiB";
                 std::cerr << "[Launcher] emoji script at " << path
                           << " (" << reason
                           << "), using built-in fallback\n";
                 contents = std::string(realmheart::services::kEmojiDataFallback);
-                succeeded = !contents.empty();
             }
+            const bool load_succeeded = !contents.empty();
 
             auto* completion = new Completion{
                 state,
                 generation,
-                succeeded,
+                load_succeeded,
                 std::move(contents),
             };
             g_main_context_invoke(nullptr, callback, completion);

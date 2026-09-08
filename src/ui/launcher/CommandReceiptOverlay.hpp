@@ -48,11 +48,6 @@ private:
         std::atomic<std::uint64_t> generation{0};
     };
 
-    struct CompletionPayload {
-        std::shared_ptr<AsyncState> state;
-        std::uint64_t generation = 0;
-        std::chrono::steady_clock::time_point started_at;
-    };
 
     void setup_ui();
     void reset_after_collapse();
@@ -76,6 +71,7 @@ private:
     void retry();
     void schedule_auto_dismiss();
     void cancel_auto_dismiss();
+    void cancel_active_execution() noexcept;
     void present_receipt();
     void begin_drag(
         GtkGestureDrag* gesture,
@@ -108,11 +104,6 @@ private:
         std::string_view launch_error
     ) const;
 
-    static void communicate_finished(
-        GObject* source_object,
-        GAsyncResult* result,
-        gpointer user_data
-    );
     static gboolean auto_dismiss_timeout(gpointer user_data);
     static gboolean drag_tick(
         GtkWidget* widget,
@@ -140,7 +131,7 @@ private:
     GtkWidget* log_view_ = nullptr;
 
     std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
-    GSubprocess* active_process_ = nullptr;
+    std::shared_ptr<std::atomic_bool> active_cancellation_;
     std::optional<services::LauncherResult> current_result_;
     std::string current_command_;
     std::string standard_output_;

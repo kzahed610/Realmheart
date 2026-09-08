@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <atomic>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -124,6 +125,11 @@ std::vector<LauncherResult> launcher_emoji_results(
     std::string_view emoji_script,
     std::string_view filter,
     std::size_t limit = 10
+);
+std::size_t launcher_emoji_data_start(std::string_view emoji_script);
+std::optional<std::string> read_bounded_emoji_data(
+    const std::filesystem::path& path,
+    std::size_t maximum_bytes
 );
 LauncherResult launcher_clipboard_clear_result(bool confirmation_armed);
 std::vector<LauncherResult> launcher_command_suggestions(std::string_view query);

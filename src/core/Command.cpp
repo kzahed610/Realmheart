@@ -136,17 +136,23 @@ ChildReaper& child_reaper() {
     return *reaper;
 }
 
-void drain_output(int& fd, CommandResult& result, std::size_t max_output_bytes, std::string& io_error) {
+void drain_output(
+    int& fd,
+    std::string& output,
+    bool& truncated,
+    std::size_t max_output_bytes,
+    std::string& io_error
+) {
     std::array<char, 4096> buffer{};
     for (int reads = 0; reads < 32 && fd >= 0; ++reads) {
         const ssize_t count = ::read(fd, buffer.data(), buffer.size());
         if (count > 0) {
-            const auto available = max_output_bytes > result.output.size()
-                ? max_output_bytes - result.output.size()
+            const auto available = max_output_bytes > output.size()
+                ? max_output_bytes - output.size()
                 : 0;
             const auto captured = std::min<std::size_t>(available, static_cast<std::size_t>(count));
-            result.output.append(buffer.data(), captured);
-            if (captured < static_cast<std::size_t>(count)) result.truncated = true;
+            output.append(buffer.data(), captured);
+            if (captured < static_cast<std::size_t>(count)) truncated = true;
             continue;
         }
         if (count == 0) {
@@ -159,6 +165,15 @@ void drain_output(int& fd, CommandResult& result, std::size_t max_output_bytes, 
         close_fd(fd);
         return;
     }
+}
+
+void drain_output(
+    int& fd,
+    CommandResult& result,
+    std::size_t max_output_bytes,
+    std::string& io_error
+) {
+    drain_output(fd, result.output, result.truncated, max_output_bytes, io_error);
 }
 
 void drain_exec_error(
@@ -495,21 +510,32 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
     exec_argv.push_back(nullptr);
 
     int output_pipe[2] = {-1, -1};
+    int error_pipe[2] = {-1, -1};
     int exec_pipe[2] = {-1, -1};
     int input_pipe[2] = {-1, -1};
     if (::pipe2(output_pipe, O_CLOEXEC) != 0) {
         return error_result(CommandStatus::SystemError, std::string("pipe2 failed: ") + std::strerror(errno));
     }
+    if (options.separate_stderr && ::pipe2(error_pipe, O_CLOEXEC) != 0) {
+        const auto error = std::string("stderr pipe2 failed: ") + std::strerror(errno);
+        ::close(output_pipe[0]);
+        ::close(output_pipe[1]);
+        return error_result(CommandStatus::SystemError, error);
+    }
     if (::pipe2(exec_pipe, O_CLOEXEC) != 0) {
         const auto error = std::string("exec pipe2 failed: ") + std::strerror(errno);
         ::close(output_pipe[0]);
         ::close(output_pipe[1]);
+        close_fd(error_pipe[0]);
+        close_fd(error_pipe[1]);
         return error_result(CommandStatus::SystemError, error);
     }
     if (options.stdin_data && ::pipe2(input_pipe, O_CLOEXEC) != 0) {
         const auto error = std::string("stdin pipe2 failed: ") + std::strerror(errno);
         ::close(output_pipe[0]);
         ::close(output_pipe[1]);
+        close_fd(error_pipe[0]);
+        close_fd(error_pipe[1]);
         ::close(exec_pipe[0]);
         ::close(exec_pipe[1]);
         return error_result(CommandStatus::SystemError, error);
@@ -522,6 +548,8 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
         ::close(output_pipe[1]);
         ::close(exec_pipe[0]);
         ::close(exec_pipe[1]);
+        close_fd(error_pipe[0]);
+        close_fd(error_pipe[1]);
         close_fd(input_pipe[0]);
         close_fd(input_pipe[1]);
         return error_result(CommandStatus::SpawnFailed, error);
@@ -530,6 +558,7 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
     if (child == 0) {
         ::close(output_pipe[0]);
         ::close(exec_pipe[0]);
+        if (options.separate_stderr) ::close(error_pipe[0]);
         if (options.stdin_data) {
             ::close(input_pipe[1]);
             if (::dup2(input_pipe[0], STDIN_FILENO) < 0) {
@@ -539,14 +568,24 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
             }
             ::close(input_pipe[0]);
         }
+        if (options.working_directory &&
+            ::chdir(options.working_directory->c_str()) < 0) {
+            const int child_errno = errno;
+            static_cast<void>(::write(exec_pipe[1], &child_errno, sizeof(child_errno)));
+            _exit(127);
+        }
         ::setpgid(0, 0);
 
-        if (::dup2(output_pipe[1], STDOUT_FILENO) < 0 || ::dup2(output_pipe[1], STDERR_FILENO) < 0) {
+        const bool stderr_ready = options.separate_stderr
+            ? ::dup2(error_pipe[1], STDERR_FILENO) >= 0
+            : ::dup2(output_pipe[1], STDERR_FILENO) >= 0;
+        if (::dup2(output_pipe[1], STDOUT_FILENO) < 0 || !stderr_ready) {
             const int child_errno = errno;
             static_cast<void>(::write(exec_pipe[1], &child_errno, sizeof(child_errno)));
             _exit(127);
         }
         ::close(output_pipe[1]);
+        if (options.separate_stderr) ::close(error_pipe[1]);
 
         ::execvp(exec_argv[0], exec_argv.data());
         const int child_errno = errno;
@@ -556,6 +595,10 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
 
     ::close(output_pipe[1]);
     output_pipe[1] = -1;
+    if (options.separate_stderr) {
+        ::close(error_pipe[1]);
+        error_pipe[1] = -1;
+    }
     ::close(exec_pipe[1]);
     exec_pipe[1] = -1;
     if (options.stdin_data) {
@@ -582,11 +625,14 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
 
     CommandResult result;
     result.status = CommandStatus::SystemError;
-    if (!set_nonblocking(output_pipe[0]) || !set_nonblocking(exec_pipe[0])) {
+    if (!set_nonblocking(output_pipe[0]) ||
+        (options.separate_stderr && !set_nonblocking(error_pipe[0])) ||
+        !set_nonblocking(exec_pipe[0])) {
         result.error = std::string("fcntl failed: ") + std::strerror(errno);
         signal_process_group(child, SIGKILL);
         static_cast<void>(::waitpid(child, nullptr, 0));
         close_fd(output_pipe[0]);
+        close_fd(error_pipe[0]);
         close_fd(exec_pipe[0]);
         return result;
     }
@@ -608,19 +654,46 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
     std::size_t exec_error_bytes = 0;
 
     while (!child_reaped) {
-        pollfd descriptors[2] = {
-            {output_pipe[0], POLLIN | POLLHUP | POLLERR, 0},
-            {exec_pipe[0], POLLIN | POLLHUP | POLLERR, 0},
+        pollfd descriptors[3]{};
+        int descriptor_count = 0;
+        descriptors[descriptor_count++] = {
+            output_pipe[0], POLLIN | POLLHUP | POLLERR, 0
         };
-        static_cast<void>(::poll(descriptors, 2, 20));
+        if (options.separate_stderr) {
+            descriptors[descriptor_count++] = {
+                error_pipe[0], POLLIN | POLLHUP | POLLERR, 0
+            };
+        }
+        descriptors[descriptor_count++] = {
+            exec_pipe[0], POLLIN | POLLHUP | POLLERR, 0
+        };
+        static_cast<void>(::poll(descriptors, descriptor_count, 20));
 
         drain_output(output_pipe[0], result, options.max_output_bytes, io_error);
+        if (options.separate_stderr) {
+            drain_output(
+                error_pipe[0],
+                result.standard_error,
+                result.truncated,
+                options.max_output_bytes,
+                io_error
+            );
+        }
         drain_exec_error(exec_pipe[0], exec_error_buffer, exec_error_bytes, io_error);
 
         const pid_t waited = ::waitpid(child, &wait_status, WNOHANG);
         if (waited == child) {
             child_reaped = true;
             drain_output(output_pipe[0], result, options.max_output_bytes, io_error);
+            if (options.separate_stderr) {
+                drain_output(
+                    error_pipe[0],
+                    result.standard_error,
+                    result.truncated,
+                    options.max_output_bytes,
+                    io_error
+                );
+            }
             drain_exec_error(exec_pipe[0], exec_error_buffer, exec_error_bytes, io_error);
             break;
         }
@@ -662,8 +735,10 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
     }
 
     close_fd(output_pipe[0]);
+    close_fd(error_pipe[0]);
     close_fd(exec_pipe[0]);
     result.output = trim(std::move(result.output));
+    result.standard_error = trim(std::move(result.standard_error));
 
     int exec_errno = 0;
     if (exec_error_bytes == sizeof(exec_errno)) {

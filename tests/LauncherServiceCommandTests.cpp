@@ -1,4 +1,9 @@
+#include "core/Command.hpp"
+
+#include <atomic>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 #include <gtest/gtest.h>
 #include "services/LauncherService.hpp"
@@ -214,6 +219,94 @@ TEST(LauncherServiceCommandTransportTest, NormalCommandRunsWithoutTerminal) {
         launcher_command_argv("npm run dev"),
         (std::vector<std::string>{"fish", "-C", "npm run dev"})
     );
+}
+
+TEST(LauncherCommandBoundaryTest, CapturesStdoutAndStderrWithinSeparateBounds) {
+    realmheart::core::CommandOptions options;
+    options.deadline = std::chrono::seconds(2);
+    options.max_output_bytes = 32;
+    options.separate_stderr = true;
+
+    const auto result = realmheart::core::run_capture(
+        {"sh", "-c", "printf stdout; printf stderr >&2"},
+        options
+    );
+
+    ASSERT_TRUE(result.succeeded()) << result.error;
+    EXPECT_EQ(result.output, "stdout");
+    EXPECT_EQ(result.standard_error, "stderr");
+    EXPECT_FALSE(result.truncated);
+}
+
+TEST(LauncherCommandBoundaryTest, TerminatesNeverEndingOutputAtDeadlineWithoutUnboundedCapture) {
+    realmheart::core::CommandOptions options;
+    options.deadline = std::chrono::milliseconds(120);
+    options.terminate_grace = std::chrono::milliseconds(40);
+    options.max_output_bytes = 4096;
+    options.separate_stderr = true;
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = realmheart::core::run_capture(
+        {"sh", "-c", "while :; do printf x; printf y >&2; done"},
+        options
+    );
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    EXPECT_EQ(result.status, realmheart::core::CommandStatus::TimedOut);
+    EXPECT_LE(result.output.size(), options.max_output_bytes);
+    EXPECT_LE(result.standard_error.size(), options.max_output_bytes);
+    EXPECT_TRUE(result.truncated);
+    EXPECT_LT(elapsed, std::chrono::seconds(2));
+}
+
+TEST(LauncherCommandBoundaryTest, CancellationTerminatesAndReapsDescendants) {
+    std::atomic_bool cancelled = false;
+    realmheart::core::CommandOptions options;
+    options.deadline = std::chrono::seconds(10);
+    options.terminate_grace = std::chrono::milliseconds(40);
+    options.cancelled = [&cancelled] { return cancelled.load(); };
+
+    std::thread canceller([&cancelled] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        cancelled.store(true);
+    });
+    const auto result = realmheart::core::run_capture(
+        {"sh", "-c", "sleep 60 & wait"},
+        options
+    );
+    canceller.join();
+
+    EXPECT_EQ(result.status, realmheart::core::CommandStatus::Cancelled);
+    EXPECT_TRUE(result.error.find("cancelled") != std::string::npos);
+}
+
+TEST(LauncherEmojiInputBoundaryTest, RejectsInputThatExceedsLimitDuringRead) {
+    const auto path = std::filesystem::temp_directory_path() /
+        "realmheart-task20-emoji-oversize.txt";
+    {
+        std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+        stream << "### DATA ###\n" << std::string(129, 'x');
+    }
+
+    const auto contents = realmheart::services::read_bounded_emoji_data(path, 128);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+    EXPECT_FALSE(contents.has_value());
+}
+
+TEST(LauncherEmojiInputBoundaryTest, AcceptsInputExactlyAtReadLimit) {
+    const auto path = std::filesystem::temp_directory_path() /
+        "realmheart-task20-emoji-exact-limit.txt";
+    {
+        std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+        stream << std::string(128, 'x');
+    }
+
+    const auto contents = realmheart::services::read_bounded_emoji_data(path, 128);
+    std::error_code error;
+    std::filesystem::remove(path, error);
+    ASSERT_TRUE(contents.has_value());
+    EXPECT_EQ(contents->size(), 128U);
 }
 
 TEST(LauncherServiceCommandLiveTest, HiddenCommandActuallyRuns) {

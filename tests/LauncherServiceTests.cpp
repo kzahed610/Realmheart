@@ -161,6 +161,31 @@ esac
     EXPECT_EQ(limited.size(), 2U);
 }
 
+TEST(LauncherServiceHelpersTest, RequiresStandaloneEmojiDataMarker) {
+    constexpr std::string_view script = R"EMOJI(
+# Documentation mentions ### DATA ### but is not the marker line.
+### DATA ### embedded in another line
+😀 grinning face smile
+)EMOJI";
+
+    EXPECT_EQ(launcher_emoji_data_start(script), std::string_view::npos);
+    EXPECT_TRUE(launcher_emoji_results(script, "", 10).empty());
+}
+
+TEST(LauncherServiceHelpersTest, RejectsCommentsAndMalformedEmojiRecords) {
+    constexpr std::string_view script = R"EMOJI(### DATA ###
+# comment must not become selectable
+not-an-emoji
+😀 grinning face smile
+⚔️ crossed swords weapon
+)EMOJI";
+
+    const auto results = launcher_emoji_results(script, "", 10);
+    ASSERT_EQ(results.size(), 2U);
+    EXPECT_EQ(results[0].id, "😀");
+    EXPECT_EQ(results[1].id, "⚔️");
+}
+
 TEST(LauncherServiceHelpersTest, SuggestsEmojiLauncherCommand) {
     const auto results = launcher_command_suggestions(">em");
     ASSERT_EQ(results.size(), 1U);

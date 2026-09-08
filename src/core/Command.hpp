@@ -26,7 +26,9 @@ struct CommandOptions {
     std::optional<std::chrono::steady_clock::time_point> deadline_at;
     std::chrono::milliseconds terminate_grace{100};
     std::size_t max_output_bytes = 64 * 1024;
+    bool separate_stderr = false;
     std::optional<std::string> stdin_data;
+    std::optional<std::string> working_directory;
     std::function<bool()> cancelled;
 };
 
@@ -55,6 +57,7 @@ struct CommandResult {
     int exit_code = -1;
     int term_signal = 0;
     std::string output;
+    std::string standard_error;
     std::string error;
     bool truncated = false;
 
