@@ -539,6 +539,7 @@ bool CommandReceiptOverlay::execute(const services::LauncherResult& result) {
     standard_output_.clear();
     standard_error_.clear();
     launch_error_.clear();
+    output_truncated_ = false;
     exit_code_ = 0;
     duration_seconds_ = 0.0;
     set_logs_expanded(false);
@@ -551,6 +552,7 @@ bool CommandReceiptOverlay::execute(const services::LauncherResult& result) {
         bool successful = false;
         int exit_code = -1;
         double duration_seconds = 0.0;
+        bool output_truncated = false;
         std::string standard_output;
         std::string standard_error;
         std::string launch_error;
@@ -572,6 +574,7 @@ bool CommandReceiptOverlay::execute(const services::LauncherResult& result) {
             completion->successful,
             completion->exit_code,
             completion->duration_seconds,
+            completion->output_truncated,
             std::move(completion->standard_output),
             std::move(completion->standard_error),
             std::move(completion->launch_error)
@@ -612,6 +615,7 @@ bool CommandReceiptOverlay::execute(const services::LauncherResult& result) {
                 std::chrono::duration<double>(
                     std::chrono::steady_clock::now() - started_at
                 ).count(),
+                result.truncated,
                 result.output,
                 result.standard_error,
                 std::move(launch_error),
@@ -632,6 +636,7 @@ bool CommandReceiptOverlay::execute(const services::LauncherResult& result) {
             false,
             -1,
             0.0,
+            false,
             {},
             {},
             "Unable to queue command execution"
@@ -666,6 +671,7 @@ void CommandReceiptOverlay::complete_execution(
     bool successful,
     int exit_code,
     double duration_seconds,
+    bool output_truncated,
     std::string standard_output,
     std::string standard_error,
     std::string launch_error
@@ -677,6 +683,7 @@ void CommandReceiptOverlay::complete_execution(
     standard_output_ = std::move(standard_output);
     standard_error_ = std::move(standard_error);
     launch_error_ = std::move(launch_error);
+    output_truncated_ = output_truncated;
     exit_code_ = exit_code;
     duration_seconds_ = duration_seconds;
     set_state(successful ? ReceiptState::Success : ReceiptState::Failure);
@@ -697,6 +704,7 @@ void CommandReceiptOverlay::complete_execution(
         ? "Exit " + std::to_string(exit_code)
         : "Unable to read exit status";
     metadata += "  ·  " + duration_text(duration_seconds_);
+    if (output_truncated_) metadata += "  ·  output truncated";
     gtk_label_set_text(GTK_LABEL(metadata_label_), metadata.c_str());
 
     gtk_widget_set_sensitive(full_logs_button_, TRUE);
@@ -770,6 +778,9 @@ void CommandReceiptOverlay::update_log_view() {
     if (state_ != ReceiptState::Running) {
         log << "Exit code: " << exit_code_ << '\n';
         log << "Duration: " << duration_text(duration_seconds_) << '\n';
+        if (output_truncated_) {
+            log << command_receipt_detail::kOutputTruncationMarker << '\n';
+        }
     }
 
     GtkTextBuffer* buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(log_view_));
@@ -1198,24 +1209,32 @@ std::string CommandReceiptOverlay::compact_output_summary(
     std::string_view standard_error,
     std::string_view launch_error
 ) const {
-    if (!launch_error.empty()) return tail_excerpt(launch_error);
+    if (!launch_error.empty()) {
+        return command_receipt_detail::annotate_output_truncation(
+            tail_excerpt(launch_error),
+            output_truncated_
+        );
+    }
+    std::string summary;
     if (!successful) {
         if (const std::string error = tail_excerpt(standard_error); !error.empty()) {
-            return error;
+            summary = error;
+        } else if (const std::string output = tail_excerpt(standard_output); !output.empty()) {
+            summary = output;
+        } else {
+            summary = "The command exited with an error and produced no output.";
         }
-        if (const std::string output = tail_excerpt(standard_output); !output.empty()) {
-            return output;
-        }
-        return "The command exited with an error and produced no output.";
+    } else if (const std::string output = tail_excerpt(standard_output); !output.empty()) {
+        summary = output;
+    } else if (const std::string warning = tail_excerpt(standard_error); !warning.empty()) {
+        summary = warning;
+    } else {
+        summary = "Completed successfully.";
     }
-
-    if (const std::string output = tail_excerpt(standard_output); !output.empty()) {
-        return output;
-    }
-    if (const std::string warning = tail_excerpt(standard_error); !warning.empty()) {
-        return warning;
-    }
-    return "Completed successfully.";
+    return command_receipt_detail::annotate_output_truncation(
+        std::move(summary),
+        output_truncated_
+    );
 }
 
 gboolean CommandReceiptOverlay::auto_dismiss_timeout(gpointer user_data) {

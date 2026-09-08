@@ -18,6 +18,25 @@ class ThemedSvgIcon;
 
 namespace realmheart::ui {
 
+namespace command_receipt_detail {
+
+inline constexpr std::string_view kOutputTruncationMarker =
+    "… Realmheart truncated command output …";
+
+inline std::string annotate_output_truncation(
+    std::string value,
+    bool truncated
+) {
+    if (!truncated || value.find(kOutputTruncationMarker) != std::string::npos) {
+        return value;
+    }
+    if (!value.empty()) value += "\n\n";
+    value += kOutputTruncationMarker;
+    return value;
+}
+
+} // namespace command_receipt_detail
+
 class CommandReceiptOverlay {
 public:
     CommandReceiptOverlay();
@@ -60,6 +79,7 @@ private:
         bool successful,
         int exit_code,
         double duration_seconds,
+        bool output_truncated,
         std::string standard_output,
         std::string standard_error,
         std::string launch_error
@@ -137,6 +157,7 @@ private:
     std::string standard_output_;
     std::string standard_error_;
     std::string launch_error_;
+    bool output_truncated_ = false;
     ReceiptState state_ = ReceiptState::Running;
     guint auto_dismiss_id_ = 0;
     guint drag_tick_id_ = 0;

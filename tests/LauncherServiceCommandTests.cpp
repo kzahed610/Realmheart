@@ -7,6 +7,7 @@
 #include <thread>
 #include <gtest/gtest.h>
 #include "services/LauncherService.hpp"
+#include "ui/launcher/CommandReceiptOverlay.hpp"
 
 using namespace realmheart::services;
 
@@ -278,6 +279,70 @@ TEST(LauncherCommandBoundaryTest, CancellationTerminatesAndReapsDescendants) {
 
     EXPECT_EQ(result.status, realmheart::core::CommandStatus::Cancelled);
     EXPECT_TRUE(result.error.find("cancelled") != std::string::npos);
+}
+
+TEST(LauncherCommandReceiptContractTest, PropagatesAndDisplaysTruncationMetadata) {
+    const auto source_root = std::filesystem::path(REALMHEART_SOURCE_DIR);
+    const auto source_path = source_root /
+        "src/ui/launcher/CommandReceiptOverlay.cpp";
+    const auto header_path = source_root /
+        "src/ui/launcher/CommandReceiptOverlay.hpp";
+    std::ifstream source(source_path);
+    std::ifstream header(header_path);
+    ASSERT_TRUE(source.good()) << source_path;
+    ASSERT_TRUE(header.good()) << header_path;
+    const std::string contents(
+        (std::istreambuf_iterator<char>(source)),
+        std::istreambuf_iterator<char>()
+    );
+    const std::string header_contents(
+        (std::istreambuf_iterator<char>(header)),
+        std::istreambuf_iterator<char>()
+    );
+
+    EXPECT_NE(contents.find("result.truncated"), std::string::npos);
+    EXPECT_NE(contents.find("output_truncated"), std::string::npos);
+    EXPECT_NE(
+        header_contents.find("Realmheart truncated command output"),
+        std::string::npos
+    );
+}
+
+TEST(LauncherCommandReceiptContractTest, MarksOnlyTruncatedOutput) {
+    using realmheart::ui::command_receipt_detail::annotate_output_truncation;
+    using realmheart::ui::command_receipt_detail::kOutputTruncationMarker;
+
+    EXPECT_EQ(annotate_output_truncation("captured", false), "captured");
+    EXPECT_EQ(
+        annotate_output_truncation("captured", true),
+        "captured\n\n" + std::string(kOutputTruncationMarker)
+    );
+    EXPECT_EQ(
+        annotate_output_truncation(
+            std::string(kOutputTruncationMarker),
+            true
+        ),
+        kOutputTruncationMarker
+    );
+}
+
+TEST(ShellShutdownContractTest, DetachesCommandReceiptsBeforeExecutorDrain) {
+    const auto path = std::filesystem::path(REALMHEART_SOURCE_DIR) /
+        "src/ui/ShellApp.cpp";
+    std::ifstream source(path);
+    ASSERT_TRUE(source.good()) << path;
+    const std::string contents(
+        (std::istreambuf_iterator<char>(source)),
+        std::istreambuf_iterator<char>()
+    );
+
+    const auto detach = contents.find("command_receipts_->detach()");
+    const auto drain = contents.find(
+        "core::shared_task_executor().wait_for_idle()"
+    );
+    ASSERT_NE(detach, std::string::npos);
+    ASSERT_NE(drain, std::string::npos);
+    EXPECT_LT(detach, drain);
 }
 
 TEST(LauncherEmojiInputBoundaryTest, RejectsInputThatExceedsLimitDuringRead) {

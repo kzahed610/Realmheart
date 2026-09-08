@@ -472,6 +472,9 @@ public:
         // Cancellation prevents queued work from starting, but a worker may
         // already have passed its cancellation check. Drain the shared pool
         // while media_ and battery_ are still alive before member teardown.
+        if (command_receipts_ != nullptr) {
+            command_receipts_->detach();
+        }
         core::shared_task_executor().wait_for_idle();
         if (lock_surface_ != nullptr) {
             lock_surface_->hide_immediately();

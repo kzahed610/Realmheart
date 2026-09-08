@@ -1130,7 +1130,15 @@ if(BUILD_TESTING)
         src/services/HyprlandEventMonitor.cpp
         src/services/HyprlandSession.cpp
     )
-    target_link_libraries(realmheart_launcher_service_command_tests PRIVATE GTest::gtest GTest::gtest_main PkgConfig::GIO)
+    target_compile_definitions(realmheart_launcher_service_command_tests PRIVATE
+        REALMHEART_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    )
+    target_link_libraries(realmheart_launcher_service_command_tests PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+        PkgConfig::GIO
+        PkgConfig::GTK4
+    )
     realmheart_register_test(realmheart_launcher_service_command_tests)
 
     add_executable(
