@@ -1,5 +1,6 @@
 #include "ui/powermenu/PowerMenuScene.hpp"
 #include "ui/AssetResolver.hpp"
+#include "ui/powermenu/PowerMenuContracts.hpp"
 #include "ui/powermenu/animation/PowerMenuRippleRenderer.hpp"
 
 #include <algorithm>
@@ -118,6 +119,7 @@ PowerMenuScene::~PowerMenuScene() {
     stop_tick();
     on_hidden_ = {};
     visibility_callback_ = {};
+    failure_callback_ = {};
     finish_ripple();
     release_ripple_renderer();
     destroy_media();
@@ -144,6 +146,10 @@ void PowerMenuScene::set_visibility_callback(std::function<void(double)> callbac
     publish_visibility();
 }
 
+void PowerMenuScene::set_failure_callback(std::function<void()> callback) {
+    failure_callback_ = std::move(callback);
+}
+
 void PowerMenuScene::set_viewport_size(int logical_width, int logical_height) {
     viewport_width_ = std::max(logical_width, 1);
     viewport_height_ = std::max(logical_height, 1);
@@ -160,19 +166,20 @@ void PowerMenuScene::set_viewport_size(int logical_width, int logical_height) {
     }
 }
 
-void PowerMenuScene::present(
+bool PowerMenuScene::present(
     double normalized_origin_x,
     double normalized_origin_y
 ) {
     on_hidden_ = {};
+    presentation_failed_ = false;
     if (!ready()) {
         std::cerr << "[PowerMenuScene] " << error_message_ << '\n';
-        return;
+        return false;
     }
 
     if (!ensure_poster()) {
         std::cerr << "[PowerMenuScene] " << error_message_ << '\n';
-        return;
+        return false;
     }
     ensure_ripple_renderer();
 
@@ -183,7 +190,11 @@ void PowerMenuScene::present(
     last_ripple_media_timestamp_us_ = -1;
     final_ripple_frame_requested_ = false;
     state_.present();
-    acquire_media();
+    if (!acquire_media()) {
+        std::cerr << "[PowerMenuScene] " << error_message_ << '\n';
+        if (!presentation_failed_) fail_presentation();
+        return false;
+    }
     // The ripple still snapshots the deterministic first-frame poster, but the
     // live stream prerolls underneath it immediately. By the time the reveal
     // reaches its terminal frame, the decoder has already produced live video
@@ -198,6 +209,7 @@ void PowerMenuScene::present(
 
     apply_frame();
     ensure_tick();
+    return true;
 }
 
 void PowerMenuScene::dismiss(std::function<void()> on_hidden) {
@@ -313,8 +325,8 @@ void PowerMenuScene::release_ripple_renderer() noexcept {
     std::cerr << "[PowerMenuRipple] GL renderer destroyed while idle\n";
 }
 
-void PowerMenuScene::acquire_media() {
-    if (!ready()) return;
+bool PowerMenuScene::acquire_media() {
+    if (!ready()) return false;
 
     // Create and source the GtkMediaFile only once. Reassigning its filename on
     // every open causes the GTK GStreamer backend to create another GL worker
@@ -342,7 +354,7 @@ void PowerMenuScene::acquire_media() {
         GFile* file = video_asset_ ? gfile_for_asset(*video_asset_) : nullptr;
         if (file == nullptr) {
             error_message_ = "Power-menu video descriptor is unavailable";
-            return;
+            return false;
         }
         gtk_media_file_set_file(GTK_MEDIA_FILE(media_stream_), file);
         g_clear_object(&file);
@@ -359,11 +371,19 @@ void PowerMenuScene::acquire_media() {
     );
     pause_media_playback();
 
-    if (gtk_media_stream_is_prepared(media_stream_)) {
+    if (gtk_media_stream_get_error(media_stream_) != nullptr) {
         handle_stream_notify(media_stream_);
+        return false;
+    }
+    if (gtk_media_stream_is_prepared(media_stream_)) {
+        const bool has_error = gtk_media_stream_get_error(media_stream_) != nullptr;
+        handle_stream_notify(media_stream_);
+        return media_acquisition_state(true, has_error) ==
+            MediaAcquisitionState::Ready;
     } else {
         sync_media_widgets();
     }
+    return gtk_media_stream_get_error(media_stream_) == nullptr;
 }
 
 void PowerMenuScene::release_media() noexcept {
@@ -514,8 +534,24 @@ void PowerMenuScene::arm_live_handoff() noexcept {
 }
 
 void PowerMenuScene::update_live_handoff(gint64 frame_time_us) noexcept {
-    if (state_.phase() != PowerMenuVideoPhase::Visible ||
-        ripple_renderer_ == nullptr || !ripple_renderer_->active()) {
+    if (state_.phase() != PowerMenuVideoPhase::Visible) {
+        cancel_live_handoff(false);
+        return;
+    }
+    if (ripple_renderer_ == nullptr || !ripple_renderer_->active()) {
+        if (!handoff_needs_frame()) return;
+        // Renderer deactivation is terminal for this transition. Do not keep
+        // the scene's timer alive waiting for a GL frame that can no longer
+        // arrive; keep the decoded media visible as the deterministic fallback.
+        cancel_live_handoff(false);
+        ripple_fallback_ = true;
+        ripple_pending_ = false;
+        ripple_attempts_ = 0;
+        live_video_committed_ = true;
+        gtk_widget_set_visible(media_layer_, TRUE);
+        gtk_widget_set_opacity(media_layer_, 1.0);
+        start_media_playback();
+        sync_media_widgets();
         return;
     }
 
@@ -573,7 +609,7 @@ void PowerMenuScene::handle_stream_notify(GtkMediaStream* stream) {
     if (const GError* error = gtk_media_stream_get_error(stream); error != nullptr) {
         error_message_ = std::string{"Unable to decode power-menu video: "} + error->message;
         std::cerr << "[PowerMenuScene] " << error_message_ << '\n';
-        if (stream == media_stream_) release_media();
+        if (stream == media_stream_) fail_presentation();
         return;
     }
     if (stream == media_stream_ && gtk_media_stream_is_prepared(stream)) {
@@ -583,6 +619,22 @@ void PowerMenuScene::handle_stream_notify(GtkMediaStream* stream) {
         apply_media_geometry();
         sync_media_widgets();
     }
+}
+
+void PowerMenuScene::fail_presentation() noexcept {
+    if (presentation_failed_) return;
+    presentation_failed_ = true;
+    stop_tick();
+    on_hidden_ = {};
+    state_.hide_immediately();
+    ripple_pending_ = false;
+    ripple_fallback_ = false;
+    ripple_attempts_ = 0;
+    cancel_live_handoff(false);
+    finish_ripple();
+    release_media();
+    apply_frame();
+    if (failure_callback_) failure_callback_();
 }
 
 GdkPaintable* PowerMenuScene::transition_source() const noexcept {

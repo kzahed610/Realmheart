@@ -28,8 +28,9 @@ public:
     [[nodiscard]] bool ready() const;
     [[nodiscard]] const std::string& error_message() const;
     void set_visibility_callback(std::function<void(double)> callback);
+    void set_failure_callback(std::function<void()> callback);
     void set_viewport_size(int logical_width, int logical_height);
-    void present(double normalized_origin_x, double normalized_origin_y);
+    [[nodiscard]] bool present(double normalized_origin_x, double normalized_origin_y);
     void dismiss(std::function<void()> on_hidden);
     void hide_immediately();
 
@@ -45,7 +46,7 @@ private:
     void release_poster() noexcept;
     void ensure_ripple_renderer();
     void release_ripple_renderer() noexcept;
-    void acquire_media();
+    [[nodiscard]] bool acquire_media();
     void release_media() noexcept;
     void destroy_media() noexcept;
     void start_media_playback() noexcept;
@@ -59,6 +60,7 @@ private:
     void cancel_live_handoff(bool keep_ripple) noexcept;
     [[nodiscard]] bool handoff_needs_frame() const noexcept;
     void handle_stream_notify(GtkMediaStream* stream);
+    void fail_presentation() noexcept;
     [[nodiscard]] GdkPaintable* transition_source() const noexcept;
     bool try_begin_ripple();
     void finish_ripple() noexcept;
@@ -81,6 +83,7 @@ private:
     PowerMenuVideoState state_;
     std::function<void()> on_hidden_;
     std::function<void(double)> visibility_callback_;
+    std::function<void()> failure_callback_;
     guint tick_callback_id_ = 0;
     gint64 last_frame_time_us_ = 0;
     double ripple_origin_x_ = 0.012;
@@ -90,6 +93,7 @@ private:
     bool ripple_fallback_ = false;
     bool media_source_loaded_ = false;
     bool media_playback_started_ = false;
+    bool presentation_failed_ = false;
     bool live_video_committed_ = false;
     bool handoff_pending_ = false;
     bool handoff_active_ = false;

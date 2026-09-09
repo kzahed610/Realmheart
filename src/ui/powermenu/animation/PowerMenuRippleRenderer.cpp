@@ -213,7 +213,15 @@ struct PowerMenuRippleRenderer::State {
         active = false;
         frame_ready = false;
         source_upload_pending = false;
-        release_texture();
+        release_gl_resources();
+        // A context-loss path may prevent GL deletion from being issued. The
+        // renderer is terminally inactive regardless, so never retain names
+        // that a later transition could mistake for valid resources.
+        source_texture = 0;
+        vertex_array = 0;
+        program = 0;
+        texture_width = 0;
+        texture_height = 0;
         source_pixels.clear();
         source_pixels.shrink_to_fit();
         source_width = 0;

@@ -2,6 +2,7 @@
 
 #include "ui/LayerSurface.hpp"
 #include "ui/MonitorResolver.hpp"
+#include "ui/powermenu/PowerMenuContracts.hpp"
 #include "ui/powermenu/PowerMenuControls.hpp"
 #include "ui/powermenu/PowerMenuScene.hpp"
 
@@ -15,6 +16,9 @@ namespace realmheart::ui::powermenu {
 namespace {
 
 constexpr guint kConfirmationTimeoutMs = 1200;
+constexpr guint kActionFailureTimeoutMs = 2500;
+constexpr guint kLockStatePollMs = 50;
+constexpr unsigned int kLockStateMaximumAttempts = 30;
 constexpr int kInputRegionCommitFrames = 30;
 
 const char* action_name(PowerMenuOverlay::Action action) {
@@ -90,7 +94,7 @@ bool apply_full_input_region(GtkWidget* widget) {
 } // namespace
 
 PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions, int monitor_index)
-    : actions_(std::move(actions)) {
+    : monitor_index_(monitor_index), actions_(std::move(actions)) {
     window_ = GTK_WINDOW(gtk_application_window_new(app));
     gtk_window_set_title(window_, "Realmheart Power Menu");
     gtk_window_set_decorated(window_, FALSE);
@@ -135,27 +139,13 @@ PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions
     gtk_widget_set_hexpand(root, TRUE);
     gtk_widget_set_vexpand(root, TRUE);
 
-    const auto monitor_context = monitor_context_for_index(
-        gdk_display_get_default(), monitor_index
-    );
-
     scene_ = std::make_unique<PowerMenuScene>();
-    if (monitor_context) {
-        scene_->set_viewport_size(
-            monitor_context->logical_width, monitor_context->logical_height
-        );
-    }
     gtk_overlay_set_child(GTK_OVERLAY(root), scene_->widget());
 
     controls_ = std::make_unique<PowerMenuControls>(
         [this](Action action) { activate(action); },
         [this]() { hide(); }
     );
-    if (monitor_context) {
-        controls_->set_viewport_size(
-            monitor_context->logical_width, monitor_context->logical_height
-        );
-    }
     gtk_overlay_add_overlay(GTK_OVERLAY(root), controls_->widget());
     gtk_widget_set_opacity(controls_->widget(), 0.0);
     gtk_widget_set_sensitive(controls_->widget(), FALSE);
@@ -181,6 +171,19 @@ PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions
             gtk_widget_set_opacity(confirmation_banner_, opacity);
         }
     });
+    scene_->set_failure_callback([this]() { handle_scene_failure(); });
+
+    g_signal_connect(
+        window_,
+        "realize",
+        G_CALLBACK(+[](GtkWidget*, gpointer data) {
+            auto* self = static_cast<PowerMenuOverlay*>(data);
+            if (self == nullptr) return;
+            self->refresh_monitor_binding();
+            self->watch_monitor_topology();
+        }),
+        this
+    );
 
     if (GdkDisplay* display = gdk_display_get_default(); display != nullptr) {
         GtkCssProvider* provider = gtk_css_provider_new();
@@ -241,6 +244,12 @@ PowerMenuOverlay::PowerMenuOverlay(GtkApplication* app, PowerMenuActions actions
 PowerMenuOverlay::~PowerMenuOverlay() {
     cancel_interaction_setup();
     clear_confirmation();
+    cancel_lock_verification();
+    if (action_failure_timeout_id_ != 0) {
+        g_source_remove(action_failure_timeout_id_);
+        action_failure_timeout_id_ = 0;
+    }
+    unwatch_monitor_topology();
     if (scene_ != nullptr) {
         scene_->set_visibility_callback({});
         scene_->hide_immediately();
@@ -251,26 +260,35 @@ PowerMenuOverlay::~PowerMenuOverlay() {
     }
 }
 
-void PowerMenuOverlay::show(
+bool PowerMenuOverlay::show(
     double normalized_origin_x,
     double normalized_origin_y
 ) {
     closed_notified_ = false;
     clear_confirmation();
+    cancel_lock_verification();
+    if (!gtk_widget_get_realized(GTK_WIDGET(window_))) {
+        gtk_widget_realize(GTK_WIDGET(window_));
+    }
+    refresh_monitor_binding();
     // Prime the transparent scene and its GL endpoint before mapping the layer
     // surface. Mapping first exposes the window's uninitialised backing frame
     // for one compositor cycle, which reads as a dark flash at click time.
-    if (scene_ != nullptr) {
-        scene_->present(normalized_origin_x, normalized_origin_y);
+    if (scene_ == nullptr ||
+        !scene_->present(normalized_origin_x, normalized_origin_y)) {
+        handle_scene_failure();
+        return false;
     }
     gtk_window_present(window_);
     force_transparent_surface(GTK_WIDGET(window_));
     schedule_interaction_setup();
+    return true;
 }
 
 void PowerMenuOverlay::hide() {
     cancel_interaction_setup();
     clear_confirmation();
+    cancel_lock_verification();
     force_transparent_surface(GTK_WIDGET(window_));
     if (controls_ != nullptr) {
         gtk_widget_set_sensitive(controls_->widget(), FALSE);
@@ -336,8 +354,94 @@ void PowerMenuOverlay::toggle(
     if (visible()) {
         hide();
     } else {
-        show(normalized_origin_x, normalized_origin_y);
+        static_cast<void>(show(normalized_origin_x, normalized_origin_y));
     }
+}
+
+void PowerMenuOverlay::refresh_monitor_binding() {
+    if (window_ == nullptr || !gtk_widget_get_realized(GTK_WIDGET(window_))) return;
+
+    const bool monitor_bound = set_layer_surface_monitor(window_, monitor_index_);
+    if (!monitor_bound && monitor_index_ >= 0) {
+        // A requested output may disappear between realization and this
+        // refresh. Keep the surface live on the first available output rather
+        // than leaving layer-shell bound to a stale disconnected surface.
+        static_cast<void>(set_layer_surface_monitor(window_, 0));
+    }
+    const int bound_monitor_index = effective_monitor_index(
+        monitor_index_,
+        monitor_bound
+    );
+    const auto context = monitor_context_for_widget(
+        GTK_WIDGET(window_),
+        bound_monitor_index
+    );
+    if (context) {
+        scene_->set_viewport_size(context->logical_width, context->logical_height);
+        controls_->set_viewport_size(context->logical_width, context->logical_height);
+    }
+
+    GdkMonitor* monitor = resolve_layer_surface_monitor(
+        GTK_WIDGET(window_), bound_monitor_index
+    );
+    if (monitor == bound_monitor_) {
+        if (monitor != nullptr) g_object_unref(monitor);
+        return;
+    }
+    if (bound_monitor_ != nullptr && bound_monitor_notify_handler_id_ != 0) {
+        g_signal_handler_disconnect(
+            bound_monitor_,
+            bound_monitor_notify_handler_id_
+        );
+    }
+    g_clear_object(&bound_monitor_);
+    bound_monitor_notify_handler_id_ = 0;
+    bound_monitor_ = monitor;
+    if (bound_monitor_ != nullptr) {
+        bound_monitor_notify_handler_id_ = g_signal_connect(
+            bound_monitor_,
+            "notify",
+            G_CALLBACK(+[](GObject*, GParamSpec*, gpointer data) {
+                auto* self = static_cast<PowerMenuOverlay*>(data);
+                if (self != nullptr) self->refresh_monitor_binding();
+            }),
+            this
+        );
+    }
+}
+
+void PowerMenuOverlay::watch_monitor_topology() {
+    if (monitors_model_ != nullptr || window_ == nullptr) return;
+    GdkDisplay* display = gtk_widget_get_display(GTK_WIDGET(window_));
+    if (display == nullptr) return;
+    monitors_model_ = G_LIST_MODEL(gdk_display_get_monitors(display));
+    if (monitors_model_ == nullptr) return;
+    g_object_ref(monitors_model_);
+    monitors_changed_handler_id_ = g_signal_connect(
+        monitors_model_,
+        "items-changed",
+        G_CALLBACK(+[](GListModel*, guint, guint, guint, gpointer data) {
+            auto* self = static_cast<PowerMenuOverlay*>(data);
+            if (self != nullptr) self->refresh_monitor_binding();
+        }),
+        this
+    );
+}
+
+void PowerMenuOverlay::unwatch_monitor_topology() noexcept {
+    if (monitors_model_ != nullptr && monitors_changed_handler_id_ != 0) {
+        g_signal_handler_disconnect(monitors_model_, monitors_changed_handler_id_);
+    }
+    monitors_changed_handler_id_ = 0;
+    g_clear_object(&monitors_model_);
+    if (bound_monitor_ != nullptr && bound_monitor_notify_handler_id_ != 0) {
+        g_signal_handler_disconnect(
+            bound_monitor_,
+            bound_monitor_notify_handler_id_
+        );
+    }
+    bound_monitor_notify_handler_id_ = 0;
+    g_clear_object(&bound_monitor_);
 }
 
 void PowerMenuOverlay::set_closed_callback(std::function<void()> callback) {
@@ -359,9 +463,9 @@ void PowerMenuOverlay::activate(Action action) {
     }
 
     clear_confirmation();
-    if (scene_ != nullptr) scene_->hide_immediately();
-    gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
     if (preview_mode_enabled()) {
+        if (scene_ != nullptr) scene_->hide_immediately();
+        gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
         std::cerr << "[PowerMenu] Preview confirmation: " << action_name(action) << '\n';
         notify_closed();
         return;
@@ -375,9 +479,132 @@ void PowerMenuOverlay::activate(Action action) {
         case Action::Reboot: callback = &actions_.reboot; break;
         case Action::PowerOff: callback = &actions_.power_off; break;
     }
-    if (callback == nullptr || !*callback || !(*callback)()) {
-        std::cerr << "[PowerMenu] Unable to " << action_name(action) << '\n';
+    bool succeeded = false;
+    try {
+        succeeded = callback != nullptr && *callback && (*callback)();
+    } catch (...) {
+        succeeded = false;
     }
+    if (!succeeded) {
+        std::cerr << "[PowerMenu] Unable to " << action_name(action) << '\n';
+        gtk_window_present(window_);
+        gtk_label_set_text(
+            GTK_LABEL(confirmation_banner_),
+            (std::string{"Unable to "} + action_name(action) +
+             ". The session action failed; try again.").c_str()
+        );
+        gtk_widget_set_visible(confirmation_banner_, TRUE);
+        gtk_widget_set_opacity(confirmation_banner_, 1.0);
+        if (action_failure_timeout_id_ != 0) {
+            g_source_remove(action_failure_timeout_id_);
+        }
+        action_failure_timeout_id_ = g_timeout_add(
+            kActionFailureTimeoutMs,
+            +[](gpointer data) -> gboolean {
+                auto* self = static_cast<PowerMenuOverlay*>(data);
+                if (self == nullptr) return G_SOURCE_REMOVE;
+                self->action_failure_timeout_id_ = 0;
+                if (self->confirmation_banner_ != nullptr) {
+                    gtk_widget_set_visible(self->confirmation_banner_, FALSE);
+                }
+                return G_SOURCE_REMOVE;
+            },
+            this
+        );
+        if (controls_ != nullptr) {
+            gtk_widget_set_sensitive(controls_->widget(), TRUE);
+        }
+        return;
+    }
+    if (action == Action::Lock) {
+        begin_lock_verification();
+        return;
+    }
+    if (scene_ != nullptr) scene_->hide_immediately();
+    gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
+    notify_closed();
+}
+
+void PowerMenuOverlay::begin_lock_verification() {
+    lock_state_attempts_ = 0;
+    if (controls_ != nullptr) {
+        gtk_widget_set_sensitive(controls_->widget(), FALSE);
+    }
+    gtk_label_set_text(
+        GTK_LABEL(confirmation_banner_),
+        "Lock request sent; waiting for the session to confirm it..."
+    );
+    gtk_widget_set_visible(confirmation_banner_, TRUE);
+    gtk_widget_set_opacity(confirmation_banner_, 1.0);
+
+    if (!actions_.lock_state) {
+        gtk_label_set_text(
+            GTK_LABEL(confirmation_banner_),
+            "Lock request launched, but its final state cannot be verified."
+        );
+        if (controls_ != nullptr) {
+            gtk_widget_set_sensitive(controls_->widget(), TRUE);
+        }
+        return;
+    }
+
+    cancel_lock_verification();
+    lock_state_timeout_id_ = g_timeout_add(
+        kLockStatePollMs,
+        +[](gpointer data) -> gboolean {
+            auto* self = static_cast<PowerMenuOverlay*>(data);
+            if (self == nullptr) return G_SOURCE_REMOVE;
+
+            bool locked = false;
+            try {
+                locked = self->actions_.lock_state && self->actions_.lock_state();
+            } catch (...) {
+                locked = false;
+            }
+            const auto completion = action_completion(true, locked);
+            if (action_completion_allows_hide(completion)) {
+                self->lock_state_timeout_id_ = 0;
+                if (self->scene_ != nullptr) self->scene_->hide_immediately();
+                if (self->window_ != nullptr) {
+                    gtk_widget_set_visible(GTK_WIDGET(self->window_), FALSE);
+                }
+                self->notify_closed();
+                return G_SOURCE_REMOVE;
+            }
+
+            ++self->lock_state_attempts_;
+            if (self->lock_state_attempts_ < kLockStateMaximumAttempts) {
+                return G_SOURCE_CONTINUE;
+            }
+
+            self->lock_state_timeout_id_ = 0;
+            gtk_label_set_text(
+                GTK_LABEL(self->confirmation_banner_),
+                "Lock request was not confirmed; try again."
+            );
+            gtk_widget_set_visible(self->confirmation_banner_, TRUE);
+            if (self->controls_ != nullptr) {
+                gtk_widget_set_sensitive(self->controls_->widget(), TRUE);
+            }
+            return G_SOURCE_REMOVE;
+        },
+        this
+    );
+}
+
+void PowerMenuOverlay::cancel_lock_verification() noexcept {
+    if (lock_state_timeout_id_ != 0) {
+        g_source_remove(lock_state_timeout_id_);
+        lock_state_timeout_id_ = 0;
+    }
+    lock_state_attempts_ = 0;
+}
+
+void PowerMenuOverlay::handle_scene_failure() {
+    cancel_interaction_setup();
+    clear_confirmation();
+    if (scene_ != nullptr) scene_->hide_immediately();
+    if (window_ != nullptr) gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
     notify_closed();
 }
 

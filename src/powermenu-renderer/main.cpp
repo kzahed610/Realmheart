@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <sys/socket.h>
 #include <unistd.h>
 
 namespace {
@@ -91,6 +92,43 @@ void begin_close(RendererState& state) {
     }
 }
 
+bool notify_ready() {
+    int socket_type = 0;
+    socklen_t socket_type_length = sizeof(socket_type);
+    if (::getsockopt(
+            STDIN_FILENO,
+            SOL_SOCKET,
+            SO_TYPE,
+            &socket_type,
+            &socket_type_length
+        ) != 0) {
+        // Direct/manual invocations may use a terminal or pipe for stdin
+        // rather than the parent socketpair. There is no readiness peer in
+        // that mode, so leave the standalone renderer usable.
+        return errno == ENOTSOCK;
+    }
+
+    constexpr char message[] = "ready\n";
+    std::size_t remaining = sizeof(message) - 1;
+    const char* cursor = message;
+    while (remaining > 0) {
+        const ssize_t written = ::send(
+            STDIN_FILENO,
+            cursor,
+            remaining,
+            MSG_NOSIGNAL
+        );
+        if (written > 0) {
+            cursor += written;
+            remaining -= static_cast<std::size_t>(written);
+            continue;
+        }
+        if (written < 0 && errno == EINTR) continue;
+        return false;
+    }
+    return true;
+}
+
 gboolean stdin_callback(gint fd, GIOCondition condition, gpointer data) {
     auto* state = static_cast<RendererState*>(data);
     if (state == nullptr) return G_SOURCE_REMOVE;
@@ -133,6 +171,7 @@ void activate(GtkApplication* application, gpointer data) {
         application,
         realmheart::ui::powermenu::PowerMenuActions{
             .lock = [state] { return state->session->lock(); },
+            .lock_state = [state] { return state->session->is_locked(); },
             .suspend = [state] { return state->session->suspend(); },
             .logout = [state] { return state->session->logout(); },
             .reboot = [state] { return state->session->reboot(); },
@@ -145,7 +184,10 @@ void activate(GtkApplication* application, gpointer data) {
             g_application_quit(G_APPLICATION(state->application));
         }
     });
-    state->overlay->show(state->origin_x, state->origin_y);
+    const bool presented = state->overlay->show(state->origin_x, state->origin_y);
+    if (presented && !state->close_requested && !notify_ready()) {
+        begin_close(*state);
+    }
     if (state->close_requested) state->overlay->hide();
 }
 

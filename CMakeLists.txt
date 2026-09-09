@@ -1280,6 +1280,20 @@ if(BUILD_TESTING)
     add_executable(realmheart_session_manager_tests tests/SessionManagerTests.cpp src/core/Command.cpp src/services/SessionManager.cpp)
     realmheart_register_test(realmheart_session_manager_tests)
 
+    add_executable(
+        realmheart_power_menu_process_tests
+        tests/PowerMenuProcessTests.cpp
+        src/ui/powermenu/PowerMenuProcess.cpp
+    )
+    target_link_libraries(realmheart_power_menu_process_tests PRIVATE PkgConfig::GIO)
+    realmheart_register_test(realmheart_power_menu_process_tests)
+
+    add_executable(
+        realmheart_power_menu_contract_tests
+        tests/PowerMenuContractsTests.cpp
+    )
+    realmheart_register_test(realmheart_power_menu_contract_tests)
+
     add_executable(realmheart_shell_state_tests tests/ShellStateTests.cpp)
     realmheart_register_test(realmheart_shell_state_tests)
 
