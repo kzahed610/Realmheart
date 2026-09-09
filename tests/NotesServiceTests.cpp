@@ -98,6 +98,9 @@ void test_save_replaces_existing_file() {
     if (std::filesystem::exists(path.string() + ".tmp")) {
         fail("temporary file remained after successful save");
     }
+    if (std::filesystem::exists(path.string() + ".pending")) {
+        fail("durable pending journal remained after successful save");
+    }
 
     std::filesystem::remove_all(root);
 }
@@ -311,7 +314,10 @@ void test_permanent_failure_is_latched_until_new_edit() {
 
     realmheart::services::NotesService service(blocked_parent / "notes.txt", 20ms);
     service.acknowledge_load_failure();
-    if (!service.set_content("cannot persist")) fail("failed to prepare retry latch test");
+    if (service.set_content("cannot persist")) fail("unwritable notes path accepted a non-durable edit");
+    if (service.save_state() != realmheart::services::NotesSaveState::Failed) {
+        fail("immediate journal failure was not reported");
+    }
     std::this_thread::sleep_for(100ms);
     if (service.save_state() != realmheart::services::NotesSaveState::Failed) {
         fail("permanent persistence failure was not reported");
@@ -363,6 +369,79 @@ void test_default_path_rejects_relative_xdg_configuration() {
     else unsetenv("HOME");
 }
 
+void test_crash_recovery_and_writer_exclusion() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-notes-recovery-test";
+    const auto path = root / "notes.txt";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    int ready_pipe[2]{};
+    if (::pipe(ready_pipe) != 0) fail("could not create crash-recovery readiness pipe");
+
+    const pid_t child = ::fork();
+    if (child < 0) fail("could not fork crash-recovery writer");
+    if (child == 0) {
+        ::close(ready_pipe[0]);
+        realmheart::services::NotesService service(path, 5s);
+        if (!service.set_content("recovered after crash")) _exit(2);
+        const char ready = '1';
+        if (::write(ready_pipe[1], &ready, 1) != 1) _exit(3);
+        std::this_thread::sleep_for(500ms);
+        _exit(0);
+    }
+
+    ::close(ready_pipe[1]);
+    char ready = 0;
+    if (::read(ready_pipe[0], &ready, 1) != 1 || ready != '1') {
+        ::kill(child, SIGKILL);
+        ::waitpid(child, nullptr, 0);
+        ::close(ready_pipe[0]);
+        std::filesystem::remove_all(root);
+        fail("crash-recovery writer did not publish its durable intent");
+    }
+    ::close(ready_pipe[0]);
+
+    {
+        realmheart::services::NotesService overlapping(path, 20ms);
+        if (overlapping.save_state() != realmheart::services::NotesSaveState::LoadFailed) {
+            ::kill(child, SIGKILL);
+            ::waitpid(child, nullptr, 0);
+            std::filesystem::remove_all(root);
+            fail("a restarted writer was allowed to overlap the active writer");
+        }
+        if (overlapping.set_content("must not overlap")) {
+            ::kill(child, SIGKILL);
+            ::waitpid(child, nullptr, 0);
+            std::filesystem::remove_all(root);
+            fail("a lock-contended writer accepted an edit");
+        }
+        if (!overlapping.acknowledge_load_failure() || overlapping.save()) {
+            ::kill(child, SIGKILL);
+            ::waitpid(child, nullptr, 0);
+            std::filesystem::remove_all(root);
+            fail("a lock-contended writer bypassed ownership through save");
+        }
+    }
+
+    int status = 0;
+    if (::waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        std::filesystem::remove_all(root);
+        fail("crash-recovery writer did not exit cleanly");
+    }
+
+    {
+        realmheart::services::NotesService recovered(path, 20ms);
+        if (recovered.save_state() != realmheart::services::NotesSaveState::Saved ||
+            recovered.get_content() != "recovered after crash" ||
+            read_file(path) != "recovered after crash") {
+            std::filesystem::remove_all(root);
+            fail("durable pending content was not recovered after process death");
+        }
+    }
+
+    std::filesystem::remove_all(root);
+}
+
 } // namespace
 
 int main() {
@@ -379,6 +458,7 @@ int main() {
     test_permanent_failure_is_latched_until_new_edit();
     test_edited_text_is_bounded_and_validated();
     test_default_path_rejects_relative_xdg_configuration();
+    test_crash_recovery_and_writer_exclusion();
     std::cout << "NotesService tests PASSED\n";
     return 0;
 }

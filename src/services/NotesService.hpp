@@ -38,9 +38,10 @@ public:
 
     std::string get_content() const;
 
-    // Accepts valid UTF-8 text up to max_note_bytes and schedules one
-    // debounced atomic disk write. Returns false without changing the note when
-    // validation or an unacknowledged load failure rejects the edit.
+    // Accepts valid UTF-8 text up to max_note_bytes, durably records its
+    // write-ahead intent, and schedules one debounced atomic note replacement.
+    // Returns false without changing the note when validation, persistence, or
+    // an unacknowledged load failure rejects the edit.
     bool set_content(const std::string& content);
 
     // Explicitly permits replacing content after a load failure. No content is

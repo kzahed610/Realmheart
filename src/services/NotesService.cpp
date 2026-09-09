@@ -11,6 +11,7 @@
 #include <iostream>
 #include <limits>
 #include <pwd.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -32,6 +33,13 @@ enum class LoadResult {
     Missing,
     Loaded,
     Failed,
+};
+
+enum class FileWriteResult {
+    Committed,
+    Stale,
+    Failed,
+    DurabilityUncertain,
 };
 
 bool is_absolute_directory_root(const char* value) {
@@ -160,6 +168,10 @@ struct NotesService::State {
     explicit State(std::filesystem::path path, std::chrono::milliseconds delay)
         : notes_path(std::move(path)), debounce(delay) {}
 
+    ~State() {
+        if (lock_fd >= 0) ::close(lock_fd);
+    }
+
     const std::filesystem::path notes_path;
     const std::chrono::milliseconds debounce;
     mutable std::mutex mutex;
@@ -178,23 +190,29 @@ struct NotesService::State {
     bool stopping = false;
     bool shutdown_attempted = false;
     bool worker_exited = false;
+    bool writer_lock_contended = false;
+    int lock_fd = -1;
 };
 
 namespace {
 
-WriteResult write_atomically(
+std::filesystem::path pending_path(const NotesService::State& state);
+bool remove_pending_file(const std::shared_ptr<NotesService::State>& state);
+
+FileWriteResult write_file_atomically(
     const std::shared_ptr<NotesService::State>& state,
+    const std::filesystem::path& target,
     const std::string& content,
-    std::uint64_t generation
+    const std::function<bool()>& before_rename
 ) {
     if (content.size() > NotesService::max_note_bytes || !valid_note_text(content)) {
-        return WriteResult::Failed;
+        return FileWriteResult::Failed;
     }
 
-    const auto parent = state->notes_path.parent_path();
-    const auto filename = state->notes_path.filename().string();
-    if (!state->notes_path.is_absolute() || parent.empty() || filename.empty()) {
-        return WriteResult::Failed;
+    const auto parent = target.parent_path();
+    const auto filename = target.filename().string();
+    if (!target.is_absolute() || parent.empty() || filename.empty()) {
+        return FileWriteResult::Failed;
     }
 
     std::lock_guard io_lock(state->io_mutex);
@@ -204,7 +222,7 @@ WriteResult write_atomically(
     );
     if (directory_fd < 0) {
         report_errno("open notes directory", errno);
-        return WriteResult::Failed;
+        return FileWriteResult::Failed;
     }
 
     int temporary_fd = -1;
@@ -222,12 +240,12 @@ WriteResult write_atomically(
         if (errno != EEXIST) {
             report_errno("create temporary notes file", errno);
             ::close(directory_fd);
-            return WriteResult::Failed;
+            return FileWriteResult::Failed;
         }
     }
     if (temporary_fd < 0) {
         ::close(directory_fd);
-        return WriteResult::Failed;
+        return FileWriteResult::Failed;
     }
 
     const auto remove_temporary = [&] {
@@ -257,29 +275,25 @@ WriteResult write_atomically(
         report_errno("write temporary notes file", write_error);
         remove_temporary();
         ::close(directory_fd);
-        return WriteResult::Failed;
+        return FileWriteResult::Failed;
     }
 
-    {
-        std::lock_guard commit_lock(state->commit_mutex);
-        std::lock_guard state_lock(state->mutex);
-        if (state->edit_generation != generation) {
-            remove_temporary();
-            ::close(directory_fd);
-            return WriteResult::Stale;
-        }
-        if (::renameat(
-                directory_fd,
-                temporary_name.c_str(),
-                directory_fd,
-                filename.c_str()
-            ) != 0) {
-            const int error = errno;
-            report_errno("replace notes file", error);
-            remove_temporary();
-            ::close(directory_fd);
-            return WriteResult::Failed;
-        }
+    if (before_rename && !before_rename()) {
+        remove_temporary();
+        ::close(directory_fd);
+        return FileWriteResult::Stale;
+    }
+    if (::renameat(
+            directory_fd,
+            temporary_name.c_str(),
+            directory_fd,
+            filename.c_str()
+        ) != 0) {
+        const int error = errno;
+        report_errno("replace notes file", error);
+        remove_temporary();
+        ::close(directory_fd);
+        return FileWriteResult::Failed;
     }
 
     int directory_error = 0;
@@ -287,9 +301,102 @@ WriteResult write_atomically(
     if (::close(directory_fd) != 0 && directory_error == 0) directory_error = errno;
     if (directory_error != 0) {
         report_errno("sync notes directory", directory_error);
-        return WriteResult::DurabilityUncertain;
+        return FileWriteResult::DurabilityUncertain;
     }
-    return WriteResult::Committed;
+    return FileWriteResult::Committed;
+}
+
+WriteResult write_atomically(
+    const std::shared_ptr<NotesService::State>& state,
+    const std::string& content,
+    std::uint64_t generation
+) {
+    std::lock_guard commit_lock(state->commit_mutex);
+    const auto result = write_file_atomically(
+        state,
+        state->notes_path,
+        content,
+        [&] {
+            std::lock_guard state_lock(state->mutex);
+            return state->edit_generation == generation;
+        }
+    );
+    switch (result) {
+    case FileWriteResult::Committed:
+        return remove_pending_file(state)
+            ? WriteResult::Committed
+            : WriteResult::DurabilityUncertain;
+    case FileWriteResult::Stale:
+        return WriteResult::Stale;
+    case FileWriteResult::DurabilityUncertain:
+        return WriteResult::DurabilityUncertain;
+    case FileWriteResult::Failed:
+        return WriteResult::Failed;
+    }
+    return WriteResult::Failed;
+}
+
+std::filesystem::path pending_path(const NotesService::State& state) {
+    return std::filesystem::path(state.notes_path.string() + ".pending");
+}
+
+std::filesystem::path lock_path(const NotesService::State& state) {
+    return std::filesystem::path(state.notes_path.string() + ".lock");
+}
+
+bool remove_pending_file(const std::shared_ptr<NotesService::State>& state) {
+    const auto pending = pending_path(*state);
+    const auto parent = pending.parent_path();
+    const auto filename = pending.filename().string();
+    if (!pending.is_absolute() || parent.empty() || filename.empty()) return false;
+
+    std::lock_guard io_lock(state->io_mutex);
+    const int directory_fd = ::open(
+        parent.c_str(),
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    );
+    if (directory_fd < 0) {
+        report_errno("open notes directory for recovery cleanup", errno);
+        return false;
+    }
+
+    int remove_error = 0;
+    if (::unlinkat(directory_fd, filename.c_str(), 0) != 0 && errno != ENOENT) {
+        remove_error = errno;
+    }
+    if (remove_error == 0 && ::fsync(directory_fd) != 0) remove_error = errno;
+    if (::close(directory_fd) != 0 && remove_error == 0) remove_error = errno;
+    if (remove_error != 0) {
+        report_errno("remove recovered notes journal", remove_error);
+        return false;
+    }
+    return true;
+}
+
+bool acquire_writer_lock(const std::shared_ptr<NotesService::State>& state) {
+    const auto path = lock_path(*state);
+    if (!path.is_absolute() || path.parent_path().empty() || path.filename().empty()) return false;
+    const int fd = ::open(
+        path.c_str(),
+        O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW,
+        0600
+    );
+    if (fd < 0) {
+        report_errno("open notes writer lock", errno);
+        return false;
+    }
+    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        const int error = errno;
+        ::close(fd);
+        if (error == EWOULDBLOCK || error == EAGAIN) {
+            state->writer_lock_contended = true;
+        } else {
+            report_errno("acquire notes writer lock", error);
+        }
+        return false;
+    }
+    state->lock_fd = fd;
+    return true;
 }
 
 NotesService::SaveStateCallback finalize_write(
@@ -378,16 +485,43 @@ void NotesService::load_from_disk() {
         if (ec) path_usable = false;
     }
 
-    const LoadResult result = path_usable
-        ? read_note_file(state->notes_path, content)
-        : LoadResult::Failed;
+    bool recovery_durability_uncertain = false;
+    LoadResult result = LoadResult::Failed;
+    if (path_usable && acquire_writer_lock(state)) {
+        std::string pending_content;
+        const LoadResult pending_result = read_note_file(pending_path(*state), pending_content);
+        if (pending_result == LoadResult::Failed) {
+            result = LoadResult::Failed;
+        } else if (pending_result == LoadResult::Loaded) {
+            const FileWriteResult recovery_result = write_file_atomically(
+                state,
+                state->notes_path,
+                pending_content,
+                {}
+            );
+            if (recovery_result == FileWriteResult::Committed) {
+                if (remove_pending_file(state)) {
+                    content = std::move(pending_content);
+                    result = LoadResult::Loaded;
+                } else {
+                    recovery_durability_uncertain = true;
+                    result = LoadResult::Failed;
+                }
+            } else {
+                recovery_durability_uncertain = recovery_result == FileWriteResult::DurabilityUncertain;
+                result = LoadResult::Failed;
+            }
+        } else {
+            result = read_note_file(state->notes_path, content);
+        }
+    }
     std::lock_guard lock(state->mutex);
     state->cached_content = std::move(content);
     state->load_failed = result == LoadResult::Failed;
     state->load_failure_acknowledged = false;
-    state->save_state = state->load_failed
-        ? NotesSaveState::LoadFailed
-        : NotesSaveState::Saved;
+    state->save_state = recovery_durability_uncertain
+        ? NotesSaveState::DurabilityUncertain
+        : state->load_failed ? NotesSaveState::LoadFailed : NotesSaveState::Saved;
 }
 
 std::string NotesService::get_content() const {
@@ -409,12 +543,55 @@ bool NotesService::set_content(const std::string& content) {
     }
 
     SaveStateCallback callback;
+    NotesSaveState unavailable_state = NotesSaveState::Saved;
+    bool writer_lock_unavailable = false;
+    std::unique_lock commit_lock(state->commit_mutex);
     {
-        std::lock_guard commit_lock(state->commit_mutex);
         std::lock_guard lock(state->mutex);
-        if (state->stopping || (state->load_failed && !state->load_failure_acknowledged)) {
+        if (state->stopping ||
+            (state->load_failed && !state->load_failure_acknowledged)) {
             return false;
         }
+        if (state->lock_fd < 0) {
+            state->save_state = state->writer_lock_contended
+                ? NotesSaveState::LoadFailed
+                : NotesSaveState::Failed;
+            state->retry_blocked = true;
+            callback = state->save_state_callback;
+            unavailable_state = state->save_state;
+            writer_lock_unavailable = true;
+        }
+    }
+    if (writer_lock_unavailable) {
+        commit_lock.unlock();
+        if (callback) callback(unavailable_state);
+        return false;
+    }
+
+    const FileWriteResult journal_result = write_file_atomically(
+        state,
+        pending_path(*state),
+        content,
+        {}
+    );
+    if (journal_result != FileWriteResult::Committed) {
+        NotesSaveState current;
+        {
+            std::lock_guard lock(state->mutex);
+            state->retry_blocked = true;
+            state->save_state = journal_result == FileWriteResult::DurabilityUncertain
+                ? NotesSaveState::DurabilityUncertain
+                : NotesSaveState::Failed;
+            callback = state->save_state_callback;
+            current = state->save_state;
+        }
+        commit_lock.unlock();
+        if (callback) callback(current);
+        return false;
+    }
+
+    {
+        std::lock_guard lock(state->mutex);
         state->cached_content = content;
         state->dirty = true;
         state->retry_blocked = false;
@@ -422,6 +599,7 @@ bool NotesService::set_content(const std::string& content) {
         state->save_state = NotesSaveState::Pending;
         callback = state->save_state_callback;
     }
+    commit_lock.unlock();
     if (callback) callback(NotesSaveState::Pending);
     state->cv.notify_all();
     return true;
@@ -440,7 +618,8 @@ bool NotesService::save() {
     std::uint64_t generation = 0;
     {
         std::lock_guard lock(state->mutex);
-        if (state->stopping || (state->load_failed && !state->load_failure_acknowledged)) return false;
+        if (state->stopping || state->lock_fd < 0 ||
+            (state->load_failed && !state->load_failure_acknowledged)) return false;
         content = state->cached_content;
         generation = state->edit_generation;
     }
