@@ -1,6 +1,5 @@
 #include "mana_core/ManaCoresSelector.hpp"
 
-#include <cstdlib>
 #include <cmath>
 #include <numbers>
 #include <memory>
@@ -386,6 +385,8 @@ void ManaCoresSelector::present(GtkApplication* app, int monitor_index) {
     apply_callback_fired_ = false;
     nav_transitioning_ = false;
     nav_progress_ = 1.0;
+    pending_navigation_ = false;
+    initial_preview_ready_ = false;
 
     // Initialize layout from monitor dimensions
     GdkDisplay* display = gdk_display_get_default();
@@ -440,10 +441,13 @@ void ManaCoresSelector::present(GtkApplication* app, int monitor_index) {
 }
 
 void ManaCoresSelector::dismiss() {
+    async_state_->generation.fetch_add(1);
     visible_ = false;
     state_ = State::Hidden;
     nav_transitioning_ = false;
     nav_progress_ = 1.0;
+    pending_navigation_ = false;
+    initial_preview_ready_ = false;
     particles_.fill(ManaParticle{});
     last_tick_micros_ = 0;
     if (tick_callback_id_ != 0 && canvas_ != nullptr) {
@@ -602,6 +606,8 @@ void ManaCoresSelector::load_wallpapers_from_library(const std::filesystem::path
     hovered_radial_ = -1;
     clear_pixbufs();
     clear_old_pixbufs();
+    pending_navigation_ = false;
+    initial_preview_ready_ = false;
     queue_redraw();
 
     struct Payload {
@@ -669,7 +675,6 @@ void ManaCoresSelector::load_wallpapers_from_library(const std::filesystem::path
                         payload->wallpaper_index,
                         payload->pixbufs
                     );
-                    payload->pixbufs.fill(nullptr);
                 }
                 return G_SOURCE_REMOVE;
             },
@@ -688,6 +693,8 @@ void ManaCoresSelector::load_wallpapers_from_library(const std::filesystem::path
     if (!posted) {
         all_wallpaper_paths_.clear();
         wallpaper_decode_ready_.clear();
+        initial_preview_ready_ = true;
+        queue_redraw();
     }
 }
 
@@ -698,6 +705,7 @@ void ManaCoresSelector::reload_pixbufs() {
         hovered_radial_ = -1;
         return;
     }
+    pending_navigation_ = false;
     request_preview_load(async_state_->generation.fetch_add(1) + 1);
 }
 
@@ -731,6 +739,7 @@ void ManaCoresSelector::request_preview_load(std::uint64_t generation) {
                 );
             }
         }
+
         g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,
             +[](gpointer raw) -> gboolean {
@@ -743,7 +752,6 @@ void ManaCoresSelector::request_preview_load(std::uint64_t generation) {
                         payload->wallpaper_index,
                         payload->pixbufs
                     );
-                    payload->pixbufs.fill(nullptr);
                 }
                 return G_SOURCE_REMOVE;
             },
@@ -759,19 +767,131 @@ void ManaCoresSelector::request_preview_load(std::uint64_t generation) {
     }, "mana-core-preview-load", [state, generation] {
         return !state->alive.load() || state->generation.load() != generation;
     });
-    if (!posted) clear_pixbufs();
+    if (!posted) {
+        if (pending_navigation_) {
+            pending_navigation_ = false;
+            nav_transition_start_micros_ = 0;
+        } else {
+            if (!initial_preview_ready_) {
+                initial_preview_ready_ = true;
+            }
+        }
+        queue_redraw();
+    }
+}
+
+void ManaCoresSelector::schedule_adjacent_prewarm() {
+    const auto state = async_state_;
+    const auto paths = all_wallpaper_paths_;
+    const int wallpaper_index = current_wallpaper_index_;
+    const std::uint64_t generation = state->generation.load();
+    const int total = static_cast<int>(paths.size());
+    if (total < 2 || wallpaper_index < 0 || wallpaper_index >= total) return;
+
+    static constexpr std::array<int, 2> kAdjacentOffsets = {-1, 1};
+    static constexpr std::array<int, 4> kBatchOffsets = {0, 1, 2, 3};
+    // Share the direct-load key: a queued prewarm is replaced by an arrow
+    // request, while an active prewarm leaves the other worker available.
+    static_cast<void>(core::shared_task_executor().post(
+        [state, paths, wallpaper_index, generation] {
+            const int total = static_cast<int>(paths.size());
+            for (const int adjacent_offset : kAdjacentOffsets) {
+                if (!state->alive.load() || state->generation.load() != generation) {
+                    return;
+                }
+
+                const int destination =
+                    (wallpaper_index + adjacent_offset + total) % total;
+                for (std::size_t slot = 0; slot < kBatchOffsets.size(); ++slot) {
+                    if (!state->alive.load() || state->generation.load() != generation) {
+                        return;
+                    }
+                    const int index = (destination + kBatchOffsets[slot]) % total;
+                    GdkPixbuf* preview = ThumbnailCache::load_or_create(
+                        paths[static_cast<std::size_t>(index)],
+                        slot == 0 ? 480 : 360,
+                        nullptr
+                    );
+                    if (preview != nullptr) g_object_unref(preview);
+                }
+            }
+        },
+        "mana-core-preview-load",
+        [state, generation] {
+            return !state->alive.load() || state->generation.load() != generation;
+        }
+    ));
 }
 
 void ManaCoresSelector::apply_preview_load(
     std::uint64_t generation,
     int wallpaper_index,
-    std::array<GdkPixbuf*, 4> pixbufs
+    std::array<GdkPixbuf*, 4>& pixbufs
 ) {
-    if (generation != async_state_->generation.load() ||
-        wallpaper_index != current_wallpaper_index_ || all_wallpaper_paths_.empty()) {
+    if (generation != async_state_->generation.load()) {
         return;
     }
-    clear_pixbufs();
+
+    if (all_wallpaper_paths_.empty()) {
+        pending_navigation_ = false;
+        nav_transition_start_micros_ = 0;
+        if (!initial_preview_ready_) {
+            initial_preview_ready_ = true;
+            queue_redraw();
+        }
+        return;
+    }
+
+    if (wallpaper_index != current_wallpaper_index_ ||
+        wallpaper_index < 0 ||
+        wallpaper_index >= static_cast<int>(wallpaper_decode_ready_.size())) {
+        return;
+    }
+
+    const bool complete_batch = std::all_of(
+        pixbufs.begin(),
+        pixbufs.end(),
+        [](GdkPixbuf* pixbuf) { return pixbuf != nullptr; }
+    );
+    if (!complete_batch) {
+        if (pending_navigation_) {
+            wallpaper_decode_ready_[static_cast<std::size_t>(wallpaper_index)] = false;
+            pending_navigation_ = false;
+            nav_transition_start_micros_ = 0;
+        } else if (!initial_preview_ready_) {
+            initial_preview_ready_ = true;
+        }
+        queue_redraw();
+        return;
+    }
+
+    const bool navigation_publication = pending_navigation_;
+    const bool initial_publication = !initial_preview_ready_ && !navigation_publication;
+    if (pending_navigation_) {
+
+        if (old_core_pixbuf_ != nullptr) g_object_unref(old_core_pixbuf_);
+        old_core_pixbuf_ = current_core_pixbuf_
+            ? GDK_PIXBUF(g_object_ref(current_core_pixbuf_))
+            : nullptr;
+        for (std::size_t index = 0; index < 3; ++index) {
+            if (old_slice_pixbufs_[index] != nullptr) {
+                g_object_unref(old_slice_pixbufs_[index]);
+            }
+            old_slice_pixbufs_[index] = slice_pixbufs_[index]
+                ? GDK_PIXBUF(g_object_ref(slice_pixbufs_[index]))
+                : nullptr;
+        }
+
+        if (current_core_pixbuf_ != nullptr) g_object_unref(current_core_pixbuf_);
+        current_core_pixbuf_ = nullptr;
+        for (auto& pixbuf : slice_pixbufs_) {
+            if (pixbuf != nullptr) g_object_unref(pixbuf);
+            pixbuf = nullptr;
+        }
+    } else {
+        clear_pixbufs();
+    }
+
     current_core_pixbuf_ = pixbufs[0];
     pixbufs[0] = nullptr;
     for (std::size_t index = 0; index < 3; ++index) {
@@ -779,7 +899,21 @@ void ManaCoresSelector::apply_preview_load(
         pixbufs[index + 1] = nullptr;
     }
     wallpaper_decode_ready_[static_cast<std::size_t>(wallpaper_index)] =
-        current_core_pixbuf_ != nullptr;
+        true;
+
+    if (pending_navigation_) {
+        pending_navigation_ = false;
+        nav_transitioning_ = true;
+        nav_progress_ = 0.0;
+        nav_direction_ = pending_navigation_direction_;
+        nav_transition_start_micros_ = g_get_monotonic_time();
+    }
+    if (initial_publication) {
+        initial_preview_ready_ = true;
+    }
+    if (initial_publication || navigation_publication) {
+        schedule_adjacent_prewarm();
+    }
     queue_redraw();
 }
 
@@ -792,26 +926,14 @@ void ManaCoresSelector::cycle_wallpaper(int direction) {
         clear_old_pixbufs();
     }
 
-    if (old_core_pixbuf_ != nullptr) g_object_unref(old_core_pixbuf_);
-    old_core_pixbuf_ = current_core_pixbuf_ ? GDK_PIXBUF(g_object_ref(current_core_pixbuf_)) : nullptr;
-
-    for (size_t i = 0; i < 3; ++i) {
-        if (old_slice_pixbufs_[i] != nullptr) g_object_unref(old_slice_pixbufs_[i]);
-        old_slice_pixbufs_[i] = slice_pixbufs_[i] ? GDK_PIXBUF(g_object_ref(slice_pixbufs_[i])) : nullptr;
-    }
-
     const int total = static_cast<int>(all_wallpaper_paths_.size());
     current_wallpaper_index_ = (current_wallpaper_index_ + direction + total) % total;
     wallpaper_decode_ready_[static_cast<std::size_t>(current_wallpaper_index_)] = false;
-    clear_pixbufs();
-
-    reload_pixbufs();
-
-    // Trigger navigation slide+crossfade
-    nav_transitioning_ = true;
-    nav_progress_ = 0.0;
-    nav_direction_ = direction;
-    nav_transition_start_micros_ = g_get_monotonic_time();
+    pending_navigation_ = true;
+    pending_navigation_direction_ = direction;
+    nav_transition_start_micros_ = 0;
+    const auto generation = async_state_->generation.fetch_add(1) + 1;
+    request_preview_load(generation);
 
     queue_redraw();
 }
@@ -1635,6 +1757,10 @@ gboolean ManaCoresSelector::tick_callback(GtkWidget*, GdkFrameClock*, gpointer u
     if (!self->visible_) return G_SOURCE_REMOVE;
 
     guint64 now = g_get_monotonic_time();
+    if (self->state_ == State::Assembling && !self->initial_preview_ready_) {
+        self->last_tick_micros_ = now;
+        return G_SOURCE_CONTINUE;
+    }
     if (self->animation_start_micros_ == 0) {
         self->animation_start_micros_ = now;
     }

@@ -11,14 +11,18 @@
 #include <cstring>
 #include <fstream>
 #include <filesystem>
-#include <string_view>
-#include <system_error>
-#include <limits>
-#include <unistd.h>
-#include <optional>
 #include <cmath>
 #include <atomic>
+#include <list>
+#include <limits>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <vector>
+#include <unordered_map>
+#include <unistd.h>
 
 namespace realmheart::mana_core {
 namespace {
@@ -33,10 +37,16 @@ constexpr std::uint32_t kMaxSourceDimension = 16384;
 constexpr std::uint32_t kMaxPreviewDimension = 4096;
 constexpr std::uintmax_t kMaxCacheBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaxCacheEntries = 256;
+constexpr std::size_t kDecodedPixelBudget = 8ULL * 1024ULL * 1024ULL;
+constexpr std::size_t kMaxDecodedCacheEntries = 64;
 
 struct PreviewSourceStamp {
     std::uint64_t size = 0;
     std::int64_t mtime = 0;
+
+    bool operator==(const PreviewSourceStamp& other) const noexcept {
+        return size == other.size && mtime == other.mtime;
+    }
 };
 
 std::optional<PreviewSourceStamp> preview_source_stamp(const std::filesystem::path& path) noexcept {
@@ -54,6 +64,214 @@ std::optional<PreviewSourceStamp> preview_source_stamp(const std::filesystem::pa
     return stamp;
 }
 
+std::filesystem::path canonical_source_path(const std::filesystem::path& source) {
+    std::error_code canonical_error;
+    auto canonical = std::filesystem::weakly_canonical(source, canonical_error);
+    if (canonical_error) canonical = source.lexically_normal();
+    return canonical;
+}
+
+struct DecodedPreviewKey {
+    std::string canonical_source;
+    std::uint32_t target_dimension = 0;
+    PreviewSourceStamp source_stamp;
+
+    bool operator==(const DecodedPreviewKey& other) const noexcept {
+        return canonical_source == other.canonical_source &&
+            target_dimension == other.target_dimension &&
+            source_stamp.size == other.source_stamp.size &&
+            source_stamp.mtime == other.source_stamp.mtime;
+    }
+};
+
+struct DecodedPreviewKeyHash {
+    std::size_t operator()(const DecodedPreviewKey& key) const noexcept {
+        std::size_t hash = std::hash<std::string>{}(key.canonical_source);
+        hash ^= std::hash<std::uint32_t>{}(key.target_dimension) +
+            (hash << 6U) + (hash >> 2U);
+        hash ^= std::hash<std::uint64_t>{}(key.source_stamp.size) +
+            (hash << 6U) + (hash >> 2U);
+        hash ^= std::hash<std::int64_t>{}(key.source_stamp.mtime) +
+            (hash << 6U) + (hash >> 2U);
+        return hash;
+    }
+};
+
+struct DecodedPreviewEntry {
+    DecodedPreviewKey key;
+    GdkPixbuf* pixbuf = nullptr;
+    std::size_t bytes = 0;
+};
+
+class DecodedPreviewCache {
+public:
+    ~DecodedPreviewCache() {
+        for (const auto& entry : entries_) {
+            g_object_unref(entry.pixbuf);
+        }
+    }
+
+    GdkPixbuf* lookup(const DecodedPreviewKey& key) {
+        std::lock_guard lock(mutex_);
+        const auto found = entries_by_key_.find(key);
+        if (found == entries_by_key_.end()) return nullptr;
+
+        entries_.splice(entries_.begin(), entries_, found->second);
+        return GDK_PIXBUF(g_object_ref(entries_.front().pixbuf));
+    }
+
+    void remove_stale(const DecodedPreviewKey& current_key) noexcept {
+        std::array<GdkPixbuf*, kMaxDecodedCacheEntries> evicted{};
+        std::size_t evicted_count = 0;
+        {
+            std::lock_guard lock(mutex_);
+            for (auto iterator = entries_.begin(); iterator != entries_.end();) {
+                const bool same_source =
+                    iterator->key.canonical_source == current_key.canonical_source;
+                if (!same_source || iterator->key.source_stamp == current_key.source_stamp) {
+                    ++iterator;
+                    continue;
+                }
+
+                used_bytes_ -= iterator->bytes;
+                entries_by_key_.erase(iterator->key);
+                evicted[evicted_count++] = iterator->pixbuf;
+                iterator = entries_.erase(iterator);
+            }
+        }
+        for (std::size_t index = 0; index < evicted_count; ++index) {
+            g_object_unref(evicted[index]);
+        }
+    }
+
+    void remove_source(std::string_view canonical_source) noexcept {
+        std::array<GdkPixbuf*, kMaxDecodedCacheEntries> evicted{};
+        std::size_t evicted_count = 0;
+        {
+            std::lock_guard lock(mutex_);
+            for (auto iterator = entries_.begin(); iterator != entries_.end();) {
+                if (iterator->key.canonical_source != canonical_source) {
+                    ++iterator;
+                    continue;
+                }
+
+                used_bytes_ -= iterator->bytes;
+                entries_by_key_.erase(iterator->key);
+                evicted[evicted_count++] = iterator->pixbuf;
+                iterator = entries_.erase(iterator);
+            }
+        }
+        for (std::size_t index = 0; index < evicted_count; ++index) {
+            g_object_unref(evicted[index]);
+        }
+    }
+
+    void insert(const DecodedPreviewKey& key, GdkPixbuf* pixbuf, std::size_t bytes) noexcept {
+        if (pixbuf == nullptr || bytes == 0 || bytes > kDecodedPixelBudget) return;
+
+        std::array<GdkPixbuf*, kMaxDecodedCacheEntries + 1> evicted{};
+        std::size_t evicted_count = 0;
+        {
+            std::lock_guard lock(mutex_);
+            if (const auto existing = entries_by_key_.find(key);
+                existing != entries_by_key_.end()) {
+                used_bytes_ -= existing->second->bytes;
+                evicted[evicted_count++] = existing->second->pixbuf;
+                entries_.erase(existing->second);
+                entries_by_key_.erase(existing);
+            }
+
+            while (!entries_.empty() &&
+                   (entries_.size() >= kMaxDecodedCacheEntries ||
+                    used_bytes_ > kDecodedPixelBudget - bytes)) {
+                auto least_recent = std::prev(entries_.end());
+                used_bytes_ -= least_recent->bytes;
+                evicted[evicted_count++] = least_recent->pixbuf;
+                entries_by_key_.erase(least_recent->key);
+                entries_.erase(least_recent);
+            }
+
+            try {
+                entries_.push_front(DecodedPreviewEntry{key, pixbuf, bytes});
+                g_object_ref(pixbuf);
+                try {
+                    const auto result =
+                        entries_by_key_.emplace(entries_.front().key, entries_.begin());
+                    if (!result.second) {
+                        g_object_unref(pixbuf);
+                        entries_.pop_front();
+                    } else {
+                        used_bytes_ += bytes;
+                    }
+                } catch (...) {
+                    g_object_unref(pixbuf);
+                    entries_.pop_front();
+                    throw;
+                }
+            } catch (...) {
+                // The decoded cache is an optional optimization. If allocation
+                // fails, leave the cache in a valid reduced state and preserve
+                // the caller's reference.
+            }
+        }
+        for (std::size_t index = 0; index < evicted_count; ++index) {
+            g_object_unref(evicted[index]);
+        }
+    }
+
+private:
+    std::mutex mutex_;
+    std::list<DecodedPreviewEntry> entries_;
+    std::unordered_map<
+        DecodedPreviewKey,
+        std::list<DecodedPreviewEntry>::iterator,
+        DecodedPreviewKeyHash
+    > entries_by_key_;
+    std::size_t used_bytes_ = 0;
+};
+
+DecodedPreviewCache& decoded_preview_cache() {
+    static DecodedPreviewCache cache;
+    return cache;
+}
+
+std::optional<std::size_t> decoded_pixel_bytes(GdkPixbuf* pixbuf) noexcept {
+    if (pixbuf == nullptr) return std::nullopt;
+
+    const int width = gdk_pixbuf_get_width(pixbuf);
+    const int height = gdk_pixbuf_get_height(pixbuf);
+    const int channels = gdk_pixbuf_get_n_channels(pixbuf);
+    const int rowstride = gdk_pixbuf_get_rowstride(pixbuf);
+    if (width <= 0 || height <= 0 || channels <= 0 || rowstride <= 0) {
+        return std::nullopt;
+    }
+
+    const auto width_size = static_cast<std::size_t>(width);
+    const auto channels_size = static_cast<std::size_t>(channels);
+    if (width_size > std::numeric_limits<std::size_t>::max() / channels_size) {
+        return std::nullopt;
+    }
+    const auto minimum_row_bytes = width_size * channels_size;
+    const auto rowstride_size = static_cast<std::size_t>(rowstride);
+    if (rowstride_size < minimum_row_bytes ||
+        static_cast<std::size_t>(height) > std::numeric_limits<std::size_t>::max() / rowstride_size) {
+        return std::nullopt;
+    }
+    return rowstride_size * static_cast<std::size_t>(height);
+}
+
+void retain_if_source_is_current(
+    const std::filesystem::path& source,
+    const DecodedPreviewKey& key,
+    GdkPixbuf* pixbuf
+) noexcept {
+    const auto current_stamp = preview_source_stamp(source);
+    if (!current_stamp || !(*current_stamp == key.source_stamp)) return;
+    if (const auto bytes = decoded_pixel_bytes(pixbuf)) {
+        decoded_preview_cache().insert(key, pixbuf, *bytes);
+    }
+}
+
 std::uint64_t fnv1a_64(std::string_view text) noexcept {
     std::uint64_t hash = 1469598103934665603ULL;
     for (const unsigned char byte : text) {
@@ -67,9 +285,7 @@ std::filesystem::path preview_cache_path(
     const std::filesystem::path& source,
     int target_dimension
 ) {
-    std::error_code canonical_error;
-    auto canonical = std::filesystem::weakly_canonical(source, canonical_error);
-    if (canonical_error) canonical = source.lexically_normal();
+    const auto canonical = canonical_source_path(source);
 
     const std::string key = canonical.generic_string() + "\n" +
         std::to_string(std::max(target_dimension, 0));
@@ -247,10 +463,11 @@ GdkPixbuf* load_cached_preview(
 void store_cached_preview(
     const std::filesystem::path& source,
     int target_dimension,
-    GdkPixbuf* pixbuf
+    GdkPixbuf* pixbuf,
+    const PreviewSourceStamp& expected_stamp
 ) noexcept {
     const auto stamp = preview_source_stamp(source);
-    if (!stamp || !pixbuf) return;
+    if (!stamp || !(*stamp == expected_stamp) || !pixbuf) return;
     
     const int width = gdk_pixbuf_get_width(pixbuf);
     const int height = gdk_pixbuf_get_height(pixbuf);
@@ -342,8 +559,39 @@ GdkPixbuf* ThumbnailCache::load_or_create(
     std::error_code file_error;
     const auto source_size = std::filesystem::file_size(source_path, file_error);
     if (file_error || source_size == 0 || source_size > kMaxSourceBytes) {
+        decoded_preview_cache().remove_source(
+            canonical_source_path(source_path).generic_string()
+        );
         if (error) *error = "wallpaper file is missing or exceeds the size limit";
         return nullptr;
+    }
+
+    const auto source_stamp = preview_source_stamp(source_path);
+    const auto canonical_source = canonical_source_path(source_path).generic_string();
+    if (!source_stamp) {
+        decoded_preview_cache().remove_source(canonical_source);
+        if (error) *error = "unable to stat wallpaper source";
+        return nullptr;
+    }
+    const DecodedPreviewKey memory_key{
+        canonical_source,
+        static_cast<std::uint32_t>(target_dimension),
+        *source_stamp
+    };
+    decoded_preview_cache().remove_stale(memory_key);
+    if (GdkPixbuf* cached = decoded_preview_cache().lookup(memory_key)) {
+        if (error) error->clear();
+        return cached;
+    }
+
+    if (GdkPixbuf* cached = load_cached_preview(source_path, target_dimension)) {
+        const auto current_stamp = preview_source_stamp(source_path);
+        if (current_stamp && *current_stamp == memory_key.source_stamp) {
+            retain_if_source_is_current(source_path, memory_key, cached);
+            if (error) error->clear();
+            return cached;
+        }
+        g_object_unref(cached);
     }
 
     int source_width = 0;
@@ -353,13 +601,9 @@ GdkPixbuf* ThumbnailCache::load_or_create(
         static_cast<std::uint32_t>(source_width) > kMaxSourceDimension ||
         static_cast<std::uint32_t>(source_height) > kMaxSourceDimension ||
         static_cast<std::uint64_t>(source_width) * static_cast<std::uint64_t>(source_height) > kMaxSourcePixels) {
+        decoded_preview_cache().remove_source(canonical_source);
         if (error) *error = "wallpaper dimensions exceed the decode limit";
         return nullptr;
-    }
-
-    if (GdkPixbuf* cached = load_cached_preview(source_path, target_dimension)) {
-        if (error) error->clear();
-        return cached;
     }
 
     int target_width = source_width;
@@ -389,7 +633,8 @@ GdkPixbuf* ThumbnailCache::load_or_create(
     }
     g_clear_error(&decode_error);
 
-    store_cached_preview(source_path, target_dimension, pixbuf);
+    store_cached_preview(source_path, target_dimension, pixbuf, memory_key.source_stamp);
+    retain_if_source_is_current(source_path, memory_key, pixbuf);
     prune_cache();
     
     if (error) error->clear();

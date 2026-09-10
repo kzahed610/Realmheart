@@ -112,6 +112,9 @@ private:
     bool nav_transitioning_ = false;
     double nav_progress_ = 1.0;
     int nav_direction_ = 1;  // +1 = right/next, -1 = left/prev
+    bool pending_navigation_ = false;
+    int pending_navigation_direction_ = 1;
+    bool initial_preview_ready_ = false;
 
     // Hovered radial slice index (-1 = none, 0 = silver, 1 = yellow, 2 = orange)
     int hovered_radial_ = -1;
@@ -178,10 +181,11 @@ private:
 
     void reload_pixbufs();
     void request_preview_load(std::uint64_t generation);
+    void schedule_adjacent_prewarm();
     void apply_preview_load(
         std::uint64_t generation,
         int wallpaper_index,
-        std::array<GdkPixbuf*, 4> pixbufs
+        std::array<GdkPixbuf*, 4>& pixbufs
     );
     void clear_pixbufs();
     void clear_old_pixbufs();
