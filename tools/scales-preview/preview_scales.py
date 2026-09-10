@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import tempfile
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -25,6 +26,8 @@ WARN_C = np.array([0.702, 0.149, 0.118])  # #b3261e wrong-password red
 
 CELL_FRAC = 0.058   # scale size in screen-height fractions (shader constant)
 TARGET = 0.34       # final blob radius (screen-height fractions)
+MAX_DIMENSION = 8192
+MAX_PIXELS = 8_000_000  # bounded NumPy working set for four preview frames
 
 
 def fract(x: np.ndarray) -> np.ndarray:
@@ -194,15 +197,32 @@ def standin_wallpaper(width: int, height: int) -> np.ndarray:
     return np.clip(img, 0.0, 1.0)
 
 
+def validate_dimensions(width: int, height: int) -> None:
+    if width <= 0 or height <= 0:
+        raise ValueError("preview dimensions must be positive")
+    if width > MAX_DIMENSION or height > MAX_DIMENSION:
+        raise ValueError(
+            f"preview dimensions exceed the {MAX_DIMENSION}px per-axis limit"
+        )
+    if width * height > MAX_PIXELS:
+        raise ValueError(
+            f"preview dimensions exceed the {MAX_PIXELS:,}-pixel memory budget"
+        )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/tmp/scales-preview")
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=800)
     args = ap.parse_args()
+    try:
+        validate_dimensions(args.width, args.height)
+    except ValueError as error:
+        ap.error(str(error))
 
-    os.makedirs(args.out, exist_ok=True)
-    bg = standin_wallpaper(args.width, args.height)
+    output_dir = os.path.abspath(args.out)
+    os.makedirs(output_dir, exist_ok=True)
 
     # (label, time_s, reveal, opening, warn) — mirrors the state machine
     states = [
@@ -212,26 +232,34 @@ def main() -> None:
         ("closing-0_4s", 0.4, max(0.0, 1.0 - 0.4 / 0.8), False, 0.0),
     ]
 
-    tiles = []
-    for label, t, reveal, opening, warn in states:
-        frame = render_frame(args.width, args.height, time_s=t, reveal=reveal,
-                             opening=opening, warn=warn, seed=12.34,
-                             bg_image=bg)
-        img = Image.fromarray((frame * 255).astype(np.uint8))
-        d = ImageDraw.Draw(img)
-        d.rectangle([0, 0, args.width, 26], fill=(10, 10, 12))
-        d.text((10, 7), label, fill=(232, 193, 90))
-        path = os.path.join(args.out, f"{label}.png")
-        img.save(path)
-        tiles.append(img)
-        print(f"wrote {path}")
+    with tempfile.TemporaryDirectory(prefix=".scales-preview-", dir=output_dir) as staging:
+        bg = standin_wallpaper(args.width, args.height)
+        tiles = []
+        staged_paths = []
+        for label, t, reveal, opening, warn in states:
+            frame = render_frame(args.width, args.height, time_s=t, reveal=reveal,
+                                 opening=opening, warn=warn, seed=12.34,
+                                 bg_image=bg)
+            img = Image.fromarray((frame * 255).astype(np.uint8))
+            d = ImageDraw.Draw(img)
+            d.rectangle([0, 0, args.width, 26], fill=(10, 10, 12))
+            d.text((10, 7), label, fill=(232, 193, 90))
+            path = os.path.join(staging, f"{label}.png")
+            img.save(path)
+            tiles.append(img)
+            staged_paths.append(path)
 
-    sheet = Image.new("RGB", (args.width, (args.height + 4) * len(tiles)))
-    for i, tile in enumerate(tiles):
-        sheet.paste(tile, (0, i * (args.height + 4)))
-    sheet_path = os.path.join(args.out, "sheet.png")
-    sheet.save(sheet_path)
-    print(f"wrote {sheet_path}")
+        sheet = Image.new("RGB", (args.width, (args.height + 4) * len(tiles)))
+        for i, tile in enumerate(tiles):
+            sheet.paste(tile, (0, i * (args.height + 4)))
+        sheet_path = os.path.join(staging, "sheet.png")
+        sheet.save(sheet_path)
+        staged_paths.append(sheet_path)
+
+        for path in staged_paths:
+            destination = os.path.join(output_dir, os.path.basename(path))
+            os.replace(path, destination)
+            print(f"wrote {destination}")
 
 
 if __name__ == "__main__":

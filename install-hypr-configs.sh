@@ -42,41 +42,122 @@ need_sudo() {
     local dest="$1"
     local dest_dir
     dest_dir="$(dirname "$dest")"
-    mkdir -p "$dest_dir" 2>/dev/null
-    # If the directory doesn't exist yet or is writable, no sudo needed
-    if [[ -d "$dest_dir" ]] && [[ -w "$dest_dir" ]]; then
+    mkdir -p "$dest_dir" 2>/dev/null || true
+    # Atomic replacement and backups need write access to the parent directory.
+    if [[ -d "$dest_dir" ]] && [[ -w "$dest_dir" ]] &&
+       { [[ ! -e "$dest" ]] || { [[ -r "$dest" ]] && [[ -w "$dest" ]]; }; }; then
         return 1   # false (no sudo)
     fi
-    # If the file exists and is not writable, need sudo
-    if [[ -f "$dest" ]] && [[ ! -w "$dest" ]]; then
-        return 0  # true (sudo needed)
+    return 0      # true (sudo needed)
+}
+
+run_privileged() {
+    if [[ -n "${use_sudo:-}" ]]; then
+        sudo -- "$@"
+    else
+        "$@"
     fi
-    return 1      # false (no sudo)
+}
+
+path_contains_symlink() {
+    local path="$1"
+    while [[ "$path" != "/" && -n "$path" ]]; do
+        if [[ -L "$path" ]]; then
+            return 0
+        fi
+        path="$(dirname -- "$path")"
+    done
+    return 1
+}
+
+validate_destination() {
+    local dest="$1"
+    local parent
+    parent="$(dirname -- "$dest")"
+    if [[ -L "$dest" ]]; then
+        echo "  error: refusing symlink destination: $dest" >&2
+        return 1
+    fi
+    if [[ -e "$dest" && ! -f "$dest" ]]; then
+        echo "  error: refusing non-regular destination: $dest" >&2
+        return 1
+    fi
+    if path_contains_symlink "$parent"; then
+        echo "  error: refusing destination through a symlinked directory: $parent" >&2
+        return 1
+    fi
+    return 0
+}
+
+systemd_escape_exec_arg() {
+    local value="$1"
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//%/%%}
+    printf '"%s"' "$value"
 }
 
 copy_file() {
     local src="$1"
     local dest="$2"
     local use_sudo=""
+    local dest_dir
+    local temporary=""
+    local backup=""
+
+    if [[ ! -f "$src" || -L "$src" ]]; then
+        echo "  error: source is not a regular file: $src" >&2
+        return 1
+    fi
+    validate_destination "$dest" || return 1
+
+    dest_dir="$(dirname -- "$dest")"
+    if ! mkdir -p "$dest_dir" 2>/dev/null; then
+        :
+    fi
 
     if need_sudo "$dest"; then
         use_sudo="sudo"
     fi
 
-    if [[ -f "$dest" ]]; then
-        local bak="${dest}.bak.$(date +%Y%m%d_%H%M%S)"
-        if [[ -n "$use_sudo" ]]; then
-            sudo cp "$dest" "$bak"
-        else
-            cp "$dest" "$bak"
-        fi
-        echo "  backed up: $dest -> $bak"
+    if ! run_privileged mkdir -p -- "$dest_dir"; then
+        echo "  error: unable to create destination directory: $dest_dir" >&2
+        return 1
     fi
 
-    if [[ -n "$use_sudo" ]]; then
-        sudo cp "$src" "$dest"
-    else
-        cp "$src" "$dest"
+    if ! temporary="$(run_privileged mktemp -- "$dest_dir/.realmheart-copy.XXXXXX")"; then
+        echo "  error: unable to allocate an atomic temporary file for $dest" >&2
+        return 1
+    fi
+
+    if [[ -f "$dest" ]]; then
+        if ! backup="$(run_privileged mktemp -- "${dest}.bak.XXXXXX")" ||
+           ! run_privileged cp --preserve=mode,timestamps -- "$dest" "$backup"; then
+            run_privileged rm -f -- "$temporary" "$backup"
+            echo "  error: unable to create backup for $dest" >&2
+            return 1
+        fi
+        echo "  backed up: $dest -> $backup"
+    fi
+
+    if ! run_privileged cp --preserve=mode,timestamps -- "$src" "$temporary" ||
+       ! run_privileged mv -f -- "$temporary" "$dest"; then
+        run_privileged rm -f -- "$temporary"
+        if [[ -n "$backup" ]]; then
+            local restore=""
+            if restore="$(run_privileged mktemp -- "$dest.restore.XXXXXX")" &&
+               run_privileged cp --preserve=mode,timestamps -- "$backup" "$restore" &&
+               run_privileged mv -f -- "$restore" "$dest"; then
+                echo "  rolled back: $dest" >&2
+            else
+                run_privileged rm -f -- "$restore"
+                echo "  error: rollback failed for $dest; backup retained at $backup" >&2
+            fi
+        else
+            run_privileged rm -f -- "$dest"
+        fi
+        echo "  error: unable to install $dest" >&2
+        return 1
     fi
     echo "  installed: $dest"
 }
@@ -93,7 +174,8 @@ install_config_source() {
     elif [[ "$rel" == bin/* ]]; then
         dest_base="$LOCAL_BIN_DIR/${rel#bin/}"
     elif [[ "$rel" == pam/* ]]; then
-        dest_base="$HYPRLAND_DIR/${rel#pam/}"
+        echo "  skipped: $src (install with CMake to /etc/pam.d)"
+        return 0
     else
         return 0
     fi
@@ -103,12 +185,16 @@ install_config_source() {
 }
 
 install_realmheart_service() {
-    local binary="$SCRIPT_DIR/build-hybrid/realmheart"
+    # REALMHEART_BINARY is an explicit deployment/test override; normal users
+    # get the repository build path used by the historical helper.
+    local binary="${REALMHEART_BINARY:-$SCRIPT_DIR/build-hybrid/realmheart}"
     local destination="$SYSTEMD_USER_DIR/realmheart.service"
     local temporary
+    local escaped_binary
     temporary="$(mktemp -t realmheart-service-XXXXXX)"
+    escaped_binary="$(systemd_escape_exec_arg "$binary")"
 
-    {
+    if ! {
         printf '%s\n' \
             '[Unit]' \
             'Description=Realmheart desktop shell' \
@@ -117,21 +203,28 @@ install_realmheart_service() {
             '' \
             '[Service]' \
             'Type=simple' \
-            "ExecStart=$binary --shell --wallpaper-backend native" \
+            "ExecStart=$escaped_binary --shell --wallpaper-backend native" \
             'Restart=on-failure' \
             'RestartSec=2' \
             '' \
             '[Install]' \
             'WantedBy=graphical-session.target'
-    } >"$temporary"
-    chmod 0644 "$temporary"
+    } >"$temporary"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    if ! chmod 0644 "$temporary"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
 
     echo "[realmheart.service]"
-    if ! copy_file "$temporary" "$destination"; then
+    if copy_file "$temporary" "$destination"; then
+        rm -f -- "$temporary"
+    else
         rm -f "$temporary"
         return 1
     fi
-    rm -f "$temporary"
 
     if [[ ! -x "$binary" ]]; then
         echo "  warning: Realmheart binary is not built yet: $binary" >&2

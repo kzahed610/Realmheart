@@ -17,6 +17,8 @@ readonly expected_commit="${REALMHEART_FX_HYPRLAND_COMMIT:-efb50993780079460b0cb
 readonly expected_abi="${REALMHEART_FX_HYPRLAND_ABI:-efb50993780079460b0cbed1363e2166a2de1d9f_aq_0.14_hu_0.14_hg_0.5_hc_0.1_hlg_0.6}"
 readonly hyprctl_name="${REALMHEART_FX_HYPRCTL:-hyprctl}"
 readonly runtime_dir="${REALMHEART_FX_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/realmheart-fx}"
+readonly script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly generated_plugin_relative_dir="@REALMHEART_PLUGIN_RELATIVE_DIR@"
 
 hyprctl_bin="$(command -v "$hyprctl_name" 2>/dev/null || true)"
 if [[ -z "$hyprctl_bin" ]]; then
@@ -91,6 +93,7 @@ fi
 
 candidates=(
     "${REALMHEART_FX_SO:-}"
+    "${script_dir}/${generated_plugin_relative_dir}"
     "${HOME}/Realmheart/build-hybrid/realmheart-fx.so"
     "${HOME}/.local/lib/realmheart-fx.so"
     "/usr/lib/realmheart/realmheart-fx.so"

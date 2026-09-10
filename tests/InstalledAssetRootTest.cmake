@@ -17,6 +17,7 @@ execute_process(
     ERROR_VARIABLE install_stderr
 )
 if(NOT install_status EQUAL 0)
+    file(REMOVE_RECURSE "${REALMHEART_STAGE_DIR}")
     message(FATAL_ERROR
         "Staged Realmheart install failed (${install_status})\n"
         "stdout:\n${install_stdout}\n"
@@ -28,6 +29,7 @@ set(asset_root
     "${REALMHEART_STAGE_DIR}${REALMHEART_INSTALL_FULL_DATADIR}/realmheart/assets"
 )
 if(NOT IS_DIRECTORY "${asset_root}")
+    file(REMOVE_RECURSE "${REALMHEART_STAGE_DIR}")
     message(FATAL_ERROR "Staged Realmheart asset root is missing: ${asset_root}")
 endif()
 
@@ -38,6 +40,7 @@ execute_process(
     ERROR_VARIABLE probe_stderr
 )
 if(NOT probe_status EQUAL 0)
+    file(REMOVE_RECURSE "${REALMHEART_STAGE_DIR}")
     message(FATAL_ERROR
         "Installed asset resolver/package probe failed (${probe_status})\n"
         "stdout:\n${probe_stdout}\n"

@@ -5,7 +5,9 @@
 #include <cerrno>
 #include <cstdlib>
 #include <fcntl.h>
+#include <filesystem>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <system_error>
 #include <unistd.h>
@@ -30,6 +32,19 @@ std::filesystem::path executable_directory() {
     return std::filesystem::path(std::string(buffer.data(), static_cast<std::size_t>(length))).parent_path();
 }
 
+bool source_tree_resolution_enabled(const std::filesystem::path& executable) {
+    if (const char* configured = std::getenv("REALMHEART_ALLOW_SOURCE_ASSETS");
+        configured != nullptr && std::string_view(configured) == "1") {
+        return true;
+    }
+    if (executable.empty()) return false;
+    std::error_code error;
+    const bool is_build_tree = std::filesystem::is_regular_file(
+        executable / "CMakeCache.txt", error
+    );
+    return is_build_tree && !error;
+}
+
 std::vector<std::filesystem::path> asset_roots() {
     std::vector<std::filesystem::path> roots;
     if (const char* configured = std::getenv("REALMHEART_ASSET_DIR");
@@ -37,14 +52,20 @@ std::vector<std::filesystem::path> asset_roots() {
         roots.emplace_back(configured);
     }
 
-    roots.emplace_back(REALMHEART_INSTALL_ASSET_DIR);
     const auto executable = executable_directory();
+    roots.emplace_back(REALMHEART_INSTALL_ASSET_DIR);
     if (!executable.empty()) {
         roots.push_back(executable / "../share/realmheart/assets");
-        roots.push_back(executable / "assets");
+        if (source_tree_resolution_enabled(executable)) {
+            roots.push_back(executable / "assets");
+        }
     }
-    roots.emplace_back(REALMHEART_SOURCE_ASSET_DIR); // development-tree fallback
-    roots.emplace_back("assets");
+    if (source_tree_resolution_enabled(executable)) {
+        // Development builds may intentionally consume the checked-out tree;
+        // an installed binary must stop at its packaged roots instead.
+        roots.emplace_back(REALMHEART_SOURCE_ASSET_DIR);
+        roots.emplace_back("assets");
+    }
     return roots;
 }
 

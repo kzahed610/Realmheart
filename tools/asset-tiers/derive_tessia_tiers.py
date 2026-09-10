@@ -8,8 +8,11 @@ import copy
 import hashlib
 import json
 import math
+import os
 import shutil
 import sys
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -137,7 +140,134 @@ def source_manifest(root: Path) -> dict[str, Any]:
 
 
 def expected_assets(manifest: dict[str, Any]) -> list[str]:
-    return [str(asset["file"]) for asset in manifest["assets"].values()]
+    assets = manifest.get("assets")
+    if not isinstance(assets, dict):
+        raise ValueError("manifest assets must be an object")
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for asset in assets.values():
+        filename = asset.get("file") if isinstance(asset, dict) else None
+        if not isinstance(filename, str) or not filename:
+            raise ValueError("manifest asset filename must be a non-empty string")
+        relative = Path(filename)
+        if (
+            relative.is_absolute()
+            or "\\" in filename
+            or any(part in ("", ".", "..") for part in relative.parts)
+            or relative.as_posix() != filename
+        ):
+            raise ValueError(f"manifest asset path must be normalized and relative: {filename}")
+        normalized = relative.as_posix()
+        if normalized in seen:
+            raise ValueError(f"manifest contains duplicate asset path: {normalized}")
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
+def source_asset_path(canonical_dir: Path, filename: str) -> Path:
+    root = canonical_dir.resolve()
+    path = canonical_dir / filename
+    if path.is_symlink():
+        raise ValueError(f"canonical asset must not be a symlink: {filename}")
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root)
+    except (FileNotFoundError, OSError, ValueError) as error:
+        raise ValueError(f"canonical asset escapes Tessia root: {filename}") from error
+    if not resolved.is_file():
+        raise FileNotFoundError(resolved)
+    return path
+
+
+def verify_package_contents(output_dir: Path, asset_files: list[str]) -> list[str]:
+    errors: list[str] = []
+    expected = {"manifest.json", *asset_files}
+    expected_directories: set[str] = set()
+    for filename in asset_files:
+        parent = Path(filename).parent
+        while parent != Path("."):
+            expected_directories.add(parent.as_posix())
+            parent = parent.parent
+    actual: set[str] = set()
+    if not output_dir.is_dir() or output_dir.is_symlink():
+        return [f"{output_dir.name}: package directory is missing or unsafe"]
+
+    for path in output_dir.rglob("*"):
+        relative = path.relative_to(output_dir).as_posix()
+        if path.is_symlink():
+            errors.append(f"{output_dir.name}: symlink is not allowed: {relative}")
+        elif path.is_file():
+            actual.add(relative)
+        elif path.is_dir() and relative not in expected_directories:
+            errors.append(f"{output_dir.name}: unexpected package directory {relative}")
+    for missing in sorted(expected - actual):
+        errors.append(f"{output_dir.name}: missing package file {missing}")
+    for extra in sorted(actual - expected):
+        errors.append(f"{output_dir.name}: unexpected package file {extra}")
+    return errors
+
+
+def verify_tier(
+    output_dir: Path,
+    source: dict[str, Any],
+    tier: str,
+    scale: float,
+    asset_files: list[str],
+    canonical_dir: Path,
+) -> list[str]:
+    errors = verify_package_contents(output_dir, asset_files)
+    manifest_path = output_dir / "manifest.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        return errors + [f"{tier}: missing manifest.json"]
+    manifest = load_json(manifest_path)
+    errors.extend(verify_manifest_geometry(manifest, source, tier, scale))
+
+    for filename in asset_files:
+        source_path = source_asset_path(canonical_dir, filename)
+        output_path = output_dir / filename
+        if not output_path.is_file() or output_path.is_symlink():
+            continue
+        if tier == "1080p":
+            if sha256(source_path) != sha256(output_path):
+                errors.append(f"1080p: asset is not byte-preserving: {filename}")
+            continue
+
+        resampling, filter_name = filter_for_asset(filename)
+        with Image.open(source_path) as source_image, Image.open(output_path) as output_image:
+            source_rgba = source_image.convert("RGBA")
+            expected_size = expected_asset_size(source_rgba, scale)
+            if output_image.mode != "RGBA":
+                errors.append(f"{tier}: {filename} is not RGBA")
+            if output_image.size != expected_size:
+                errors.append(
+                    f"{tier}: {filename} size {output_image.size} != {expected_size}"
+                )
+            expected_image = source_rgba.resize(expected_size, resample=resampling)
+            if ImageChops.difference(expected_image, output_image.convert("RGBA")).getbbox() is not None:
+                errors.append(f"{tier}: {filename} differs from direct {filter_name} transform")
+    return errors
+
+
+def replace_tier(staged_dir: Path, output_dir: Path) -> None:
+    if output_dir.is_symlink():
+        raise ValueError(f"refusing to replace symlinked tier directory: {output_dir}")
+    if output_dir.exists() and not output_dir.is_dir():
+        raise ValueError(f"refusing to replace non-directory tier path: {output_dir}")
+
+    backup_dir: Path | None = None
+    if output_dir.exists():
+        backup_dir = output_dir.parent / f".{output_dir.name}.backup-{uuid.uuid4().hex}"
+        os.replace(output_dir, backup_dir)
+    try:
+        os.replace(staged_dir, output_dir)
+    except OSError:
+        if backup_dir is not None and not output_dir.exists():
+            os.replace(backup_dir, output_dir)
+        raise
+    if backup_dir is not None:
+        shutil.rmtree(backup_dir)
 
 
 def generate(root: Path) -> None:
@@ -147,19 +277,29 @@ def generate(root: Path) -> None:
 
     for tier, scale in TIERS.items():
         output_dir = root / tier
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_manifest = scaled_manifest(source, tier, scale)
-        write_json(output_dir / "manifest.json", output_manifest)
+        staged_dir = Path(tempfile.mkdtemp(prefix=f".{tier}.staging-", dir=root))
+        try:
+            output_manifest = scaled_manifest(source, tier, scale)
+            write_json(staged_dir / "manifest.json", output_manifest)
 
-        for filename in asset_files:
-            source_path = canonical_dir / filename
-            output_path = output_dir / filename
-            if not source_path.is_file():
-                raise FileNotFoundError(source_path)
-            if tier == "1080p":
-                shutil.copyfile(source_path, output_path)
-            else:
-                resize_asset(source_path, output_path, scale)
+            for filename in asset_files:
+                source_path = source_asset_path(canonical_dir, filename)
+                output_path = staged_dir / filename
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                if tier == "1080p":
+                    shutil.copyfile(source_path, output_path)
+                else:
+                    resize_asset(source_path, output_path, scale)
+
+            errors = verify_tier(
+                staged_dir, source, tier, scale, asset_files, canonical_dir
+            )
+            if errors:
+                raise ValueError("; ".join(errors))
+            replace_tier(staged_dir, output_dir)
+        finally:
+            if staged_dir.exists():
+                shutil.rmtree(staged_dir, ignore_errors=True)
 
 
 def sha256(path: Path) -> str:
@@ -203,37 +343,9 @@ def verify(root: Path) -> list[str]:
 
     for tier, scale in TIERS.items():
         output_dir = root / tier
-        manifest_path = output_dir / "manifest.json"
-        if not manifest_path.is_file():
-            errors.append(f"{tier}: missing manifest.json")
-            continue
-        manifest = load_json(manifest_path)
-        errors.extend(verify_manifest_geometry(manifest, source, tier, scale))
-
-        for filename in asset_files:
-            source_path = canonical_dir / filename
-            output_path = output_dir / filename
-            if not output_path.is_file():
-                errors.append(f"{tier}: missing asset {filename}")
-                continue
-            if tier == "1080p":
-                if sha256(source_path) != sha256(output_path):
-                    errors.append(f"1080p: asset is not byte-preserving: {filename}")
-                continue
-
-            resampling, filter_name = filter_for_asset(filename)
-            with Image.open(source_path) as source_image, Image.open(output_path) as output_image:
-                source_rgba = source_image.convert("RGBA")
-                expected_size = expected_asset_size(source_rgba, scale)
-                if output_image.mode != "RGBA":
-                    errors.append(f"{tier}: {filename} is not RGBA")
-                if output_image.size != expected_size:
-                    errors.append(
-                        f"{tier}: {filename} size {output_image.size} != {expected_size}"
-                    )
-                expected_image = source_rgba.resize(expected_size, resample=resampling)
-                if ImageChops.difference(expected_image, output_image.convert("RGBA")).getbbox() is not None:
-                    errors.append(f"{tier}: {filename} differs from direct {filter_name} transform")
+        errors.extend(
+            verify_tier(output_dir, source, tier, scale, asset_files, canonical_dir)
+        )
 
     return errors
 

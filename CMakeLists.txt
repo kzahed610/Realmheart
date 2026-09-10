@@ -47,6 +47,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(REALMHEART_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(REALMHEART_ENABLE_NATIVE_WALLPAPER "Build the Wayland/EGL wallpaper renderer when dependencies are available" ON)
 option(REALMHEART_BUILD_HYPRLAND_PLUGIN "Build the optional Realmheart FX Hyprland plugin when matching headers are available" ON)
+option(REALMHEART_ENABLE_SCREENSHOT "Build the optional Wayland/OpenCV screenshot tools" ON)
 set(REALMHEART_WLR_LAYER_SHELL_XML "" CACHE FILEPATH "Path to wlr-layer-shell-unstable-v1.xml")
 
 find_package(PkgConfig REQUIRED)
@@ -284,6 +285,7 @@ target_link_libraries(realmheart PRIVATE
 
 # Standalone screenshot surface. Kept separate from the main shell while the
 # replacement screenshot interaction stack is developed and compositor-tested.
+if(REALMHEART_ENABLE_SCREENSHOT)
 pkg_check_modules(REALMHEART_SCREENSHOT_WAYLAND REQUIRED IMPORTED_TARGET wayland-client)
 pkg_check_modules(REALMHEART_SCREENSHOT_WLR_PROTOCOLS REQUIRED wlr-protocols)
 pkg_get_variable(REALMHEART_SCREENSHOT_WLR_DATADIR wlr-protocols pkgdatadir)
@@ -370,6 +372,9 @@ target_link_libraries(realmheart_screenshot PRIVATE
     PkgConfig::REALMHEART_SCREENSHOT_WAYLAND
     Threads::Threads
 )
+else()
+    message(STATUS "Realmheart screenshot tools disabled (REALMHEART_ENABLE_SCREENSHOT=OFF)")
+endif()
 
 add_executable(realmheart_power_menu_renderer
     src/powermenu-renderer/main.cpp
@@ -512,22 +517,36 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
     endif()
 endif()
 
-add_dependencies(realmheart realmheart_screenshot)
-find_program(REALMHEART_SCREENSHOT_WL_COPY NAMES wl-copy)
-find_program(REALMHEART_SCREENSHOT_TESSERACT NAMES tesseract)
-if(NOT REALMHEART_SCREENSHOT_WL_COPY)
-    message(WARNING "Realmheart screenshot: wl-copy was not found; image/text clipboard export will fail at runtime")
-endif()
-if(NOT REALMHEART_SCREENSHOT_TESSERACT)
-    message(STATUS "Realmheart screenshot: tesseract not found; screenshots work, OCR mode will be unavailable")
+if(REALMHEART_ENABLE_SCREENSHOT)
+    add_dependencies(realmheart realmheart_screenshot)
+    find_program(REALMHEART_SCREENSHOT_WL_COPY NAMES wl-copy)
+    find_program(REALMHEART_SCREENSHOT_TESSERACT NAMES tesseract)
+    if(NOT REALMHEART_SCREENSHOT_WL_COPY)
+        message(WARNING "Realmheart screenshot: wl-copy was not found; image/text clipboard export will fail at runtime")
+    endif()
+    if(NOT REALMHEART_SCREENSHOT_TESSERACT)
+        message(STATUS "Realmheart screenshot: tesseract not found; screenshots work, OCR mode will be unavailable")
+    endif()
 endif()
 if(TARGET realmheart_fx)
     install(TARGETS realmheart_fx LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/realmheart)
+    set(REALMHEART_PLUGIN_RELATIVE_DIR "../${CMAKE_INSTALL_LIBDIR}/realmheart")
+    configure_file(
+        "${CMAKE_SOURCE_DIR}/config/bin/realmheart-fx-load"
+        "${CMAKE_CURRENT_BINARY_DIR}/realmheart-fx-load"
+        @ONLY
+    )
+    install(
+        PROGRAMS "${CMAKE_CURRENT_BINARY_DIR}/realmheart-fx-load"
+        DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
 endif()
 
 install(TARGETS realmheart realmheart_power_menu_renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(TARGETS realmheart_screenshot RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(TARGETS realmheart_screenshot_regions RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+if(REALMHEART_ENABLE_SCREENSHOT)
+    install(TARGETS realmheart_screenshot RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(TARGETS realmheart_screenshot_regions RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 install(TARGETS realmheart_auth_helper RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/realmheart)
 # Set the setuid bit on the auth helper so the user shell can use PAM.
 set(_realmheart_auth_helper_install_code [=[
@@ -611,28 +630,30 @@ if(BUILD_TESTING)
     add_executable(realmheart_command_tests tests/CommandTests.cpp src/core/Command.cpp)
     realmheart_register_test(realmheart_command_tests)
 
-    add_executable(
-        realmheart_screenshot_contract_tests
-        tests/ScreenshotContractTests.cpp
-        src/screenshot/OcrEngine.cpp
-    )
-    target_link_libraries(
-        realmheart_screenshot_contract_tests
-        PRIVATE
-        PkgConfig::GIO
-        PkgConfig::GDK_PIXBUF
-    )
-    target_compile_definitions(
-        realmheart_screenshot_contract_tests
-        PRIVATE REALMHEART_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-    )
-    realmheart_register_test(realmheart_screenshot_contract_tests)
+    if(REALMHEART_ENABLE_SCREENSHOT)
+        add_executable(
+            realmheart_screenshot_contract_tests
+            tests/ScreenshotContractTests.cpp
+            src/screenshot/OcrEngine.cpp
+        )
+        target_link_libraries(
+            realmheart_screenshot_contract_tests
+            PRIVATE
+            PkgConfig::GIO
+            PkgConfig::GDK_PIXBUF
+        )
+        target_compile_definitions(
+            realmheart_screenshot_contract_tests
+            PRIVATE REALMHEART_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+        )
+        realmheart_register_test(realmheart_screenshot_contract_tests)
 
-    add_test(
-        NAME realmheart_screenshot_utility_contracts
-        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/ScreenshotUtilityTests.sh ${CMAKE_SOURCE_DIR}
-    )
-    set_tests_properties(realmheart_screenshot_utility_contracts PROPERTIES TIMEOUT 30)
+        add_test(
+            NAME realmheart_screenshot_utility_contracts
+            COMMAND bash ${CMAKE_SOURCE_DIR}/tests/ScreenshotUtilityTests.sh ${CMAKE_SOURCE_DIR}
+        )
+        set_tests_properties(realmheart_screenshot_utility_contracts PROPERTIES TIMEOUT 30)
+    endif()
 
     add_executable(
         realmheart_auth_protocol_tests

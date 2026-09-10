@@ -903,42 +903,46 @@ def main() -> int:
     session_root = Path(tempfile.mkdtemp(prefix=f"realmheart-{args.layout}-", dir="/tmp"))
     config_path = session_root / "hyprland.lua"
     log_path = output_dir / f"hyprland-{args.layout}.log"
-    for subdir in ("config", "state", "cache", "data"):
-        (session_root / subdir).mkdir(parents=True, exist_ok=True)
-    write_minimal_config(config_path, realmheart)
-
-    host = snapshot_host(hyprctl)
-    existing_instances = {
-        str(item.get("instance"))
-        for item in hyprctl_json(hyprctl, "instances")
-        if isinstance(item, dict) and item.get("instance")
-    }
-
-    env = os.environ.copy()
-    env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
-    env.pop("HYPRLAND_CMD", None)
-    env.update({
-        "HYPRLAND_NO_SD_VARS": "1",
-        "HYPRLAND_NO_SD_NOTIFY": "1",
-        "HYPRLAND_NO_RT": "1",
-        "XDG_CONFIG_HOME": str(session_root / "config"),
-        "XDG_STATE_HOME": str(session_root / "state"),
-        "XDG_CACHE_HOME": str(session_root / "cache"),
-        "XDG_DATA_HOME": str(session_root / "data"),
-        "REALMHEART_ASSET_DIR": str(repo_root / "assets"),
-        "REALMHEART_STYLE_DIR": str(repo_root / "styles"),
-        "REALMHEART_EFFECT_DIR": str(repo_root / "effects"),
-        "REALMHEART_WALLPAPER_BACKEND": "gtk",
-    })
-
-    print(f"[session] isolated state: {session_root}")
-    print(f"[session] Hyprland log: {log_path}")
-
-    nested: subprocess.Popen[Any] | None = None
-    log_stream = log_path.open("w", encoding="utf-8")
     warnings: list[str] = []
     screenshot_paths: list[Path] = []
     instance = ""
+    nested: subprocess.Popen[Any] | None = None
+    try:
+        for subdir in ("config", "state", "cache", "data"):
+            (session_root / subdir).mkdir(parents=True, exist_ok=True)
+        write_minimal_config(config_path, realmheart)
+
+        host = snapshot_host(hyprctl)
+        existing_instances = {
+            str(item.get("instance"))
+            for item in hyprctl_json(hyprctl, "instances")
+            if isinstance(item, dict) and item.get("instance")
+        }
+
+        env = os.environ.copy()
+        env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+        env.pop("HYPRLAND_CMD", None)
+        env.update({
+            "HYPRLAND_NO_SD_VARS": "1",
+            "HYPRLAND_NO_SD_NOTIFY": "1",
+            "HYPRLAND_NO_RT": "1",
+            "XDG_CONFIG_HOME": str(session_root / "config"),
+            "XDG_STATE_HOME": str(session_root / "state"),
+            "XDG_CACHE_HOME": str(session_root / "cache"),
+            "XDG_DATA_HOME": str(session_root / "data"),
+            "REALMHEART_ASSET_DIR": str(repo_root / "assets"),
+            "REALMHEART_STYLE_DIR": str(repo_root / "styles"),
+            "REALMHEART_EFFECT_DIR": str(repo_root / "effects"),
+            "REALMHEART_WALLPAPER_BACKEND": "gtk",
+        })
+
+        print(f"[session] isolated state: {session_root}")
+        print(f"[session] Hyprland log: {log_path}")
+        log_stream = log_path.open("w", encoding="utf-8")
+    except BaseException:
+        if not args.keep_session:
+            shutil.rmtree(session_root, ignore_errors=True)
+        raise
 
     try:
         nested = subprocess.Popen(
@@ -1035,8 +1039,14 @@ def main() -> int:
                         os.killpg(nested.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-        log_stream.close()
-        warnings.extend(restore_host(hyprctl, host))
+        try:
+            log_stream.close()
+        finally:
+            try:
+                warnings.extend(restore_host(hyprctl, host))
+            finally:
+                if not args.keep_session:
+                    shutil.rmtree(session_root, ignore_errors=True)
 
     if args.interactive:
         print("\nIsolated Realmheart interactive session complete.")
@@ -1052,9 +1062,7 @@ def main() -> int:
         for warning in warnings:
             print(f"  - {warning}")
 
-    if not args.keep_session and not warnings:
-        shutil.rmtree(session_root, ignore_errors=True)
-    elif args.keep_session or warnings:
+    if args.keep_session:
         print(f"Session data retained: {session_root}")
     return 0
 

@@ -4,7 +4,9 @@ if is_file_exists(HOME .. "/.config/hypr/custom/variables.lua") then
     require("custom.variables")
 end
 
-local realmheart = "$HOME/Realmheart/build-hybrid/realmheart"
+-- Resolve the installed binary through PATH; development users can prepend
+-- their build directory without rewriting this portable configuration.
+local realmheart = "realmheart"
 local realmheartCommand = realmheart .. " --command "
 local hyprScripts = "$HOME/.config/hypr/hyprland/scripts"
 local realmheartScripts = "$HOME/.config/realmheart/scripts"
@@ -48,7 +50,7 @@ hl.bind("CTRL + SUPER + T", hl.dsp.exec_cmd(realmheartCommand .. "mana-cores-tog
 hl.bind("CTRL + SUPER + ALT + T", hl.dsp.exec_cmd(
     "find $(xdg-user-dir PICTURES)/Wallpapers -type f | shuf -n 1 | xargs -r " .. realmheartCommand .. "set-wallpaper"),
     { description = "Shell: Random wallpaper" })
-hl.bind("SUPER + R", hl.dsp.exec_cmd("$HOME/.local/bin/realmheart-reload"),
+hl.bind("SUPER + R", hl.dsp.exec_cmd(realmheartCommand .. "restart"),
     { description = "Shell: Restart Realmheart" })
 
 --##! Utilities

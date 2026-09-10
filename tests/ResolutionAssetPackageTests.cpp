@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <string>
 #include <string_view>
 
@@ -109,6 +110,11 @@ void test_tessia_manifests_and_family_membership(const fs::path& root) {
     const auto tessia_root = root / "characters" / "tessia";
     const auto canonical_manifest = read_json(tessia_root / "1x" / "manifest.json");
     const auto canonical_assets = canonical_manifest.at("assets");
+    std::set<std::string> canonical_ids;
+    for (const auto& [asset_id, asset] : canonical_assets.items()) {
+        (void)asset;
+        canonical_ids.insert(asset_id);
+    }
 
     for (const auto& tier : kTiers) {
         const auto tier_root = tessia_root / tier.directory;
@@ -121,6 +127,15 @@ void test_tessia_manifests_and_family_membership(const fs::path& root) {
         require(
             manifest.at("assets").size() == canonical_assets.size(),
             "Tessia asset family count mismatch: " + manifest_path.string()
+        );
+        std::set<std::string> tier_ids;
+        for (const auto& [asset_id, asset] : manifest.at("assets").items()) {
+            (void)asset;
+            tier_ids.insert(asset_id);
+        }
+        require(
+            tier_ids == canonical_ids,
+            "Tessia asset family membership mismatch: " + manifest_path.string()
         );
         for (const auto& [asset_id, asset] : manifest.at("assets").items()) {
             (void)asset_id;
