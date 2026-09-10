@@ -27,6 +27,10 @@ cat > "$bin/gio" <<'FAKEGIO'
 printf '%s\n' "$2" > "${REALMHEART_TEST_GIO_LOG:?}"
 exit "${REALMHEART_TEST_GIO_STATUS:-0}"
 FAKEGIO
+cat > "$bin/notify-send" <<'FAKENOTIFY'
+#!/usr/bin/env bash
+exit 0
+FAKENOTIFY
 cat > "$bin/slurp" <<'FAKESLURP'
 #!/usr/bin/env bash
 printf '%s' '0,0 10x10'
