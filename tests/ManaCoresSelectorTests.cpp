@@ -81,8 +81,14 @@ TEST(ManaCoresSelector, ApplyCallbackWiring) {
     sel.set_apply_callback([&applied_path](const std::string& path) {
         applied_path = path;
     });
-    // Verify callback setter does not crash
-    EXPECT_FALSE(sel.is_visible());
+    seed_preview_batch(sel);
+    sel.visible_ = true;
+    sel.state_ = realmheart::mana_core::ManaCoresSelector::State::Idle;
+    sel.force_apply("core-b.png");
+    ASSERT_EQ(sel.state_, realmheart::mana_core::ManaCoresSelector::State::Applying);
+    sel.apply_start_micros_ = g_get_monotonic_time() - 600'000;
+    realmheart::mana_core::ManaCoresSelector::tick_callback(nullptr, nullptr, &sel);
+    EXPECT_EQ(applied_path, "core-b.png");
 }
 
 TEST(ManaCoresSelector, HandleKeyWhenHiddenReturnsFalse) {

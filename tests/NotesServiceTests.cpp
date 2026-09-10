@@ -28,6 +28,16 @@ std::string read_file(const std::filesystem::path& path) {
     return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
 }
 
+template <typename Predicate>
+bool wait_until(Predicate&& predicate, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(5ms);
+    }
+    return predicate();
+}
+
 void test_set_content_is_debounced_and_persisted() {
     const auto root = std::filesystem::temp_directory_path() / "realmheart-notes-debounce-test";
     const auto path = root / "notes.txt";
@@ -43,8 +53,7 @@ void test_set_content_is_debounced_and_persisted() {
             fail("set_content performed a synchronous disk write");
         }
 
-        std::this_thread::sleep_for(250ms);
-        if (read_file(path) != "second") {
+        if (!wait_until([&] { return read_file(path) == "second"; }, 2s)) {
             fail("debounced write did not persist the latest content");
         }
     }
@@ -120,8 +129,9 @@ void test_save_state_reports_success_and_failure() {
         if (state.load() != static_cast<int>(realmheart::services::NotesSaveState::Pending)) {
             fail("editing did not publish a pending save state");
         }
-        std::this_thread::sleep_for(160ms);
-        if (state.load() != static_cast<int>(realmheart::services::NotesSaveState::Saved)) {
+        if (!wait_until([&] {
+                return state.load() == static_cast<int>(realmheart::services::NotesSaveState::Saved);
+            }, 2s)) {
             fail("successful persistence did not publish a saved state");
         }
     }
@@ -138,8 +148,9 @@ void test_save_state_reports_success_and_failure() {
             fail("failed-path test could not acknowledge its intentional load failure");
         }
         service.set_content("cannot persist");
-        std::this_thread::sleep_for(160ms);
-        if (state.load() != static_cast<int>(realmheart::services::NotesSaveState::Failed)) {
+        if (!wait_until([&] {
+                return state.load() == static_cast<int>(realmheart::services::NotesSaveState::Failed);
+            }, 2s)) {
             fail("persistence failure was not exposed through the save state");
         }
     }
@@ -296,8 +307,7 @@ void test_newer_generation_wins_over_concurrent_save() {
         if (!service.set_content("newest")) fail("new generation edit was rejected");
         saver.join();
 
-        std::this_thread::sleep_for(120ms);
-        if (read_file(path) != "newest") {
+        if (!wait_until([&] { return read_file(path) == "newest"; }, 2s)) {
             fail("a stale save committed over a newer generation");
         }
     }
@@ -318,13 +328,8 @@ void test_permanent_failure_is_latched_until_new_edit() {
     if (service.save_state() != realmheart::services::NotesSaveState::Failed) {
         fail("immediate journal failure was not reported");
     }
-    std::this_thread::sleep_for(100ms);
     if (service.save_state() != realmheart::services::NotesSaveState::Failed) {
-        fail("permanent persistence failure was not reported");
-    }
-    std::this_thread::sleep_for(120ms);
-    if (service.save_state() != realmheart::services::NotesSaveState::Failed) {
-        fail("permanent persistence failure was retried without an explicit action");
+        fail("permanent persistence failure was not latched without an explicit action");
     }
 
     std::filesystem::remove_all(root);

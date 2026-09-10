@@ -48,6 +48,8 @@ option(REALMHEART_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(REALMHEART_ENABLE_NATIVE_WALLPAPER "Build the Wayland/EGL wallpaper renderer when dependencies are available" ON)
 option(REALMHEART_BUILD_HYPRLAND_PLUGIN "Build the optional Realmheart FX Hyprland plugin when matching headers are available" ON)
 option(REALMHEART_ENABLE_SCREENSHOT "Build the optional Wayland/OpenCV screenshot tools" ON)
+option(REALMHEART_REGISTER_LIVE_COMPOSITOR_TESTS "Register compositor lifecycle probes against an explicitly isolated Wayland display" OFF)
+set(REALMHEART_ISOLATED_WAYLAND_DISPLAY "" CACHE STRING "Wayland display/socket reserved for Realmheart lifecycle tests")
 set(REALMHEART_WLR_LAYER_SHELL_XML "" CACHE FILEPATH "Path to wlr-layer-shell-unstable-v1.xml")
 
 find_package(PkgConfig REQUIRED)
@@ -592,7 +594,7 @@ install(FILES config/pam/realmheart-lockscreen DESTINATION ${CMAKE_INSTALL_SYSCO
 include(CTest)
 if(BUILD_TESTING)
     find_package(GTest REQUIRED)
-    find_program(DBUS_RUN_SESSION_EXECUTABLE dbus-run-session)
+    find_program(DBUS_RUN_SESSION_EXECUTABLE dbus-run-session REQUIRED)
 
     function(realmheart_configure_test target)
         target_include_directories(${target} PRIVATE src third_party)
@@ -615,7 +617,9 @@ if(BUILD_TESTING)
         if(DBUS_RUN_SESSION_EXECUTABLE)
             add_test(NAME ${target} COMMAND ${DBUS_RUN_SESSION_EXECUTABLE} -- $<TARGET_FILE:${target}>)
         else()
-            add_test(NAME ${target} COMMAND ${target})
+            message(FATAL_ERROR
+                "Realmheart: ${target} requires dbus-run-session for an isolated session bus"
+            )
         endif()
         set_tests_properties(${target} PROPERTIES TIMEOUT 20)
     endfunction()
@@ -696,6 +700,10 @@ if(BUILD_TESTING)
     )
     target_link_libraries(realmheart_shell_effect_view_tests PRIVATE PkgConfig::GTK4)
     realmheart_register_test(realmheart_shell_effect_view_tests)
+    set_tests_properties(realmheart_shell_effect_view_tests PROPERTIES
+        SKIP_RETURN_CODE 77
+        LABELS "isolated-gtk"
+    )
 
     add_executable(
         realmheart_shell_shader_renderer_tests
@@ -817,9 +825,9 @@ if(BUILD_TESTING)
     target_link_libraries(realmheart_shell_control_delivery_tests PRIVATE PkgConfig::GIO)
     realmheart_register_dbus_test(realmheart_shell_control_delivery_tests)
 
-    # Manual compositor-backed stress probe. It deliberately is not registered
-    # with CTest because layer-shell windows require the user's live Wayland
-    # session, but the executable is always available in build-hybrid.
+    # The compositor-backed stress probe is never part of the default suite.
+    # Registration requires an operator-provided display/socket reserved for an
+    # isolated compositor; this prevents CTest from mutating the live desktop.
     add_executable(
         realmheart_lifetime_stress
         tests/ShellLifetimeStress.cpp
@@ -832,6 +840,25 @@ if(BUILD_TESTING)
         PkgConfig::GIO
         Threads::Threads
     )
+    if(REALMHEART_REGISTER_LIVE_COMPOSITOR_TESTS)
+        if(REALMHEART_ISOLATED_WAYLAND_DISPLAY STREQUAL "")
+            message(FATAL_ERROR
+                "REALMHEART_REGISTER_LIVE_COMPOSITOR_TESTS requires "
+                "REALMHEART_ISOLATED_WAYLAND_DISPLAY to name an isolated compositor socket"
+            )
+        endif()
+        add_test(
+            NAME realmheart_lifetime_stress
+            COMMAND ${CMAKE_COMMAND} -E env
+                WAYLAND_DISPLAY=${REALMHEART_ISOLATED_WAYLAND_DISPLAY}
+                $<TARGET_FILE:realmheart_lifetime_stress>
+                --iterations 20
+        )
+        set_tests_properties(realmheart_lifetime_stress PROPERTIES
+            TIMEOUT 60
+            LABELS "isolated-compositor"
+        )
+    endif()
 
     add_executable(
         realmheart_character_animator_tests
@@ -1012,6 +1039,8 @@ if(BUILD_TESTING)
     )
     realmheart_register_test(realmheart_resolution_diagnostics_tests)
 
+    # This executable is a probe invoked by the staged-install CTest script;
+    # it is not a standalone test entry.
     add_executable(
         realmheart_installed_asset_root_probe
         tests/InstalledAssetRootTests.cpp
@@ -1212,6 +1241,9 @@ if(BUILD_TESTING)
         src/services/HyprlandEventMonitor.cpp
         src/services/HyprlandSession.cpp
     )
+    target_compile_definitions(realmheart_fuzzel_emoji_script_tests PRIVATE
+        REALMHEART_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    )
     target_link_libraries(realmheart_fuzzel_emoji_script_tests PRIVATE GTest::gtest GTest::gtest_main PkgConfig::GIO)
     realmheart_register_test(realmheart_fuzzel_emoji_script_tests)
 
@@ -1385,6 +1417,8 @@ if(BUILD_TESTING)
         tests/NativeWallpaperLifecycleTests.cpp
         src/ui/wallpaper/NativeWallpaperBackend.cpp
     )
+    # This renderer is a deterministic fixture process for the native
+    # wallpaper lifecycle test and is not itself a CTest entry.
     add_executable(
         realmheart_native_wallpaper_test_renderer
         tests/FakeNativeWallpaperRenderer.cpp

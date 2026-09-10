@@ -193,11 +193,12 @@ void test_background_rejects_empty_argv() {
 
 void test_background_does_not_block_for_long_running_process() {
     const auto started = std::chrono::steady_clock::now();
-    const bool spawned = realmheart::core::run_background({"/bin/sh", "-c", "sleep 2"});
+    auto tracked = realmheart::core::run_background_tracked({"/bin/sh", "-c", "sleep 2"});
     const auto elapsed = std::chrono::steady_clock::now() - started;
 
-    require(spawned, "long running process should spawn successfully");
+    require(tracked.has_value(), "long running process should spawn successfully");
     require(elapsed < 500ms, "run_background must return promptly without waiting for process exit");
+    require(tracked->stop(200ms), "tracked background process must be terminated and reaped");
 }
 
 } // namespace

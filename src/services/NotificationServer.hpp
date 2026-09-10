@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <list>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -30,12 +31,13 @@ public:
     void set_transient_handler(TransientHandler handler);
     void set_closed_handler(ClosedHandler handler);
     void set_closed_observer(ClosedHandler observer);
+    [[nodiscard]] bool contains(std::uint32_t id) const;
 
 private:
-    bool contains(std::uint32_t id) const;
     std::uint32_t allocate_id();
 
     NotificationHistory& history_;
+    mutable std::mutex mutex_;
     std::uint32_t next_id_ = 1;
     std::size_t max_active_ = 0;
     std::list<std::uint32_t> active_order_;

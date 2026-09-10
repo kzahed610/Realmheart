@@ -6,13 +6,46 @@
 
 #include <chrono>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+struct ClosedSignalState {
+    std::mutex mutex;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> events;
+};
+
+void on_closed_signal(
+    GDBusConnection*,
+    const gchar*,
+    const gchar*,
+    const gchar*,
+    const gchar*,
+    GVariant* parameters,
+    gpointer user_data
+) {
+    guint32 id = 0;
+    guint32 reason = 0;
+    g_variant_get(parameters, "(uu)", &id, &reason);
+    auto* state = static_cast<ClosedSignalState*>(user_data);
+    std::lock_guard lock(state->mutex);
+    state->events.emplace_back(id, reason);
+}
+
+bool has_closed_signal(ClosedSignalState& state, std::uint32_t id, std::uint32_t reason) {
+    std::lock_guard lock(state.mutex);
+    for (const auto& event : state.events) {
+        if (event == std::pair{id, reason}) return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -78,12 +111,38 @@ int main() {
         g_variant_get(reply, "(u)", &id);
         g_variant_unref(reply);
         require(id != 0, "Notify should return a non-zero id");
+        require(server.contains(id), "new notification must be active before expiry");
+
+        ClosedSignalState closed_signal;
+        const guint subscription = g_dbus_connection_signal_subscribe(
+            connection,
+            "org.freedesktop.Notifications",
+            "org.freedesktop.Notifications",
+            "NotificationClosed",
+            "/org/freedesktop/Notifications",
+            nullptr,
+            G_DBUS_SIGNAL_FLAGS_NONE,
+            on_closed_signal,
+            &closed_signal,
+            nullptr
+        );
+        require(subscription != 0, "NotificationClosed signal subscription must succeed");
 
         auto snapshot = history.snapshot();
         require(snapshot.entries.size() == 1, "Notify should enter history");
         require(snapshot.entries.front().summary == "DBus summary", "Notify summary should survive DBus");
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(260));
+        bool expired = false;
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            if (!server.contains(id) && has_closed_signal(closed_signal, id, 1)) {
+                expired = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        require(expired, "expired notification must leave active state and emit reason 1");
+        require(!server.contains(id), "expired notification must be inactive");
+        require(has_closed_signal(closed_signal, id, 1), "expiry must emit NotificationClosed reason 1");
         snapshot = history.snapshot();
         require(snapshot.entries.size() == 1, "toast expiration must preserve sidebar history");
 
@@ -104,6 +163,7 @@ int main() {
         require(error != nullptr, "invalid CloseNotification must return a D-Bus error");
         g_clear_error(&error);
         require(history.snapshot().entries.size() == 1, "CloseNotification must preserve sidebar history");
+        g_dbus_connection_signal_unsubscribe(connection, subscription);
 
         g_object_unref(connection);
         daemon.stop();

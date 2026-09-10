@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <thread>
+#include <unistd.h>
 #include <gtest/gtest.h>
 #include "services/LauncherService.hpp"
 #include "ui/launcher/CommandReceiptOverlay.hpp"
@@ -375,21 +376,34 @@ TEST(LauncherEmojiInputBoundaryTest, AcceptsInputExactlyAtReadLimit) {
 }
 
 TEST(LauncherServiceCommandLiveTest, HiddenCommandActuallyRuns) {
+    char directory_template[] = "/tmp/realmheart-launcher-command-XXXXXX";
+    char* directory = ::mkdtemp(directory_template);
+    ASSERT_NE(directory, nullptr);
+    const auto probe_directory = std::filesystem::path(directory);
+    const auto marker = probe_directory / "marker";
+
     SystemLauncherCommandExecutor executor;
-    std::string probe = "touch /tmp/realmheart-live-ok";
+    const std::string probe = "printf '%s' launcher-ok > " + marker.string();
     bool success = executor.run_command(probe);
     EXPECT_TRUE(success);
-    
+
     bool found = false;
-    for(int i=0; i<20; ++i) {
-        if (std::filesystem::exists("/tmp/realmheart-live-ok")) {
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        std::ifstream input(marker);
+        const std::string contents{
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()
+        };
+        if (contents == "launcher-ok") {
             found = true;
             break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
     EXPECT_TRUE(found);
-    std::filesystem::remove("/tmp/realmheart-live-ok");
+    std::error_code error;
+    std::filesystem::remove_all(probe_directory, error);
+    EXPECT_FALSE(error);
 }
 
 TEST(LauncherServiceScopeTest, WrapsArgvInIndependentUserScope) {

@@ -1,6 +1,7 @@
 #include "effects/shell/ShellEffectView.hpp"
 
 #include <cassert>
+#include <cstdlib>
 #include <iostream>
 
 namespace {
@@ -50,6 +51,14 @@ void snapshot_probe_init(SnapshotProbe* /*probe*/) {}
 } // namespace
 
 int main() {
+    const char* isolated_display = std::getenv("REALMHEART_TEST_GTK_DISPLAY");
+    if (isolated_display == nullptr || *isolated_display == '\0') {
+        std::cout << "Shell effect view tests SKIPPED: set REALMHEART_TEST_GTK_DISPLAY "
+                     "to an explicitly isolated X display\n";
+        return 77;
+    }
+    g_setenv("DISPLAY", isolated_display, TRUE);
+    g_setenv("GDK_BACKEND", "x11", TRUE);
     gtk_init();
 
     auto* probe = GTK_WIDGET(g_object_new(snapshot_probe_get_type(), nullptr));

@@ -16,9 +16,16 @@
 namespace {
 
 std::filesystem::path resolve_shipped_script() {
-    // Try a few plausible locations so the test works whether it was
-    // launched from the build dir (CTest) or the source root (direct
-    // invocation, IDE debugger, etc.).
+#ifdef REALMHEART_SOURCE_DIR
+    const auto source_path = std::filesystem::path(REALMHEART_SOURCE_DIR) /
+        "config/hypr/hyprland/scripts/fuzzel-emoji.sh";
+    std::error_code source_error;
+    if (std::filesystem::exists(source_path, source_error) && !source_error) {
+        return source_path;
+    }
+#endif
+    // Keep direct, non-CMake invocations useful without making CTest depend on
+    // its out-of-tree working directory.
     const std::filesystem::path candidates[] = {
         "../config/hypr/hyprland/scripts/fuzzel-emoji.sh",
         "config/hypr/hyprland/scripts/fuzzel-emoji.sh",
