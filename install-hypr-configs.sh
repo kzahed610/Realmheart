@@ -373,20 +373,18 @@ install_lock_command
 while IFS= read -r -d '' src; do
     rel="${src#$CONFIG_SRC/}"
     case "$rel" in
-        hypr/hyprland.lua|hypr/hyprland.conf) continue ;;
+        hypr/hyprland.lua) continue ;;
     esac
     install_config_source "$src"
 done < <(find "$CONFIG_SRC" -type f -print0 | sort -z)
 
 # The shipped hyprland/execs.lua already starts realmheart.service on
-# hyprland.start. Install the missing portable unit before exposing the Lua
-# entrypoint, then refresh the current user manager when it is safe to do so.
+# hyprland.start. Install the portable unit before exposing the Lua entrypoint,
+# then refresh the current user manager when it is safe to do so.
 install_realmheart_service
 reload_current_user_manager
 
-for entrypoint in hypr/hyprland.conf hypr/hyprland.lua; do
-    install_config_source "$CONFIG_SRC/$entrypoint"
-done
+install_config_source "$CONFIG_SRC/hypr/hyprland.lua"
 
 echo ""
 echo "Done. Realmheart will start through realmheart.service on the next Hyprland login."
