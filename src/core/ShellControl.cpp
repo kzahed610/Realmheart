@@ -8,11 +8,14 @@
 #include <mutex>
 #include <thread>
 #include <string>
+#include <unistd.h>
 
 namespace realmheart::core {
 namespace {
 
 constexpr std::string_view kShellApplicationId = "dev.realmheart.shell";
+constexpr std::string_view kLockControlObjectPath = "/dev/realmheart/ShellControl";
+constexpr std::string_view kLockControlInterface = "dev.realmheart.ShellControl";
 
 class FlushDeadline {
 public:
@@ -43,6 +46,62 @@ private:
 
 std::string_view shell_application_id() {
     return kShellApplicationId;
+}
+
+ShellControlResult request_shell_lock(std::string_view request_token) {
+    std::string token(request_token);
+    if (token.empty()) {
+        token = std::to_string(static_cast<long long>(::getpid())) + "-" +
+            std::to_string(static_cast<long long>(g_get_monotonic_time()));
+    }
+
+    GApplication* application = g_application_new(
+        kShellApplicationId.data(),
+        G_APPLICATION_DEFAULT_FLAGS
+    );
+    GError* error = nullptr;
+    if (!g_application_register(application, nullptr, &error)) {
+        g_clear_error(&error);
+        g_object_unref(application);
+        return ShellControlResult::RegistrationFailed;
+    }
+    if (!g_application_get_is_remote(application)) {
+        g_object_unref(application);
+        return ShellControlResult::NotRunning;
+    }
+
+    GDBusConnection* connection = g_application_get_dbus_connection(application);
+    if (connection == nullptr) {
+        g_object_unref(application);
+        return ShellControlResult::DeliveryFailed;
+    }
+
+    GError* call_error = nullptr;
+    GVariant* reply = g_dbus_connection_call_sync(
+        connection,
+        kShellApplicationId.data(),
+        kLockControlObjectPath.data(),
+        kLockControlInterface.data(),
+        "LockSession",
+        g_variant_new("(s)", token.c_str()),
+        G_VARIANT_TYPE("(s)"),
+        G_DBUS_CALL_FLAGS_NONE,
+        6000,
+        nullptr,
+        &call_error
+    );
+    if (reply == nullptr) {
+        g_clear_error(&call_error);
+        g_object_unref(application);
+        return ShellControlResult::LockFailed;
+    }
+
+    const char* status = nullptr;
+    g_variant_get(reply, "(&s)", &status);
+    const bool ready = status != nullptr && std::string_view(status) == "native";
+    g_variant_unref(reply);
+    g_object_unref(application);
+    return ready ? ShellControlResult::LockReady : ShellControlResult::LockFailed;
 }
 
 ShellControlResult send_shell_command(ShellCommand command, std::string_view argument) {
@@ -78,6 +137,16 @@ ShellControlResult send_shell_command(ShellCommand command, std::string_view arg
     }
 
     if (requires_argument) {
+        const std::string owned_argument(argument);
+        g_action_group_activate_action(
+            G_ACTION_GROUP(application),
+            action_name.data(),
+            g_variant_new_string(owned_argument.c_str())
+        );
+    } else if (command == ShellCommand::LockSession) {
+        // Tokenized lock requests use request_shell_lock(), which waits for a
+        // private D-Bus acknowledgement. This branch remains the deliberate
+        // fire-and-forget path used by SUPER+L.
         const std::string owned_argument(argument);
         g_action_group_activate_action(
             G_ACTION_GROUP(application),

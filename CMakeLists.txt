@@ -381,6 +381,8 @@ endif()
 add_executable(realmheart_power_menu_renderer
     src/powermenu-renderer/main.cpp
     src/core/Command.cpp
+    src/core/ShellCommand.cpp
+    src/core/ShellControl.cpp
     src/services/SessionManager.cpp
 )
 set_target_properties(realmheart_power_menu_renderer PROPERTIES
@@ -549,34 +551,70 @@ if(REALMHEART_ENABLE_SCREENSHOT)
     install(TARGETS realmheart_screenshot RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     install(TARGETS realmheart_screenshot_regions RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
-install(TARGETS realmheart_auth_helper RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/realmheart)
-# Set the setuid bit on the auth helper so the user shell can use PAM.
+install(TARGETS realmheart_auth_helper
+    RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/realmheart
+    PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE SETUID
+)
+# The helper must be root-owned as well as setuid. A normal unprivileged build
+# must never produce a seemingly usable helper that AuthPam would execute.
+find_program(REALMHEART_CHOWN_EXECUTABLE chown REQUIRED)
+find_program(REALMHEART_CHMOD_EXECUTABLE chmod REQUIRED)
 set(_realmheart_auth_helper_install_code [=[
-    set(_realmheart_auth_helper
-        ""
-    )
-    if(IS_ABSOLUTE "@REALMHEART_LIBEXEC_DIR@")
+    if(IS_ABSOLUTE "@REALMHEART_AUTH_HELPER_RELATIVE_PATH@")
         set(_realmheart_auth_helper
-            "$ENV{DESTDIR}@REALMHEART_LIBEXEC_DIR@/realmheart/realmheart-auth-helper"
+            "$ENV{DESTDIR}@REALMHEART_AUTH_HELPER_RELATIVE_PATH@"
         )
     else()
+        # Keep CMAKE_INSTALL_PREFIX runtime-resolvable so
+        # `cmake --install --prefix ...` updates the helper path as well as the
+        # target files. DESTDIR is applied only by the generated install step.
         set(_realmheart_auth_helper
-            "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@REALMHEART_LIBEXEC_DIR@/realmheart/realmheart-auth-helper"
+            "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@REALMHEART_AUTH_HELPER_RELATIVE_PATH@"
+        )
+    endif()
+    if("$ENV{DESTDIR}" STREQUAL "" OR
+       NOT "$ENV{REALMHEART_ALLOW_UNPRIVILEGED_STAGED_INSTALL}" STREQUAL "1")
+        execute_process(
+            COMMAND "@REALMHEART_CHOWN_EXECUTABLE@" root:root "${_realmheart_auth_helper}"
+            RESULT_VARIABLE _realmheart_auth_helper_chown_result
+        )
+        if(_realmheart_auth_helper_chown_result)
+            message(FATAL_ERROR
+                "Realmheart: unable to make auth helper root-owned at ${_realmheart_auth_helper}; "
+                "run the install step with root privileges"
+            )
+        endif()
+    else()
+        message(WARNING
+            "Realmheart: leaving staged auth helper ownership unchanged for an "
+            "explicit unprivileged packaging install"
         )
     endif()
     execute_process(
-        COMMAND chmod u+s "${_realmheart_auth_helper}"
-        RESULT_VARIABLE _realmheart_auth_helper_chmod_result
+        COMMAND "@REALMHEART_CHMOD_EXECUTABLE@" 4755 "${_realmheart_auth_helper}"
+        RESULT_VARIABLE _realmheart_auth_helper_mode_result
     )
-    if(_realmheart_auth_helper_chmod_result)
+    if(_realmheart_auth_helper_mode_result)
         message(FATAL_ERROR
-            "Realmheart: unable to setuid auth helper at ${_realmheart_auth_helper}"
+            "Realmheart: unable to set secure mode 4755 on auth helper at ${_realmheart_auth_helper}"
         )
     endif()
 ]=])
 string(REPLACE
-    "@REALMHEART_LIBEXEC_DIR@"
-    "${CMAKE_INSTALL_LIBEXECDIR}"
+    "@REALMHEART_AUTH_HELPER_RELATIVE_PATH@"
+    "${CMAKE_INSTALL_LIBEXECDIR}/realmheart/realmheart-auth-helper"
+    _realmheart_auth_helper_install_code
+    "${_realmheart_auth_helper_install_code}"
+)
+string(REPLACE
+    "@REALMHEART_CHOWN_EXECUTABLE@"
+    "${REALMHEART_CHOWN_EXECUTABLE}"
+    _realmheart_auth_helper_install_code
+    "${_realmheart_auth_helper_install_code}"
+)
+string(REPLACE
+    "@REALMHEART_CHMOD_EXECUTABLE@"
+    "${REALMHEART_CHMOD_EXECUTABLE}"
     _realmheart_auth_helper_install_code
     "${_realmheart_auth_helper_install_code}"
 )
@@ -666,6 +704,12 @@ if(BUILD_TESTING)
     )
     target_link_libraries(realmheart_auth_protocol_tests PRIVATE PkgConfig::GIO)
     realmheart_register_test(realmheart_auth_protocol_tests)
+
+    add_test(
+        NAME realmheart_lock_routing_contracts
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/LockRoutingTests.sh ${CMAKE_SOURCE_DIR}
+    )
+    set_tests_properties(realmheart_lock_routing_contracts PROPERTIES TIMEOUT 20)
 
     add_executable(realmheart_task_executor_tests
         tests/TaskExecutorTests.cpp
@@ -1050,7 +1094,7 @@ if(BUILD_TESTING)
         src/animation/character/CharacterManifest.cpp
     )
     target_compile_definitions(realmheart_installed_asset_root_probe PRIVATE
-        REALMHEART_INSTALL_ASSET_DIR="${CMAKE_BINARY_DIR}/realmheart-installed-root-test${CMAKE_INSTALL_FULL_DATADIR}/realmheart/assets"
+        REALMHEART_INSTALL_ASSET_DIR="${CMAKE_BINARY_DIR}/realmheart-installed-root-test/opt/realmheart-test/${CMAKE_INSTALL_DATADIR}/realmheart/assets"
         REALMHEART_SOURCE_ASSET_DIR="${CMAKE_BINARY_DIR}/realmheart-installed-root-test/no-source-assets"
     )
     realmheart_configure_test(realmheart_installed_asset_root_probe)
@@ -1061,7 +1105,8 @@ if(BUILD_TESTING)
             -DREALMHEART_BUILD_DIR=${CMAKE_BINARY_DIR}
             -DREALMHEART_STAGE_DIR=${CMAKE_BINARY_DIR}/realmheart-installed-root-test
             -DREALMHEART_TEST_EXECUTABLE=$<TARGET_FILE:realmheart_installed_asset_root_probe>
-            -DREALMHEART_INSTALL_FULL_DATADIR=${CMAKE_INSTALL_FULL_DATADIR}
+            -DREALMHEART_INSTALL_PREFIX=/opt/realmheart-test
+            -DREALMHEART_INSTALL_DATADIR=${CMAKE_INSTALL_DATADIR}
             -P ${CMAKE_SOURCE_DIR}/tests/InstalledAssetRootTest.cmake
     )
     set_tests_properties(realmheart_installed_asset_root_tests PROPERTIES TIMEOUT 60)

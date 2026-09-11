@@ -313,7 +313,13 @@ int main(int argc, char** argv) {
         }
 
         std::string_view shell_argument;
-        if (realmheart::core::shell_command_requires_argument(*shell_command)) {
+        if (*shell_command == realmheart::core::ShellCommand::LockSession) {
+            if (argc > 4 || (argc == 4 && std::string_view(argv[3]).empty())) {
+                std::cerr << argv[2] << " accepts at most one non-empty request token\n";
+                return 2;
+            }
+            if (argc == 4) shell_argument = argv[3];
+        } else if (realmheart::core::shell_command_requires_argument(*shell_command)) {
             if (argc != 4 || std::string_view(argv[3]).empty()) {
                 std::cerr << argv[2] << " requires exactly one argument\n";
                 return 2;
@@ -327,9 +333,14 @@ int main(int argc, char** argv) {
         if (is_screenshot_command(*shell_command)) {
             return run_screenshot_helper_direct();
         }
-        const auto result = realmheart::core::send_shell_command(*shell_command, shell_argument);
+        const auto result = *shell_command == realmheart::core::ShellCommand::LockSession &&
+                !shell_argument.empty()
+            ? realmheart::core::request_shell_lock(shell_argument)
+            : realmheart::core::send_shell_command(*shell_command, shell_argument);
         switch (result) {
         case realmheart::core::ShellControlResult::Delivered:
+            return 0;
+        case realmheart::core::ShellControlResult::LockReady:
             return 0;
         case realmheart::core::ShellControlResult::NotRunning:
             std::cerr << "Realmheart shell is not running\n";
@@ -345,6 +356,9 @@ int main(int argc, char** argv) {
         case realmheart::core::ShellControlResult::DeliveryFailed:
             std::cerr << "Realmheart shell command could not be delivered\n";
             return 5;
+        case realmheart::core::ShellControlResult::LockFailed:
+            std::cerr << "Realmheart native lock was not confirmed\n";
+            return 125;
         }
     }
 

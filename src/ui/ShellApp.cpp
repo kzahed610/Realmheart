@@ -44,6 +44,7 @@
 
 #include <gtk/gtk.h>
 #include <gtk4-layer-shell/gtk4-layer-shell.h>
+#include <gtk4-layer-shell/gtk4-session-lock.h>
 #include <glib-unix.h>
 
 #include <algorithm>
@@ -53,6 +54,7 @@
 #include <csignal>
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>
 #include <ctime>
 #include <cstring>
 #include <filesystem>
@@ -64,11 +66,13 @@
 #include <optional>
 #include <poll.h>
 #include <string>
+#include <string_view>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <thread>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 #include <unistd.h>
 
@@ -108,6 +112,9 @@ constexpr std::string_view kLockWorkspaceName = "realmheart-lock";
 // dead while locked; the lockscreen's own layer-shell keyboard grab still
 // receives keystrokes for the password entry.
 constexpr std::string_view kLockSubmapName = "realmheart-locked";
+constexpr std::string_view kNativeLockReadyStatus = "native";
+constexpr std::string_view kLockFailureStatus = "failed";
+constexpr int kNativeLockReadyTimeoutMs = 5000;
 
 template <typename... Args>
 void sidebar_input_debug(Args&&... args) {
@@ -451,6 +458,34 @@ public:
         ::close(fd);
     }
 
+    void handle_lock_control_call(
+        GDBusMethodInvocation* invocation,
+        const char* request_token
+    ) {
+        if (invocation == nullptr || request_token == nullptr ||
+            *request_token == '\0') {
+            g_dbus_method_invocation_return_error(
+                invocation,
+                G_IO_ERROR,
+                G_IO_ERROR_INVALID_ARGUMENT,
+                "LockSession requires a non-empty request token"
+            );
+            return;
+        }
+        const std::string token(request_token);
+        if (lock_control_invocations_.contains(token)) {
+            g_dbus_method_invocation_return_error(
+                invocation,
+                G_IO_ERROR,
+                G_IO_ERROR_EXISTS,
+                "LockSession request token is already active"
+            );
+            return;
+        }
+        lock_control_invocations_.emplace(token, g_object_ref(invocation));
+        lock_session(token);
+    }
+
     std::optional<RestartHandoff> take_restart_handoff() {
         if (restart_handoff_fd_ < 0) return std::nullopt;
         return RestartHandoff{
@@ -467,6 +502,11 @@ public:
         cancel_right_sidebar_prewarm();
 
         // Stop callbacks that capture this before tearing down UI/controllers.
+        if (terminal_lock_watch_id_ != 0) {
+            g_source_remove(terminal_lock_watch_id_);
+            terminal_lock_watch_id_ = 0;
+        }
+        cancel_hyprlock_fallback_watchdog();
         runtime_async_state_->alive.store(false);
         runtime_async_state_->owner.store(nullptr);
         // Cancellation prevents queued work from starting, but a worker may
@@ -476,6 +516,19 @@ public:
             command_receipts_->detach();
         }
         core::shared_task_executor().wait_for_idle();
+        for (auto& [token, invocation] : lock_control_invocations_) {
+            if (invocation != nullptr) {
+                g_dbus_method_invocation_return_value(
+                    invocation,
+                    g_variant_new("(s)", kLockFailureStatus.data())
+                );
+                g_object_unref(invocation);
+            }
+        }
+        lock_control_invocations_.clear();
+        if (session_lock_ != nullptr) {
+            release_session_lock();
+        }
         if (lock_surface_ != nullptr) {
             lock_surface_->hide_immediately();
         }
@@ -485,7 +538,8 @@ public:
         // The lock submap is compositor-global, so it must be restored before
         // the surfaces that normally complete the unlock choreography vanish.
         // This is idempotent and also covers normal quit/restart while locked.
-        if (!services::HyprlandWorkspaces::set_submap("reset")) {
+        if (!lock_failure_terminal_ &&
+            !services::HyprlandWorkspaces::set_submap("reset")) {
             std::cerr << "[Lockscreen] unable to restore the compositor bind map during shutdown\n";
         }
         ++lock_choreography_generation_;
@@ -1296,13 +1350,17 @@ public:
         notes_overlay_->toggle();
     }
 
-    void ensure_lock_surfaces(int primary_monitor_index) {
+    void ensure_lock_surfaces(
+        int primary_monitor_index,
+        bool session_lock_surface
+    ) {
         GdkDisplay* display = gdk_display_get_default();
         const int count = std::max(monitor_count(display), 1);
         primary_monitor_index = std::clamp(primary_monitor_index, 0, count - 1);
 
         const bool topology_matches = lock_surface_ != nullptr &&
             lock_surface_->monitor_index() == primary_monitor_index &&
+            lock_surface_->uses_session_lock() == session_lock_surface &&
             static_cast<int>(lock_mirror_surfaces_.size()) == count - 1;
         if (topology_matches) return;
 
@@ -1314,9 +1372,10 @@ public:
         lock_surface_.reset();
 
         lock_surface_ = std::make_unique<lockscreen::LockSurface>(
-            application_, primary_monitor_index, true
+            application_, primary_monitor_index, true, session_lock_surface
         );
         lock_surface_->set_unlock_started_callback([this] {
+            if (session_lock_ != nullptr) return;
             for (const auto& mirror : lock_mirror_surfaces_) {
                 if (mirror != nullptr) mirror->hide();
             }
@@ -1330,7 +1389,7 @@ public:
             if (index == primary_monitor_index) continue;
             lock_mirror_surfaces_.push_back(
                 std::make_unique<lockscreen::LockSurface>(
-                    application_, index, false
+                    application_, index, false, session_lock_surface
                 )
             );
         }
@@ -1352,58 +1411,472 @@ public:
         }
     }
 
+    void remember_lock_request(std::string_view request_token) {
+        if (request_token.empty() || request_token == lock_request_token_) return;
+        if (std::find(
+                lock_waiting_tokens_.begin(),
+                lock_waiting_tokens_.end(),
+                request_token
+            ) == lock_waiting_tokens_.end()) {
+            lock_waiting_tokens_.emplace_back(request_token);
+        }
+    }
+
+    void publish_lock_status(
+        std::string_view request_token,
+        std::string_view status
+    ) {
+        if (request_token.empty()) return;
+        const auto it = lock_control_invocations_.find(std::string(request_token));
+        if (it == lock_control_invocations_.end()) return;
+        if (it->second != nullptr) {
+            g_dbus_method_invocation_return_value(
+                it->second,
+                g_variant_new("(s)", std::string(status).c_str())
+            );
+            g_object_unref(it->second);
+        }
+        lock_control_invocations_.erase(it);
+    }
+
+    void publish_pending_lock_status(std::string_view status) {
+        publish_lock_status(lock_request_token_, status);
+        for (const auto& request_token : lock_waiting_tokens_) {
+            publish_lock_status(request_token, status);
+        }
+        lock_request_token_.clear();
+        lock_waiting_tokens_.clear();
+    }
+
+    void cancel_lock_surface_coverage_watch() {
+        if (terminal_lock_watch_id_ != 0) {
+            g_source_remove(terminal_lock_watch_id_);
+            terminal_lock_watch_id_ = 0;
+        }
+    }
+
+    void watch_lock_surface_coverage(
+        bool terminal_state,
+        std::string_view failure_reason
+    ) {
+        cancel_lock_surface_coverage_watch();
+        if (all_lock_surfaces_mapped()) return;
+
+        struct LockSurfaceCoverageWatch {
+            std::shared_ptr<RuntimeAsyncState> state;
+            gint64 deadline_us = 0;
+            bool terminal_state = false;
+            std::string failure_reason;
+        };
+        terminal_lock_watch_id_ = g_timeout_add_full(
+            G_PRIORITY_DEFAULT,
+            50,
+            +[](gpointer raw) -> gboolean {
+                auto* watch = static_cast<LockSurfaceCoverageWatch*>(raw);
+                ShellRuntime* owner = watch->state->owner.load();
+                if (!watch->state->alive.load() || owner == nullptr) {
+                    if (owner != nullptr) owner->terminal_lock_watch_id_ = 0;
+                    return G_SOURCE_REMOVE;
+                }
+                if (owner->all_lock_surfaces_mapped()) {
+                    owner->terminal_lock_watch_id_ = 0;
+                    return G_SOURCE_REMOVE;
+                }
+                if (g_get_monotonic_time() < watch->deadline_us) {
+                    return G_SOURCE_CONTINUE;
+                }
+                owner->terminal_lock_watch_id_ = 0;
+                if (watch->terminal_state) {
+                    // This is only a best-effort external request. Its exit
+                    // status is never treated as proof of lock coverage.
+                    owner->session_->request_emergency_lock();
+                    std::cerr << "[Lockscreen] terminal lock surfaces did not map; "
+                                 "emergency lock requested, retaining the coverage watchdog\n";
+                    // loginctl has no completion protocol that Realmheart can
+                    // verify. Re-present and rebind the terminal surfaces before
+                    // retrying the watchdog; never turn an unverified emergency
+                    // request into readiness.
+                    owner->show_terminal_lock_surfaces();
+                } else {
+                    owner->enter_terminal_lock_failure(watch->failure_reason);
+                }
+                return G_SOURCE_REMOVE;
+            },
+            new LockSurfaceCoverageWatch{
+                runtime_async_state_,
+                g_get_monotonic_time() +
+                    static_cast<gint64>(kNativeLockReadyTimeoutMs) * 1000,
+                terminal_state,
+                std::string(failure_reason)
+            },
+            +[](gpointer raw) { delete static_cast<LockSurfaceCoverageWatch*>(raw); }
+        );
+    }
+
+    void show_terminal_lock_surfaces() {
+        // ext-session-lock surfaces cannot remain after their protocol object
+        // is released. Rebuild them as fullscreen overlay surfaces so a failed
+        // native/fallback lock still covers every output and owns keyboard
+        // focus, even when the compositor submap was never established.
+        release_session_lock();
+        ensure_lock_surfaces(invocation_monitor_index(), false);
+        if (lock_surface_ != nullptr) {
+            lock_surface_->set_authentication_enabled(false);
+        }
+        for (const auto& mirror : lock_mirror_surfaces_) {
+            if (mirror != nullptr) mirror->show();
+        }
+        if (lock_surface_ != nullptr) lock_surface_->show();
+
+        watch_lock_surface_coverage(
+            true,
+            "terminal lock surfaces did not map"
+        );
+    }
+
+    [[nodiscard]] bool all_lock_surfaces_mapped() const {
+        if (lock_surface_ == nullptr || !lock_surface_->coverage_verified()) return false;
+        for (const auto& mirror : lock_mirror_surfaces_) {
+            if (mirror == nullptr || !mirror->coverage_verified()) return false;
+        }
+        return true;
+    }
+
+    void cancel_hyprlock_fallback_watchdog() {
+        if (hyprlock_watch_id_ != 0) {
+            g_source_remove(hyprlock_watch_id_);
+            hyprlock_watch_id_ = 0;
+        }
+        const pid_t pid = std::exchange(
+            hyprlock_fallback_pid_,
+            static_cast<pid_t>(-1)
+        );
+        if (pid <= 0) return;
+
+        errno = 0;
+        const bool running = ::kill(pid, 0) == 0 || errno == EPERM;
+        if (running) static_cast<void>(::kill(pid, SIGTERM));
+
+        int status = 0;
+        pid_t waited = -1;
+        do {
+            waited = ::waitpid(pid, &status, WNOHANG);
+        } while (waited < 0 && errno == EINTR);
+        if (waited == 0) {
+            static_cast<void>(::kill(pid, SIGKILL));
+            do {
+                waited = ::waitpid(pid, &status, 0);
+            } while (waited < 0 && errno == EINTR);
+        }
+    }
+
+    void finish_hyprlock_fallback(int status) {
+        if (lock_failure_terminal_) return;
+        // hyprlock's successful exit is not an authentication result: its
+        // documented SIGUSR1 handler exits with status 0 after unlocking.
+        // There is no authenticated completion protocol we can consume here,
+        // so every child exit remains terminal and fail-closed.
+        enter_terminal_lock_failure(
+            WIFEXITED(status) && WEXITSTATUS(status) == 0
+                ? "hyprlock fallback exited without a verifiable authentication result"
+                : "unexpected hyprlock fallback exit"
+        );
+    }
+
+    void release_session_lock() {
+        if (session_lock_ == nullptr) return;
+        const bool was_locked = session_lock_locked_ ||
+            gtk_session_lock_instance_is_locked(session_lock_);
+        if (was_locked) {
+            session_lock_unlocking_ = true;
+            gtk_session_lock_instance_unlock(session_lock_);
+            session_lock_unlocking_ = false;
+        }
+        g_signal_handlers_disconnect_by_data(session_lock_, this);
+        g_object_unref(session_lock_);
+        session_lock_ = nullptr;
+        session_lock_locked_ = false;
+        session_lock_unlocking_ = false;
+        lock_mirror_surfaces_.clear();
+        lock_surface_.reset();
+        lock_monitor_index_ = -1;
+    }
+
+    void session_lock_failed() {
+        if (session_lock_ == nullptr || session_lock_locked_) return;
+        const auto async_state = runtime_async_state_;
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT,
+            +[](gpointer data) -> gboolean {
+                auto* state = static_cast<std::shared_ptr<RuntimeAsyncState>*>(data);
+                ShellRuntime* owner = (*state)->owner.load();
+                if ((*state)->alive.load() && owner != nullptr &&
+                    owner->session_lock_ != nullptr &&
+                    !owner->session_lock_locked_) {
+                    owner->release_session_lock();
+                    owner->fallback_to_hyprlock(
+                        "compositor refused the native session lock"
+                    );
+                }
+                return G_SOURCE_REMOVE;
+            },
+            new std::shared_ptr<RuntimeAsyncState>(async_state),
+            +[](gpointer data) {
+                delete static_cast<std::shared_ptr<RuntimeAsyncState>*>(data);
+            }
+        );
+    }
+
+    void session_lock_locked() {
+        if (session_lock_ == nullptr || lock_failure_terminal_) return;
+        session_lock_locked_ = true;
+        publish_pending_lock_status(kNativeLockReadyStatus);
+    }
+
+    void session_lock_unlocked() {
+        if (session_lock_unlocking_ || lock_failure_terminal_) return;
+        enter_terminal_lock_failure("native session lock ended unexpectedly");
+    }
+
+    bool begin_session_lock() {
+        if (!gtk_session_lock_is_supported()) return false;
+        session_lock_ = gtk_session_lock_instance_new();
+        if (session_lock_ == nullptr) return false;
+        g_signal_connect(
+            session_lock_,
+            "locked",
+            G_CALLBACK(+[](GtkSessionLockInstance*, gpointer data) {
+                static_cast<ShellRuntime*>(data)->session_lock_locked();
+            }),
+            this
+        );
+        g_signal_connect(
+            session_lock_,
+            "failed",
+            G_CALLBACK(+[](GtkSessionLockInstance*, gpointer data) {
+                static_cast<ShellRuntime*>(data)->session_lock_failed();
+            }),
+            this
+        );
+        g_signal_connect(
+            session_lock_,
+            "unlocked",
+            G_CALLBACK(+[](GtkSessionLockInstance*, gpointer data) {
+                static_cast<ShellRuntime*>(data)->session_lock_unlocked();
+            }),
+            this
+        );
+        if (!gtk_session_lock_instance_lock(session_lock_)) {
+            release_session_lock();
+            return false;
+        }
+        if (session_lock_ == nullptr) return false;
+
+        GdkDisplay* display = gdk_display_get_default();
+        const int count = std::max(monitor_count(display), 1);
+        if (lock_surface_ == nullptr ||
+            !lock_surface_->uses_session_lock() ||
+            static_cast<int>(lock_mirror_surfaces_.size()) != count - 1) {
+            release_session_lock();
+            return false;
+        }
+        GListModel* monitors = gdk_display_get_monitors(display);
+        if (monitors == nullptr ||
+            g_list_model_get_n_items(monitors) < static_cast<guint>(count)) {
+            release_session_lock();
+            return false;
+        }
+        const auto monitor_at = [monitors](int index) -> GdkMonitor* {
+            if (index < 0 || static_cast<guint>(index) >=
+                g_list_model_get_n_items(monitors)) {
+                return nullptr;
+            }
+            return GDK_MONITOR(g_list_model_get_item(
+                monitors,
+                static_cast<guint>(index)
+            ));
+        };
+        GdkMonitor* primary_monitor = monitor_at(lock_surface_->monitor_index());
+        if (primary_monitor == nullptr) {
+            release_session_lock();
+            return false;
+        }
+        gtk_session_lock_instance_assign_window_to_monitor(
+            session_lock_,
+            lock_surface_->window(),
+            primary_monitor
+        );
+        g_object_unref(primary_monitor);
+        int mirror_index = 0;
+        for (int index = 0; index < count; ++index) {
+            if (index == lock_surface_->monitor_index()) continue;
+            auto& mirror = lock_mirror_surfaces_[static_cast<std::size_t>(mirror_index++)];
+            GdkMonitor* monitor = monitor_at(index);
+            if (monitor == nullptr) {
+                release_session_lock();
+                return false;
+            }
+            gtk_session_lock_instance_assign_window_to_monitor(
+                session_lock_,
+                mirror->window(),
+                monitor
+            );
+            g_object_unref(monitor);
+        }
+        return true;
+    }
+
+    void enter_terminal_lock_failure(std::string_view reason) {
+        // The lock submap and any isolated workspaces are deliberately kept in
+        // place. Restoring the desktop after both native lock and hyprlock
+        // failed would turn an operational failure into a fail-open boundary.
+        lock_choreography_pending_ = false;
+        lock_hyprlock_fallback_active_ = true;
+        lock_failure_terminal_ = true;
+        ++lock_choreography_generation_;
+        publish_pending_lock_status(kLockFailureStatus);
+        cancel_hyprlock_fallback_watchdog();
+        hide_all_bars();
+        show_terminal_lock_surfaces();
+        std::cerr << "[Lockscreen] terminal fail-closed lock state: " << reason
+                  << "\n";
+    }
+
     void fallback_to_hyprlock(std::string_view reason) {
-        if (lock_hyprlock_fallback_active_) return;
+        if (lock_hyprlock_fallback_active_ || lock_failure_terminal_) return;
+        if (session_lock_locked_) {
+            enter_terminal_lock_failure("native session lock cannot be replaced after lock");
+            return;
+        }
         lock_hyprlock_fallback_active_ = true;
         lock_choreography_pending_ = false;
         ++lock_choreography_generation_;
+        publish_pending_lock_status(kLockFailureStatus);
         std::cerr << "[Lockscreen] " << reason
                   << "; falling back to hyprlock\n";
-        hide_native_lock_surfaces_immediately();
-        if (!session_->lock()) {
+        if (session_lock_ != nullptr && !session_lock_locked_) {
+            release_session_lock();
+        }
+        // Keep shell chrome hidden for the complete fallback lifetime; a
+        // transparent lock surface must never reveal a normal bar during a
+        // failed native-lock transition or a monitor rebuild.
+        hide_all_bars();
+        // Keep a Realmheart-owned exclusive surface visible while the legacy
+        // fallback starts. Hyprlock has no authenticated readiness signal, so
+        // its liveness must never be the event that uncovers the desktop.
+        ensure_lock_surfaces(invocation_monitor_index(), false);
+        for (const auto& mirror : lock_mirror_surfaces_) {
+            if (mirror != nullptr) mirror->show();
+        }
+        if (lock_surface_ != nullptr) lock_surface_->show();
+        watch_lock_surface_coverage(
+            false,
+            "hyprlock fallback lock surfaces failed to map after startup"
+        );
+        const auto fallback_pid = session_->fallback_lock_tracked();
+        if (!fallback_pid) {
             std::cerr << "[Lockscreen] unable to launch hyprlock fallback\n";
-            lock_hyprlock_fallback_active_ = false;
-            finish_lock_unlock();
+            enter_terminal_lock_failure("native lock and hyprlock fallback are unavailable");
             return;
         }
+        hyprlock_fallback_pid_ = *fallback_pid;
 
         struct HyprlockWatch {
             std::shared_ptr<RuntimeAsyncState> state;
+            pid_t pid = -1;
+            gint64 startup_deadline_us = 0;
+            gint64 kill_deadline_us = 0;
+            bool terminating = false;
         };
-        g_timeout_add_full(
+        hyprlock_watch_id_ = g_timeout_add_full(
             G_PRIORITY_DEFAULT,
-            500,
+            50,
             +[](gpointer raw) -> gboolean {
                 auto* watch = static_cast<HyprlockWatch*>(raw);
                 ShellRuntime* owner = watch->state->owner.load();
                 if (!watch->state->alive.load() || owner == nullptr) {
                     return G_SOURCE_REMOVE;
                 }
-                const auto hyprlock = realmheart::core::run_capture(
-                    {"pgrep", "-x", "hyprlock"}
-                );
-                if (!hyprlock.succeeded() || hyprlock.output.find_first_not_of(
-                        " \t\n\r0123456789") != std::string::npos) {
-                    owner->finish_lock_unlock();
+                int status = 0;
+                const pid_t waited = ::waitpid(watch->pid, &status, WNOHANG);
+                if (waited == watch->pid) {
+                    owner->hyprlock_fallback_pid_ = -1;
+                    owner->hyprlock_watch_id_ = 0;
+                    owner->finish_hyprlock_fallback(status);
                     return G_SOURCE_REMOVE;
+                }
+                if (waited < 0 && errno != EINTR) {
+                    owner->hyprlock_fallback_pid_ = -1;
+                    owner->hyprlock_watch_id_ = 0;
+                    owner->enter_terminal_lock_failure(
+                        "hyprlock fallback process could not be monitored"
+                    );
+                    return G_SOURCE_REMOVE;
+                }
+                const gint64 now_us = g_get_monotonic_time();
+                if (!watch->terminating && now_us >= watch->startup_deadline_us) {
+                    static_cast<void>(::kill(watch->pid, SIGTERM));
+                    watch->terminating = true;
+                    watch->kill_deadline_us = now_us + 1000000;
+                    owner->enter_terminal_lock_failure(
+                        "hyprlock fallback exposed no authenticated readiness signal"
+                    );
+                    return G_SOURCE_REMOVE;
+                } else if (watch->terminating && now_us >= watch->kill_deadline_us) {
+                    static_cast<void>(::kill(watch->pid, SIGKILL));
+                    watch->kill_deadline_us = now_us + 1000000;
                 }
                 return G_SOURCE_CONTINUE;
             },
-            new HyprlockWatch{runtime_async_state_},
+            new HyprlockWatch{
+                runtime_async_state_,
+                *fallback_pid,
+                g_get_monotonic_time() +
+                    static_cast<gint64>(kNativeLockReadyTimeoutMs) * 1000,
+                0,
+                false
+            },
             +[](gpointer raw) { delete static_cast<HyprlockWatch*>(raw); }
         );
     }
 
-    void lock_session() {
+    void lock_session(std::string_view request_token = {}) {
         // Ignore re-entry while already locked (SUPER+L while locked must not
         // toggle back to the desktop).
-        if (lock_hyprlock_fallback_active_ || lock_choreography_pending_ ||
-            (lock_surface_ != nullptr && lock_surface_->visible())) {
+        if (lock_failure_terminal_) {
+            publish_lock_status(request_token, kLockFailureStatus);
+            return;
+        }
+        if (lock_hyprlock_fallback_active_) {
+            publish_lock_status(request_token, kLockFailureStatus);
+            return;
+        }
+        if (lock_choreography_pending_ ||
+            (session_lock_ != nullptr && !session_lock_locked_)) {
+            remember_lock_request(request_token);
+            return;
+        }
+        if (lock_surface_ != nullptr && lock_surface_->visible()) {
+            publish_lock_status(request_token, kNativeLockReadyStatus);
             return;
         }
 
+        lock_request_token_ = request_token;
+        lock_waiting_tokens_.clear();
+        lock_choreography_bar_was_visible_ =
+            bar_ != nullptr && state_.bar_visible();
+        if (lock_choreography_bar_was_visible_) hide_all_bars();
+
         const int primary_monitor_index = invocation_monitor_index();
-        ensure_lock_surfaces(primary_monitor_index);
+        if (!gtk_session_lock_is_supported()) {
+            // A layer-shell window cannot satisfy hypridle's lock-notify
+            // barrier. Jail compositor binds first, then use the explicit
+            // tracked hyprlock fallback rather than pretending native lock is
+            // ready.
+            ensure_lock_surfaces(primary_monitor_index, false);
+        } else {
+            ensure_lock_surfaces(primary_monitor_index, true);
+        }
 
         // Lock choreography (mana-core style): every output moves to its own
         // empty named workspace, then a Broken Seal surface is mapped on every
@@ -1417,12 +1890,18 @@ public:
         // SUPER+num and friends cannot move focus to a workspace with real
         // windows. The interactive layer-shell surface receives password input.
         if (!services::HyprlandWorkspaces::set_submap(kLockSubmapName)) {
-            fallback_to_hyprlock("unable to activate compositor lock submap");
+            enter_terminal_lock_failure("unable to activate compositor lock submap");
             return;
         }
-        lock_choreography_bar_was_visible_ =
-            bar_ != nullptr && state_.bar_visible();
-        if (lock_choreography_bar_was_visible_) hide_all_bars();
+        lock_jail_established_ = true;
+        if (!gtk_session_lock_is_supported()) {
+            fallback_to_hyprlock("native session lock protocol is unavailable");
+            return;
+        }
+        if (!begin_session_lock()) {
+            fallback_to_hyprlock("unable to establish native session lock");
+            return;
+        }
 
         GdkDisplay* display = gdk_display_get_default();
         const int count = std::max(monitor_count(display), 1);
@@ -1542,49 +2021,72 @@ public:
 
         const auto async_state = runtime_async_state_;
         const std::uint64_t fallback_generation = generation;
-        g_timeout_add(2000, +[](gpointer raw) -> gboolean {
-            auto* payload = static_cast<std::pair<
-                std::shared_ptr<RuntimeAsyncState>, std::uint64_t>*>(raw);
-            ShellRuntime* owner = payload->first->owner.load();
-            if (!payload->first->alive.load() || owner == nullptr ||
-                owner->lock_choreography_generation_ != payload->second) {
+        struct LockVisibilityWatch {
+            std::shared_ptr<RuntimeAsyncState> state;
+            std::uint64_t generation = 0;
+            gint64 deadline_us = 0;
+        };
+        g_timeout_add(50, +[](gpointer raw) -> gboolean {
+            auto* payload = static_cast<LockVisibilityWatch*>(raw);
+            ShellRuntime* owner = payload->state->owner.load();
+            if (!payload->state->alive.load() || owner == nullptr ||
+                owner->lock_choreography_generation_ != payload->generation) {
                 delete payload;
                 return G_SOURCE_REMOVE;
             }
-            if (owner->all_native_lock_surfaces_visible()) {
+            if (owner->session_lock_ != nullptr &&
+                gtk_session_lock_instance_is_locked(owner->session_lock_)) {
+                owner->session_lock_locked_ = true;
+                owner->publish_pending_lock_status(kNativeLockReadyStatus);
                 delete payload;
                 return G_SOURCE_REMOVE;
+            }
+            if (g_get_monotonic_time() < payload->deadline_us) {
+                return G_SOURCE_CONTINUE;
             }
             owner->fallback_to_hyprlock(
                 "one or more Broken Seal monitor surfaces failed to map"
             );
             delete payload;
             return G_SOURCE_REMOVE;
-        }, new std::pair<std::shared_ptr<RuntimeAsyncState>, std::uint64_t>{
-            async_state, fallback_generation
+        }, new LockVisibilityWatch{
+            async_state,
+            fallback_generation,
+            g_get_monotonic_time() +
+                static_cast<gint64>(kNativeLockReadyTimeoutMs) * 1000
         });
     }
 
     void finish_lock_unlock() {
+        cancel_lock_surface_coverage_watch();
+        cancel_hyprlock_fallback_watchdog();
+        if (lock_failure_terminal_) return;
+
         // Invalidate the post-map visibility watchdog before restoring the
         // desktop. Otherwise a fast native unlock can leave that stale timer
         // observing hidden lock surfaces and relock the now-unlocked session.
         ++lock_choreography_generation_;
 
-        // Reverse choreography: mirrors disappear first, binds return, then
-        // each monitor goes back to the workspace it owned before locking.
-        for (const auto& mirror : lock_mirror_surfaces_) {
-            if (mirror != nullptr) mirror->hide_immediately();
+        // Reverse choreography: release the compositor-owned session-lock
+        // windows first, then binds return, then each monitor goes back to the
+        // workspace it owned before locking.
+        if (session_lock_ != nullptr) {
+            release_session_lock();
+        } else {
+            for (const auto& mirror : lock_mirror_surfaces_) {
+                if (mirror != nullptr) mirror->hide_immediately();
+            }
         }
         if (!services::HyprlandWorkspaces::set_submap("reset")) {
             // Never restore normal workspaces while the compositor remains in
-            // the lock submap. Re-lock with hyprlock and retry the reset only
-            // after the compositor accepts the command.
+            // the lock submap. A second fallback would recurse when the
+            // compositor or hyprlock is unavailable, so retain the jailed
+            // state permanently instead.
             std::cerr << "[Lockscreen] unable to restore compositor binds after unlock\n";
-            lock_hyprlock_fallback_active_ = false;
-            fallback_to_hyprlock("compositor bind-map reset failed after unlock");
+            enter_terminal_lock_failure("compositor bind-map reset failed after unlock");
             return;
         }
+        lock_jail_established_ = false;
 
         // Restore every monitor for which we captured an original workspace.
         // This is intentionally independent of the aggregate `switched` flag:
@@ -2765,24 +3267,42 @@ private:
         GdkDisplay* display = gdk_display_get_default();
         const int count = std::max(monitor_count(display), 1);
         const bool notes_was_visible = notes_overlay_ != nullptr && notes_overlay_->visible();
+        const bool terminal_lock_active = lock_failure_terminal_;
+        const bool fallback_lock_active =
+            lock_hyprlock_fallback_active_ && !terminal_lock_active;
 
-        // A wl_output appearing/disappearing while native Broken Seal is up
-        // invalidates the exact set of fullscreen security surfaces. Keep the
-        // custom lockscreen for normal multi-monitor use, but fail closed to
-        // hyprlock for the rare hotplug-while-locked case. Hidden lock surfaces
-        // can simply be rebuilt lazily on the next lock.
+        // A wl_output appearing/disappearing while a lock is up invalidates
+        // the exact set of fullscreen security surfaces. Rebuild the
+        // Realmheart-owned coverage for an active fallback; terminal failure
+        // remains terminal and is rebuilt as a fullscreen fail-closed jail.
         const bool native_lock_visible =
             lock_surface_ != nullptr && lock_surface_->visible();
-        if (lock_choreography_pending_) {
+        if (terminal_lock_active) {
+            // Terminal failure is a live security state, not a reason to
+            // restore ordinary shell surfaces. Rebuild the lock surfaces
+            // after the monitor-owned shell chrome below.
+            hide_native_lock_surfaces_immediately();
+            lock_mirror_surfaces_.clear();
+            lock_surface_.reset();
+            lock_monitor_index_ = -1;
+        } else if (fallback_lock_active) {
+            // The tracked hyprlock child remains owned by ShellRuntime, but
+            // its Realmheart coverage must be rebound to the new outputs.
+            hide_native_lock_surfaces_immediately();
+            lock_mirror_surfaces_.clear();
+            lock_surface_.reset();
+            lock_monitor_index_ = -1;
+            lock_topology_dirty_ = false;
+        } else if (lock_choreography_pending_) {
             // Let the in-flight workspace worker return its restore points
             // first; finish_lock_choreography() will then fail closed to
             // hyprlock without losing the workspaces we must restore.
             lock_topology_dirty_ = true;
         } else if (native_lock_visible) {
+            // Keep the compositor-owned session-lock windows alive until the
+            // replacement topology is ready. Releasing them here would expose
+            // the desktop between the old and new output snapshots.
             lock_topology_dirty_ = true;
-            fallback_to_hyprlock(
-                "monitor topology changed while Broken Seal was active"
-            );
         } else if (lock_surface_ != nullptr || !lock_mirror_surfaces_.empty()) {
             hide_native_lock_surfaces_immediately();
             lock_mirror_surfaces_.clear();
@@ -2875,8 +3395,35 @@ private:
         for (int index = 0; index < count; ++index) {
             create_monitor_hotspot(index);
         }
-        apply_bar_visibility();
+        const bool lock_surfaces_must_hide =
+            terminal_lock_active || fallback_lock_active ||
+            lock_choreography_pending_ || native_lock_visible;
+        if (lock_surfaces_must_hide) {
+            hide_all_bars();
+        } else {
+            apply_bar_visibility();
+        }
         bind_monitor_property_watchers();
+        if (terminal_lock_active) {
+            show_terminal_lock_surfaces();
+        } else if (fallback_lock_active) {
+            ensure_lock_surfaces(invocation_monitor_index(), false);
+            for (const auto& mirror : lock_mirror_surfaces_) {
+                if (mirror != nullptr) mirror->show();
+            }
+            if (lock_surface_ != nullptr) lock_surface_->show();
+            watch_lock_surface_coverage(
+                false,
+                "hyprlock fallback lock surfaces failed to map after monitor hotplug"
+            );
+        } else if (native_lock_visible) {
+            // The old session-lock assignment is tied to the previous output
+            // set. Drop it only after the new shell chrome has been created,
+            // then rebuild a terminal fullscreen jail from the fresh model.
+            enter_terminal_lock_failure(
+                "monitor topology changed while Broken Seal was active"
+            );
+        }
         if (notes_was_visible) {
             ensure_notes_overlay(active_monitor_index_);
             notes_overlay_->show();
@@ -3255,6 +3802,17 @@ private:
     std::uint64_t lock_choreography_generation_ = 0;
     bool lock_topology_dirty_ = false;
     bool lock_hyprlock_fallback_active_ = false;
+    bool lock_failure_terminal_ = false;
+    bool lock_jail_established_ = false;
+    std::string lock_request_token_;
+    std::vector<std::string> lock_waiting_tokens_;
+    std::unordered_map<std::string, GDBusMethodInvocation*> lock_control_invocations_;
+    guint terminal_lock_watch_id_ = 0;
+    guint hyprlock_watch_id_ = 0;
+    pid_t hyprlock_fallback_pid_ = -1;
+    GtkSessionLockInstance* session_lock_ = nullptr;
+    bool session_lock_locked_ = false;
+    bool session_lock_unlocking_ = false;
     services::WorkspaceSnapshot empty_workspace_snapshot_;
     std::vector<MonitorWorkspaceSnapshot> monitor_workspace_snapshots_;
     powermenu::PowerMenuProcess power_menu_process_;
@@ -3274,6 +3832,182 @@ private:
 };
 
 namespace {
+
+constexpr const char* kLockControlXml =
+    "<node>"
+    "<interface name='dev.realmheart.ShellControl'>"
+    "<method name='LockSession'>"
+    "<arg type='s' name='token' direction='in'/>"
+    "<arg type='s' name='status' direction='out'/>"
+    "</method>"
+    "</interface>"
+    "</node>";
+
+struct LockControlRegistrationContext {
+    ShellRuntime* runtime = nullptr;
+    GDBusNodeInfo* node = nullptr;
+    guint registration = 0;
+};
+
+void lock_control_method_call(
+    GDBusConnection*,
+    const gchar*,
+    const gchar*,
+    const gchar* interface_name,
+    const gchar* method_name,
+    GVariant* parameters,
+    GDBusMethodInvocation* invocation,
+    gpointer user_data
+) {
+    if (g_strcmp0(interface_name, "dev.realmheart.ShellControl") != 0 ||
+        g_strcmp0(method_name, "LockSession") != 0 ||
+        parameters == nullptr) {
+        g_dbus_method_invocation_return_error(
+            invocation,
+            G_IO_ERROR,
+            G_IO_ERROR_NOT_SUPPORTED,
+            "Unsupported Realmheart shell control method"
+        );
+        return;
+    }
+    const char* token = nullptr;
+    g_variant_get(parameters, "(&s)", &token);
+    auto* context = static_cast<LockControlRegistrationContext*>(user_data);
+    if (context == nullptr || context->runtime == nullptr) {
+        g_dbus_method_invocation_return_error(
+            invocation,
+            G_IO_ERROR,
+            G_IO_ERROR_NOT_INITIALIZED,
+            "Realmheart shell is not ready to handle LockSession"
+        );
+        return;
+    }
+    context->runtime->handle_lock_control_call(
+        invocation,
+        token
+    );
+}
+
+constexpr GDBusInterfaceVTable kLockControlVtable = {
+    lock_control_method_call,
+    nullptr,
+    nullptr,
+    {nullptr},
+};
+
+struct RealmheartApplication {
+    GtkApplication parent_instance;
+};
+
+struct RealmheartApplicationClass {
+    GtkApplicationClass parent_class;
+};
+
+static gboolean realmheart_application_dbus_register(
+    GApplication* application,
+    GDBusConnection* connection,
+    const gchar* object_path,
+    GError** error
+);
+
+static void realmheart_application_dbus_unregister(
+    GApplication* application,
+    GDBusConnection* connection,
+    const gchar* object_path
+);
+
+G_DEFINE_TYPE(
+    RealmheartApplication,
+    realmheart_application,
+    GTK_TYPE_APPLICATION
+)
+
+void realmheart_application_class_init(RealmheartApplicationClass* klass) {
+    auto* application_class = G_APPLICATION_CLASS(klass);
+    application_class->dbus_register = realmheart_application_dbus_register;
+    application_class->dbus_unregister = realmheart_application_dbus_unregister;
+}
+
+void realmheart_application_init(RealmheartApplication*) {}
+
+gboolean realmheart_application_dbus_register(
+    GApplication* application,
+    GDBusConnection* connection,
+    const gchar* object_path,
+    GError** error
+) {
+    auto* context = static_cast<LockControlRegistrationContext*>(
+        g_object_get_data(G_OBJECT(application), "realmheart-lock-control")
+    );
+    if (context == nullptr || context->node == nullptr) {
+        g_set_error(
+            error,
+            G_IO_ERROR,
+            G_IO_ERROR_FAILED,
+            "Realmheart lock control was not initialized before registration"
+        );
+        return FALSE;
+    }
+
+    auto* parent_class = G_APPLICATION_CLASS(realmheart_application_parent_class);
+    if (parent_class->dbus_register != nullptr &&
+        !parent_class->dbus_register(application, connection, object_path, error)) {
+        return FALSE;
+    }
+
+    const GDBusInterfaceInfo* interface_info =
+        g_dbus_node_info_lookup_interface(
+            context->node,
+            "dev.realmheart.ShellControl"
+        );
+    if (interface_info == nullptr) {
+        g_set_error(
+            error,
+            G_IO_ERROR,
+            G_IO_ERROR_FAILED,
+            "Realmheart lock control interface is missing"
+        );
+        if (parent_class->dbus_unregister != nullptr) {
+            parent_class->dbus_unregister(application, connection, object_path);
+        }
+        return FALSE;
+    }
+
+    context->registration = g_dbus_connection_register_object(
+        connection,
+        "/dev/realmheart/ShellControl",
+        const_cast<GDBusInterfaceInfo*>(interface_info),
+        &kLockControlVtable,
+        context,
+        nullptr,
+        error
+    );
+    if (context->registration == 0) {
+        if (parent_class->dbus_unregister != nullptr) {
+            parent_class->dbus_unregister(application, connection, object_path);
+        }
+        return FALSE;
+    }
+    return TRUE;
+}
+
+void realmheart_application_dbus_unregister(
+    GApplication* application,
+    GDBusConnection* connection,
+    const gchar* object_path
+) {
+    auto* context = static_cast<LockControlRegistrationContext*>(
+        g_object_get_data(G_OBJECT(application), "realmheart-lock-control")
+    );
+    if (context != nullptr && context->registration != 0) {
+        g_dbus_connection_unregister_object(connection, context->registration);
+        context->registration = 0;
+    }
+    auto* parent_class = G_APPLICATION_CLASS(realmheart_application_parent_class);
+    if (parent_class->dbus_unregister != nullptr) {
+        parent_class->dbus_unregister(application, connection, object_path);
+    }
+}
 
 void activate_shell(GtkApplication*, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->activate();
@@ -3387,8 +4121,11 @@ void toggle_notes_action(GSimpleAction*, GVariant*, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->toggle_notes();
 }
 
-void lock_session_action(GSimpleAction*, GVariant*, gpointer user_data) {
-    static_cast<ShellRuntime*>(user_data)->lock_session();
+void lock_session_action(GSimpleAction*, GVariant* parameter, gpointer user_data) {
+    const char* request_token = parameter != nullptr
+        ? g_variant_get_string(parameter, nullptr)
+        : "";
+    static_cast<ShellRuntime*>(user_data)->lock_session(request_token);
 }
 
 void open_logout_menu_action(GSimpleAction*, GVariant*, gpointer user_data) {
@@ -3410,7 +4147,7 @@ constexpr GActionEntry kShellActions[] = {
     {"character-hair-mode", set_character_hair_mode_action, "s", nullptr, nullptr, {}},
     {"osd-volume", show_osd_volume_action, nullptr, nullptr, nullptr, {}},
     {"osd-brightness", show_osd_brightness_action, nullptr, nullptr, nullptr, {}},
-    {"lock-session", lock_session_action, nullptr, nullptr, nullptr, {}},
+    {"lock-session", lock_session_action, "s", nullptr, nullptr, {}},
     {"logout-menu", open_logout_menu_action, nullptr, nullptr, nullptr, {}},
     {"restart", restart_action, nullptr, nullptr, nullptr, {}},
     {"screenshot-full", take_screenshot_full_action, nullptr, nullptr, nullptr, {}},
@@ -3436,10 +4173,12 @@ int run_shell(
     wallpaper::WallpaperBackendType wallpaper_backend,
     int restart_readiness_fd
 ) {
-    GtkApplication* application = gtk_application_new(
-        realmheart::core::shell_application_id().data(),
-        G_APPLICATION_DEFAULT_FLAGS
-    );
+    GtkApplication* application = GTK_APPLICATION(g_object_new(
+        realmheart_application_get_type(),
+        "application-id", realmheart::core::shell_application_id().data(),
+        "flags", G_APPLICATION_DEFAULT_FLAGS,
+        nullptr
+    ));
     const guint sigterm_source = g_unix_signal_add(
         SIGTERM,
         +[](gpointer data) -> gboolean {
@@ -3456,19 +4195,87 @@ int run_shell(
         },
         application
     );
+
+    auto lock_control_context = std::make_unique<LockControlRegistrationContext>();
+    lock_control_context->node = g_dbus_node_info_new_for_xml(
+        kLockControlXml,
+        nullptr
+    );
+    if (lock_control_context->node == nullptr) {
+        std::cerr << "Unable to initialize native lock control interface\n";
+        if (restart_readiness_fd >= 0) {
+            static_cast<void>(core::restart_handshake::send_message(
+                restart_readiness_fd,
+                core::restart_handshake::MessageType::Failure,
+                EPROTO
+            ));
+            ::close(restart_readiness_fd);
+        }
+        if (sigterm_source != 0) g_source_remove(sigterm_source);
+        if (sigint_source != 0) g_source_remove(sigint_source);
+        g_object_unref(application);
+        return 1;
+    }
+    g_object_set_data(
+        G_OBJECT(application),
+        "realmheart-lock-control",
+        lock_control_context.get()
+    );
+
+    GError* application_registration_error = nullptr;
+    if (!g_application_register(
+            G_APPLICATION(application),
+            nullptr,
+            &application_registration_error
+        )) {
+        std::cerr << "Unable to register Realmheart shell application: "
+                  << (application_registration_error != nullptr
+                          ? application_registration_error->message
+                          : "unknown error")
+                  << '\n';
+        if (restart_readiness_fd >= 0) {
+            static_cast<void>(core::restart_handshake::send_message(
+                restart_readiness_fd,
+                core::restart_handshake::MessageType::Failure,
+                EIO
+            ));
+            ::close(restart_readiness_fd);
+        }
+        g_clear_error(&application_registration_error);
+        if (sigterm_source != 0) g_source_remove(sigterm_source);
+        if (sigint_source != 0) g_source_remove(sigint_source);
+        g_object_unref(application);
+        g_dbus_node_info_unref(lock_control_context->node);
+        return 1;
+    }
+
+    // Registration establishes whether this process owns the unique shell.
+    // Do not touch compositor-global state or construct a runtime for a remote
+    // invocation: its destructor must never reset the primary shell's jail.
+    if (g_application_get_is_remote(G_APPLICATION(application))) {
+        if (sigterm_source != 0) g_source_remove(sigterm_source);
+        if (sigint_source != 0) g_source_remove(sigint_source);
+        g_object_unref(application);
+        g_dbus_node_info_unref(lock_control_context->node);
+        return 0;
+    }
+
     auto runtime = std::make_unique<ShellRuntime>(
         application,
         wallpaper_backend,
         restart_readiness_fd
     );
+    lock_control_context->runtime = runtime.get();
 
     // Safety: a previous session that died while the lockscreen bind jail
     // was active would leave every compositor keybind dead. Reset the submap
-    // unconditionally at startup.
+    // only after primary-instance detection above.
     if (!services::HyprlandWorkspaces::set_submap("reset")) {
         std::cerr << "[Lockscreen] refusing to start while compositor bind-map reset failed\n";
+        lock_control_context->runtime = nullptr;
         runtime.reset();
         g_object_unref(application);
+        g_dbus_node_info_unref(lock_control_context->node);
         return 1;
     }
 
@@ -3478,6 +4285,7 @@ int run_shell(
         static_cast<gint>(sizeof(kShellActions) / sizeof(kShellActions[0])),
         runtime.get()
     );
+
     g_signal_connect(
         application,
         "activate",
@@ -3575,9 +4383,11 @@ int run_shell(
 
     // Controllers own GTK windows and callbacks; destroy them while the
     // GtkApplication/display are still valid.
+    lock_control_context->runtime = nullptr;
     runtime.reset();
     core::shared_task_executor().shutdown();
     g_object_unref(application);
+    g_dbus_node_info_unref(lock_control_context->node);
 
     if (restart_recovery_reexec && restart_handoff) {
         const std::string executable = current_executable_path();

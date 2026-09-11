@@ -1,3 +1,4 @@
+#include "core/ShellControl.hpp"
 #include "services/SessionManager.hpp"
 #include "ui/powermenu/PowerMenuOverlay.hpp"
 
@@ -27,6 +28,7 @@ struct RendererState {
     double origin_y = 1048.0 / 1080.0;
     int monitor_index = 0;
     bool close_requested = false;
+    bool native_lock_requested = false;
 };
 
 bool parse_unit_double(const char* text, double& value) {
@@ -170,8 +172,16 @@ void activate(GtkApplication* application, gpointer data) {
     state->overlay = std::make_unique<realmheart::ui::powermenu::PowerMenuOverlay>(
         application,
         realmheart::ui::powermenu::PowerMenuActions{
-            .lock = [state] { return state->session->lock(); },
-            .lock_state = [state] { return state->session->is_locked(); },
+            .lock = [state] {
+                const auto result = realmheart::core::request_shell_lock();
+                state->native_lock_requested =
+                    result == realmheart::core::ShellControlResult::LockReady;
+                return state->native_lock_requested;
+            },
+            // The callback above returns only after the persistent shell has
+            // acknowledged native Broken Seal readiness. Never probe hyprlock:
+            // it is only a deliberate fail-closed fallback owned by ShellRuntime.
+            .lock_state = [state] { return state->native_lock_requested; },
             .suspend = [state] { return state->session->suspend(); },
             .logout = [state] { return state->session->logout(); },
             .reboot = [state] { return state->session->reboot(); },

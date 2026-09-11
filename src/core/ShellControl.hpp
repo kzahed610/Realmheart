@@ -13,6 +13,8 @@ enum class ShellControlResult {
     ActionUnavailable = 3,
     InvalidArgument = 4,
     DeliveryFailed = 5,
+    LockReady = 6,
+    LockFailed = 7,
 };
 
 std::string_view shell_application_id();
@@ -20,5 +22,8 @@ std::string_view shell_application_id();
 // It is a same-user desktop convenience channel, not an authentication
 // boundary or a cross-user privilege mechanism.
 ShellControlResult send_shell_command(ShellCommand command, std::string_view argument = {});
+// Wait for the persistent shell's native lock acknowledgement. The reply is
+// carried by a private D-Bus method, not a forgeable runtime status file.
+ShellControlResult request_shell_lock(std::string_view request_token = {});
 
 } // namespace realmheart::core

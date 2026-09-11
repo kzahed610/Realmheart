@@ -6,15 +6,26 @@ namespace {
 constexpr const char* kHyprlock = "/usr/bin/hyprlock";
 constexpr const char* kSystemctl = "/usr/bin/systemctl";
 constexpr const char* kHyprctl = "/usr/bin/hyprctl";
-constexpr const char* kPgrep = "/usr/bin/pgrep";
+constexpr const char* kLoginctl = "/usr/bin/loginctl";
 
 } // namespace
 
 SessionManager::SessionManager(std::unique_ptr<ICommandExecutor> executor) 
     : executor_(std::move(executor)) {}
 
-bool SessionManager::lock() {
+bool SessionManager::fallback_lock() {
     return executor_->run_background({kHyprlock});
+}
+
+std::optional<pid_t> SessionManager::fallback_lock_tracked() {
+    return executor_->run_background_tracked({kHyprlock});
+}
+
+void SessionManager::request_emergency_lock() {
+    static_cast<void>(executor_->run_capture_succeeded_bounded(
+        {kLoginctl, "lock-session"},
+        std::chrono::seconds(1)
+    ));
 }
 
 bool SessionManager::suspend() {
@@ -31,13 +42,6 @@ bool SessionManager::reboot() {
 
 bool SessionManager::power_off() {
     return executor_->run_capture_succeeded({kSystemctl, "poweroff"});
-}
-
-bool SessionManager::is_locked() const {
-    return executor_->run_capture_succeeded_bounded(
-        {kPgrep, "-x", "hyprlock"},
-        std::chrono::milliseconds(250)
-    );
 }
 
 } // namespace realmheart::services

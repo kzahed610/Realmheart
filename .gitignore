@@ -18,10 +18,8 @@ __pycache__/
 # Personal helper scripts (not part of the public repo)
 /scripts/fresh-account-setup.sh
 
-# Private session notes / local logs (never publish)
-/docs/current-state.md
-/docs/current-state.md.bak
-/docs/log.txt
+# Private documentation and session notes (never publish)
+/docs/
 
 # CTest transient output
 /Testing/

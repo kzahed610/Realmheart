@@ -8,6 +8,7 @@
 
 #include <gdk/gdk.h>
 #include <gtk4-layer-shell/gtk4-layer-shell.h>
+#include <gtk4-layer-shell/gtk4-session-lock.h>
 
 #include <algorithm>
 #include <cmath>
@@ -44,6 +45,9 @@ struct LockSurface::State {
     std::function<void()> unlock_started_callback;
     int monitor_index = -1;
     bool interactive = true;
+    bool session_lock_surface = true;
+    bool authentication_enabled = true;
+    bool monitor_binding_verified = false;
 
     std::unique_ptr<AuthPam> auth;
     std::unique_ptr<ScalesRenderer> scales;
@@ -114,13 +118,16 @@ struct LockSurface::State {
 LockSurface::LockSurface(
     GtkApplication* app,
     int monitor_index,
-    bool interactive
+    bool interactive,
+    bool session_lock_surface
 ) : state_(std::make_shared<State>()) {
     state_->self = state_;
     state_->owner = this;
     state_->application = app;
     state_->monitor_index = monitor_index;
     state_->interactive = interactive;
+    state_->session_lock_surface = session_lock_surface;
+    state_->monitor_binding_verified = session_lock_surface;
     if (interactive) state_->auth = std::make_unique<AuthPam>();
     state_->scales = std::make_unique<ScalesRenderer>();
     state_->shaders = std::make_unique<ShaderManager>();
@@ -133,13 +140,27 @@ LockSurface::LockSurface(
     gtk_widget_add_css_class(GTK_WIDGET(state_->window), "realmheart-broken-seal-window");
     // Exactly one Broken Seal surface owns the keyboard. Every other output
     // gets a visual mirror bound to its own wl_output with no input grab.
-    apply_layer_surface(
-        state_->window,
-        make_lockscreen_surface_spec(
-            monitor_index,
-            interactive ? LayerKeyboardMode::Exclusive : LayerKeyboardMode::None
-        )
-    );
+    if (!session_lock_surface) {
+        apply_layer_surface(
+            state_->window,
+            make_lockscreen_surface_spec(
+                monitor_index,
+                interactive ? LayerKeyboardMode::Exclusive : LayerKeyboardMode::None
+            )
+        );
+        g_signal_connect(
+            state_->window,
+            "realize",
+            G_CALLBACK(+[](GtkWidget* widget, gpointer data) {
+                auto* state = static_cast<State*>(data);
+                state->monitor_binding_verified = set_layer_surface_monitor(
+                    GTK_WINDOW(widget),
+                    state->monitor_index
+                );
+            }),
+            state_.get()
+        );
+    }
 
     g_signal_connect(
         state_->window,
@@ -149,12 +170,14 @@ LockSurface::LockSurface(
             // Only the interactive surface owns the keyboard. Mirror surfaces
             // still cover their outputs but never compete for the exclusive
             // key focus.
-            gtk_layer_set_keyboard_mode(
-                GTK_WINDOW(widget),
-                state->interactive
-                    ? GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE
-                    : GTK_LAYER_SHELL_KEYBOARD_MODE_NONE
-            );
+            if (!state->session_lock_surface) {
+                gtk_layer_set_keyboard_mode(
+                    GTK_WINDOW(widget),
+                    state->interactive
+                        ? GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE
+                        : GTK_LAYER_SHELL_KEYBOARD_MODE_NONE
+                );
+            }
             // Never advertise opacity, or the compositor skips alpha blending
             // and the surface's transparent pixels become a black rectangle.
             if (GdkSurface* surface = gtk_native_get_surface(
@@ -210,6 +233,14 @@ void LockSurface::set_unlocked_callback(std::function<void()> callback) {
 
 void LockSurface::set_unlock_started_callback(std::function<void()> callback) {
     if (state_ != nullptr) state_->unlock_started_callback = std::move(callback);
+}
+
+void LockSurface::set_authentication_enabled(bool enabled) noexcept {
+    if (state_ == nullptr) return;
+    state_->authentication_enabled = enabled;
+    if (!enabled && state_->entry != nullptr) {
+        gtk_widget_set_visible(state_->entry, FALSE);
+    }
 }
 
 void LockSurface::setup_layout() {
@@ -364,9 +395,11 @@ void LockSurface::show() {
     gtk_window_present(state_->window);
     force_transparent_surface();
 
-    // Re-assert exclusive keyboard after present so the compositor routes
-    // all keys to this surface (lockscreen grab).
-    if (gtk_widget_get_realized(GTK_WIDGET(state_->window))) {
+    // Re-assert exclusive keyboard after present for the legacy layer-shell
+    // caller. Session-lock surfaces receive keyboard input through the
+    // compositor's lock role and must not be assigned a layer-shell role.
+    if (!state_->session_lock_surface &&
+        gtk_widget_get_realized(GTK_WIDGET(state_->window))) {
         gtk_layer_set_keyboard_mode(
             state_->window,
             state_->interactive
@@ -376,7 +409,7 @@ void LockSurface::show() {
     }
 
     // Show and focus the password entry.
-    if (state_->interactive && state_->entry != nullptr) {
+    if (state_->authentication_enabled && state_->interactive && state_->entry != nullptr) {
         gtk_widget_set_visible(state_->entry, TRUE);
         gtk_widget_grab_focus(state_->entry);
     }
@@ -443,8 +476,17 @@ bool LockSurface::mapped() const noexcept {
         gtk_widget_get_mapped(GTK_WIDGET(state_->window));
 }
 
+bool LockSurface::coverage_verified() const noexcept {
+    return mapped() && (state_ == nullptr || state_->session_lock_surface ||
+                        state_->monitor_binding_verified);
+}
+
 bool LockSurface::interactive() const noexcept {
     return state_ != nullptr && state_->interactive;
+}
+
+bool LockSurface::uses_session_lock() const noexcept {
+    return state_ != nullptr && state_->session_lock_surface;
 }
 
 int LockSurface::monitor_index() const noexcept {
@@ -518,6 +560,13 @@ void LockSurface::advance_frame() {
         state_->closing = false;
         state_->stop_tick();
         if (state_->scales != nullptr) state_->scales->finish();
+        if (state_->session_lock_surface && state_->unlocked_callback) {
+            // Session-lock owns the surface role and unmaps/destroys the
+            // assigned window during unlock. Let the shell release that
+            // protocol before touching the window again.
+            state_->unlocked_callback();
+            return;
+        }
         if (state_->window != nullptr) {
             gtk_widget_set_visible(GTK_WIDGET(state_->window), FALSE);
         }
@@ -570,7 +619,8 @@ void LockSurface::push_frame() {
 
 gboolean LockSurface::submit_password() {
     if (state_ == nullptr || state_->entry == nullptr || state_->auth == nullptr ||
-        state_->closing || state_->machine->phase() == ScalesPhase::Hidden) {
+        !state_->authentication_enabled || state_->closing ||
+        state_->machine->phase() == ScalesPhase::Hidden) {
         return TRUE;
     }
 

@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -30,15 +31,11 @@
 namespace realmheart::ui::lockscreen {
 namespace {
 
-// CMake supplies the installed libexec path. The executable-relative fallback
-// keeps an uninstalled build diagnosable, but helper_is_secure() still requires
-// a root-owned setuid file before it can be executed.
+// Resolve the helper next to the installed executable first. This keeps
+// `cmake --install --prefix ...` relocatable at runtime; the configured absolute
+// path remains a compatibility fallback for older system installations. Every
+// candidate still passes helper_is_secure() before it can be executed.
 std::string auth_helper_path() {
-    const std::string configured = REALMHEART_AUTH_HELPER_PATH;
-    if (!configured.empty() && ::access(configured.c_str(), F_OK) == 0) {
-        return configured;
-    }
-
     char exe[4096]{};
     const ssize_t len = ::readlink("/proc/self/exe", exe, sizeof(exe) - 1);
     if (len <= 0) return {};
@@ -57,22 +54,98 @@ std::string auth_helper_path() {
             if (::access(derived.c_str(), F_OK) == 0) return derived;
         }
     }
+
+    const std::string configured = REALMHEART_AUTH_HELPER_PATH;
+    if (!configured.empty() && ::access(configured.c_str(), F_OK) == 0) {
+        return configured;
+    }
     return executable_dir + "/realmheart-auth-helper";
 }
 
-bool helper_is_secure(const std::string& path) noexcept {
-    struct stat metadata{};
-    if (::stat(path.c_str(), &metadata) != 0 ||
-        !S_ISREG(metadata.st_mode) ||
-        metadata.st_uid != 0 ||
-        (metadata.st_mode & S_ISUID) == 0 ||
-        (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
-        return false;
+bool secure_directory(const struct stat& metadata) noexcept {
+    return S_ISDIR(metadata.st_mode) &&
+        metadata.st_uid == 0 &&
+        (metadata.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+int open_secure_helper(const std::string& path) noexcept {
+    if (path.empty() || path.front() != '/') return -1;
+
+    int directory = ::open(
+        "/",
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+    );
+    if (directory < 0) return -1;
+
+    std::size_t cursor = 1;
+    while (cursor < path.size()) {
+        const std::size_t slash = path.find('/', cursor);
+        const bool final_component = slash == std::string::npos;
+        const std::size_t length = (final_component ? path.size() : slash) - cursor;
+        if (length == 0) {
+            cursor = slash + 1;
+            continue;
+        }
+        const std::string component = path.substr(cursor, length);
+        if (component == "." || component == "..") {
+            ::close(directory);
+            return -1;
+        }
+
+        if (final_component) {
+            const int helper = ::openat(
+                directory,
+                component.c_str(),
+                O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+            );
+            ::close(directory);
+            if (helper < 0) return -1;
+
+            struct stat metadata{};
+            if (::fstat(helper, &metadata) != 0 ||
+                !S_ISREG(metadata.st_mode) ||
+                metadata.st_uid != 0 ||
+                (metadata.st_mode & S_ISUID) == 0 ||
+                (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0 ||
+                (metadata.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0) {
+                ::close(helper);
+                return -1;
+            }
+            return helper;
+        }
+
+        const int next_directory = ::openat(
+            directory,
+            component.c_str(),
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+        );
+        ::close(directory);
+        if (next_directory < 0) return -1;
+        struct stat metadata{};
+        if (::fstat(next_directory, &metadata) != 0 ||
+            !secure_directory(metadata)) {
+            ::close(next_directory);
+            return -1;
+        }
+        directory = next_directory;
+        cursor = slash + 1;
     }
-    return ::access(path.c_str(), X_OK) == 0;
+    ::close(directory);
+    return -1;
+}
+
+bool helper_is_secure(const std::string& path) noexcept {
+    const int helper = open_secure_helper(path);
+    if (helper < 0) return false;
+    ::close(helper);
+    return true;
 }
 
 } // namespace
+
+bool auth_helper_is_secure(const std::string& path) noexcept {
+    return helper_is_secure(path);
+}
 
 void SecretBuffer::wipe(char* data, const std::size_t size) noexcept {
     if (data == nullptr) return;
@@ -169,10 +242,12 @@ void AuthPam::verify_async(
 
         if (helper.empty()) {
             std::cerr << "[Lockscreen] auth: cannot resolve helper path\n";
-        } else if (!helper_is_secure(helper)) {
+        } else {
+            const int helper_fd = open_secure_helper(helper);
+            if (helper_fd < 0) {
             std::cerr << "[Lockscreen] auth: helper missing or insecure: "
                       << helper << "\n";
-        } else {
+            } else {
             // Spawn the setuid helper: argv = [helper, username], stdin = password.
             // A socketpair lets the parent use MSG_NOSIGNAL instead of changing
             // the process-wide SIGPIPE disposition.
@@ -184,17 +259,23 @@ void AuthPam::verify_async(
                     ::dup2(socketfd[0], STDIN_FILENO);
                     ::close(socketfd[0]);
                     ::close(socketfd[1]);
-                    ::execl(helper.c_str(), helper.c_str(), username.c_str(),
-                            static_cast<char*>(nullptr));
+                    char* helper_argv[] = {
+                        const_cast<char*>(helper.c_str()),
+                        const_cast<char*>(username.c_str()),
+                        nullptr
+                    };
+                    ::fexecve(helper_fd, helper_argv, environ);
                     _exit(127);
                 }
                 if (pid < 0) {
                     const int fork_error = errno;
+                    ::close(helper_fd);
                     ::close(socketfd[0]);
                     ::close(socketfd[1]);
                     std::cerr << "[Lockscreen] auth: fork() failed: "
                               << std::strerror(fork_error) << "\n";
                 } else {
+                    ::close(helper_fd);
                     state->child_pid.store(pid);
                     ::close(socketfd[0]);
                     std::size_t remaining = password.size();
@@ -259,8 +340,10 @@ void AuthPam::verify_async(
                     }
                 }
             } else {
+                ::close(helper_fd);
                 std::cerr << "[Lockscreen] auth: socketpair() failed: "
                           << std::strerror(errno) << "\n";
+            }
             }
         }
 

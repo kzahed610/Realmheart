@@ -7,16 +7,18 @@
 
 namespace realmheart::ui::lockscreen {
 
-// Broken Seal lockscreen surface. A layer-shell overlay window
-// (namespace realmheart-broken_seal, exclusive keyboard) hosting the scales
-// GL scene as the base layer, with the password entry and "BROKEN SEAL"
-// title as GTK widgets above it. PAM auth via AuthPam.
+// Broken Seal lockscreen surface. The normal path uses the compositor's
+// ext-session-lock role; the layer-shell role is retained only for callers
+// that explicitly request a non-lock surface. The surface hosts the scales GL
+// scene as the base layer, with the password entry and "BROKEN SEAL" title as
+// GTK widgets above it. PAM auth via AuthPam.
 class LockSurface {
 public:
     explicit LockSurface(
         GtkApplication* app,
         int monitor_index = -1,
-        bool interactive = true
+        bool interactive = true,
+        bool session_lock_surface = false
     );
     ~LockSurface();
 
@@ -26,6 +28,7 @@ public:
     // Invoked when the user authenticates successfully and the surface hides.
     void set_unlocked_callback(std::function<void()> callback);
     void set_unlock_started_callback(std::function<void()> callback);
+    void set_authentication_enabled(bool enabled) noexcept;
 
     [[nodiscard]] GtkWindow* window() const noexcept;
 
@@ -39,7 +42,9 @@ public:
 
     [[nodiscard]] bool visible() const noexcept;
     [[nodiscard]] bool mapped() const noexcept;
+    [[nodiscard]] bool coverage_verified() const noexcept;
     [[nodiscard]] bool interactive() const noexcept;
+    [[nodiscard]] bool uses_session_lock() const noexcept;
     [[nodiscard]] int monitor_index() const noexcept;
 
 private:

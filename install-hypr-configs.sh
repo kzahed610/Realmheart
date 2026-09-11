@@ -21,6 +21,20 @@ HYPRLAND_DIR="${HOME}/.config/hypr"
 REALMHEART_DIR="${HOME}/.config/realmheart"
 LOCAL_BIN_DIR="${HOME}/.local/bin"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
+REALMHEART_BINARY_PATH="${REALMHEART_BINARY:-$SCRIPT_DIR/build-hybrid/realmheart}"
+REALMHEART_INSTALL_PREFIX="${REALMHEART_INSTALL_PREFIX:-/usr/local}"
+REALMHEART_SYSTEM_ROOT="${REALMHEART_SYSTEM_ROOT:-}"
+if [[ -z "${REALMHEART_AUTH_HELPER_DESTINATION:-}" ]]; then
+    if [[ "$REALMHEART_BINARY_PATH" == */bin/realmheart &&
+          "$REALMHEART_INSTALL_PREFIX" == "/usr/local" ]]; then
+        REALMHEART_INSTALL_PREFIX="$(dirname -- "$(dirname -- "$REALMHEART_BINARY_PATH")")"
+    fi
+    if [[ -n "$REALMHEART_SYSTEM_ROOT" ]]; then
+        REALMHEART_AUTH_HELPER_DESTINATION="${REALMHEART_SYSTEM_ROOT%/}${REALMHEART_INSTALL_PREFIX}/libexec/realmheart/realmheart-auth-helper"
+    else
+        REALMHEART_AUTH_HELPER_DESTINATION="$REALMHEART_INSTALL_PREFIX/libexec/realmheart/realmheart-auth-helper"
+    fi
+fi
 
 # If invoked through sudo, resolve the real user's home from SUDO_USER so we
 # never write config files into /root. Refuse silently if the variable isn't
@@ -162,6 +176,103 @@ copy_file() {
     echo "  installed: $dest"
 }
 
+install_secure_auth_helper() {
+    local source="${REALMHEART_AUTH_HELPER_SOURCE:-$(dirname -- "$REALMHEART_BINARY_PATH")/realmheart-auth-helper}"
+    local destination="$REALMHEART_AUTH_HELPER_DESTINATION"
+    local use_sudo=""
+    local metadata=""
+
+    if [[ ! -f "$source" || -L "$source" ]]; then
+        echo "  error: auth helper is not a regular file: $source" >&2
+        return 1
+    fi
+    if [[ ! -x "$source" ]]; then
+        echo "  error: auth helper is not executable: $source" >&2
+        return 1
+    fi
+    if [[ "${REALMHEART_ALLOW_UNPRIVILEGED_STAGED_INSTALL:-0}" == "1" &&
+          ( -z "$REALMHEART_SYSTEM_ROOT" ||
+            "$destination" != "${REALMHEART_SYSTEM_ROOT%/}/"* ) ]]; then
+        echo "  error: unprivileged auth-helper staging must stay inside REALMHEART_SYSTEM_ROOT" >&2
+        return 1
+    fi
+
+    if need_sudo "$destination"; then
+        use_sudo="sudo"
+    fi
+    local install_command=(install -D -o root -g root -m 4755)
+    if [[ "${REALMHEART_ALLOW_UNPRIVILEGED_STAGED_INSTALL:-0}" == "1" &&
+          -n "$REALMHEART_SYSTEM_ROOT" ]]; then
+        # Package staging is intentionally explicit and cannot create a
+        # runnable secure helper: the staged file remains user-owned until the
+        # privileged package installation sets root:root ownership.
+        install_command=(install -D -m 4755)
+    fi
+    if ! run_privileged "${install_command[@]}" -- "$source" "$destination"; then
+        echo "  error: unable to install root-owned setuid auth helper at $destination" >&2
+        echo "         run this installer with sudo available, or set REALMHEART_AUTH_HELPER_DESTINATION" >&2
+        return 1
+    fi
+    if ! metadata="$(run_privileged stat -c '%u:%g:%a' -- "$destination")" ||
+       { [[ "$metadata" != "0:0:4755" ]] &&
+         [[ "${REALMHEART_ALLOW_UNPRIVILEGED_STAGED_INSTALL:-0}" != "1" ]]; }; then
+        echo "  error: auth helper failed security metadata check at $destination ($metadata)" >&2
+        return 1
+    fi
+    echo "  installed secure auth helper: $destination"
+}
+
+install_lock_command() {
+    local binary="$REALMHEART_BINARY_PATH"
+    local destination="$LOCAL_BIN_DIR/realmheart-lock-session"
+    local temporary
+    local quoted_binary
+    temporary="$(mktemp -t realmheart-lock-command-XXXXXX)"
+    quoted_binary="$(printf '%q' "$binary")"
+
+    if ! {
+        printf '%s\n' \
+            '#!/usr/bin/env bash' \
+            'set -euo pipefail' \
+            '' \
+            'suspend=0' \
+            'case "${1:-}" in' \
+            '    "") ;;' \
+            '    "--suspend") suspend=1 ;;' \
+            '    *) printf "Realmheart: unknown lock command argument: %s\\n" "$1" >&2; exit 2 ;;' \
+            'esac' \
+            '' \
+            "binary=$quoted_binary" \
+            'if [[ ! -x "$binary" ]]; then' \
+            '    printf "%s\\n" "Realmheart: native lock binary was not found: $binary" >&2' \
+            '    exit 127' \
+            'fi' \
+            'if ! "$binary" --command lock-session "$$-$(/usr/bin/date +%s%N)"; then' \
+            '    printf "%s\\n" "Realmheart: native lock request could not be delivered" >&2' \
+            '    exit 125' \
+            'fi' \
+            '' \
+            'if (( suspend )); then' \
+            '    /usr/bin/systemctl suspend || /usr/bin/loginctl suspend' \
+            'fi'
+    } >"$temporary"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    if ! chmod 0755 "$temporary"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+
+    echo "[realmheart-lock-session]"
+    if copy_file "$temporary" "$destination"; then
+        rm -f -- "$temporary"
+    else
+        rm -f -- "$temporary"
+        return 1
+    fi
+}
+
 install_config_source() {
     local src="$1"
     local rel="${src#$CONFIG_SRC/}"
@@ -174,8 +285,7 @@ install_config_source() {
     elif [[ "$rel" == bin/* ]]; then
         dest_base="$LOCAL_BIN_DIR/${rel#bin/}"
     elif [[ "$rel" == pam/* ]]; then
-        echo "  skipped: $src (install with CMake to /etc/pam.d)"
-        return 0
+        dest_base="$REALMHEART_SYSTEM_ROOT/etc/pam.d/${rel#pam/}"
     else
         return 0
     fi
@@ -187,7 +297,7 @@ install_config_source() {
 install_realmheart_service() {
     # REALMHEART_BINARY is an explicit deployment/test override; normal users
     # get the repository build path used by the historical helper.
-    local binary="${REALMHEART_BINARY:-$SCRIPT_DIR/build-hybrid/realmheart}"
+    local binary="$REALMHEART_BINARY_PATH"
     local destination="$SYSTEMD_USER_DIR/realmheart.service"
     local temporary
     local escaped_binary
@@ -253,6 +363,9 @@ reload_current_user_manager() {
 
 echo "=== Realmheart Hyprland Config Installer ==="
 echo ""
+
+install_secure_auth_helper
+install_lock_command
 
 # Install dependencies first. Hyprland watches its entrypoint and may reload as
 # soon as hyprland.lua appears; copying it before realmheart_fx.lua exists causes

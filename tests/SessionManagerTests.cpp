@@ -5,6 +5,8 @@
 #include <string>
 #include <cassert>
 #include <memory>
+#include <optional>
+#include <sys/types.h>
 
 class MockCommandExecutor : public realmheart::services::ICommandExecutor {
 public:
@@ -14,10 +16,18 @@ public:
     bool next_background_result = true;
     bool bounded_capture_used = false;
     std::chrono::milliseconds bounded_capture_deadline{};
+    std::vector<std::vector<std::string>> tracked_background_calls;
+    std::optional<pid_t> next_tracked_pid = 4242;
 
     bool run_background(const std::vector<std::string>& argv) override {
         background_calls.push_back(argv);
         return next_background_result;
+    }
+    std::optional<pid_t> run_background_tracked(
+        const std::vector<std::string>& argv
+    ) override {
+        tracked_background_calls.push_back(argv);
+        return next_tracked_pid;
     }
     bool run_capture_succeeded(const std::vector<std::string>& argv) override {
         capture_calls.push_back(argv);
@@ -33,17 +43,17 @@ public:
     }
 };
 
-void test_lock_triggers_hyprlock() {
+void test_fallback_lock_triggers_hyprlock() {
     auto mock = std::make_unique<MockCommandExecutor>();
     auto* mock_ptr = mock.get();
     realmheart::services::SessionManager session(std::move(mock));
 
-    bool result = session.lock();
+    bool result = session.fallback_lock();
 
     if (!result) { std::cerr << "Lock failed\n"; exit(1); }
     if (mock_ptr->background_calls.size() != 1) { std::cerr << "Wrong call count\n"; exit(1); }
     if (mock_ptr->background_calls[0] != std::vector<std::string>{"/usr/bin/hyprlock"}) { std::cerr << "Wrong trusted command\n"; exit(1); }
-    std::cout << "test_lock_triggers_hyprlock PASSED\n";
+    std::cout << "test_fallback_lock_triggers_hyprlock PASSED\n";
 }
 
 void test_suspend_triggers_systemd_suspend() {
@@ -59,6 +69,18 @@ void test_suspend_triggers_systemd_suspend() {
     std::cout << "test_suspend_triggers_systemd_suspend PASSED\n";
 }
 
+void test_tracked_fallback_preserves_child_identity() {
+    auto mock = std::make_unique<MockCommandExecutor>();
+    auto* mock_ptr = mock.get();
+    realmheart::services::SessionManager session(std::move(mock));
+
+    const auto pid = session.fallback_lock_tracked();
+    assert(pid && *pid == 4242);
+    assert(mock_ptr->tracked_background_calls ==
+           std::vector<std::vector<std::string>>{{"/usr/bin/hyprlock"}});
+    std::cout << "test_tracked_fallback_preserves_child_identity PASSED\n";
+}
+
 void test_session_action_reports_post_exec_failure() {
     auto mock = std::make_unique<MockCommandExecutor>();
     auto* mock_ptr = mock.get();
@@ -71,6 +93,27 @@ void test_session_action_reports_post_exec_failure() {
         exit(1);
     }
     std::cout << "test_session_action_reports_post_exec_failure PASSED\n";
+}
+
+void test_emergency_lock_is_best_effort_and_bounded() {
+    auto mock = std::make_unique<MockCommandExecutor>();
+    auto* mock_ptr = mock.get();
+    mock_ptr->next_capture_result = false;
+    realmheart::services::SessionManager session(std::move(mock));
+
+    session.request_emergency_lock();
+    if (!mock_ptr->bounded_capture_used ||
+        mock_ptr->bounded_capture_deadline != std::chrono::seconds(1)) {
+        std::cerr << "Emergency lock must use a bounded best-effort request\n";
+        exit(1);
+    }
+    if (mock_ptr->capture_calls != std::vector<std::vector<std::string>>{
+            {"/usr/bin/loginctl", "lock-session"}
+        }) {
+        std::cerr << "Emergency lock must use the trusted loginctl path\n";
+        exit(1);
+    }
+    std::cout << "test_emergency_lock_is_best_effort_and_bounded PASSED\n";
 }
 
 void test_logout_triggers_hyprland_exit() {
@@ -112,35 +155,16 @@ void test_power_off_triggers_systemd_poweroff() {
     std::cout << "test_power_off_triggers_systemd_poweroff PASSED\n";
 }
 
-void test_is_locked_checks_pgrep() {
-    auto mock = std::make_unique<MockCommandExecutor>();
-    auto* mock_ptr = mock.get();
-    realmheart::services::SessionManager session(std::move(mock));
-
-    mock_ptr->next_capture_result = true;
-    if (!session.is_locked()) { std::cerr << "Should be locked\n"; exit(1); }
-
-    mock_ptr->next_capture_result = false;
-    if (session.is_locked()) { std::cerr << "Should be unlocked\n"; exit(1); }
-
-    if (mock_ptr->capture_calls.size() != 2) { std::cerr << "Wrong call count\n"; exit(1); }
-    if (mock_ptr->capture_calls[0] != std::vector<std::string>{"/usr/bin/pgrep", "-x", "hyprlock"}) { std::cerr << "Wrong trusted command\n"; exit(1); }
-    if (!mock_ptr->bounded_capture_used ||
-        mock_ptr->bounded_capture_deadline != std::chrono::milliseconds(250)) {
-        std::cerr << "Lock-state probe must use a bounded deadline\n";
-        exit(1);
-    }
-    std::cout << "test_is_locked_checks_pgrep PASSED\n";
-}
-
 int main() {
-    test_lock_triggers_hyprlock();
+    test_fallback_lock_triggers_hyprlock();
     test_suspend_triggers_systemd_suspend();
+    test_tracked_fallback_preserves_child_identity();
     test_session_action_reports_post_exec_failure();
+    test_emergency_lock_is_best_effort_and_bounded();
     test_logout_triggers_hyprland_exit();
     test_reboot_triggers_systemd_reboot();
     test_power_off_triggers_systemd_poweroff();
-    test_is_locked_checks_pgrep();
+
     std::cout << "All SessionManager tests PASSED (MOCKED)\n";
     return 0;
 }

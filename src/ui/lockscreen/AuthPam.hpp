@@ -10,6 +10,11 @@
 
 namespace realmheart::ui::lockscreen {
 
+// Returns true only for the root-owned, setuid, non-writable executable that
+// the PAM boundary requires. Kept as a narrow contract so deployment tests can
+// exercise the same predicate used by AuthPam without invoking PAM.
+[[nodiscard]] bool auth_helper_is_secure(const std::string& path) noexcept;
+
 // Bounded, move-only storage for password material. The allocation is wiped
 // before release so authentication code never needs to copy a std::string
 // containing a password through a worker or IPC payload.

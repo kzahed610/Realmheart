@@ -10,6 +10,8 @@ namespace realmheart::ui::powermenu {
 
 struct PowerMenuActions {
     std::function<bool()> lock;
+    // Reports that the persistent shell accepted the native lock request.
+    // This is deliberately not a hyprlock process-state probe.
     std::function<bool()> lock_state;
     std::function<bool()> suspend;
     std::function<bool()> logout;

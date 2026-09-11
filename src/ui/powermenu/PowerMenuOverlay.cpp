@@ -532,7 +532,7 @@ void PowerMenuOverlay::begin_lock_verification() {
     }
     gtk_label_set_text(
         GTK_LABEL(confirmation_banner_),
-        "Lock request sent; waiting for the session to confirm it..."
+        "Native lock request accepted; closing power menu..."
     );
     gtk_widget_set_visible(confirmation_banner_, TRUE);
     gtk_widget_set_opacity(confirmation_banner_, 1.0);
