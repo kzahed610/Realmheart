@@ -48,6 +48,7 @@ option(REALMHEART_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(REALMHEART_ENABLE_NATIVE_WALLPAPER "Build the Wayland/EGL wallpaper renderer when dependencies are available" ON)
 option(REALMHEART_BUILD_HYPRLAND_PLUGIN "Build the optional Realmheart FX Hyprland plugin when matching headers are available" ON)
 option(REALMHEART_ENABLE_SCREENSHOT "Build the optional Wayland/OpenCV screenshot tools" ON)
+option(REALMHEART_EVENTD_AUTOSTART "Install/enable/restart the user Event Surface daemon after relinking it" ON)
 option(REALMHEART_REGISTER_LIVE_COMPOSITOR_TESTS "Register compositor lifecycle probes against an explicitly isolated Wayland display" OFF)
 set(REALMHEART_ISOLATED_WAYLAND_DISPLAY "" CACHE STRING "Wayland display/socket reserved for Realmheart lifecycle tests")
 set(REALMHEART_WLR_LAYER_SHELL_XML "" CACHE FILEPATH "Path to wlr-layer-shell-unstable-v1.xml")
@@ -62,6 +63,7 @@ pkg_check_modules(GTK4_LAYER_SHELL REQUIRED IMPORTED_TARGET gtk4-layer-shell-0)
 pkg_check_modules(GDK_PIXBUF REQUIRED IMPORTED_TARGET gdk-pixbuf-2.0)
 pkg_check_modules(JPEG REQUIRED IMPORTED_TARGET libjpeg)
 pkg_check_modules(HYPRLAND QUIET IMPORTED_TARGET hyprland)
+pkg_check_modules(SQLITE3 REQUIRED IMPORTED_TARGET sqlite3)
 
 set(REALMHEART_WARNING_FLAGS
     -Wall -Wextra -Wpedantic
@@ -146,6 +148,53 @@ target_link_libraries(realmheart_gl_probe PRIVATE
     PkgConfig::EPOXY
 )
 
+add_library(realmheart_event_core STATIC
+    src/events/EventTypes.cpp
+    src/events/EventProtocol.cpp
+    src/events/EventTransport.cpp
+    src/events/EventClient.cpp
+    src/events/EventStore.cpp
+    src/events/EventPersistence.cpp
+)
+target_include_directories(realmheart_event_core PUBLIC src third_party)
+target_compile_options(realmheart_event_core PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_link_libraries(realmheart_event_core PUBLIC Threads::Threads PkgConfig::SQLITE3)
+
+add_executable(realmheart_eventd
+    src/eventd/main.cpp
+    src/eventd/EventDaemonServer.cpp
+    src/eventd/RateLimiter.cpp
+    src/eventd/FallbackNotifier.cpp
+)
+set_target_properties(realmheart_eventd PROPERTIES OUTPUT_NAME "realmheart-eventd")
+target_include_directories(realmheart_eventd PRIVATE src third_party)
+target_compile_options(realmheart_eventd PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_link_libraries(realmheart_eventd PRIVATE realmheart_event_core Threads::Threads)
+
+if(REALMHEART_EVENTD_AUTOSTART)
+    find_program(REALMHEART_BASH_EXECUTABLE bash)
+    if(REALMHEART_BASH_EXECUTABLE)
+        add_custom_command(
+            TARGET realmheart_eventd POST_BUILD
+            COMMAND "${REALMHEART_BASH_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tools/realmheart-eventd-autostart.sh"
+                "$<TARGET_FILE:realmheart_eventd>"
+            COMMENT "Realmheart: refreshing realmheart-eventd user service"
+            VERBATIM
+        )
+    else()
+        message(WARNING "Realmheart Event Surface: bash not found; automatic eventd service setup is disabled")
+    endif()
+endif()
+
+add_executable(realmheart_event_cli
+    src/event-cli/main.cpp
+)
+set_target_properties(realmheart_event_cli PROPERTIES OUTPUT_NAME "realmheart-event")
+target_include_directories(realmheart_event_cli PRIVATE src third_party)
+target_compile_options(realmheart_event_cli PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_link_libraries(realmheart_event_cli PRIVATE realmheart_event_core Threads::Threads)
+
 add_executable(realmheart
     src/main.cpp
     ${REALMHEART_RUNTIME_SOURCES}
@@ -215,6 +264,9 @@ add_library(realmheart_ui STATIC
     src/ui/sidebar/SidebarGeometry.cpp
     src/ui/sidebar/SidebarFrame.cpp
     src/ui/NotificationToast.cpp
+    src/ui/events/EventSurface.cpp
+    src/ui/events/EventRevealClip.cpp
+    src/ui/events/EventSurfaceGeometry.cpp
     src/ui/NowPlayingOverlay.cpp
     src/ui/OSDOverlay.cpp
     src/ui/lockscreen/AuthPam.cpp
@@ -270,6 +322,7 @@ target_compile_definitions(realmheart_ui PRIVATE
 )
 target_compile_options(realmheart_ui PRIVATE ${REALMHEART_WARNING_FLAGS})
 target_link_libraries(realmheart_ui PRIVATE
+    realmheart_event_core
     PkgConfig::GIO
     PkgConfig::GTK4
     PkgConfig::GTK4_LAYER_SHELL
@@ -546,7 +599,7 @@ if(TARGET realmheart_fx)
     )
 endif()
 
-install(TARGETS realmheart realmheart_power_menu_renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS realmheart realmheart_power_menu_renderer realmheart_eventd realmheart_event_cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(REALMHEART_ENABLE_SCREENSHOT)
     install(TARGETS realmheart_screenshot RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     install(TARGETS realmheart_screenshot_regions RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -661,6 +714,66 @@ if(BUILD_TESTING)
         endif()
         set_tests_properties(${target} PROPERTIES TIMEOUT 20)
     endfunction()
+
+    add_executable(
+        realmheart_event_protocol_tests
+        tests/EventProtocolTests.cpp
+    )
+    target_link_libraries(realmheart_event_protocol_tests PRIVATE realmheart_event_core)
+    realmheart_register_test(realmheart_event_protocol_tests)
+
+    add_executable(
+        realmheart_event_store_tests
+        tests/EventStoreTests.cpp
+    )
+    target_link_libraries(realmheart_event_store_tests PRIVATE realmheart_event_core)
+    realmheart_register_test(realmheart_event_store_tests)
+
+    add_executable(
+        realmheart_event_persistence_tests
+        tests/EventPersistenceTests.cpp
+    )
+    target_link_libraries(realmheart_event_persistence_tests PRIVATE realmheart_event_core)
+    realmheart_register_test(realmheart_event_persistence_tests)
+
+    add_executable(
+        realmheart_event_rate_limiter_tests
+        tests/EventRateLimiterTests.cpp
+        src/eventd/RateLimiter.cpp
+    )
+    target_link_libraries(realmheart_event_rate_limiter_tests PRIVATE Threads::Threads)
+    target_include_directories(realmheart_event_rate_limiter_tests PRIVATE src third_party)
+    target_compile_options(realmheart_event_rate_limiter_tests PRIVATE ${REALMHEART_WARNING_FLAGS})
+    realmheart_register_test(realmheart_event_rate_limiter_tests)
+
+    add_executable(
+        realmheart_event_fallback_notifier_tests
+        tests/EventFallbackNotifierTests.cpp
+        src/eventd/FallbackNotifier.cpp
+    )
+    target_link_libraries(realmheart_event_fallback_notifier_tests PRIVATE realmheart_event_core)
+    realmheart_register_test(realmheart_event_fallback_notifier_tests)
+
+    add_executable(
+        realmheart_event_surface_geometry_tests
+        tests/EventSurfaceGeometryTests.cpp
+        src/core/DisplayTier.cpp
+        src/core/MonitorContext.cpp
+        src/ui/events/EventSurfaceGeometry.cpp
+    )
+    target_include_directories(realmheart_event_surface_geometry_tests PRIVATE src third_party)
+    target_compile_options(realmheart_event_surface_geometry_tests PRIVATE ${REALMHEART_WARNING_FLAGS})
+    realmheart_register_test(realmheart_event_surface_geometry_tests)
+
+    add_executable(
+        realmheart_event_daemon_integration_tests
+        tests/EventDaemonIntegrationTests.cpp
+        src/eventd/EventDaemonServer.cpp
+        src/eventd/RateLimiter.cpp
+        src/eventd/FallbackNotifier.cpp
+    )
+    target_link_libraries(realmheart_event_daemon_integration_tests PRIVATE realmheart_event_core)
+    realmheart_register_test(realmheart_event_daemon_integration_tests)
 
     add_executable(
         realmheart_display_tier_tests
@@ -1297,6 +1410,12 @@ if(BUILD_TESTING)
         COMMAND bash ${CMAKE_SOURCE_DIR}/tests/HyprConfigInstallerTests.sh ${CMAKE_SOURCE_DIR}
     )
     set_tests_properties(realmheart_hypr_config_installer_tests PROPERTIES TIMEOUT 20)
+
+    add_test(
+        NAME realmheart_eventd_autostart_tests
+        COMMAND bash ${CMAKE_SOURCE_DIR}/tests/EventDaemonAutostartTests.sh ${CMAKE_SOURCE_DIR}
+    )
+    set_tests_properties(realmheart_eventd_autostart_tests PROPERTIES TIMEOUT 20)
 
     add_executable(realmheart_emoji_fallback_tests
         tests/EmojiDataFallbackTests.cpp

@@ -1,0 +1,8 @@
+{
+  "id": "build.realmheart",
+  "source": {"id": "realmheart-build", "name": "Realmheart Build"},
+  "severity": "info",
+  "presentation": "attention",
+  "title": "Building Realmheart",
+  "progress": {"mode": "determinate", "value": 0.63, "label": "63%"}
+}

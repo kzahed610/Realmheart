@@ -22,6 +22,7 @@ REALMHEART_DIR="${HOME}/.config/realmheart"
 LOCAL_BIN_DIR="${HOME}/.local/bin"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 REALMHEART_BINARY_PATH="${REALMHEART_BINARY:-$SCRIPT_DIR/build-hybrid/realmheart}"
+REALMHEART_EVENTD_BINARY_PATH="${REALMHEART_EVENTD_BINARY:-$(dirname -- "$REALMHEART_BINARY_PATH")/realmheart-eventd}"
 REALMHEART_INSTALL_PREFIX="${REALMHEART_INSTALL_PREFIX:-/usr/local}"
 REALMHEART_SYSTEM_ROOT="${REALMHEART_SYSTEM_ROOT:-}"
 if [[ -z "${REALMHEART_AUTH_HELPER_DESTINATION:-}" ]]; then
@@ -308,7 +309,8 @@ install_realmheart_service() {
         printf '%s\n' \
             '[Unit]' \
             'Description=Realmheart desktop shell' \
-            'After=graphical-session.target' \
+            'Wants=realmheart-eventd.service' \
+            'After=graphical-session.target realmheart-eventd.service' \
             'PartOf=graphical-session.target' \
             '' \
             '[Service]' \
@@ -342,6 +344,46 @@ install_realmheart_service() {
     fi
 }
 
+install_realmheart_eventd_service() {
+    local binary="$REALMHEART_EVENTD_BINARY_PATH"
+    local destination="$SYSTEMD_USER_DIR/realmheart-eventd.service"
+    local temporary
+    local escaped_binary
+    temporary="$(mktemp -t realmheart-eventd-service-XXXXXX)"
+    escaped_binary="$(systemd_escape_exec_arg "$binary")"
+
+    if ! {
+        printf '%s\n' \
+            '[Unit]' \
+            'Description=Realmheart Event Surface daemon' \
+            '' \
+            '[Service]' \
+            'Type=simple' \
+            "ExecStart=$escaped_binary" \
+            'Restart=on-failure' \
+            'RestartSec=1' \
+            '' \
+            '[Install]' \
+            'WantedBy=default.target'
+    } >"$temporary"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    chmod 0644 "$temporary"
+
+    echo "[realmheart-eventd.service]"
+    if copy_file "$temporary" "$destination"; then
+        rm -f -- "$temporary"
+    else
+        rm -f -- "$temporary"
+        return 1
+    fi
+
+    if [[ ! -x "$binary" ]]; then
+        echo "  warning: Realmheart event daemon is not built yet: $binary" >&2
+    fi
+}
+
 reload_current_user_manager() {
     local account_home
     account_home="$(getent passwd "$(id -un)" | cut -d: -f6)"
@@ -358,6 +400,34 @@ reload_current_user_manager() {
         echo "  reloaded current user systemd manager"
     else
         echo "  user manager unavailable; unit will be discovered at next login"
+    fi
+}
+
+activate_realmheart_eventd_service() {
+    local account_home
+    account_home="$(getent passwd "$(id -un)" | cut -d: -f6)"
+
+    # Staged installer tests and sudo-targeted installs must never control the
+    # caller's unrelated user manager. The unit remains enabled on the next
+    # normal build/login path.
+    if [[ "$HOME" != "$account_home" ]] || ! command -v systemctl >/dev/null 2>&1; then
+        echo "  realmheart-eventd activation deferred until the target user's next login/build"
+        return 0
+    fi
+    if ! systemctl --user show-environment >/dev/null 2>&1; then
+        echo "  realmheart-eventd activation deferred; user manager unavailable"
+        return 0
+    fi
+
+    systemctl --user enable realmheart-eventd.service >/dev/null
+    if [[ ! -x "$REALMHEART_EVENTD_BINARY_PATH" ]]; then
+        echo "  enabled realmheart-eventd.service; start deferred until the daemon is built"
+        return 0
+    fi
+    if systemctl --user restart realmheart-eventd.service; then
+        echo "  enabled and started realmheart-eventd.service"
+    else
+        echo "  warning: realmheart-eventd.service is enabled but could not be started now" >&2
     fi
 }
 
@@ -381,11 +451,13 @@ done < <(find "$CONFIG_SRC" -type f -print0 | sort -z)
 # The shipped hyprland/execs.lua already starts realmheart.service on
 # hyprland.start. Install the portable unit before exposing the Lua entrypoint,
 # then refresh the current user manager when it is safe to do so.
+install_realmheart_eventd_service
 install_realmheart_service
 reload_current_user_manager
+activate_realmheart_eventd_service
 
 install_config_source "$CONFIG_SRC/hypr/hyprland.lua"
 
 echo ""
-echo "Done. Realmheart will start through realmheart.service on the next Hyprland login."
+echo "Done. Realmheart uses a user service; realmheart-eventd is enabled as background user infrastructure."
 echo "Reload Hyprland config with: hyprctl reload"

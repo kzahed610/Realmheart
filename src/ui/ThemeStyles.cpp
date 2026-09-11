@@ -90,7 +90,7 @@ ThemeStyles::ThemeStyles(std::shared_ptr<services::ThemeService> theme_service)
       display_(gdk_display_get_default()) {
     if (!theme_service_) throw std::invalid_argument("ThemeStyles requires ThemeService");
 
-    constexpr std::array<std::string_view, 7> component_modules{
+    constexpr std::array<std::string_view, 8> component_modules{
         "taskbar/bar.css",
         "taskbar/icons.css",
         "taskbar/workspaces.css",
@@ -98,6 +98,7 @@ ThemeStyles::ThemeStyles(std::shared_ptr<services::ThemeService> theme_service)
         "launcher/launcher.css",
         "launcher/command-receipt.css",
         "lockscreen/lockscreen.css",
+        "events/event-surface.css",
     };
     try {
         component_css_ = styles::load_css_modules(component_modules);
@@ -235,6 +236,7 @@ std::string ThemeStyles::build_css(const services::Palette& palette) {
         "window.realmheart-sidebar-backdrop-window,\n"
         "window.realmheart-launcher-window,\n"
         "window.realmheart-notification-window,\n"
+        "window.realmheart-event-surface-window,\n"
         "window.realmheart-now-playing-window,\n"
         "window.realmheart-osd-window,\n"
         "window.realmheart-media-layer-window,\n"

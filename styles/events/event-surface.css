@@ -1,0 +1,323 @@
+@define-color rh_event_gold #ffd66b;
+
+window.realmheart-event-surface-window,
+window.realmheart-event-surface-window > *,
+.realmheart-event-surface-revealer,
+.realmheart-event-surface-scroller,
+.realmheart-event-surface-scroller > viewport,
+.realmheart-event-primary-stack {
+  background: transparent;
+  background-color: transparent;
+  background-image: none;
+  box-shadow: none;
+}
+
+.realmheart-event-frame {
+  border: 0.08em solid alpha(@rh_event_gold, 0.84);
+  border-radius: 1.15em;
+  background-color: alpha(@rh_surface, 0.965);
+  background-image: linear-gradient(
+    to bottom,
+    alpha(@rh_primary, 0.055),
+    alpha(@rh_surface, 0.0) 42%
+  );
+  box-shadow:
+    0 0.5em 1.9em alpha(black, 0.34),
+    0 0 1.15em alpha(@rh_event_gold, 0.08),
+    inset 0 0 0 0.04em alpha(@rh_event_gold, 0.10);
+  color: @rh_text;
+}
+
+.realmheart-event-frame-critical {
+  border-color: alpha(@rh_error, 0.96);
+  background-image: linear-gradient(
+    to bottom,
+    alpha(@rh_error, 0.115),
+    alpha(@rh_surface, 0.0) 46%
+  );
+  box-shadow:
+    0 0.55em 2.1em alpha(black, 0.38),
+    0 0 1.7em alpha(@rh_error, 0.24),
+    inset 0 0 0 0.05em alpha(@rh_error, 0.16);
+}
+
+.realmheart-event-frame-attention {
+  box-shadow:
+    0 0.5em 1.9em alpha(black, 0.34),
+    0 0 1.3em alpha(@rh_event_gold, 0.12),
+    inset 0 0 0 0.04em alpha(@rh_event_gold, 0.12);
+}
+
+.realmheart-event-frame-critical.realmheart-event-frame-attention,
+.realmheart-event-frame-critical.realmheart-event-frame-persistent {
+  box-shadow:
+    0 0.6em 2.2em alpha(black, 0.40),
+    0 0 2.0em alpha(@rh_error, 0.30),
+    inset 0 0 0 0.05em alpha(@rh_error, 0.20);
+}
+
+
+
+/* During the bottom-to-top furl, suppress out-of-bounds decoration so GTK's
+ * shadow does not linger for a frame after the clipped card has disappeared. */
+.realmheart-event-frame.realmheart-event-frame-furling {
+  box-shadow: none;
+}
+
+.realmheart-event-selector-section {
+  padding: 0.72em 0.9em 0.66em;
+  border-bottom: 0.06em solid alpha(@rh_event_gold, 0.18);
+  background-color: alpha(@rh_surface_variant, 0.24);
+}
+
+.realmheart-event-frame-critical .realmheart-event-selector-section {
+  border-bottom-color: alpha(@rh_error, 0.24);
+}
+
+.realmheart-event-selector-count {
+  margin-bottom: 0.5em;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  color: alpha(@rh_event_gold, 0.82);
+}
+
+.realmheart-event-frame-critical .realmheart-event-selector-count {
+  color: alpha(@rh_error, 0.92);
+}
+
+.realmheart-event-selector-scroller,
+.realmheart-event-selector-scroller > viewport,
+.realmheart-event-selector-strip {
+  background: transparent;
+  background-color: transparent;
+}
+
+.realmheart-event-selector-strip > button {
+  margin-right: 0.42em;
+}
+
+.realmheart-event-selector-chip {
+  padding: 0.42em 0.72em;
+  border-radius: 0.8em;
+  border: 0.06em solid alpha(@rh_outline, 0.44);
+  background-color: alpha(@rh_surface_variant, 0.48);
+  color: alpha(@rh_text_muted, 0.94);
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.realmheart-event-selector-chip:hover {
+  background-color: alpha(@rh_primary, 0.14);
+  border-color: alpha(@rh_event_gold, 0.62);
+  color: @rh_text;
+}
+
+.realmheart-event-selector-warning {
+  border-color: alpha(@rh_event_gold, 0.58);
+}
+
+.realmheart-event-selector-critical {
+  border-color: alpha(@rh_error, 0.78);
+  color: @rh_error;
+  background-color: alpha(@rh_error, 0.09);
+}
+
+.realmheart-event-card {
+  padding: 1.05em 1.2em 0.9em;
+  background: transparent;
+  color: @rh_text;
+}
+
+.realmheart-event-header {
+  margin-bottom: 0.72em;
+}
+
+.realmheart-event-source {
+  font-size: 0.78rem;
+  font-weight: 750;
+  letter-spacing: 0.025em;
+  color: alpha(@rh_text_muted, 0.92);
+}
+
+.realmheart-event-severity {
+  font-size: 0.70rem;
+  font-weight: 850;
+  letter-spacing: 0.09em;
+  color: alpha(@rh_event_gold, 0.92);
+}
+
+.realmheart-event-card-critical .realmheart-event-severity {
+  color: @rh_error;
+}
+
+.realmheart-event-card-success .realmheart-event-severity {
+  color: @rh_primary;
+}
+
+.realmheart-event-title {
+  margin-bottom: 0.34em;
+  font-size: 1.16rem;
+  font-weight: 820;
+  color: @rh_text;
+}
+
+.realmheart-event-summary {
+  margin-bottom: 0.92em;
+  color: alpha(@rh_text_muted, 0.96);
+  font-size: 0.92rem;
+}
+
+.realmheart-event-fields {
+  margin-bottom: 0.9em;
+  padding: 0.72em 0.8em;
+  border-radius: 0.82em;
+  border: 0.05em solid alpha(@rh_outline, 0.24);
+  background-color: alpha(@rh_surface_variant, 0.46);
+}
+
+.realmheart-event-field-row {
+  padding: 0.22em 0;
+}
+
+.realmheart-event-field-label {
+  font-size: 0.79rem;
+  font-weight: 720;
+  color: alpha(@rh_text_muted, 0.88);
+}
+
+.realmheart-event-field-value {
+  font-size: 0.79rem;
+  font-weight: 680;
+  color: @rh_text;
+}
+
+.realmheart-event-progress-row {
+  margin-bottom: 0.88em;
+}
+
+.realmheart-event-progress-row progressbar {
+  margin-right: 0.7em;
+}
+
+.realmheart-event-progress-row progressbar trough {
+  min-height: 0.36em;
+  border-radius: 99em;
+  background-color: alpha(@rh_surface_variant, 0.72);
+}
+
+.realmheart-event-progress-row progressbar progress {
+  min-height: 0.36em;
+  border-radius: 99em;
+  background-color: @rh_event_gold;
+  box-shadow: 0 0 0.7em alpha(@rh_event_gold, 0.22);
+}
+
+.realmheart-event-card-critical .realmheart-event-progress-row progressbar progress {
+  background-color: @rh_error;
+  box-shadow: 0 0 0.85em alpha(@rh_error, 0.28);
+}
+
+.realmheart-event-progress-label {
+  font-size: 0.76rem;
+  font-weight: 760;
+  color: alpha(@rh_text_muted, 0.9);
+}
+
+.realmheart-event-details-button {
+  margin-bottom: 0.58em;
+  padding: 0.36em 0.58em;
+  border: none;
+  border-radius: 0.65em;
+  background-color: transparent;
+  color: alpha(@rh_event_gold, 0.92);
+  font-size: 0.78rem;
+  font-weight: 740;
+}
+
+.realmheart-event-details-button:hover {
+  background-color: alpha(@rh_event_gold, 0.09);
+  color: @rh_text;
+}
+
+.realmheart-event-card-critical .realmheart-event-details-button {
+  color: @rh_error;
+}
+
+.realmheart-event-card-critical .realmheart-event-details-button:hover {
+  background-color: alpha(@rh_error, 0.10);
+}
+
+.realmheart-event-details-shell {
+  margin-bottom: 0.9em;
+  border-radius: 0.82em;
+  border: 0.06em solid alpha(@rh_outline, 0.30);
+  background-color: alpha(@rh_surface_variant, 0.38);
+}
+
+.realmheart-event-details-shell > viewport,
+.realmheart-event-details-view,
+.realmheart-event-details-view > text {
+  background-color: transparent;
+  color: alpha(@rh_text, 0.92);
+}
+
+.realmheart-event-details-view {
+  padding: 0.8em 0.9em;
+  font-size: 0.82rem;
+  caret-color: transparent;
+}
+
+.realmheart-event-producer-actions {
+  margin-bottom: 0.68em;
+}
+
+.realmheart-event-action {
+  padding: 0.48em 0.78em;
+  border-radius: 0.72em;
+  border: 0.06em solid alpha(@rh_event_gold, 0.48);
+  background-color: alpha(@rh_surface_variant, 0.48);
+  color: @rh_text;
+  font-size: 0.80rem;
+  font-weight: 700;
+}
+
+.realmheart-event-action:hover {
+  background-color: alpha(@rh_event_gold, 0.14);
+  border-color: alpha(@rh_event_gold, 0.82);
+  box-shadow: 0 0 0.8em alpha(@rh_event_gold, 0.10);
+}
+
+.realmheart-event-card-critical .realmheart-event-action:hover {
+  background-color: alpha(@rh_error, 0.14);
+  border-color: alpha(@rh_error, 0.84);
+  box-shadow: 0 0 0.9em alpha(@rh_error, 0.14);
+}
+
+.realmheart-event-actions {
+  margin-top: 0.08em;
+  margin-bottom: 0.44em;
+}
+
+.realmheart-event-dismiss {
+  border-color: alpha(@rh_outline, 0.38);
+  background-color: transparent;
+  color: alpha(@rh_text_muted, 0.88);
+}
+
+.realmheart-event-dismiss:hover {
+  border-color: alpha(@rh_event_gold, 0.58);
+  color: @rh_text;
+}
+
+.realmheart-event-card-critical .realmheart-event-dismiss:hover {
+  border-color: alpha(@rh_error, 0.72);
+}
+
+.realmheart-event-timestamp {
+  margin-top: 0.08em;
+  font-size: 0.68rem;
+  font-weight: 620;
+  letter-spacing: 0.035em;
+  color: alpha(@rh_text_muted, 0.72);
+}

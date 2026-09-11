@@ -1,0 +1,14 @@
+{
+  "id": "doctor.lock-screen",
+  "source": {"id": "realmheart-doctor", "name": "Realmheart Doctor", "icon": "realmheart-doctor"},
+  "severity": "warning",
+  "presentation": "attention",
+  "title": "Lockscreen health degraded",
+  "summary": "A dependency mismatch was detected.",
+  "fields": [
+    {"label": "Component", "value": "Realmheart Lockscreen"},
+    {"label": "Status", "value": "Degraded"}
+  ],
+  "details": {"format": "plain", "text": "Recovery was attempted but did not restore the component."},
+  "lifecycle": {"persistent": true}
+}

@@ -93,7 +93,7 @@ https://github.com/user-attachments/assets/0efbbdd1-fc3a-41f3-87fb-a696f99375a5
 
 ```bash
 sudo pacman -S --needed \
-  base-devel cmake ninja pkgconf gtest \
+  base-devel cmake ninja pkgconf gtest sqlite \
   gtk4 gtk4-layer-shell glib2 gdk-pixbuf2 \
   libjpeg-turbo libepoxy
 ```
@@ -174,18 +174,26 @@ Check your environment before installing the shell integration:
 
 Realmheart ships portable Hyprland configs under `config/`. The installer
 copies them into `~/.config/hypr/` and `~/.config/realmheart/`, installs the FX
-loader into `~/.local/bin/`, and creates the user unit at
-`~/.config/systemd/user/realmheart.service`:
+loader into `~/.local/bin/`, and creates the user units
+`~/.config/systemd/user/realmheart.service` and
+`~/.config/systemd/user/realmheart-eventd.service`:
 
 ```bash
 ./install-hypr-configs.sh
 ```
 
 The installer saves every replaced file as `<file>.bak.<timestamp>` and only
-uses sudo when a destination cannot be written normally. The shipped Hyprland
-startup hooks start `realmheart.service` and load `realmheart-fx.so`
-automatically. Log out and back into Hyprland after the first install; there is
-no separate plugin-load or shell-autostart command to maintain.
+uses sudo when a destination cannot be written normally. `realmheart-eventd` is
+enabled as a background systemd user service and is also refreshed automatically
+when the daemon is rebuilt from the source tree. The shipped Hyprland startup
+hooks start `realmheart.service` and load `realmheart-fx.so` automatically. Log
+out and back into Hyprland after the first install; there is no separate
+plugin-load or shell-autostart command to maintain.
+
+Any same-user local service can publish structured events to Event Surface; it
+does not need to be part of Realmheart. Producer examples, the CLI contract,
+raw Unix-socket framing, actions, and persistence are documented in
+`src/ui/events/README.md`.
 
 If you ever see absolute paths from a previous checkout baked into the
 binary (the classic "/home/you path error"), delete the build tree and

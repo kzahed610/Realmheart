@@ -1,0 +1,6 @@
+{
+  "id": "invalid.progress",
+  "source": {"id": "test"},
+  "title": "Invalid progress",
+  "progress": {"mode": "determinate", "value": 1.2}
+}

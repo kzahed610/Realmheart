@@ -25,6 +25,7 @@ INSTALL_ENV=(
 FX_DEST="$TEMP_HOME/.config/hypr/realmheart_fx.lua"
 ENTRY_DEST="$TEMP_HOME/.config/hypr/hyprland.lua"
 SERVICE_DEST="$TEMP_HOME/.config/systemd/user/realmheart.service"
+EVENTD_SERVICE_DEST="$TEMP_HOME/.config/systemd/user/realmheart-eventd.service"
 PAM_DEST="$SYSTEM_ROOT/etc/pam.d/realmheart-lockscreen"
 LOCK_DEST="$TEMP_HOME/.local/bin/realmheart-lock-session"
 
@@ -38,6 +39,10 @@ LOCK_DEST="$TEMP_HOME/.local/bin/realmheart-lock-session"
 }
 [[ -f "$SERVICE_DEST" ]] || {
     echo "realmheart.service was not installed" >&2
+    exit 1
+}
+[[ -f "$EVENTD_SERVICE_DEST" ]] || {
+    echo "realmheart-eventd.service was not installed" >&2
     exit 1
 }
 [[ -x "$LOCK_DEST" ]] || {
@@ -67,6 +72,13 @@ grep -Fqx "$EXPECTED_EXEC" "$SERVICE_DEST" || {
 }
 grep -Fqx 'Restart=on-failure' "$SERVICE_DEST"
 grep -Fqx 'PartOf=graphical-session.target' "$SERVICE_DEST"
+EXPECTED_EVENTD_EXEC="ExecStart=\"$REPO/build-hybrid/realmheart-eventd\""
+grep -Fqx "$EXPECTED_EVENTD_EXEC" "$EVENTD_SERVICE_DEST" || {
+    echo "realmheart-eventd.service does not point at the repository build" >&2
+    exit 1
+}
+grep -Fqx 'Restart=on-failure' "$EVENTD_SERVICE_DEST"
+grep -Fqx 'WantedBy=default.target' "$EVENTD_SERVICE_DEST"
 grep -Fqx "binary=$REPO/build-hybrid/realmheart" "$LOCK_DEST"
 grep -Fq 'if [[ ! -x "$binary" ]]; then' "$LOCK_DEST"
 grep -Fq 'if ! "$binary" --command lock-session "$$-$(/usr/bin/date +%s%N)"; then' "$LOCK_DEST"
@@ -97,6 +109,11 @@ grep -Fq 'systemctl --user start realmheart.service' \
 backups=( "$SERVICE_DEST".bak.* )
 [[ -f "${backups[0]}" && ${#backups[@]} -ge 2 ]] || {
     echo "repeated runs did not create collision-resistant service backups" >&2
+    exit 1
+}
+eventd_backups=( "$EVENTD_SERVICE_DEST".bak.* )
+[[ -f "${eventd_backups[0]}" && ${#eventd_backups[@]} -ge 2 ]] || {
+    echo "repeated runs did not create collision-resistant eventd service backups" >&2
     exit 1
 }
 lock_backups=( "$LOCK_DEST".bak.* )
@@ -132,6 +149,8 @@ env -u SUDO_USER HOME="$SPACED_HOME" REALMHEART_BINARY="$SPACED_BINARY" \
     "$REPO/install-hypr-configs.sh" >/dev/null 2>&1
 grep -Fqx "ExecStart=\"$SPACED_BINARY\" --shell --wallpaper-backend native" \
     "$SPACED_HOME/.config/systemd/user/realmheart.service"
+grep -Fqx "ExecStart=\"$(dirname "$SPACED_BINARY")/realmheart-eventd\"" \
+    "$SPACED_HOME/.config/systemd/user/realmheart-eventd.service"
 
 CUSTOM_HOME="$TEMP_HOME/custom-prefix-home"
 CUSTOM_SYSTEM_ROOT="$TEMP_HOME/custom-prefix-system"
@@ -149,6 +168,8 @@ env -u SUDO_USER HOME="$CUSTOM_HOME" REALMHEART_BINARY="$CUSTOM_BINARY" \
 }
 grep -Fqx "ExecStart=\"$CUSTOM_BINARY\" --shell --wallpaper-backend native" \
     "$CUSTOM_HOME/.config/systemd/user/realmheart.service"
+grep -Fqx 'ExecStart="/opt/realmheart/bin/realmheart-eventd"' \
+    "$CUSTOM_HOME/.config/systemd/user/realmheart-eventd.service"
 grep -Fqx "binary=$CUSTOM_BINARY" "$CUSTOM_HOME/.local/bin/realmheart-lock-session"
 
 printf 'Realmheart installer clean-home and rerun contracts passed.\n'

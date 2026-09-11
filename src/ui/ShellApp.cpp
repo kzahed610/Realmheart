@@ -29,6 +29,7 @@
 #include "ui/OSDOverlay.hpp"
 #include "ui/ShellState.hpp"
 #include "ui/ThemeStyles.hpp"
+#include "ui/events/EventSurface.hpp"
 #include "ui/bar/VerticalBar.hpp"
 #include "ui/launcher/CommandReceiptOverlay.hpp"
 #include "ui/launcher/LauncherOverlay.hpp"
@@ -607,6 +608,10 @@ public:
             monitor_model_signal_id_ = 0;
         }
         monitor_model_ = nullptr;
+
+        // Event Surface owns GTK widgets and a subscriber callback bridge; tear it
+        // down before the display-wide stylesheet provider disappears.
+        event_surface_.reset();
 
         // Unsubscribe/remove the display-wide CSS provider while GTK is alive.
         theme_styles_.reset();
@@ -3571,6 +3576,9 @@ private:
         if (!theme_styles_) {
             theme_styles_ = std::make_unique<ThemeStyles>(theme_service_);
         }
+        if (!event_surface_) {
+            event_surface_ = std::make_unique<events::EventSurface>(application_);
+        }
         if (!audio_monitor_) {
             audio_monitor_ = std::make_unique<services::AudioMonitor>(
                 [this](const services::AudioState& audio) {
@@ -3775,6 +3783,7 @@ private:
     std::unique_ptr<services::LauncherService> launcher_service_;
 
     std::unique_ptr<ThemeStyles> theme_styles_;
+    std::unique_ptr<events::EventSurface> event_surface_;
     std::unique_ptr<NotesOverlay> notes_overlay_;
     int notes_monitor_index_ = -1;
     std::unique_ptr<NotificationToast> toast_;

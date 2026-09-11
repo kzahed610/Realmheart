@@ -168,6 +168,20 @@ void set_layer_surface_level(GtkWindow* window, LayerSurfaceLevel layer) {
     gtk_layer_set_layer(window, to_gtk_layer(layer));
 }
 
+void set_layer_surface_margins(
+    GtkWindow* window,
+    int left,
+    int right,
+    int top,
+    int bottom
+) {
+    if (window == nullptr) return;
+    gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_LEFT, std::max(left, 0));
+    gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_RIGHT, std::max(right, 0));
+    gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_TOP, std::max(top, 0));
+    gtk_layer_set_margin(window, GTK_LAYER_SHELL_EDGE_BOTTOM, std::max(bottom, 0));
+}
+
 void apply_layer_surface(GtkWindow* window, const LayerSurfaceSpec& spec) {
     gtk_layer_init_for_window(window);
     gtk_layer_set_namespace(window, spec.surface_namespace.c_str());

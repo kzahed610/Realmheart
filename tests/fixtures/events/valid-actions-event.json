@@ -1,0 +1,33 @@
+{
+  "id": "doctor.realmheart-lockscreen",
+  "source": {
+    "id": "realmheart-doctor",
+    "name": "Realmheart Doctor"
+  },
+  "severity": "warning",
+  "presentation": "persistent",
+  "title": "Dependency drift detected",
+  "summary": "A validated dependency changed.",
+  "actions": [
+    {
+      "id": "retry",
+      "label": "Retry recovery",
+      "kind": "registered"
+    },
+    {
+      "id": "docs",
+      "label": "Open documentation",
+      "kind": "uri",
+      "uri": "https://example.com/realmheart/doctor"
+    },
+    {
+      "id": "copy-diagnostics",
+      "label": "Copy diagnostics",
+      "kind": "copy",
+      "value": "Dependency drift detected"
+    }
+  ],
+  "lifecycle": {
+    "persistent": true
+  }
+}

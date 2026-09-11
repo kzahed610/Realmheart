@@ -58,6 +58,7 @@ GdkMonitor* resolve_layer_surface_monitor(
 // Returns false when the requested monitor is not currently available.
 bool set_layer_surface_monitor(GtkWindow* window, int requested_index);
 void set_layer_surface_level(GtkWindow* window, LayerSurfaceLevel layer);
+void set_layer_surface_margins(GtkWindow* window, int left, int right, int top, int bottom);
 void apply_layer_surface(GtkWindow* window, const LayerSurfaceSpec& spec);
 
 } // namespace realmheart::ui
