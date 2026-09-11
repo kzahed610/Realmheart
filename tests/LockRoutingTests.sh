@@ -95,7 +95,41 @@ require_line "$shell_app" '                "hyprlock fallback lock surfaces fail
 require_line "$shell_app" '    std::vector<std::string> lock_waiting_tokens_;'
 require_line "$shell_app" '            remember_lock_request(request_token);'
 require_line "$shell_app" '        // documented SIGUSR1 handler exits with status 0 after unlocking.'
-require_absent "$shell_app" 'owner->finish_lock_unlock();'
+# Do not globally ban finish_lock_unlock(): the native Broken Seal success path
+# deliberately schedules it on the next GLib main-loop turn so LockSurface's
+# animation callback can unwind before session-lock teardown destroys surfaces.
+# The security invariant is narrower: the hyprlock fallback watcher must never
+# treat child exit/liveness as authenticated unlock completion.
+fallback_start=$(grep -nF -- '    void fallback_to_hyprlock(std::string_view reason) {' "$shell_app" | head -n1 | cut -d: -f1)
+fallback_end=$(grep -nF -- '    void lock_session(std::string_view request_token = {}) {' "$shell_app" | head -n1 | cut -d: -f1)
+if [[ -z "$fallback_start" || -z "$fallback_end" || "$fallback_start" -ge "$fallback_end" ]]; then
+    printf 'unable to locate hyprlock fallback routing block in %s\n' "$shell_app" >&2
+    exit 1
+fi
+if sed -n "${fallback_start},$((fallback_end - 1))p" "$shell_app" | grep -Fq -- 'finish_lock_unlock'; then
+    printf 'hyprlock fallback must not route process exit/liveness to finish_lock_unlock\n' >&2
+    exit 1
+fi
+
+# Native unlock completion is intentionally deferred out of LockSurface's
+# animation tick. A synchronous finish here can destroy the surface while its
+# own advance_frame() call is still on the stack.
+native_unlock_line=$(grep -nF -- '        lock_surface_->set_unlocked_callback([async_state = runtime_async_state_] {' "$shell_app" | head -n1 | cut -d: -f1)
+if [[ -z "$native_unlock_line" ]]; then
+    printf 'missing deferred native unlock callback in %s\n' "$shell_app" >&2
+    exit 1
+fi
+native_unlock_end=$(grep -nF -- '        lock_mirror_surfaces_.reserve(' "$shell_app" | awk -F: -v start="$native_unlock_line" '$1 > start { print $1; exit }')
+if [[ -z "$native_unlock_end" || "$native_unlock_line" -ge "$native_unlock_end" ]]; then
+    printf 'unable to bound deferred native unlock callback in %s\n' "$shell_app" >&2
+    exit 1
+fi
+native_unlock_block=$(sed -n "${native_unlock_line},$((native_unlock_end - 1))p" "$shell_app")
+if ! grep -Fq -- 'g_idle_add_full(' <<<"$native_unlock_block" ||
+   ! grep -Fq -- 'owner->finish_lock_unlock();' <<<"$native_unlock_block"; then
+    printf 'native unlock completion must remain deferred off the LockSurface animation stack\n' >&2
+    exit 1
+fi
 require_line "$shell_app" '        session_lock_ = gtk_session_lock_instance_new();'
 require_line "$shell_app" '        if (!gtk_session_lock_instance_lock(session_lock_)) {'
 require_line "$shell_app" '                gtk_session_lock_instance_is_locked(owner->session_lock_)) {'
