@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(Realmheart VERSION 0.7.7 LANGUAGES C CXX)
+project(Realmheart VERSION 0.7.8 LANGUAGES C CXX)
 
 # Refuse to reuse a build tree that was generated from a different source
 # directory. Compiled-in paths (asset/style directories, plugin locations, etc.)
