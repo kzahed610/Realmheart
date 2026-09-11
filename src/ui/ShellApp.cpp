@@ -1380,8 +1380,26 @@ public:
                 if (mirror != nullptr) mirror->hide();
             }
         });
-        lock_surface_->set_unlocked_callback([this] {
-            finish_lock_unlock();
+        lock_surface_->set_unlocked_callback([async_state = runtime_async_state_] {
+            // Do not destroy/release the LockSurface synchronously from inside
+            // its own animation tick. Finish the protocol teardown on the next
+            // main-loop turn so advance_frame() and the current GLib source can
+            // unwind first.
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT,
+                +[](gpointer data) -> gboolean {
+                    auto* state = static_cast<std::shared_ptr<RuntimeAsyncState>*>(data);
+                    ShellRuntime* owner = (*state)->owner.load();
+                    if ((*state)->alive.load() && owner != nullptr) {
+                        owner->finish_lock_unlock();
+                    }
+                    return G_SOURCE_REMOVE;
+                },
+                new std::shared_ptr<RuntimeAsyncState>(async_state),
+                +[](gpointer data) {
+                    delete static_cast<std::shared_ptr<RuntimeAsyncState>*>(data);
+                }
+            );
         });
 
         lock_mirror_surfaces_.reserve(static_cast<std::size_t>(count - 1));

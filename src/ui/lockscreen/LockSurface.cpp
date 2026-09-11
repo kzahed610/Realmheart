@@ -48,6 +48,10 @@ struct LockSurface::State {
     bool session_lock_surface = true;
     bool authentication_enabled = true;
     bool monitor_binding_verified = false;
+    // gtk4-layer-shell owns destruction of assigned session-lock windows.
+    // Hold one explicit reference so our raw GtkWindow* remains valid until
+    // LockSurface teardown, even after the session-lock library destroys it.
+    bool window_ref_held = false;
 
     std::unique_ptr<AuthPam> auth;
     std::unique_ptr<ScalesRenderer> scales;
@@ -133,7 +137,24 @@ LockSurface::LockSurface(
     state_->shaders = std::make_unique<ShaderManager>();
     state_->machine = std::make_unique<ScalesStateMachine>();
 
-    state_->window = GTK_WINDOW(gtk_application_window_new(app));
+    // gtk4-layer-shell 1.3.0 has a known GTK >= 4.22 crash when unlocking a
+    // GtkApplicationWindow: it unrealizes the window before gtk_window_destroy(),
+    // then GtkApplication::window-removed dereferences the already-dead GdkSurface
+    // (upstream #122, fixed by #125 but not yet present in distro 1.3.0).
+    // Session-lock windows do not need GtkApplicationWindow semantics, and the
+    // library's own tests use bare GtkWindow instances, so avoid the affected
+    // application-window teardown path entirely.
+    state_->window = GTK_WINDOW(
+        session_lock_surface ? gtk_window_new() : gtk_application_window_new(app)
+    );
+    if (session_lock_surface) {
+        // GTK owns the initial toplevel reference. Take one Realmheart reference
+        // because gtk_session_lock_instance_unlock() destroys assigned windows.
+        // Without this, state_->window becomes a dangling raw pointer before our
+        // LockSurface destructor runs.
+        g_object_ref(state_->window);
+        state_->window_ref_held = true;
+    }
     gtk_window_set_title(state_->window, "Realmheart Lockscreen");
     gtk_window_set_decorated(state_->window, FALSE);
     gtk_window_set_resizable(state_->window, TRUE);
@@ -209,9 +230,17 @@ LockSurface::~LockSurface() {
     state_->disarm_closing_watchdog();
     state_->stop_tick();
     if (state_->window != nullptr) {
-        g_signal_handlers_disconnect_by_data(state_->window, state_.get());
-        gtk_window_destroy(state_->window);
+        GtkWindow* window = state_->window;
         state_->window = nullptr;
+        g_signal_handlers_disconnect_by_data(window, state_.get());
+        // This is intentionally idempotent. For a session-lock surface the
+        // protocol library may already have destroyed the window; our explicit
+        // reference above keeps the GObject alive until this point.
+        gtk_window_destroy(window);
+        if (state_->window_ref_held) {
+            state_->window_ref_held = false;
+            g_object_unref(window);
+        }
     }
     // The window is gone while GTK/GL are still alive. Let the renderer and
     // shader owners release their programs and widget references instead of
