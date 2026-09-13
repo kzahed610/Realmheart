@@ -55,6 +55,19 @@ using namespace Render::GL;
 
 namespace {
 
+#ifndef REALMHEART_FX_BUILD_ID
+#define REALMHEART_FX_BUILD_ID "unmanaged"
+#endif
+#ifndef REALMHEART_FX_EXPECTED_HYPRLAND_COMMIT
+#define REALMHEART_FX_EXPECTED_HYPRLAND_COMMIT ""
+#endif
+#ifndef REALMHEART_FX_EXPECTED_HYPRLAND_ABI
+#define REALMHEART_FX_EXPECTED_HYPRLAND_ABI ""
+#endif
+#ifndef REALMHEART_FX_REALMHEART_VERSION
+#define REALMHEART_FX_REALMHEART_VERSION "unknown"
+#endif
+
 constexpr float kSourceWaitTimeoutSeconds = 2.00F;
 constexpr float kSlowToolkitSourceWaitTimeoutSeconds = 8.00F;
 constexpr float kPassWaitTimeoutSeconds = 0.60F;
@@ -2453,6 +2466,13 @@ std::string controlCommand(eHyprCtlOutputFormat format, std::string request) {
     }
     if (subcommand == "status")
         return g_state && g_state->animation.active ? "active" : "idle";
+    if (subcommand == "identity") {
+        return
+            "build_id=" REALMHEART_FX_BUILD_ID "\n"
+            "realmheart_version=" REALMHEART_FX_REALMHEART_VERSION "\n"
+            "hyprland_commit=" REALMHEART_FX_EXPECTED_HYPRLAND_COMMIT "\n"
+            "hyprland_abi=" REALMHEART_FX_EXPECTED_HYPRLAND_ABI;
+    }
     if (subcommand == "cancel") {
         cancelAnimation("cancelled by user");
         return "ok";
@@ -2518,7 +2538,7 @@ std::string controlCommand(eHyprCtlOutputFormat format, std::string request) {
         return "usage: realmheart-fx auto-close on|off|status";
     }
 
-    return "usage: realmheart-fx test [effect]|status|cancel|effects|"
+    return "usage: realmheart-fx test [effect]|status|identity|cancel|effects|"
            "config status|path|reload|auto-open on|off|status|"
            "auto-close on|off|status";
 }

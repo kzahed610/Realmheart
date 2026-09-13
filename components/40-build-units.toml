@@ -1,0 +1,83 @@
+schema_version = 1
+release_version = "0.7.8"
+
+[[build_units]]
+id = "realmheart-shell"
+cmake_target = "realmheart"
+component_ids = ["realmheart-core"]
+artifact_ids = ["core.binary"]
+build_dependencies = ["dep.build.cmake", "dep.build.ninja", "dep.build.pkg-config"]
+abi_sensitive_dependencies = []
+rebuild_on_dependency_change = []
+
+[[build_units]]
+id = "power-menu-renderer"
+cmake_target = "realmheart_power_menu_renderer"
+component_ids = ["realmheart-core"]
+artifact_ids = ["core.power-menu-renderer"]
+build_dependencies = ["dep.lib.gtk4"]
+abi_sensitive_dependencies = []
+rebuild_on_dependency_change = []
+
+[[build_units]]
+id = "realmheart-fx"
+cmake_target = "realmheart_fx"
+component_ids = ["realmheart-fx"]
+artifact_ids = ["fx.plugin"]
+build_dependencies = ["dep.build.cxx26", "dep.hyprland.devel", "dep.lib.glesv2"]
+abi_sensitive_dependencies = ["dep.hyprland.devel"]
+rebuild_on_dependency_change = ["dep.hyprland.devel"]
+
+[[build_units]]
+id = "eventd"
+cmake_target = "realmheart_eventd"
+component_ids = ["event-surface"]
+artifact_ids = ["event.daemon"]
+build_dependencies = ["dep.lib.gio", "dep.lib.sqlite3"]
+abi_sensitive_dependencies = []
+rebuild_on_dependency_change = []
+
+[[build_units]]
+id = "event-cli"
+cmake_target = "realmheart_event_cli"
+component_ids = ["event-surface"]
+artifact_ids = ["event.cli"]
+build_dependencies = ["dep.lib.gio"]
+abi_sensitive_dependencies = []
+rebuild_on_dependency_change = []
+
+[[build_units]]
+id = "screenshot"
+cmake_target = "realmheart_screenshot"
+component_ids = ["screenshot"]
+artifact_ids = ["screenshot.binary"]
+build_dependencies = ["dep.wayland.client", "dep.wayland.wlr-protocols", "dep.wayland.scanner"]
+abi_sensitive_dependencies = []
+rebuild_on_dependency_change = []
+
+[[build_units]]
+id = "screenshot-regions"
+cmake_target = "realmheart_screenshot_regions"
+component_ids = ["screenshot"]
+artifact_ids = ["screenshot.regions"]
+build_dependencies = ["dep.opencv.ximgproc"]
+abi_sensitive_dependencies = []
+rebuild_on_dependency_change = []
+
+[[build_units]]
+id = "lockscreen-auth"
+cmake_target = "realmheart_auth_helper"
+component_ids = ["lockscreen-auth"]
+artifact_ids = ["auth.helper"]
+build_dependencies = ["dep.pam.devel"]
+abi_sensitive_dependencies = []
+rebuild_on_dependency_change = []
+
+[[build_units]]
+id = "wallpaper-native"
+cmake_target = "realmheart-wallpaper-renderer"
+component_ids = ["wallpaper-native"]
+artifact_ids = ["wallpaper.renderer"]
+build_dependencies = ["dep.wallpaper.wayland-egl", "dep.wallpaper.egl", "dep.wallpaper.wayland-protocols"]
+abi_sensitive_dependencies = []
+rebuild_on_dependency_change = []

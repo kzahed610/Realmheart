@@ -3,6 +3,10 @@
 #include <iostream>
 #include <string_view>
 
+#ifndef REALMHEART_VERSION
+#define REALMHEART_VERSION "unknown"
+#endif
+
 namespace realmheart::services {
 namespace {
 
@@ -301,7 +305,7 @@ void NotificationDaemon::handle_method_call(
         }
         g_dbus_method_invocation_return_value(
             invocation,
-            g_variant_new("(ssss)", "Realmheart", "Zahed", "0.1.0", "1.2")
+            g_variant_new("(ssss)", "Realmheart", "Zahed", REALMHEART_VERSION, "1.2")
         );
         return;
     }

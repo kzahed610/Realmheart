@@ -1,0 +1,12 @@
+[Unit]
+Description=Realmheart terminal theme regeneration from Matugen palette
+
+[Service]
+Type=oneshot
+ExecStart=%h/.config/realmheart/scripts/terminal/generate-theme.py
+# %% passes literal percent signs through systemd to the date command.
+# This keeps the Fish epoch notification valid instead of systemd-expanding
+# the date format as unit specifiers.
+ExecStartPost=/bin/sh -c 'command -v fish >/dev/null 2>&1 && fish -c "set -U __realmheart_theme_epoch (date +%%s%%N)" || true'
+# Reload existing Kitty windows; no-op when Kitty is not running.
+ExecStartPost=/bin/sh -c 'for p in $(pgrep -x kitty); do kill -USR1 "$p" 2>/dev/null || true; done'

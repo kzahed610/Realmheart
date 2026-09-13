@@ -5,6 +5,7 @@ REPO="${1:?repository root is required}"
 LOADER="$REPO/config/bin/realmheart-fx-load"
 EXPECTED_COMMIT="efb50993780079460b0cbed1363e2166a2de1d9f"
 EXPECTED_ABI="${EXPECTED_COMMIT}_aq_0.14_hu_0.14_hg_0.5_hc_0.1_hlg_0.6"
+EXPECTED_BUILD_ID="phase14-test-build"
 TEST_ROOT="$(mktemp -d -t realmheart-fx-loader-test-XXXXXX)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
@@ -49,6 +50,10 @@ case "${1:-} ${2:-}" in
                 ;;
         esac
         ;;
+    "realmheart-fx identity")
+        printf 'build_id=%s\nrealmheart_version=0.7.8\nhyprland_commit=%s\nhyprland_abi=%s\n' \
+            "${FAKE_LOADED_BUILD_ID:-${FAKE_BUILD_ID:?}}" "${FAKE_COMMIT:?}" "${FAKE_ABI:?}"
+        ;;
     *)
         printf 'unexpected fake hyprctl call: %s\n' "$*" >&2
         exit 44
@@ -66,11 +71,15 @@ run_loader() {
             REALMHEART_FX_HYPRCTL="$FAKE_HYPRCTL" \
             REALMHEART_FX_SO="$PLUGIN_SOURCE" \
             REALMHEART_FX_RUNTIME_DIR="$case_root/runtime" \
+            REALMHEART_FX_HYPRLAND_COMMIT="$EXPECTED_COMMIT" \
+            REALMHEART_FX_HYPRLAND_ABI="$EXPECTED_ABI" \
+            REALMHEART_FX_BUILD_ID="$EXPECTED_BUILD_ID" \
             FAKE_STATE="$case_root/state" \
             FAKE_CALL_LOG="$case_root/calls.log" \
             FAKE_RUNTIME_PLUGIN="$case_root/fake-loaded-plugin" \
             FAKE_COMMIT="$EXPECTED_COMMIT" \
             FAKE_ABI="$EXPECTED_ABI" \
+            FAKE_BUILD_ID="$EXPECTED_BUILD_ID" \
             FAKE_DIRTY=false \
             "$@" \
             "$LOADER" 2>&1
@@ -113,6 +122,16 @@ run_loader "$CLEAN_ROOT" env FAKE_LOAD_BEHAVIOR=success
 assert_status 0
 assert_output_contains 'already loaded'
 [[ "$(wc -l < "$CLEAN_ROOT/calls.log")" -eq 1 ]]
+
+# A preloaded plugin from a different installer build must never be accepted as
+# current merely because its display name matches.
+STALE_ROOT="$TEST_ROOT/stale-loaded"
+mkdir -p "$STALE_ROOT"
+touch "$STALE_ROOT/state"
+run_loader "$STALE_ROOT" env FAKE_LOADED_BUILD_ID=old-build FAKE_LOAD_BEHAVIOR=success
+assert_status 1
+assert_output_contains 'loaded plugin identity mismatch'
+[[ ! -e "$STALE_ROOT/calls.log" ]]
 
 # A dirty runtime is rejected before a plugin copy or load request.
 DIRTY_ROOT="$TEST_ROOT/dirty"

@@ -5,7 +5,7 @@ project(Realmheart VERSION 0.7.8 LANGUAGES C CXX)
 # directory. Compiled-in paths (asset/style directories, plugin locations, etc.)
 # are derived from CMAKE_SOURCE_DIR at configure time and become wrong when the
 # repo is moved or copied without a clean configure — the result is the cryptic
-# "/home/zahed paths" failure reported on fresh accounts. Auto-deletion of a
+# "paths from another checkout" failure reported on fresh accounts. Auto-deletion of a
 # build tree would be unfriendly, so we detect and explain instead.
 get_filename_component(_rh_current_source_dir "${CMAKE_CURRENT_SOURCE_DIR}" ABSOLUTE)
 if(EXISTS "${CMAKE_BINARY_DIR}/CMakeCache.txt")
@@ -52,6 +52,10 @@ option(REALMHEART_EVENTD_AUTOSTART "Install/enable/restart the user Event Surfac
 option(REALMHEART_REGISTER_LIVE_COMPOSITOR_TESTS "Register compositor lifecycle probes against an explicitly isolated Wayland display" OFF)
 set(REALMHEART_ISOLATED_WAYLAND_DISPLAY "" CACHE STRING "Wayland display/socket reserved for Realmheart lifecycle tests")
 set(REALMHEART_WLR_LAYER_SHELL_XML "" CACHE FILEPATH "Path to wlr-layer-shell-unstable-v1.xml")
+set(REALMHEART_FX_BUILD_ID "unmanaged" CACHE STRING "Per-build Realmheart FX identity used for live activation attestation")
+set(REALMHEART_FX_HYPRLAND_COMMIT "" CACHE STRING "Hyprland commit Realmheart FX was approved/built against")
+set(REALMHEART_FX_HYPRLAND_ABI "" CACHE STRING "Hyprland ABI hash Realmheart FX was approved/built against")
+set(REALMHEART_FX_PLUGIN_PATH "${CMAKE_INSTALL_FULL_LIBDIR}/realmheart/realmheart-fx.so" CACHE FILEPATH "Canonical installed Realmheart FX plugin path")
 
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
@@ -119,6 +123,10 @@ if(REALMHEART_BUILD_HYPRLAND_PLUGIN AND HYPRLAND_FOUND AND GLESV2_FOUND)
     target_compile_definitions(realmheart_fx PRIVATE
         REALMHEART_WINDOW_EFFECT_ASSET_DIR="${CMAKE_SOURCE_DIR}/effects/windows"
         REALMHEART_INSTALL_WINDOW_EFFECT_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/effects/windows"
+        REALMHEART_FX_BUILD_ID="${REALMHEART_FX_BUILD_ID}"
+        REALMHEART_FX_EXPECTED_HYPRLAND_COMMIT="${REALMHEART_FX_HYPRLAND_COMMIT}"
+        REALMHEART_FX_EXPECTED_HYPRLAND_ABI="${REALMHEART_FX_HYPRLAND_ABI}"
+        REALMHEART_FX_REALMHEART_VERSION="${PROJECT_VERSION}"
     )
     target_compile_options(realmheart_fx PRIVATE ${REALMHEART_WARNING_FLAGS})
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -200,6 +208,7 @@ add_executable(realmheart
     ${REALMHEART_RUNTIME_SOURCES}
 )
 target_include_directories(realmheart PRIVATE src third_party)
+target_compile_definitions(realmheart PRIVATE REALMHEART_VERSION="${PROJECT_VERSION}")
 target_compile_options(realmheart PRIVATE ${REALMHEART_WARNING_FLAGS})
 
 add_library(realmheart_ui STATIC
@@ -681,6 +690,26 @@ install(DIRECTORY styles/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/styles
 install(DIRECTORY effects/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/effects)
 # PAM service for the lockscreen (requires root at install time).
 install(FILES config/pam/realmheart-lockscreen DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/pam.d)
+
+# Realmheart Doctor Acceptance MVP and shared maintenance contract. These are
+# pure-Python/read-only at runtime and deliberately ship with Realmheart so the
+# installer can obtain an independent post-install acceptance verdict without
+# fetching anything from the network.
+install(
+    PROGRAMS tools/realmheart-doctor.py
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    RENAME realmheart-doctor
+)
+install(
+    DIRECTORY realmheart_doctor realmheart_maintenance
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/python
+    FILES_MATCHING PATTERN "*.py"
+)
+install(
+    DIRECTORY components/
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/components
+    FILES_MATCHING PATTERN "*.toml"
+)
 
 include(CTest)
 if(BUILD_TESTING)
@@ -1439,6 +1468,7 @@ if(BUILD_TESTING)
     realmheart_register_test(realmheart_notification_server_tests)
 
     add_executable(realmheart_notification_daemon_tests tests/NotificationDaemonTests.cpp src/services/NotificationServer.cpp src/services/Notifications.cpp src/services/NotificationDaemon.cpp)
+    target_compile_definitions(realmheart_notification_daemon_tests PRIVATE REALMHEART_VERSION="${PROJECT_VERSION}")
     target_link_libraries(realmheart_notification_daemon_tests PRIVATE PkgConfig::GIO)
     realmheart_register_dbus_test(realmheart_notification_daemon_tests)
 

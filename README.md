@@ -136,94 +136,98 @@ Optional extras:
 
 ## Install and run
 
+Realmheart ships a transactional Python installer. **Run it as your normal desktop
+user, never with `sudo`**; it requests narrow elevation only for package/system
+operations that actually need it.
+
+Current first-class install target: **CachyOS/Arch + Wayland + Hyprland**. Realmheart
+requires Hyprland **0.56.1 or newer**; the installer treats the tested 0.56.x/0.57.x
+lines separately from unknown future ABI revisions because `realmheart-fx.so` is
+Hyprland-ABI-sensitive.
+
 ```bash
 cd ~
 git clone https://github.com/kzahed610/Realmheart.git
 cd Realmheart
 
-# ⚠️  FRESH ACCOUNT / COPIED FROM ANOTHER MACHINE?
-# The build tree (build-hybrid/) does NOT transfer between accounts or machines.
-# It bakes your home path into CMAKE_SOURCE_DIR; a stale build-hybrid/ copied in
-# from another checkout produces the cryptic
-#   "CMakeCache.txt directory ... is different" / "Permission denied" errors.
-# Always nuke any pre-existing build dir first (no-op if it isn't there):
-rm -rf build-hybrid
+# Inspect the complete environment/dependency/config/system mutation plan first.
+python3 installer/realmheart_installer.py --dry-run install
 
-# IMPORTANT: never run cmake/build with sudo. Running as root changes the
-# effective user and trips CMake's source-cache mismatch check. sudo is only
-# needed for the system PAM service (see install-hypr-configs.sh).
+# If the plan is READY, install. On CachyOS/Arch this also allows the verified
+# pacman adapter to install missing package-provided dependencies after consent.
+python3 installer/realmheart_installer.py --install-dependencies install
+```
+
+The installer builds Realmheart as the normal user into an isolated CMake
+`DESTDIR`, validates that staged payload, creates the appropriate baseline or
+rollback snapshot, and only then enters the journaled live transaction. It owns
+the complete Hyprland config tree while preserving `hypr/custom/`; Kitty and Fish
+use surgical managed/drop-in integration rather than replacing personal config.
+Privileged auth-helper/PAM changes are separately verified and rollback-accounted.
+
+Before the final keep/rollback decision, the installer also runs the bundled
+**Realmheart Doctor Acceptance MVP** as an independent, read-only second opinion.
+Doctor re-observes canonical artifacts and dependency capabilities from the live
+machine and returns `KEEP`, `KEEP_WITH_WARNINGS`, `REVERT_RECOMMENDED`, or
+`INDETERMINATE`. Doctor never performs rollback itself and a Doctor crash cannot
+turn an otherwise verified install into a destructive failure; the installer
+remains the owner of the transaction and final receipt.
+
+After the first successful install, start a **fresh Hyprland session**. A deployment
+can be install-verified while runtime activation remains
+`pending_session_restart`; the installer deliberately does not claim the new shell
+or FX plugin is active until a fresh session can prove it.
+
+Useful safety/recovery commands:
+
+```bash
+# Read-only current plan / environment
+python3 installer/realmheart_installer.py --dry-run install
+
+# Check whether an interrupted transaction needs attention
+python3 installer/realmheart_installer.py recovery-list
+
+# Preview uninstall without changing anything
+python3 installer/realmheart_installer.py --dry-run uninstall
+python3 installer/realmheart_installer.py --compare-config uninstall
+
+# Bundled read-only Doctor entry point
+realmheart-doctor --version
+```
+
+See [`installer/README.md`](installer/README.md) for dependency handling,
+verification, recovery, diagnostics, uninstall semantics, and the validation
+contract.
+
+> **Do not use `install-hypr-configs.sh` for new installs.** It is retained only
+> as a guarded legacy compatibility/test fixture so the new installer can keep
+> proving adoption behavior for old Realmheart installations.
+
+### Developer build
+
+If you are developing Realmheart rather than installing it, use a clean local
+build tree. CMake intentionally refuses to reuse a cache created from a different
+source checkout because source-root paths are compiled into parts of the runtime.
+
+```bash
+rm -rf build-hybrid
 cmake -S . -B build-hybrid -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DREALMHEART_ENABLE_NATIVE_WALLPAPER=ON \
   -DBUILD_TESTING=ON
-
 cmake --build build-hybrid -j"$(nproc)"
-
-# Required. If this file is missing, stop and fix the Hyprland/GLES development
-# dependencies before installing Realmheart.
-test -f build-hybrid/realmheart-fx.so
+ctest --test-dir build-hybrid --output-on-failure
 ```
 
-Check your environment before installing the shell integration:
+`realmheart-fx.so` is required by the supported shell path. A developer build that
+cannot produce it should be treated as an incomplete Realmheart build rather than
+silently installing without FX.
 
-```bash
-./build-hybrid/realmheart --doctor
-```
-
-### Hyprland config setup
-
-Realmheart ships portable Hyprland configs under `config/`. The installer
-copies them into `~/.config/hypr/` and `~/.config/realmheart/`, installs the FX
-loader into `~/.local/bin/`, and creates the user units
-`~/.config/systemd/user/realmheart.service` and
-`~/.config/systemd/user/realmheart-eventd.service`:
-
-```bash
-./install-hypr-configs.sh
-```
-
-The installer saves every replaced file as `<file>.bak.<timestamp>` and only
-uses sudo when a destination cannot be written normally. `realmheart-eventd` is
-enabled as a background systemd user service and is also refreshed automatically
-when the daemon is rebuilt from the source tree. The shipped Hyprland startup
-hooks start `realmheart.service` and load `realmheart-fx.so` automatically. Log
-out and back into Hyprland after the first install; there is no separate
-plugin-load or shell-autostart command to maintain.
-
-Any same-user local service can publish structured events to Event Surface; it
-does not need to be part of Realmheart. Producer examples, the CLI contract,
-raw Unix-socket framing, actions, and persistence are documented in
-`src/ui/events/README.md`.
-
-If you ever see absolute paths from a previous checkout baked into the
-binary (the classic "/home/you path error"), delete the build tree and
-reconfigure from scratch:
-
-```bash
-rm -rf build-hybrid
-cmake -S . -B build-hybrid -G Ninja \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DREALMHEART_ENABLE_NATIVE_WALLPAPER=ON
-```
-
-### Required FX plugin
-
-The lock screen, power menu and Realmheart's window transitions depend on
-`realmheart-fx.so`. `install-hypr-configs.sh` installs both the loader and its
-Hyprland startup hook, so loading is automatic. The loader finds the plugin in
-`~/Realmheart/build-hybrid/` or the supported local/system install locations
-and refuses to load it twice.
-
-The plugin is ABI-coupled to Hyprland. Rebuild Realmheart after every Hyprland
-update, then start a fresh Hyprland session so the matching plugin is loaded.
-
-A running shell is controlled without restarting the session:
+A running installed shell can be controlled without restarting the session:
 
 ```bash
 realmheart --command <name>
 ```
-
-Run the test suite with `ctest --test-dir build-hybrid --output-on-failure`.
 
 ---
 
@@ -300,17 +304,18 @@ validated interactively.
 
 ## Versions and compatibility
 
-Realmheart moves with Hyprland. The shell needs the Lua config era, meaning
-Hyprland **0.55 or newer**. Development happens against **0.56.x**, which is
-where it gets battle-tested daily. If you pin an older Realmheart tag, match
-it roughly to a Hyprland release from the same period.
+Realmheart moves with Hyprland. The current release requires Hyprland
+**0.56.1 or newer**. The installer treats **0.56.x and 0.57.x** as tested lines,
+with 0.56.2 retained as the preferred development baseline; newer minor lines
+are compatibility-unknown until Realmheart FX ABI support is validated.
 
 Currently used elsewhere: GTK 4.12 or newer (development on 4.22),
 gtk4-layer-shell 1.3, matugen 4.x.
 
 The required FX plugin compiles against Hyprland's internal plugin ABI and
-must be rebuilt after every Hyprland update. The current build targets the
-0.56 ABI.
+must be rebuilt after every Hyprland update. The installer binds the build to
+the exact detected Hyprland build/ABI identity rather than assuming minor-line
+compatibility is sufficient for a previously built plugin.
 
 Stable host baseline: CachyOS/Arch Linux, Hyprland 0.56.2, GTK 4.22.
 Display compatibility is additionally regression-tested in isolated Hyprland

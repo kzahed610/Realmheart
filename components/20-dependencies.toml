@@ -1,0 +1,1041 @@
+schema_version = 1
+release_version = "0.7.8"
+
+[[external_dependencies]]
+id = "dep.build.cmake"
+name = "CMake >= 3.25"
+reason = "Required by Realmheart capability build.cmake"
+minimum_version = "3.25.0"
+
+[[capabilities]]
+id = "build.cmake"
+dependency_id = "dep.build.cmake"
+display_name = "CMake >= 3.25"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "executable"
+executable = "cmake"
+version_argv = ["--version"]
+minimum_version = "3.25.0"
+
+[[external_dependencies]]
+id = "dep.build.ninja"
+name = "Ninja"
+reason = "Required by Realmheart capability build.ninja"
+
+[[capabilities]]
+id = "build.ninja"
+dependency_id = "dep.build.ninja"
+display_name = "Ninja"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "executable"
+executable = "ninja"
+version_argv = ["--version"]
+
+[[external_dependencies]]
+id = "dep.build.pkg-config"
+name = "pkg-config"
+reason = "Required by Realmheart capability build.pkg-config"
+
+[[capabilities]]
+id = "build.pkg-config"
+dependency_id = "dep.build.pkg-config"
+display_name = "pkg-config"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "executable"
+executable = "pkg-config"
+version_argv = ["--version"]
+
+[[external_dependencies]]
+id = "dep.runtime.python3"
+name = "Python 3"
+reason = "Required by Realmheart capability runtime.python3"
+
+[[capabilities]]
+id = "runtime.python3"
+dependency_id = "dep.runtime.python3"
+display_name = "Python 3"
+requirement = "required"
+lifecycle = ["runtime"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "executable"
+executable = "python3"
+version_argv = ["--version"]
+
+[[external_dependencies]]
+id = "dep.runtime.bash"
+name = "Bash"
+reason = "Required by Realmheart capability runtime.bash"
+
+[[capabilities]]
+id = "runtime.bash"
+dependency_id = "dep.runtime.bash"
+display_name = "Bash"
+requirement = "required"
+lifecycle = ["runtime"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "executable"
+executable = "bash"
+
+[[external_dependencies]]
+id = "dep.runtime.hyprctl"
+name = "Hyprland IPC (hyprctl)"
+reason = "Required by Realmheart capability runtime.hyprctl"
+minimum_version = "0.56.1"
+tested_ranges = ["0.56.x", "0.57.x"]
+known_incompatible = []
+
+[[capabilities]]
+id = "runtime.hyprctl"
+dependency_id = "dep.runtime.hyprctl"
+display_name = "Hyprland IPC (hyprctl)"
+requirement = "required"
+lifecycle = ["runtime"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "executable"
+executable = "hyprctl"
+
+[[external_dependencies]]
+id = "dep.runtime.systemctl"
+name = "systemd user control"
+reason = "Required by Realmheart capability runtime.systemctl"
+
+[[capabilities]]
+id = "runtime.systemctl"
+dependency_id = "dep.runtime.systemctl"
+display_name = "systemd user control"
+requirement = "required"
+lifecycle = ["runtime"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "executable"
+executable = "systemctl"
+
+[[external_dependencies]]
+id = "dep.runtime.systemd-inhibit"
+name = "systemd inhibit"
+reason = "Required by Realmheart capability runtime.systemd-inhibit"
+
+[[capabilities]]
+id = "runtime.systemd-inhibit"
+dependency_id = "dep.runtime.systemd-inhibit"
+display_name = "systemd inhibit"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "session"
+[capabilities.probe]
+kind = "executable"
+executable = "systemd-inhibit"
+
+[[external_dependencies]]
+id = "dep.runtime.loginctl"
+name = "logind control"
+reason = "Required by Realmheart capability runtime.loginctl"
+
+[[capabilities]]
+id = "runtime.loginctl"
+dependency_id = "dep.runtime.loginctl"
+display_name = "logind control"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "session"
+[capabilities.probe]
+kind = "executable"
+executable = "loginctl"
+
+[[external_dependencies]]
+id = "dep.runtime.wpctl"
+name = "PipeWire volume control"
+reason = "Required by Realmheart capability runtime.wpctl"
+
+[[capabilities]]
+id = "runtime.wpctl"
+dependency_id = "dep.runtime.wpctl"
+display_name = "PipeWire volume control"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "hardware-controls"
+[capabilities.probe]
+kind = "executable"
+executable = "wpctl"
+
+[[external_dependencies]]
+id = "dep.runtime.pactl"
+name = "PulseAudio/PipeWire event subscription"
+reason = "Required by Realmheart capability runtime.pactl"
+
+[[capabilities]]
+id = "runtime.pactl"
+dependency_id = "dep.runtime.pactl"
+display_name = "PulseAudio/PipeWire event subscription"
+requirement = "soft"
+lifecycle = ["runtime"]
+component_id = "hardware-controls"
+[capabilities.probe]
+kind = "executable"
+executable = "pactl"
+
+[[external_dependencies]]
+id = "dep.runtime.brightnessctl"
+name = "Backlight control"
+reason = "Required by Realmheart capability runtime.brightnessctl"
+
+[[capabilities]]
+id = "runtime.brightnessctl"
+dependency_id = "dep.runtime.brightnessctl"
+display_name = "Backlight control"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "hardware-controls"
+[capabilities.probe]
+kind = "executable"
+executable = "brightnessctl"
+
+[[external_dependencies]]
+id = "dep.runtime.hypridle"
+name = "Hyprland idle daemon"
+reason = "Required by Realmheart capability runtime.hypridle"
+
+[[capabilities]]
+id = "runtime.hypridle"
+dependency_id = "dep.runtime.hypridle"
+display_name = "Hyprland idle daemon"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "session"
+[capabilities.probe]
+kind = "executable"
+executable = "hypridle"
+
+[[external_dependencies]]
+id = "dep.runtime.hyprsunset"
+name = "Night Light backend"
+reason = "Required by Realmheart capability runtime.hyprsunset"
+
+[[capabilities]]
+id = "runtime.hyprsunset"
+dependency_id = "dep.runtime.hyprsunset"
+display_name = "Night Light backend"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "night-light"
+[capabilities.probe]
+kind = "executable"
+executable = "hyprsunset"
+
+[[external_dependencies]]
+id = "dep.runtime.hyprlock"
+name = "Emergency lock fallback"
+reason = "Required by Realmheart capability runtime.hyprlock"
+
+[[capabilities]]
+id = "runtime.hyprlock"
+dependency_id = "dep.runtime.hyprlock"
+display_name = "Emergency lock fallback"
+requirement = "soft"
+lifecycle = ["runtime"]
+component_id = "lockscreen-auth"
+[capabilities.probe]
+kind = "executable"
+executable = "hyprlock"
+
+[[external_dependencies]]
+id = "dep.runtime.matugen"
+name = "Matugen theme generation"
+reason = "Required by Realmheart capability runtime.matugen"
+
+[[capabilities]]
+id = "runtime.matugen"
+dependency_id = "dep.runtime.matugen"
+display_name = "Matugen theme generation"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "theming"
+[capabilities.probe]
+kind = "executable"
+executable = "matugen"
+
+[[external_dependencies]]
+id = "dep.wl-clipboard"
+name = "Wayland clipboard writer"
+reason = "Required by Realmheart capability runtime.wl-copy"
+
+[[capabilities]]
+id = "runtime.wl-copy"
+dependency_id = "dep.wl-clipboard"
+display_name = "Wayland clipboard writer"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "clipboard-history"
+[capabilities.probe]
+kind = "executable"
+executable = "wl-copy"
+
+[[capabilities]]
+id = "runtime.wl-paste"
+dependency_id = "dep.wl-clipboard"
+display_name = "Wayland clipboard watcher"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "clipboard-history"
+[capabilities.probe]
+kind = "executable"
+executable = "wl-paste"
+
+[[external_dependencies]]
+id = "dep.runtime.cliphist"
+name = "Clipboard history store"
+reason = "Required by Realmheart capability runtime.cliphist"
+
+[[capabilities]]
+id = "runtime.cliphist"
+dependency_id = "dep.runtime.cliphist"
+display_name = "Clipboard history store"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "clipboard-history"
+[capabilities.probe]
+kind = "executable"
+executable = "cliphist"
+
+[[external_dependencies]]
+id = "dep.runtime.tesseract"
+name = "Tesseract OCR engine"
+reason = "Required by Realmheart capability runtime.tesseract"
+
+[[capabilities]]
+id = "runtime.tesseract"
+dependency_id = "dep.runtime.tesseract"
+display_name = "Tesseract OCR engine"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "screenshot-ocr"
+[capabilities.probe]
+kind = "executable"
+executable = "tesseract"
+version_argv = ["--version"]
+
+[[external_dependencies]]
+id = "dep.runtime.wf-recorder"
+name = "Screen recorder backend"
+reason = "Required by Realmheart capability runtime.wf-recorder"
+
+[[capabilities]]
+id = "runtime.wf-recorder"
+dependency_id = "dep.runtime.wf-recorder"
+display_name = "Screen recorder backend"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "recorder"
+[capabilities.probe]
+kind = "executable"
+executable = "wf-recorder"
+
+[[external_dependencies]]
+id = "dep.runtime.grim"
+name = "Realmheart Lens capture"
+reason = "Required by Realmheart capability runtime.grim"
+
+[[capabilities]]
+id = "runtime.grim"
+dependency_id = "dep.runtime.grim"
+display_name = "Realmheart Lens capture"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "lens"
+[capabilities.probe]
+kind = "executable"
+executable = "grim"
+
+[[external_dependencies]]
+id = "dep.runtime.slurp"
+name = "Realmheart Lens selector"
+reason = "Required by Realmheart capability runtime.slurp"
+
+[[capabilities]]
+id = "runtime.slurp"
+dependency_id = "dep.runtime.slurp"
+display_name = "Realmheart Lens selector"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "lens"
+[capabilities.probe]
+kind = "executable"
+executable = "slurp"
+
+[[external_dependencies]]
+id = "dep.runtime.curl"
+name = "HTTP client"
+reason = "Required by Realmheart capability runtime.curl"
+
+[[capabilities]]
+id = "runtime.curl"
+dependency_id = "dep.runtime.curl"
+display_name = "HTTP client"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "lens"
+[capabilities.probe]
+kind = "executable"
+executable = "curl"
+
+[[external_dependencies]]
+id = "dep.runtime.notify-send"
+name = "Desktop notification fallback"
+reason = "Required by Realmheart capability runtime.notify-send"
+
+[[capabilities]]
+id = "runtime.notify-send"
+dependency_id = "dep.runtime.notify-send"
+display_name = "Desktop notification fallback"
+requirement = "soft"
+lifecycle = ["runtime"]
+component_id = "event-surface"
+[capabilities.probe]
+kind = "executable"
+executable = "notify-send"
+
+[[external_dependencies]]
+id = "dep.runtime.kitty"
+name = "Kitty terminal"
+reason = "Required by Realmheart capability runtime.kitty"
+
+[[capabilities]]
+id = "runtime.kitty"
+dependency_id = "dep.runtime.kitty"
+display_name = "Kitty terminal"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "terminal"
+[capabilities.probe]
+kind = "executable"
+executable = "kitty"
+
+[[external_dependencies]]
+id = "dep.runtime.fish"
+name = "Fish >= 4.3"
+reason = "Required by Realmheart capability runtime.fish"
+minimum_version = "4.3.0"
+
+[[capabilities]]
+id = "runtime.fish"
+dependency_id = "dep.runtime.fish"
+display_name = "Fish >= 4.3"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "terminal"
+[capabilities.probe]
+kind = "executable"
+executable = "fish"
+version_argv = ["--version"]
+minimum_version = "4.3.0"
+
+[[external_dependencies]]
+id = "dep.runtime.starship"
+name = "Starship prompt"
+reason = "Required by Realmheart capability runtime.starship"
+
+[[capabilities]]
+id = "runtime.starship"
+dependency_id = "dep.runtime.starship"
+display_name = "Starship prompt"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "terminal"
+[capabilities.probe]
+kind = "executable"
+executable = "starship"
+version_argv = ["--version"]
+
+[[external_dependencies]]
+id = "dep.runtime.xdg-user-dir"
+name = "XDG user directory resolver"
+reason = "Required by Realmheart capability runtime.xdg-user-dir"
+
+[[capabilities]]
+id = "runtime.xdg-user-dir"
+dependency_id = "dep.runtime.xdg-user-dir"
+display_name = "XDG user directory resolver"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "wallpaper-native"
+[capabilities.probe]
+kind = "executable"
+executable = "xdg-user-dir"
+
+[[external_dependencies]]
+id = "dep.runtime.pidof"
+name = "Process lookup (pidof)"
+reason = "Required by Realmheart capability runtime.pidof"
+
+[[capabilities]]
+id = "runtime.pidof"
+dependency_id = "dep.runtime.pidof"
+display_name = "Process lookup (pidof)"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "lens"
+[capabilities.probe]
+kind = "executable"
+executable = "pidof"
+
+[[external_dependencies]]
+id = "dep.runtime.playerctl"
+name = "Legacy media-key backend"
+reason = "Required by Realmheart capability runtime.playerctl"
+
+[[capabilities]]
+id = "runtime.playerctl"
+dependency_id = "dep.runtime.playerctl"
+display_name = "Legacy media-key backend"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "hardware-controls"
+[capabilities.probe]
+kind = "executable"
+executable = "playerctl"
+
+[[external_dependencies]]
+id = "dep.runtime.bc"
+name = "Legacy media-key arithmetic"
+reason = "Required by Realmheart capability runtime.bc"
+
+[[capabilities]]
+id = "runtime.bc"
+dependency_id = "dep.runtime.bc"
+display_name = "Legacy media-key arithmetic"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "hardware-controls"
+[capabilities.probe]
+kind = "executable"
+executable = "bc"
+
+[[external_dependencies]]
+id = "dep.runtime.find"
+name = "Wallpaper file discovery"
+reason = "Required by Realmheart capability runtime.find"
+
+[[capabilities]]
+id = "runtime.find"
+dependency_id = "dep.runtime.find"
+display_name = "Wallpaper file discovery"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "wallpaper-native"
+[capabilities.probe]
+kind = "executable"
+executable = "find"
+
+[[external_dependencies]]
+id = "dep.runtime.shuf"
+name = "Wallpaper random selection"
+reason = "Required by Realmheart capability runtime.shuf"
+
+[[capabilities]]
+id = "runtime.shuf"
+dependency_id = "dep.runtime.shuf"
+display_name = "Wallpaper random selection"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "wallpaper-native"
+[capabilities.probe]
+kind = "executable"
+executable = "shuf"
+
+[[external_dependencies]]
+id = "dep.runtime.xargs"
+name = "Wallpaper command dispatch"
+reason = "Required by Realmheart capability runtime.xargs"
+
+[[capabilities]]
+id = "runtime.xargs"
+dependency_id = "dep.runtime.xargs"
+display_name = "Wallpaper command dispatch"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "wallpaper-native"
+[capabilities.probe]
+kind = "executable"
+executable = "xargs"
+
+[[external_dependencies]]
+id = "dep.dbus"
+name = "D-Bus user-session tools"
+reason = "Required by Realmheart capability verification.dbus-run-session"
+
+[[capabilities]]
+id = "verification.dbus-run-session"
+dependency_id = "dep.dbus"
+display_name = "Isolated D-Bus test session"
+requirement = "soft"
+lifecycle = ["verification"]
+component_id = "native-tests"
+[capabilities.probe]
+kind = "executable"
+executable = "dbus-run-session"
+
+[[external_dependencies]]
+id = "dep.lib.gio"
+name = "GIO"
+reason = "Required by Realmheart capability lib.gio"
+
+[[capabilities]]
+id = "lib.gio"
+dependency_id = "dep.lib.gio"
+display_name = "GIO"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "pkg_config"
+module = "gio-2.0"
+
+[[external_dependencies]]
+id = "dep.lib.gtk4"
+name = "GTK4 >= 4.12"
+reason = "Required by Realmheart capability lib.gtk4"
+minimum_version = "4.12"
+
+[[capabilities]]
+id = "lib.gtk4"
+dependency_id = "dep.lib.gtk4"
+display_name = "GTK4 >= 4.12"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "pkg_config"
+module = "gtk4"
+minimum_version = "4.12"
+
+[[external_dependencies]]
+id = "dep.lib.gtk4-layer-shell"
+name = "GTK4 Layer Shell"
+reason = "Required by Realmheart capability lib.gtk4-layer-shell"
+
+[[capabilities]]
+id = "lib.gtk4-layer-shell"
+dependency_id = "dep.lib.gtk4-layer-shell"
+display_name = "GTK4 Layer Shell"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "pkg_config"
+module = "gtk4-layer-shell-0"
+
+[[external_dependencies]]
+id = "dep.lib.epoxy"
+name = "libepoxy"
+reason = "Required by Realmheart capability lib.epoxy"
+
+[[capabilities]]
+id = "lib.epoxy"
+dependency_id = "dep.lib.epoxy"
+display_name = "libepoxy"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "pkg_config"
+module = "epoxy"
+
+[[external_dependencies]]
+id = "dep.lib.gdk-pixbuf"
+name = "GdkPixbuf"
+reason = "Required by Realmheart capability lib.gdk-pixbuf"
+
+[[capabilities]]
+id = "lib.gdk-pixbuf"
+dependency_id = "dep.lib.gdk-pixbuf"
+display_name = "GdkPixbuf"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "pkg_config"
+module = "gdk-pixbuf-2.0"
+
+[[external_dependencies]]
+id = "dep.lib.jpeg"
+name = "libjpeg"
+reason = "Required by Realmheart capability lib.jpeg"
+
+[[capabilities]]
+id = "lib.jpeg"
+dependency_id = "dep.lib.jpeg"
+display_name = "libjpeg"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "pkg_config"
+module = "libjpeg"
+
+[[external_dependencies]]
+id = "dep.lib.sqlite3"
+name = "SQLite3"
+reason = "Required by Realmheart capability lib.sqlite3"
+
+[[capabilities]]
+id = "lib.sqlite3"
+dependency_id = "dep.lib.sqlite3"
+display_name = "SQLite3"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "pkg_config"
+module = "sqlite3"
+
+[[external_dependencies]]
+id = "dep.hyprland.devel"
+name = "Hyprland development API"
+reason = "Required by Realmheart capability hyprland.devel"
+
+[[capabilities]]
+id = "hyprland.devel"
+dependency_id = "dep.hyprland.devel"
+display_name = "Hyprland development API"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "pkg_config"
+module = "hyprland"
+
+[[external_dependencies]]
+id = "dep.lib.glesv2"
+name = "OpenGL ES 2"
+reason = "Required by Realmheart capability lib.glesv2"
+
+[[capabilities]]
+id = "lib.glesv2"
+dependency_id = "dep.lib.glesv2"
+display_name = "OpenGL ES 2"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "realmheart-fx"
+[capabilities.probe]
+kind = "pkg_config"
+module = "glesv2"
+
+[[external_dependencies]]
+id = "dep.wayland.client"
+name = "Wayland client development files"
+reason = "Required by Realmheart capability wayland.client"
+
+[[capabilities]]
+id = "wayland.client"
+dependency_id = "dep.wayland.client"
+display_name = "Wayland client development files"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "screenshot"
+[capabilities.probe]
+kind = "pkg_config"
+module = "wayland-client"
+
+[[external_dependencies]]
+id = "dep.wayland.wlr-protocols"
+name = "wlroots protocol definitions"
+reason = "Required by Realmheart capability wayland.wlr-protocols"
+
+[[capabilities]]
+id = "wayland.wlr-protocols"
+dependency_id = "dep.wayland.wlr-protocols"
+display_name = "wlroots protocol definitions"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "screenshot"
+[capabilities.probe]
+kind = "pkg_config"
+module = "wlr-protocols"
+
+[[external_dependencies]]
+id = "dep.wallpaper.wayland-egl"
+name = "Wayland EGL"
+reason = "Required by Realmheart capability wallpaper.wayland-egl"
+
+[[capabilities]]
+id = "wallpaper.wayland-egl"
+dependency_id = "dep.wallpaper.wayland-egl"
+display_name = "Wayland EGL"
+requirement = "soft"
+lifecycle = ["build"]
+component_id = "wallpaper-native"
+[capabilities.probe]
+kind = "pkg_config"
+module = "wayland-egl"
+
+[[external_dependencies]]
+id = "dep.wallpaper.egl"
+name = "EGL"
+reason = "Required by Realmheart capability wallpaper.egl"
+
+[[capabilities]]
+id = "wallpaper.egl"
+dependency_id = "dep.wallpaper.egl"
+display_name = "EGL"
+requirement = "soft"
+lifecycle = ["build"]
+component_id = "wallpaper-native"
+[capabilities.probe]
+kind = "pkg_config"
+module = "egl"
+
+[[external_dependencies]]
+id = "dep.wallpaper.wayland-protocols"
+name = "Wayland protocol definitions"
+reason = "Required by Realmheart capability wallpaper.wayland-protocols"
+
+[[capabilities]]
+id = "wallpaper.wayland-protocols"
+dependency_id = "dep.wallpaper.wayland-protocols"
+display_name = "Wayland protocol definitions"
+requirement = "soft"
+lifecycle = ["build"]
+component_id = "wallpaper-native"
+[capabilities.probe]
+kind = "pkg_config"
+module = "wayland-protocols"
+
+[[external_dependencies]]
+id = "dep.wayland.scanner"
+name = "wayland-scanner"
+reason = "Required by Realmheart capability wayland.scanner"
+
+[[capabilities]]
+id = "wayland.scanner"
+dependency_id = "dep.wayland.scanner"
+display_name = "wayland-scanner"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "screenshot"
+[capabilities.probe]
+kind = "executable"
+executable = "wayland-scanner"
+
+[[external_dependencies]]
+id = "dep.build.cxx26"
+name = "C++26 compiler"
+reason = "Required by Realmheart capability build.cxx26"
+
+[[capabilities]]
+id = "build.cxx26"
+dependency_id = "dep.build.cxx26"
+display_name = "C++26 compiler"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "realmheart-fx"
+[capabilities.probe]
+kind = "cxx26"
+
+[[external_dependencies]]
+id = "dep.opencv.ximgproc"
+name = "OpenCV core/imgproc/ximgproc"
+reason = "Required by Realmheart capability opencv.ximgproc"
+
+[[capabilities]]
+id = "opencv.ximgproc"
+dependency_id = "dep.opencv.ximgproc"
+display_name = "OpenCV core/imgproc/ximgproc"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "screenshot"
+[capabilities.probe]
+kind = "opencv_cmake"
+
+[[external_dependencies]]
+id = "dep.pam.devel"
+name = "PAM development interface"
+reason = "Required by Realmheart capability pam.devel"
+
+[[capabilities]]
+id = "pam.devel"
+dependency_id = "dep.pam.devel"
+display_name = "PAM development interface"
+requirement = "required"
+lifecycle = ["build"]
+component_id = "lockscreen-auth"
+[capabilities.probe]
+kind = "pam_link"
+
+[[external_dependencies]]
+id = "dep.verification.gtest"
+name = "GoogleTest CMake package"
+reason = "Required by Realmheart capability verification.gtest"
+
+[[capabilities]]
+id = "verification.gtest"
+dependency_id = "dep.verification.gtest"
+display_name = "GoogleTest CMake package"
+requirement = "soft"
+lifecycle = ["verification"]
+component_id = "native-tests"
+[capabilities.probe]
+kind = "cmake_gtest"
+
+[[external_dependencies]]
+id = "dep.tesseract.lang.eng"
+name = "Tesseract English language data"
+reason = "Required by Realmheart capability tesseract.lang.eng"
+
+[[capabilities]]
+id = "tesseract.lang.eng"
+dependency_id = "dep.tesseract.lang.eng"
+display_name = "Tesseract English language data"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "screenshot-ocr"
+[capabilities.probe]
+kind = "tesseract_language"
+language = "eng"
+
+[[external_dependencies]]
+id = "dep.runtime.nmcli"
+name = "NetworkManager Wi-Fi control"
+reason = "Required by Realmheart capability runtime.nmcli"
+
+[[capabilities]]
+id = "runtime.nmcli"
+dependency_id = "dep.runtime.nmcli"
+display_name = "NetworkManager Wi-Fi control"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "hardware-controls"
+[capabilities.probe]
+kind = "networkmanager_backend"
+
+[[external_dependencies]]
+id = "dep.runtime.bluetoothctl"
+name = "BlueZ Bluetooth control"
+reason = "Required by Realmheart capability runtime.bluetoothctl"
+
+[[capabilities]]
+id = "runtime.bluetoothctl"
+dependency_id = "dep.runtime.bluetoothctl"
+display_name = "BlueZ Bluetooth control"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "hardware-controls"
+[capabilities.probe]
+kind = "bluetooth_backend"
+
+[[external_dependencies]]
+id = "dep.runtime.powerprofilesctl"
+name = "Power profile control"
+reason = "Required by Realmheart capability runtime.powerprofilesctl"
+
+[[capabilities]]
+id = "runtime.powerprofilesctl"
+dependency_id = "dep.runtime.powerprofilesctl"
+display_name = "Power profile control"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "hardware-controls"
+[capabilities.probe]
+kind = "power_profiles_backend"
+
+[[external_dependencies]]
+id = "dep.runtime.systemd-user"
+name = "systemd user manager"
+reason = "Required by Realmheart capability runtime.systemd-user"
+
+[[capabilities]]
+id = "runtime.systemd-user"
+dependency_id = "dep.runtime.systemd-user"
+display_name = "systemd user manager"
+requirement = "required"
+lifecycle = ["runtime"]
+component_id = "realmheart-core"
+[capabilities.probe]
+kind = "systemd_user"
+
+[[external_dependencies]]
+id = "dep.runtime.portal-hyprland"
+name = "Hyprland XDG portal"
+reason = "Required by Realmheart capability runtime.portal-hyprland"
+
+[[capabilities]]
+id = "runtime.portal-hyprland"
+dependency_id = "dep.runtime.portal-hyprland"
+display_name = "Hyprland XDG portal"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "desktop-portal"
+[capabilities.probe]
+kind = "portal_unit"
+unit = "xdg-desktop-portal-hyprland.service"
+
+[[external_dependencies]]
+id = "dep.runtime.lens-url-opener"
+name = "Lens URL opener"
+reason = "Required by Realmheart capability runtime.lens-url-opener"
+
+[[capabilities]]
+id = "runtime.lens-url-opener"
+dependency_id = "dep.runtime.lens-url-opener"
+display_name = "Lens URL opener"
+requirement = "component"
+lifecycle = ["runtime"]
+component_id = "lens"
+[capabilities.probe]
+kind = "any_command"
+commands = ["xdg-open", "gio"]
+
+[[external_dependencies]]
+id = "dep.runtime.fx-loader-tools"
+name = "Realmheart FX loader base utilities"
+reason = "Required by Realmheart capability runtime.fx-loader-tools"
+
+[[capabilities]]
+id = "runtime.fx-loader-tools"
+dependency_id = "dep.runtime.fx-loader-tools"
+display_name = "Realmheart FX loader base utilities"
+requirement = "required"
+lifecycle = ["runtime"]
+component_id = "realmheart-fx"
+[capabilities.probe]
+kind = "command_group"
+commands = ["grep", "mktemp", "cp", "chmod", "mkdir", "dirname"]
+
+[[external_dependencies]]
+id = "dep.install.privileged-file-tools"
+name = "Privileged artifact file utilities"
+reason = "Required by Realmheart capability install.privileged-file-tools"
+
+[[capabilities]]
+id = "install.privileged-file-tools"
+dependency_id = "dep.install.privileged-file-tools"
+display_name = "Privileged artifact file utilities"
+requirement = "required"
+lifecycle = ["install"]
+component_id = "lockscreen-auth"
+[capabilities.probe]
+kind = "command_group"
+commands = ["chown", "chmod"]
+
+
+[[capabilities]]
+id = "runtime.dbus-update-environment"
+dependency_id = "dep.dbus"
+display_name = "D-Bus activation environment import"
+requirement = "required"
+lifecycle = ["runtime"]
+component_id = "session"
+[capabilities.probe]
+kind = "executable"
+executable = "dbus-update-activation-environment"

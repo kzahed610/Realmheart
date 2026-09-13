@@ -1,0 +1,10 @@
+[Unit]
+Description=Regenerate Realmheart terminal theme when the Matugen palette changes
+
+[Path]
+# Cover ordinary writes and atomic replacement patterns.
+PathModified=%h/.local/state/realmheart/theme-palette.tsv
+PathChanged=%h/.local/state/realmheart/theme-palette.tsv
+
+[Install]
+WantedBy=default.target

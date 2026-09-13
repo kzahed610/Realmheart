@@ -1,0 +1,773 @@
+schema_version = 1
+release_version = "0.7.8"
+
+[[artifacts]]
+id = "core.binary"
+component_id = "realmheart-core"
+path = "$PREFIX/bin/realmheart"
+type = "executable"
+required = true
+ownership = "release"
+managed = true
+
+[[artifacts]]
+id = "core.power-menu-renderer"
+component_id = "realmheart-core"
+path = "$PREFIX/bin/realmheart-power-menu-renderer"
+type = "executable"
+required = true
+ownership = "release"
+managed = true
+
+[[artifacts]]
+id = "core.assets"
+component_id = "realmheart-core"
+path = "$PREFIX/share/realmheart/assets"
+type = "directory"
+required = true
+ownership = "release"
+managed = true
+
+[[artifacts]]
+id = "core.styles"
+component_id = "realmheart-core"
+path = "$PREFIX/share/realmheart/styles"
+type = "directory"
+required = true
+ownership = "release"
+managed = true
+source = "styles"
+
+[[artifacts]]
+id = "core.effects"
+component_id = "realmheart-core"
+path = "$PREFIX/share/realmheart/effects"
+type = "directory"
+required = true
+ownership = "release"
+managed = true
+source = "effects"
+
+[[artifacts]]
+id = "fx.plugin"
+component_id = "realmheart-fx"
+path = "$PREFIX/lib/realmheart/realmheart-fx.so"
+type = "library"
+required = true
+ownership = "release"
+managed = true
+
+[[artifacts]]
+id = "fx.loader"
+component_id = "realmheart-fx"
+path = "$HOME/.local/bin/realmheart-fx-load"
+type = "executable"
+required = true
+ownership = "user"
+managed = true
+source = "config/bin/realmheart-fx-load"
+
+[[artifacts]]
+id = "event.daemon"
+component_id = "event-surface"
+path = "$PREFIX/bin/realmheart-eventd"
+type = "executable"
+required = true
+ownership = "release"
+managed = true
+
+[[artifacts]]
+id = "event.cli"
+component_id = "event-surface"
+path = "$PREFIX/bin/realmheart-event"
+type = "executable"
+required = true
+ownership = "release"
+managed = true
+
+[[artifacts]]
+id = "event.service"
+component_id = "event-surface"
+path = "$XDG_CONFIG_HOME/systemd/user/realmheart-eventd.service"
+type = "service"
+required = true
+ownership = "user"
+managed = true
+
+[[artifacts]]
+id = "screenshot.binary"
+component_id = "screenshot"
+path = "$PREFIX/bin/realmheart-screenshot"
+type = "executable"
+required = true
+ownership = "release"
+managed = true
+
+[[artifacts]]
+id = "screenshot.regions"
+component_id = "screenshot"
+path = "$PREFIX/bin/realmheart-screenshot-regions"
+type = "executable"
+required = true
+ownership = "release"
+managed = true
+
+[[artifacts]]
+id = "auth.helper"
+component_id = "lockscreen-auth"
+path = "$LIBEXEC/realmheart/realmheart-auth-helper"
+type = "executable"
+required = true
+ownership = "system"
+managed = true
+
+[[artifacts]]
+id = "auth.pam"
+component_id = "lockscreen-auth"
+path = "$SYSCONF/pam.d/realmheart-lockscreen"
+type = "pam"
+required = true
+ownership = "system"
+managed = true
+source = "config/pam/realmheart-lockscreen"
+
+[[artifacts]]
+id = "auth.lock-session"
+component_id = "lockscreen-auth"
+path = "$HOME/.local/bin/realmheart-lock-session"
+type = "executable"
+required = true
+ownership = "user"
+managed = true
+
+[[artifacts]]
+id = "wallpaper.renderer"
+component_id = "wallpaper-native"
+path = "$PREFIX/bin/realmheart-wallpaper-renderer"
+type = "executable"
+required = true
+ownership = "release"
+managed = true
+
+[[artifacts]]
+id = "clipboard.text-service"
+component_id = "clipboard-history"
+path = "$XDG_CONFIG_HOME/systemd/user/realmheart-cliphist-text.service"
+type = "service"
+required = true
+ownership = "user"
+managed = true
+source = "config/systemd/user/realmheart-cliphist-text.service.in"
+
+[[artifacts]]
+id = "clipboard.image-service"
+component_id = "clipboard-history"
+path = "$XDG_CONFIG_HOME/systemd/user/realmheart-cliphist-image.service"
+type = "service"
+required = true
+ownership = "user"
+managed = true
+source = "config/systemd/user/realmheart-cliphist-image.service.in"
+
+[[artifacts]]
+id = "terminal.kitty-dropin"
+component_id = "terminal"
+path = "$XDG_CONFIG_HOME/kitty/realmheart-theme.conf"
+type = "config"
+required = true
+ownership = "user"
+managed = true
+mode = "0644"
+source = "config/kitty/realmheart-terminal-public/files/.config/kitty/realmheart-theme.conf"
+
+[[artifacts]]
+id = "terminal.fish-theme"
+component_id = "terminal"
+path = "$XDG_CONFIG_HOME/fish/conf.d/realmheart-theme.fish"
+type = "config"
+required = true
+ownership = "user"
+managed = true
+mode = "0644"
+source = "config/kitty/realmheart-terminal-public/files/.config/fish/conf.d/realmheart-theme.fish"
+
+[[artifacts]]
+id = "terminal.fish-starship"
+component_id = "terminal"
+path = "$XDG_CONFIG_HOME/fish/conf.d/realmheart-starship.fish"
+type = "config"
+required = true
+ownership = "user"
+managed = true
+mode = "0644"
+source = "config/kitty/realmheart-terminal-public/files/.config/fish/conf.d/realmheart-starship.fish"
+
+[[artifacts]]
+id = "terminal.generator"
+component_id = "terminal"
+path = "$XDG_CONFIG_HOME/realmheart/scripts/terminal/generate-theme.py"
+type = "file"
+required = true
+ownership = "user"
+managed = true
+mode = "0755"
+source = "config/kitty/realmheart-terminal-public/files/.config/realmheart/scripts/terminal/generate-theme.py"
+
+[[artifacts]]
+id = "terminal.theme-service"
+component_id = "terminal"
+path = "$XDG_CONFIG_HOME/systemd/user/realmheart-terminal-theme.service"
+type = "service"
+required = true
+ownership = "user"
+managed = true
+mode = "0644"
+source = "config/kitty/realmheart-terminal-public/files/.config/systemd/user/realmheart-terminal-theme.service"
+
+[[artifacts]]
+id = "terminal.theme-path"
+component_id = "terminal"
+path = "$XDG_CONFIG_HOME/systemd/user/realmheart-terminal-theme.path"
+type = "service"
+required = true
+ownership = "user"
+managed = true
+mode = "0644"
+source = "config/kitty/realmheart-terminal-public/files/.config/systemd/user/realmheart-terminal-theme.path"
+
+[[artifacts]]
+id = "terminal.generated-kitty"
+component_id = "terminal"
+path = "$XDG_STATE_HOME/realmheart/theme/kitty-theme.conf"
+type = "generated"
+required = true
+ownership = "user"
+managed = true
+
+[[artifacts]]
+id = "terminal.generated-fish"
+component_id = "terminal"
+path = "$XDG_STATE_HOME/realmheart/theme/fish-theme.fish"
+type = "generated"
+required = true
+ownership = "user"
+managed = true
+
+[[artifacts]]
+id = "terminal.generated-starship"
+component_id = "terminal"
+path = "$XDG_STATE_HOME/realmheart/theme/starship.toml"
+type = "generated"
+required = true
+ownership = "user"
+managed = true
+
+[[artifacts]]
+id = "terminal.generated-rail"
+component_id = "terminal"
+path = "$XDG_STATE_HOME/realmheart/theme/rail.png"
+type = "generated"
+required = true
+ownership = "user"
+managed = true
+
+[[artifacts]]
+id = "hypr.tree"
+component_id = "hypr-integration"
+path = "$XDG_CONFIG_HOME/hypr"
+type = "directory"
+required = true
+ownership = "user"
+managed = true
+source = "config/hypr"
+
+[[artifacts]]
+id = "realmheart.config"
+component_id = "hypr-integration"
+path = "$XDG_CONFIG_HOME/realmheart"
+type = "directory"
+required = true
+ownership = "shared"
+managed = true
+source = "config/realmheart"
+
+[[health_checks]]
+id = "check.core.binary.exists"
+component_id = "realmheart-core"
+check = "artifact_exists"
+artifact_id = "core.binary"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.core.binary.executable"
+component_id = "realmheart-core"
+check = "artifact_executable"
+artifact_id = "core.binary"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.core.power-menu-renderer.exists"
+component_id = "realmheart-core"
+check = "artifact_exists"
+artifact_id = "core.power-menu-renderer"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.core.power-menu-renderer.executable"
+component_id = "realmheart-core"
+check = "artifact_executable"
+artifact_id = "core.power-menu-renderer"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.core.assets.exists"
+component_id = "realmheart-core"
+check = "artifact_exists"
+artifact_id = "core.assets"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.core.styles.exists"
+component_id = "realmheart-core"
+check = "artifact_exists"
+artifact_id = "core.styles"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.core.effects.exists"
+component_id = "realmheart-core"
+check = "artifact_exists"
+artifact_id = "core.effects"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.fx.plugin.exists"
+component_id = "realmheart-fx"
+check = "artifact_exists"
+artifact_id = "fx.plugin"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.fx.loader.exists"
+component_id = "realmheart-fx"
+check = "artifact_exists"
+artifact_id = "fx.loader"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.fx.loader.executable"
+component_id = "realmheart-fx"
+check = "artifact_executable"
+artifact_id = "fx.loader"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.event.daemon.exists"
+component_id = "event-surface"
+check = "artifact_exists"
+artifact_id = "event.daemon"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.event.daemon.executable"
+component_id = "event-surface"
+check = "artifact_executable"
+artifact_id = "event.daemon"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.event.cli.exists"
+component_id = "event-surface"
+check = "artifact_exists"
+artifact_id = "event.cli"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.event.cli.executable"
+component_id = "event-surface"
+check = "artifact_executable"
+artifact_id = "event.cli"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.event.service.exists"
+component_id = "event-surface"
+check = "artifact_exists"
+artifact_id = "event.service"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.screenshot.binary.exists"
+component_id = "screenshot"
+check = "artifact_exists"
+artifact_id = "screenshot.binary"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.screenshot.binary.executable"
+component_id = "screenshot"
+check = "artifact_executable"
+artifact_id = "screenshot.binary"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.screenshot.regions.exists"
+component_id = "screenshot"
+check = "artifact_exists"
+artifact_id = "screenshot.regions"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.screenshot.regions.executable"
+component_id = "screenshot"
+check = "artifact_executable"
+artifact_id = "screenshot.regions"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.auth.helper.exists"
+component_id = "lockscreen-auth"
+check = "artifact_exists"
+artifact_id = "auth.helper"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.auth.helper.executable"
+component_id = "lockscreen-auth"
+check = "artifact_executable"
+artifact_id = "auth.helper"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.auth.pam.exists"
+component_id = "lockscreen-auth"
+check = "artifact_exists"
+artifact_id = "auth.pam"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.auth.lock-session.exists"
+component_id = "lockscreen-auth"
+check = "artifact_exists"
+artifact_id = "auth.lock-session"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.auth.lock-session.executable"
+component_id = "lockscreen-auth"
+check = "artifact_executable"
+artifact_id = "auth.lock-session"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.wallpaper.renderer.exists"
+component_id = "wallpaper-native"
+check = "artifact_exists"
+artifact_id = "wallpaper.renderer"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.wallpaper.renderer.executable"
+component_id = "wallpaper-native"
+check = "artifact_executable"
+artifact_id = "wallpaper.renderer"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.clipboard.text-service.exists"
+component_id = "clipboard-history"
+check = "artifact_exists"
+artifact_id = "clipboard.text-service"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.clipboard.image-service.exists"
+component_id = "clipboard-history"
+check = "artifact_exists"
+artifact_id = "clipboard.image-service"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.terminal.kitty-dropin.exists"
+component_id = "terminal"
+check = "artifact_exists"
+artifact_id = "terminal.kitty-dropin"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.terminal.fish-theme.exists"
+component_id = "terminal"
+check = "artifact_exists"
+artifact_id = "terminal.fish-theme"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.terminal.fish-starship.exists"
+component_id = "terminal"
+check = "artifact_exists"
+artifact_id = "terminal.fish-starship"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.terminal.generator.exists"
+component_id = "terminal"
+check = "artifact_exists"
+artifact_id = "terminal.generator"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.terminal.theme-service.exists"
+component_id = "terminal"
+check = "artifact_exists"
+artifact_id = "terminal.theme-service"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.terminal.theme-path.exists"
+component_id = "terminal"
+check = "artifact_exists"
+artifact_id = "terminal.theme-path"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.terminal.generated-kitty.exists"
+component_id = "terminal"
+check = "artifact_exists"
+artifact_id = "terminal.generated-kitty"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.terminal.generated-fish.exists"
+component_id = "terminal"
+check = "artifact_exists"
+artifact_id = "terminal.generated-fish"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.terminal.generated-starship.exists"
+component_id = "terminal"
+check = "artifact_exists"
+artifact_id = "terminal.generated-starship"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.terminal.generated-rail.exists"
+component_id = "terminal"
+check = "artifact_exists"
+artifact_id = "terminal.generated-rail"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.hypr.tree.exists"
+component_id = "hypr-integration"
+check = "artifact_exists"
+artifact_id = "hypr.tree"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.realmheart.config.exists"
+component_id = "hypr-integration"
+check = "artifact_exists"
+artifact_id = "realmheart.config"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+
+[[artifacts]]
+id = "core.service"
+component_id = "realmheart-core"
+path = "$XDG_CONFIG_HOME/systemd/user/realmheart.service"
+type = "service"
+required = true
+ownership = "user"
+managed = true
+
+[[health_checks]]
+id = "check.core.service.exists"
+component_id = "realmheart-core"
+check = "artifact_exists"
+artifact_id = "core.service"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+# Doctor Acceptance MVP ------------------------------------------------------
+
+[[artifacts]]
+id = "doctor.cli"
+component_id = "realmheart-core"
+path = "$PREFIX/bin/realmheart-doctor"
+type = "executable"
+required = true
+ownership = "release"
+managed = true
+source = "tools/realmheart-doctor.py"
+
+[[artifacts]]
+id = "doctor.python-runtime"
+component_id = "realmheart-core"
+path = "$PREFIX/share/realmheart/python"
+type = "directory"
+required = true
+ownership = "release"
+managed = true
+
+[[artifacts]]
+id = "doctor.manifests"
+component_id = "realmheart-core"
+path = "$PREFIX/share/realmheart/components"
+type = "directory"
+required = true
+ownership = "release"
+managed = true
+source = "components"
+
+[[health_checks]]
+id = "check.doctor.cli.exists"
+component_id = "realmheart-core"
+check = "artifact_exists"
+artifact_id = "doctor.cli"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.doctor.cli.executable"
+component_id = "realmheart-core"
+check = "artifact_executable"
+artifact_id = "doctor.cli"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.doctor.manifests.exists"
+component_id = "realmheart-core"
+check = "artifact_exists"
+artifact_id = "doctor.manifests"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]

@@ -13,8 +13,10 @@
 
 set -uo pipefail
 
-readonly expected_commit="${REALMHEART_FX_HYPRLAND_COMMIT:-efb50993780079460b0cbed1363e2166a2de1d9f}"
-readonly expected_abi="${REALMHEART_FX_HYPRLAND_ABI:-efb50993780079460b0cbed1363e2166a2de1d9f_aq_0.14_hu_0.14_hg_0.5_hc_0.1_hlg_0.6}"
+readonly expected_commit="${REALMHEART_FX_HYPRLAND_COMMIT:-@REALMHEART_FX_HYPRLAND_COMMIT@}"
+readonly expected_abi="${REALMHEART_FX_HYPRLAND_ABI:-@REALMHEART_FX_HYPRLAND_ABI@}"
+readonly expected_build_id="${REALMHEART_FX_BUILD_ID:-@REALMHEART_FX_BUILD_ID@}"
+readonly canonical_plugin="${REALMHEART_FX_PLUGIN_PATH:-@REALMHEART_FX_PLUGIN_PATH@}"
 readonly hyprctl_name="${REALMHEART_FX_HYPRCTL:-hyprctl}"
 readonly runtime_dir="${REALMHEART_FX_RUNTIME_DIR:-${XDG_RUNTIME_DIR:-/tmp}/realmheart-fx}"
 readonly script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,9 +33,9 @@ if ! plugin_list_output="$($hyprctl_bin plugin list 2>&1)"; then
     echo "realmheart-fx: unable to query the compositor plugin list" >&2
     exit 1
 fi
+plugin_loaded=false
 if grep -Eiq 'realmheart[-_ ]?fx' <<<"$plugin_list_output"; then
-    echo "realmheart-fx: already loaded"
-    exit 0
+    plugin_loaded=true
 fi
 
 if ! version_json="$($hyprctl_bin version -j 2>&1)"; then
@@ -91,8 +93,16 @@ if [[ "$runtime_dirty" != false ]]; then
     exit 1
 fi
 
+for contract_value in "$expected_commit" "$expected_abi" "$expected_build_id"; do
+    if [[ "$contract_value" == @REALMHEART_*@ ]]; then
+        echo "realmheart-fx: loader contains unresolved build identity; use the configured/installed loader" >&2
+        exit 1
+    fi
+done
+
 candidates=(
     "${REALMHEART_FX_SO:-}"
+    "$canonical_plugin"
     "${script_dir}/${generated_plugin_relative_dir}"
     "${HOME}/Realmheart/build-hybrid/realmheart-fx.so"
     "${HOME}/.local/lib/realmheart-fx.so"
@@ -111,6 +121,32 @@ done
 if [[ -z "$so" ]]; then
     echo "realmheart-fx: plugin library not found. Enable REALMHEART_BUILD_HYPRLAND_PLUGIN=ON and build against matching Hyprland headers." >&2
     exit 1
+fi
+
+verify_loaded_identity() {
+    local identity_output loaded_build_id loaded_commit loaded_abi
+    if ! identity_output="$($hyprctl_bin realmheart-fx identity 2>&1)"; then
+        printf '%s\n' "$identity_output" >&2
+        echo "realmheart-fx: compositor lists Realmheart FX but its identity command is unavailable" >&2
+        return 1
+    fi
+    loaded_build_id="$(awk -F= '$1 == "build_id" {print substr($0, index($0, "=") + 1); exit}' <<<"$identity_output")"
+    loaded_commit="$(awk -F= '$1 == "hyprland_commit" {print substr($0, index($0, "=") + 1); exit}' <<<"$identity_output")"
+    loaded_abi="$(awk -F= '$1 == "hyprland_abi" {print substr($0, index($0, "=") + 1); exit}' <<<"$identity_output")"
+    if [[ "$loaded_build_id" != "$expected_build_id" || "$loaded_commit" != "$expected_commit" || "$loaded_abi" != "$expected_abi" ]]; then
+        echo "realmheart-fx: loaded plugin identity mismatch; expected build=$expected_build_id commit=$expected_commit abi=$expected_abi, got build=${loaded_build_id:-<missing>} commit=${loaded_commit:-<missing>} abi=${loaded_abi:-<missing>}" >&2
+        return 1
+    fi
+    return 0
+}
+
+if [[ "$plugin_loaded" == true ]]; then
+    if ! verify_loaded_identity; then
+        echo "realmheart-fx: a stale/different Realmheart FX is already loaded; start a fresh Hyprland session to activate the installed build" >&2
+        exit 1
+    fi
+    echo "realmheart-fx: already loaded (verified build $expected_build_id)"
+    exit 0
 fi
 
 if ! mkdir -p "$runtime_dir" || ! chmod 700 "$runtime_dir"; then
@@ -150,5 +186,9 @@ if ! grep -Eiq 'realmheart[-_ ]?fx' <<<"$plugin_list_output"; then
     echo "realmheart-fx: compositor did not confirm Realmheart-FX after load: $runtime_plugin" >&2
     exit 1
 fi
+if ! verify_loaded_identity; then
+    echo "realmheart-fx: compositor loaded Realmheart FX but did not attest the expected build identity" >&2
+    exit 1
+fi
 
-echo "realmheart-fx: loaded $runtime_plugin (source: $so)"
+echo "realmheart-fx: loaded $runtime_plugin (source: $so, build: $expected_build_id)"

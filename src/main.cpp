@@ -26,6 +26,10 @@
 #include <thread>
 #include <unistd.h>
 
+#ifndef REALMHEART_VERSION
+#define REALMHEART_VERSION "unknown"
+#endif
+
 namespace {
 
 std::string get_supported_commands() {
@@ -34,7 +38,7 @@ std::string get_supported_commands() {
 }
 
 void print_usage() {
-    std::cout << "Realmheart 0.1.0\n"
+    std::cout << "Realmheart " << REALMHEART_VERSION << "\n"
               << "Usage:\n"
               << "  realmheart --doctor              Probe host dependencies and live service state\n"
               << "  realmheart --list-modules        Print confirmed module registry\n"
@@ -245,6 +249,10 @@ int main(int argc, char** argv) {
 
     if (command == "--help" || command == "-h") {
         print_usage();
+        return 0;
+    }
+    if (command == "--version") {
+        std::cout << "Realmheart " << REALMHEART_VERSION << "\n";
         return 0;
     }
 

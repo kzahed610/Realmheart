@@ -2,15 +2,42 @@
 set -euo pipefail
 
 # =============================================================================
-# Realmheart Hyprland Config Installer
+# Realmheart LEGACY Hyprland Config Installer
+# =============================================================================
+# This script is retained only as a compatibility/test fixture for installations
+# created before Realmheart's transactional Python installer existed.  It does
+# not provide the current backup/WAL/recovery guarantees and must never be the
+# public installation path.
+#
+# Normal users should run:
+#   python3 installer/realmheart_installer.py --dry-run install
+#   python3 installer/realmheart_installer.py --install-dependencies install
+#
+# The explicit environment opt-in below exists for repository compatibility
+# tests only.  It prevents an accidental ./install-hypr-configs.sh invocation
+# from bypassing the transactional installer.
+# =============================================================================
+
+if [[ "${REALMHEART_ENABLE_LEGACY_INSTALLER:-}" != "1" ]]; then
+    cat >&2 <<'EOF'
+Realmheart: install-hypr-configs.sh is the retired legacy installer.
+It bypasses the transactional backup/journal/recovery engine and is not supported
+for new installations.
+
+Use instead:
+  python3 installer/realmheart_installer.py --dry-run install
+  python3 installer/realmheart_installer.py --install-dependencies install
+EOF
+    exit 64
+fi
+
+# =============================================================================
+# Historical implementation below (compatibility tests only)
 # =============================================================================
 # Copies all portable config files from ./config/ into ~/.config/hypr/,
 # ~/.config/realmheart/, and ~/.local/bin/ (for helper executables like the
 # FX plugin loader). Creates .bak backups with timestamps before overwriting.
 # Safe to re-run — always backs up, never deletes.
-#
-# Usage:
-#   ./install-hypr-configs.sh
 #
 # If the destination files are root-owned, the script will use sudo.
 # =============================================================================
