@@ -6,7 +6,8 @@ import json
 import os
 from pathlib import Path
 
-from realmheart_maintenance.manifest import load_manifest
+from realmheart_maintenance.forensics import ForensicContractError
+from realmheart_maintenance.manifest import ManifestError, load_manifest
 
 from .acceptance import DoctorAcceptanceError, assess_candidate_install, load_candidate_bundle
 
@@ -24,22 +25,31 @@ def _parser() -> argparse.ArgumentParser:
 from .render import render_acceptance_assessment
 
 
+def _render_expected_error(args: argparse.Namespace, exc: Exception) -> None:
+    message = str(exc)
+    if getattr(args, "json", False):
+        print(json.dumps({"recommendation": "indeterminate", "error": message}, indent=2, sort_keys=True))
+    else:
+        print(f"Realmheart Doctor could not assess the candidate: {message}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         registry = load_manifest(args.manifest_dir)
         assessment = assess_candidate_install(registry, load_candidate_bundle(args.candidate))
-    except DoctorAcceptanceError as exc:
-        if getattr(args, "json", False):
-            print(json.dumps({"recommendation": "indeterminate", "error": str(exc)}, indent=2, sort_keys=True))
-        else:
-            print(f"Realmheart Doctor could not assess the candidate: {exc}")
+    except (DoctorAcceptanceError, ForensicContractError, ManifestError, OSError) as exc:
+        _render_expected_error(args, exc)
         return 3
     if args.json:
         print(json.dumps(assessment.to_dict(), indent=2, sort_keys=True))
     else:
         print(render_acceptance_assessment(assessment))
-    return 2 if assessment.recommendation.value == "revert_recommended" else 0
+    if assessment.recommendation.value == "revert_recommended":
+        return 2
+    if assessment.recommendation.value == "indeterminate":
+        return 3
+    return 0
 
 
 if __name__ == "__main__":

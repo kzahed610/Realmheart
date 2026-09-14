@@ -117,6 +117,7 @@ class ArtifactObservation:
     sha256: str | None = None
     immutable_fingerprint: str | None = None
     mode: str | None = None
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -387,6 +388,7 @@ def parse_health_snapshot(payload: Mapping[str, Any]) -> CurrentHealthSnapshot:
                 item.get("immutable_fingerprint"), f"health snapshot artifact {aid} immutable_fingerprint"
             ),
             mode=_optional_string(item.get("mode"), f"health snapshot artifact {aid} mode"),
+            error=_optional_string(item.get("error"), f"health snapshot artifact {aid} error"),
         )
 
     activation_state = _expect_string(payload.get("activation_state"), "health snapshot activation_state")
@@ -456,24 +458,30 @@ def _repair_readiness(registry: ManifestRegistry, snapshot: CurrentHealthSnapsho
     relevant = [cap for cap in registry.capabilities.values() if _REPAIR_LIFECYCLES.intersection(cap.lifecycle)]
     if not relevant:
         return ReadinessState.HEALTHY
-    observed = 0
+    has_unknown = False
     worst = ReadinessState.HEALTHY
     for cap in relevant:
         current = snapshot.capabilities.get(cap.id)
         if current is None:
+            if cap.requirement == "required":
+                has_unknown = True
             continue
-        observed += 1
         if current.state in _SATISFIED_CAPABILITY_STATES:
             continue
-        if cap.requirement == "required":
+        if current.state == "unknown":
+            if cap.requirement == "required":
+                has_unknown = True
+            elif worst is not ReadinessState.FAILED:
+                worst = ReadinessState.DEGRADED
+        elif cap.requirement == "required":
             worst = ReadinessState.FAILED
         elif worst is not ReadinessState.FAILED:
             worst = ReadinessState.DEGRADED
-    if worst is not ReadinessState.HEALTHY:
-        return worst
-    if observed != len(relevant):
+    if worst is ReadinessState.FAILED:
+        return ReadinessState.FAILED
+    if has_unknown:
         return ReadinessState.UNKNOWN
-    return ReadinessState.HEALTHY
+    return worst
 
 
 def analyze_forensics(
@@ -534,14 +542,44 @@ def analyze_forensics(
     for capid, accepted in receipt.capabilities.items():
         current = snapshot.capabilities.get(capid)
         manifest_cap = registry.capabilities.get(capid)
-        if current is None or manifest_cap is None:
+        if manifest_cap is None:
+            continue
+        if current is None:
+            if manifest_cap.requirement == "required":
+                add(
+                    DriftKind.DEPENDENCY,
+                    "RH_FORENSIC_DEPENDENCY_UNKNOWN",
+                    "warning",
+                    capid,
+                    component_id=manifest_cap.component_id,
+                    dependency_id=manifest_cap.dependency_id,
+                    previous=accepted.state,
+                    current="unknown",
+                    affects_runtime="runtime" in manifest_cap.lifecycle,
+                    affects_repair=bool(_REPAIR_LIFECYCLES.intersection(manifest_cap.lifecycle)),
+                    summary=f"capability {capid} was not included in the current health snapshot",
+                )
             continue
         dependency_id = manifest_cap.dependency_id
         runtime = "runtime" in manifest_cap.lifecycle
         repair = bool(_REPAIR_LIFECYCLES.intersection(manifest_cap.lifecycle))
         was_ok = accepted.state in _SATISFIED_CAPABILITY_STATES
         is_ok = current.state in _SATISFIED_CAPABILITY_STATES
-        if was_ok and not is_ok:
+        if current.state == "unknown":
+            add(
+                DriftKind.DEPENDENCY,
+                "RH_FORENSIC_DEPENDENCY_UNKNOWN",
+                "warning",
+                capid,
+                component_id=manifest_cap.component_id,
+                dependency_id=dependency_id,
+                previous=accepted.state,
+                current=current.state,
+                affects_runtime=runtime,
+                affects_repair=repair,
+                summary=f"capability {capid} current state could not be independently established",
+            )
+        elif was_ok and not is_ok:
             severity = "critical" if manifest_cap.requirement == "required" and runtime else "error" if manifest_cap.requirement != "soft" else "warning"
             code = "RH_FORENSIC_DEPENDENCY_MISSING" if current.state == "missing" else "RH_FORENSIC_DEPENDENCY_FAILED"
             add(
@@ -572,7 +610,7 @@ def analyze_forensics(
                 summary=f"capability {capid} state changed from {accepted.state} to {current.state}",
             )
 
-        if accepted.version and current.version and accepted.version != current.version:
+        if current.state != "unknown" and accepted.version and current.version and accepted.version != current.version:
             dep_spec = registry.dependencies.get(dependency_id)
             incompatible = False
             if dep_spec is not None:
@@ -595,13 +633,40 @@ def analyze_forensics(
     for aid, accepted in receipt.artifacts.items():
         current = snapshot.artifacts.get(aid)
         manifest_artifact = registry.artifacts.get(aid)
-        if current is None or manifest_artifact is None:
+        if manifest_artifact is None:
+            continue
+        if current is None:
+            if manifest_artifact.required:
+                add(
+                    DriftKind.ARTIFACT,
+                    "RH_FORENSIC_ARTIFACT_UNKNOWN",
+                    "warning",
+                    aid,
+                    component_id=manifest_artifact.component_id,
+                    previous="present",
+                    current="unknown",
+                    affects_runtime=True,
+                    summary=f"artifact {aid} was not included in the current health snapshot",
+                )
+            continue
+        if current.error is not None:
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_ARTIFACT_UNKNOWN",
+                "warning",
+                aid,
+                component_id=manifest_artifact.component_id,
+                previous="present",
+                current="unknown",
+                affects_runtime=True,
+                summary=f"artifact {aid} observation was inconclusive: {current.error}",
+            )
             continue
         if not current.exists:
             add(
                 DriftKind.ARTIFACT,
                 "RH_FORENSIC_ARTIFACT_MISSING",
-                "critical" if manifest_artifact.required and registry.components[manifest_artifact.component_id].category in {"core", "fx"} else "error",
+                "critical" if manifest_artifact.required and registry.components[manifest_artifact.component_id].category in {"core", "essential", "fx"} else "error",
                 aid,
                 component_id=manifest_artifact.component_id,
                 previous="present",
@@ -610,6 +675,25 @@ def analyze_forensics(
                 summary=f"artifact {aid} recorded by the installed receipt is now missing",
             )
             continue
+        incomplete_fields = []
+        if accepted.sha256 and not current.sha256:
+            incomplete_fields.append("sha256")
+        if accepted.immutable_fingerprint and not current.immutable_fingerprint:
+            incomplete_fields.append("immutable_fingerprint")
+        if accepted.mode and not current.mode:
+            incomplete_fields.append("mode")
+        if incomplete_fields:
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_ARTIFACT_UNKNOWN",
+                "warning",
+                aid,
+                component_id=manifest_artifact.component_id,
+                previous="present",
+                current="unknown",
+                affects_runtime=True,
+                summary=f"artifact {aid} observation is incomplete: missing {', '.join(incomplete_fields)}",
+            )
         if accepted.sha256 and current.sha256 and accepted.sha256 != current.sha256:
             add(
                 DriftKind.ARTIFACT,

@@ -129,6 +129,81 @@ class Phase20ForensicContractTests(unittest.TestCase):
             self.assertFalse(build_drift.affects_runtime)
             self.assertTrue(build_drift.affects_repair)
 
+    def test_unknown_observation_is_uncertain_not_dependency_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            snapshot_path, snapshot_payload = self._snapshot_from_receipt(root, receipt_payload)
+            capabilities = snapshot_payload["capabilities"]
+            if not isinstance(capabilities, dict):
+                self.fail("synthetic snapshot capabilities must be an object")
+            build_cmake = capabilities["build.cmake"]
+            if not isinstance(build_cmake, dict):
+                self.fail("synthetic build.cmake observation must be an object")
+            build_cmake["state"] = "unknown"
+            snapshot_path.write_text(json.dumps(snapshot_payload), encoding="utf-8")
+
+            report = analyze_forensics(self.registry, load_installed_receipt(receipt_path), load_health_snapshot(snapshot_path))
+
+            self.assertEqual(report.repair_readiness, ReadinessState.UNKNOWN)
+            unknown_drift = next(item for item in report.drifts if item.subject_id == "build.cmake")
+            self.assertEqual(unknown_drift.error_code, "RH_FORENSIC_DEPENDENCY_UNKNOWN")
+            self.assertEqual(unknown_drift.severity, "warning")
+            self.assertNotEqual(unknown_drift.error_code, "RH_FORENSIC_DEPENDENCY_FAILED")
+
+    def test_missing_required_runtime_observation_is_explicit_unknown_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            snapshot_path, snapshot_payload = self._snapshot_from_receipt(root, receipt_payload)
+            capabilities = snapshot_payload["capabilities"]
+            if not isinstance(capabilities, dict):
+                self.fail("synthetic snapshot capabilities must be an object")
+            capabilities.pop("runtime.dbus-update-environment", None)
+            snapshot_path.write_text(json.dumps(snapshot_payload), encoding="utf-8")
+
+            report = analyze_forensics(self.registry, load_installed_receipt(receipt_path), load_health_snapshot(snapshot_path))
+
+            missing = next(item for item in report.drifts if item.subject_id == "runtime.dbus-update-environment")
+            self.assertEqual(missing.error_code, "RH_FORENSIC_DEPENDENCY_UNKNOWN")
+            self.assertEqual(missing.current, "unknown")
+            self.assertTrue(report.has_drift)
+
+    def test_missing_required_artifact_observation_is_explicit_unknown_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            snapshot_path, snapshot_payload = self._snapshot_from_receipt(root, receipt_payload)
+            artifacts = snapshot_payload["artifacts"]
+            if not isinstance(artifacts, dict):
+                self.fail("synthetic snapshot artifacts must be an object")
+            artifacts.pop("core.binary", None)
+            snapshot_path.write_text(json.dumps(snapshot_payload), encoding="utf-8")
+
+            report = analyze_forensics(self.registry, load_installed_receipt(receipt_path), load_health_snapshot(snapshot_path))
+
+            missing = next(item for item in report.drifts if item.subject_id == "core.binary")
+            self.assertEqual(missing.error_code, "RH_FORENSIC_ARTIFACT_UNKNOWN")
+            self.assertEqual(missing.current, "unknown")
+            self.assertEqual(missing.severity, "warning")
+            self.assertTrue(report.has_drift)
+
+    def test_missing_optional_capability_observation_preserves_optional_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            snapshot_path, snapshot_payload = self._snapshot_from_receipt(root, receipt_payload)
+            optional = next(spec for spec in self.registry.capabilities.values() if spec.requirement != "required")
+            capabilities = snapshot_payload["capabilities"]
+            if not isinstance(capabilities, dict):
+                self.fail("synthetic snapshot capabilities must be an object")
+            capabilities.pop(optional.id, None)
+            snapshot_path.write_text(json.dumps(snapshot_payload), encoding="utf-8")
+
+            report = analyze_forensics(self.registry, load_installed_receipt(receipt_path), load_health_snapshot(snapshot_path))
+
+            self.assertFalse(any(item.subject_id == optional.id for item in report.drifts))
+
     def test_health_check_selection_honors_context_cost_and_side_effect_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             components = Path(temp) / "components"

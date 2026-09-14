@@ -1,23 +1,38 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 from . import _bootstrap
 from realmheart_doctor import AcceptanceAssessment, AcceptanceRecommendation, assess_candidate_install
 from realmheart_doctor.acceptance import DoctorAcceptanceError
-from realmheart_maintenance.manifest import load_manifest
+from realmheart_doctor.cli import main as doctor_main
+from realmheart_maintenance.forensics import ForensicContractError
+from realmheart_maintenance.manifest import ManifestError, load_manifest
 from realmheart_installer.finalization import build_final_decision, build_installed_state_receipt
 from realmheart_installer.finalization.models import FinalAction, FinalSeverity
 from realmheart_installer.models import InstallMode
 from realmheart_installer.verification.models import InstallHealthState
 
+TOOL = _bootstrap.REPO_ROOT / "tools/realmheart-doctor.py"
 
-def _manifest(root: Path, *, category: str = "core", capability_requirement: str = "required"):
+
+def _manifest(
+    root: Path,
+    *,
+    category: str = "core",
+    capability_requirement: str = "required",
+    probe_version: bool = False,
+):
     components = root / "components"
     components.mkdir()
     artifact = root / "installed-demo"
@@ -45,6 +60,7 @@ component_id = "demo"
 [capabilities.probe]
 kind = "executable"
 executable = "python3"
+{('version_argv = ["--version"]' if probe_version else '')}
 
 [[artifacts]]
 id = "demo.file"
@@ -139,6 +155,135 @@ class DoctorAcceptanceTests(unittest.TestCase):
             with patch("realmheart_doctor.acceptance.shutil.which", return_value=None):
                 result=assess_candidate_install(registry,_candidate(registry,artifact))
             self.assertEqual(result.recommendation,AcceptanceRecommendation.KEEP_WITH_WARNINGS)
+
+    def test_essential_runtime_dependency_failure_recommends_revert(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); registry, artifact=_manifest(root,category="essential"); artifact.write_text("ok\n"); artifact.chmod(0o644)
+            with patch("realmheart_doctor.acceptance.shutil.which", return_value=None):
+                result=assess_candidate_install(registry,_candidate(registry,artifact))
+            self.assertEqual(result.recommendation,AcceptanceRecommendation.REVERT_RECOMMENDED)
+            self.assertTrue(any(x.code=="RH_FORENSIC_DEPENDENCY_MISSING" and x.severity=="critical" for x in result.findings))
+
+    def test_required_essential_artifact_missing_recommends_revert(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); registry, artifact=_manifest(root,category="essential")
+            result=assess_candidate_install(registry,_candidate(registry,artifact))
+            self.assertEqual(result.recommendation,AcceptanceRecommendation.REVERT_RECOMMENDED)
+            self.assertTrue(any(x.code=="RH_FORENSIC_ARTIFACT_MISSING" and x.severity=="critical" for x in result.findings))
+
+    def test_required_core_artifact_hash_drift_recommends_revert(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); registry, artifact=_manifest(root); artifact.write_text("before\n"); artifact.chmod(0o644)
+            payload=_candidate(registry,artifact)
+            payload["artifacts"]["demo.file"]["sha256"] = hashlib.sha256(b"before\n").hexdigest()
+            artifact.write_text("after\n")
+            result=assess_candidate_install(registry,payload)
+            self.assertEqual(result.recommendation,AcceptanceRecommendation.REVERT_RECOMMENDED)
+            self.assertTrue(any(x.code=="RH_FORENSIC_ARTIFACT_HASH_DRIFT" and x.severity=="critical" for x in result.findings))
+
+    def test_required_core_artifact_mode_drift_recommends_revert(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp); registry, artifact=_manifest(root); artifact.write_text("ok\n"); artifact.chmod(0o600)
+            result=assess_candidate_install(registry,_candidate(registry,artifact))
+            self.assertEqual(result.recommendation,AcceptanceRecommendation.REVERT_RECOMMENDED)
+            self.assertTrue(any(x.code=="RH_FORENSIC_ARTIFACT_MODE_DRIFT" and x.severity=="critical" for x in result.findings))
+
+    def test_standalone_cli_expected_errors_keep_stable_json_shape(self):
+        for error in (ManifestError("bad manifest"), ForensicContractError("bad forensic input"), DoctorAcceptanceError("bad candidate")):
+            with self.subTest(error=type(error).__name__):
+                output=StringIO()
+                with patch("realmheart_doctor.cli.load_manifest", side_effect=error), redirect_stdout(output):
+                    code=doctor_main(["assess-install", "--candidate", "missing.json", "--manifest-dir", "missing-components", "--json"])
+                self.assertEqual(code,3)
+                self.assertEqual(json.loads(output.getvalue()), {"error": str(error), "recommendation": "indeterminate"})
+
+    def test_candidate_rejects_canonical_identity_and_coverage_tampering(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root)
+            cases = {
+                "component category": lambda payload: payload["components"]["demo"].update(category="qol"),
+                "component artifact coverage": lambda payload: payload["components"]["demo"].update(artifact_ids=[]),
+                "required capability omission": lambda payload: payload["dependencies"].pop("runtime.python"),
+                "required artifact omission": lambda payload: payload["artifacts"].pop("demo.file"),
+                "artifact requiredness relabel": lambda payload: payload["artifacts"]["demo.file"].update(required=False),
+                "artifact path redirection": lambda payload: payload["artifacts"]["demo.file"].update(path="/bin/sh"),
+            }
+            for label, mutate in cases.items():
+                with self.subTest(label=label):
+                    payload = _candidate(registry, artifact)
+                    mutate(payload)
+                    with self.assertRaisesRegex(DoctorAcceptanceError, "canonical|required|path"):
+                        assess_candidate_install(registry, payload)
+
+    def test_probe_timeout_is_indeterminate_not_critical_missing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root, probe_version=True)
+            artifact.write_text("ok\n")
+            artifact.chmod(0o644)
+            with patch("realmheart_doctor.acceptance.shutil.which", return_value="/usr/bin/python3"), patch(
+                "realmheart_doctor.acceptance._run", return_value=None
+            ):
+                result = assess_candidate_install(registry, _candidate(registry, artifact))
+            self.assertEqual(result.recommendation, AcceptanceRecommendation.INDETERMINATE)
+            self.assertTrue(any(item.code == "RH_DOCTOR_CAPABILITY_UNCERTAIN" for item in result.findings))
+            self.assertFalse(any(item.code == "RH_FORENSIC_DEPENDENCY_MISSING" for item in result.findings))
+
+    def test_artifact_permission_error_is_indeterminate_not_missing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root)
+            artifact.write_text("ok\n")
+            artifact.chmod(0o644)
+            with patch("realmheart_doctor.acceptance.Path.lstat", side_effect=PermissionError("denied")):
+                result = assess_candidate_install(registry, _candidate(registry, artifact))
+            self.assertEqual(result.recommendation, AcceptanceRecommendation.INDETERMINATE)
+            self.assertTrue(any(item.code == "RH_FORENSIC_ARTIFACT_UNKNOWN" for item in result.findings))
+            self.assertFalse(any(item.code == "RH_FORENSIC_ARTIFACT_MISSING" for item in result.findings))
+
+    def test_malformed_nested_candidate_values_raise_contract_errors(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root)
+            for field in ("blocked_by", "artifact_ids", "build_unit_ids"):
+                with self.subTest(field=field):
+                    payload = _candidate(registry, artifact)
+                    payload["components"]["demo"][field] = None
+                    with self.assertRaisesRegex(DoctorAcceptanceError, field):
+                        assess_candidate_install(registry, payload)
+
+    def test_cli_malformed_utf8_is_stable_exit_three_json(self):
+        with tempfile.TemporaryDirectory() as temp:
+            candidate = Path(temp) / "invalid-utf8.json"
+            candidate.write_bytes(b"{\xff\n")
+            proc = subprocess.run(
+                [sys.executable, str(TOOL), "assess-install", "--candidate", str(candidate), "--manifest-dir", str(_bootstrap.REPO_ROOT / "components"), "--json"],
+                cwd=_bootstrap.REPO_ROOT,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(proc.returncode, 3)
+            self.assertNotIn("Traceback", proc.stderr)
+            self.assertEqual(json.loads(proc.stdout)["recommendation"], "indeterminate")
+
+    def test_cli_malformed_nested_candidate_is_stable_exit_three_json(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root)
+            payload = _candidate(registry, artifact)
+            payload["components"]["demo"]["blocked_by"] = None
+            candidate = root / "candidate.json"
+            candidate.write_text(json.dumps(payload), encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(TOOL), "assess-install", "--candidate", str(candidate), "--manifest-dir", str(root / "components"), "--json"],
+                cwd=_bootstrap.REPO_ROOT,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(proc.returncode, 3)
+            self.assertNotIn("Traceback", proc.stderr)
+            self.assertEqual(json.loads(proc.stdout)["recommendation"], "indeterminate")
 
     def test_manifest_identity_mismatch_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:

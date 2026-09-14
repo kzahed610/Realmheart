@@ -11,8 +11,9 @@ import os
 import shutil
 import stat
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -33,7 +34,15 @@ from .models import AcceptanceAssessment, AcceptanceFinding, AcceptanceRecommend
 
 CANDIDATE_SCHEMA_VERSION = 1
 _SATISFIED = {"pass", "not_applicable"}
-_CORE_CATEGORIES = {"core", "fx"}
+_BLOCKING_CATEGORIES = {"core", "essential", "fx"}
+_CANDIDATE_COMPONENT_HEALTH = {
+    "healthy", "degraded", "failed", "blocked", "not_applicable", "pending_activation",
+    "pass", "warning", "pending", "running", "skipped",
+}
+_CANDIDATE_CAPABILITY_STATES = {"pass", "missing", "failed", "not_applicable"}
+_CANDIDATE_INSTALL_HEALTH = {"healthy", "degraded", "failed"}
+_CANDIDATE_ACTIVATION_STATES = {"active", "pending_session_restart", "unknown"}
+_CANDIDATE_RUNTIME_HEALTH = {"healthy", "degraded", "failed", "unknown"}
 
 
 class DoctorAcceptanceError(ValueError):
@@ -52,181 +61,438 @@ def _text(value: Any, field: str) -> str:
     return value
 
 
+def _optional_text(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    return _text(value, field)
+
+
+def _string_list(value: Any, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise DoctorAcceptanceError(f"{field} must be an array of strings")
+    return tuple(value)
+
+
+def _candidate_ids(records: Mapping[Any, Any], field: str) -> set[str]:
+    ids: set[str] = set()
+    for raw_id in records:
+        if not isinstance(raw_id, str) or not raw_id:
+            raise DoctorAcceptanceError(f"{field} contains an invalid record id")
+        ids.add(raw_id)
+    return ids
+
+
+def _validate_coverage(
+    records: Mapping[Any, Any],
+    *,
+    expected: set[str],
+    required: set[str],
+    field: str,
+) -> None:
+    actual = _candidate_ids(records, field)
+    unexpected = sorted(actual - expected)
+    if unexpected:
+        raise DoctorAcceptanceError(f"{field} contains non-canonical record(s): {', '.join(unexpected)}")
+    missing = sorted(required - actual)
+    if missing:
+        raise DoctorAcceptanceError(f"{field} is missing required record(s): {', '.join(missing)}")
+
+
+def _canonical_path_matches(declared: str, candidate: str) -> bool:
+    """Accept a candidate path only when it matches the manifest path template."""
+
+    if "\x00" in candidate or ".." in PurePosixPath(candidate).parts:
+        return False
+    if declared == candidate:
+        return True
+
+    replacements = {
+        "$HOME": os.environ.get("HOME", str(Path.home())),
+        "$XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")),
+        "$XDG_STATE_HOME": os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state")),
+    }
+    if os.environ.get("PREFIX"):
+        replacements["$PREFIX"] = os.environ["PREFIX"]
+    if os.environ.get("LIBEXEC"):
+        replacements["$LIBEXEC"] = os.environ["LIBEXEC"]
+    if os.environ.get("SYSCONF"):
+        replacements["$SYSCONF"] = os.environ["SYSCONF"]
+    expanded = declared
+    for token, value in replacements.items():
+        expanded = expanded.replace(token, value)
+    if expanded == candidate:
+        return True
+
+    if not Path(candidate).is_absolute():
+        return False
+    for token in ("$PREFIX", "$LIBEXEC", "$SYSCONF"):
+        if declared.count(token) != 1:
+            continue
+        prefix, suffix = declared.split(token, 1)
+        if prefix and not candidate.startswith(prefix):
+            continue
+        if suffix and not candidate.endswith(suffix):
+            continue
+        start = len(prefix)
+        end = len(candidate) - len(suffix) if suffix else len(candidate)
+        variable_value = candidate[start:end]
+        if variable_value.startswith("/") and variable_value != "/":
+            return True
+        if not variable_value and not prefix and suffix.startswith("/") and candidate == suffix:
+            return True
+    return False
+
+
 def load_candidate_bundle(path: Path) -> Mapping[str, Any]:
     path = Path(path)
     if path.is_symlink() or not path.is_file():
         raise DoctorAcceptanceError(f"candidate bundle must be a regular non-symlink file: {path}")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise DoctorAcceptanceError(f"cannot read candidate bundle: {exc}") from exc
     return _mapping(payload, "candidate bundle")
 
 
 def _candidate_receipt(payload: Mapping[str, Any], registry: ManifestRegistry) -> InstalledStateReceipt:
-    if payload.get("schema_version") != CANDIDATE_SCHEMA_VERSION:
+    if not isinstance(payload, Mapping):
+        raise DoctorAcceptanceError("candidate bundle must be an object")
+    if type(payload.get("schema_version")) is not int or payload.get("schema_version") != CANDIDATE_SCHEMA_VERSION:
         raise DoctorAcceptanceError(f"unsupported candidate schema {payload.get('schema_version')!r}")
     if payload.get("kind") != "realmheart_install_candidate":
         raise DoctorAcceptanceError("candidate bundle kind must be realmheart_install_candidate")
     if payload.get("manifest_set_sha256") != registry.digest:
         raise DoctorAcceptanceError("candidate manifest digest does not match the canonical manifest")
-    if payload.get("manifest_schema_version") != registry.schema_version:
+    if type(payload.get("manifest_schema_version")) is not int or payload.get("manifest_schema_version") != registry.schema_version:
         raise DoctorAcceptanceError("candidate manifest schema does not match the canonical manifest")
 
+    components_raw = _mapping(payload.get("components"), "components")
+    dependencies_raw = _mapping(payload.get("dependencies"), "dependencies")
+    artifacts_raw = _mapping(payload.get("artifacts"), "artifacts")
+    required_component_ids = {
+        spec.component_id
+        for spec in registry.capabilities.values()
+        if spec.requirement == "required" and spec.component_id is not None
+    }
+    required_component_ids.update(
+        spec.component_id for spec in registry.artifacts.values() if spec.required
+    )
+    required_component_ids.update(
+        component_id
+        for component_id, spec in registry.components.items()
+        if spec.category in _BLOCKING_CATEGORIES
+    )
+    _validate_coverage(
+        components_raw,
+        expected=set(registry.components),
+        required=required_component_ids,
+        field="components",
+    )
+    _validate_coverage(
+        dependencies_raw,
+        expected=set(registry.capabilities),
+        required={capid for capid, spec in registry.capabilities.items() if spec.requirement == "required"},
+        field="dependencies",
+    )
+    _validate_coverage(
+        artifacts_raw,
+        expected=set(registry.artifacts),
+        required={aid for aid, spec in registry.artifacts.items() if spec.required},
+        field="artifacts",
+    )
+
     components: dict[str, ReceiptComponent] = {}
-    for cid, raw_value in _mapping(payload.get("components"), "components").items():
+    for cid, raw_value in components_raw.items():
+        canonical = registry.components.get(cid)
+        if canonical is None:
+            raise DoctorAcceptanceError(f"component {cid} is not declared by the canonical manifest")
         raw = _mapping(raw_value, f"component {cid}")
+        display_name = _text(raw.get("display_name"), f"component {cid}.display_name")
+        if display_name != canonical.name:
+            raise DoctorAcceptanceError(f"component {cid}.display_name does not match the canonical manifest")
+        category = _text(raw.get("category"), f"component {cid}.category")
+        if category != canonical.category:
+            raise DoctorAcceptanceError(f"component {cid}.category does not match the canonical manifest")
+        health = _text(raw.get("health"), f"component {cid}.health")
+        if health not in _CANDIDATE_COMPONENT_HEALTH:
+            raise DoctorAcceptanceError(f"component {cid}.health has invalid state {health!r}")
+        blocked_by = _string_list(raw.get("blocked_by", []), f"component {cid}.blocked_by")
+        artifact_ids = _string_list(raw.get("artifact_ids", []), f"component {cid}.artifact_ids")
+        build_unit_ids = _string_list(raw.get("build_unit_ids", []), f"component {cid}.build_unit_ids")
+        if "warnings" in raw:
+            _string_list(raw["warnings"], f"component {cid}.warnings")
+        for aid in artifact_ids:
+            artifact = registry.artifacts.get(aid)
+            if artifact is None or artifact.component_id != cid:
+                raise DoctorAcceptanceError(f"component {cid}.artifact_ids contains a non-canonical artifact")
+        for bid in build_unit_ids:
+            build_unit = registry.build_units.get(bid)
+            if build_unit is None or cid not in build_unit.component_ids:
+                raise DoctorAcceptanceError(f"component {cid}.build_unit_ids contains a non-canonical build unit")
         components[cid] = ReceiptComponent(
             component_id=cid,
-            display_name=_text(raw.get("display_name"), f"component {cid}.display_name"),
-            category=_text(raw.get("category"), f"component {cid}.category"),
-            health=_text(raw.get("health"), f"component {cid}.health"),
-            blocked_by=tuple(str(x) for x in raw.get("blocked_by", ())),
-            artifact_ids=tuple(str(x) for x in raw.get("artifact_ids", ())),
-            build_unit_ids=tuple(str(x) for x in raw.get("build_unit_ids", ())),
+            display_name=display_name,
+            category=category,
+            health=health,
+            blocked_by=blocked_by,
+            artifact_ids=artifact_ids,
+            build_unit_ids=build_unit_ids,
         )
 
     capabilities: dict[str, ReceiptCapability] = {}
-    for capid, raw_value in _mapping(payload.get("dependencies"), "dependencies").items():
+    for capid, raw_value in dependencies_raw.items():
+        canonical = registry.capabilities.get(capid)
+        if canonical is None:
+            raise DoctorAcceptanceError(f"dependency {capid} is not declared by the canonical manifest")
         raw = _mapping(raw_value, f"dependency {capid}")
+        component_id = raw.get("component_id")
+        if component_id is not None and not isinstance(component_id, str):
+            raise DoctorAcceptanceError(f"dependency {capid}.component_id must be a string or null")
+        if component_id != canonical.component_id:
+            raise DoctorAcceptanceError(f"dependency {capid}.component_id does not match the canonical manifest")
+        requirement = _text(raw.get("requirement"), f"dependency {capid}.requirement")
+        if requirement != canonical.requirement:
+            raise DoctorAcceptanceError(f"dependency {capid}.requirement does not match the canonical manifest")
+        lifecycle = _string_list(raw.get("lifecycle", []), f"dependency {capid}.lifecycle")
+        if lifecycle != canonical.lifecycle:
+            raise DoctorAcceptanceError(f"dependency {capid}.lifecycle does not match the canonical manifest")
+        state = _text(raw.get("state"), f"dependency {capid}.state")
+        if state not in _CANDIDATE_CAPABILITY_STATES:
+            raise DoctorAcceptanceError(f"dependency {capid}.state has invalid state {state!r}")
         capabilities[capid] = ReceiptCapability(
             capability_id=capid,
-            component_id=raw.get("component_id") if isinstance(raw.get("component_id"), str) else None,
-            requirement=_text(raw.get("requirement"), f"dependency {capid}.requirement"),
-            lifecycle=tuple(str(x) for x in raw.get("lifecycle", ())),
-            state=_text(raw.get("state"), f"dependency {capid}.state"),
-            version=raw.get("version") if isinstance(raw.get("version"), str) else None,
+            component_id=component_id,
+            requirement=requirement,
+            lifecycle=lifecycle,
+            state=state,
+            version=_optional_text(raw.get("version"), f"dependency {capid}.version"),
         )
 
     artifacts: dict[str, ReceiptArtifact] = {}
-    for aid, raw_value in _mapping(payload.get("artifacts"), "artifacts").items():
+    for aid, raw_value in artifacts_raw.items():
+        canonical = registry.artifacts.get(aid)
+        if canonical is None:
+            raise DoctorAcceptanceError(f"artifact {aid} is not declared by the canonical manifest")
         raw = _mapping(raw_value, f"artifact {aid}")
+        component_id = _text(raw.get("component_id"), f"artifact {aid}.component_id")
+        if component_id != canonical.component_id:
+            raise DoctorAcceptanceError(f"artifact {aid}.component_id does not match the canonical manifest")
+        path = _text(raw.get("path"), f"artifact {aid}.path")
+        if not _canonical_path_matches(canonical.path, path):
+            raise DoctorAcceptanceError(f"artifact {aid}.path is not authorized by the canonical manifest")
+        artifact_type = _text(raw.get("type"), f"artifact {aid}.type")
+        if artifact_type != canonical.type:
+            raise DoctorAcceptanceError(f"artifact {aid}.type does not match the canonical manifest")
+        ownership = _text(raw.get("ownership"), f"artifact {aid}.ownership")
+        if ownership != canonical.ownership:
+            raise DoctorAcceptanceError(f"artifact {aid}.ownership does not match the canonical manifest")
+        if "required" in raw:
+            required = raw["required"]
+            if type(required) is not bool or required != canonical.required:
+                raise DoctorAcceptanceError(f"artifact {aid}.required does not match the canonical manifest")
+        mode = _optional_text(raw.get("mode"), f"artifact {aid}.mode")
+        if mode is not None and (len(mode) != 4 or any(char not in "01234567" for char in mode)):
+            raise DoctorAcceptanceError(f"artifact {aid}.mode must be four octal digits or null")
         artifacts[aid] = ReceiptArtifact(
             artifact_id=aid,
-            component_id=_text(raw.get("component_id"), f"artifact {aid}.component_id"),
-            path=_text(raw.get("path"), f"artifact {aid}.path"),
-            artifact_type=_text(raw.get("type"), f"artifact {aid}.type"),
-            ownership=_text(raw.get("ownership"), f"artifact {aid}.ownership"),
-            mode=raw.get("mode") if isinstance(raw.get("mode"), str) else None,
-            sha256=raw.get("sha256") if isinstance(raw.get("sha256"), str) else None,
-            immutable_fingerprint=raw.get("immutable_fingerprint") if isinstance(raw.get("immutable_fingerprint"), str) else None,
+            component_id=component_id,
+            path=path,
+            artifact_type=artifact_type,
+            ownership=ownership,
+            mode=mode,
+            sha256=_optional_text(raw.get("sha256"), f"artifact {aid}.sha256"),
+            immutable_fingerprint=_optional_text(raw.get("immutable_fingerprint"), f"artifact {aid}.immutable_fingerprint"),
         )
+
+    for aid, artifact in artifacts.items():
+        component = components.get(artifact.component_id)
+        if component is None or aid not in component.artifact_ids:
+            raise DoctorAcceptanceError(f"artifact {aid} is not covered by its canonical component record")
+    for aid, canonical in registry.artifacts.items():
+        if canonical.required and aid not in components[canonical.component_id].artifact_ids:
+            raise DoctorAcceptanceError(f"required artifact {aid} is omitted from its component coverage")
+
+    install_health = _text(payload.get("install_health"), "install_health")
+    activation_state = _text(payload.get("activation_state"), "activation_state")
+    runtime_health = _text(payload.get("runtime_health"), "runtime_health")
+    if install_health not in _CANDIDATE_INSTALL_HEALTH:
+        raise DoctorAcceptanceError(f"install_health has invalid state {install_health!r}")
+    if activation_state not in _CANDIDATE_ACTIVATION_STATES:
+        raise DoctorAcceptanceError(f"activation_state has invalid state {activation_state!r}")
+    if runtime_health not in _CANDIDATE_RUNTIME_HEALTH:
+        raise DoctorAcceptanceError(f"runtime_health has invalid state {runtime_health!r}")
 
     return InstalledStateReceipt(
         schema_version=2,
         realmheart_version=_text(payload.get("realmheart_version"), "realmheart_version"),
-        manifest_schema_version=int(payload["manifest_schema_version"]),
+        manifest_schema_version=payload["manifest_schema_version"],
         manifest_digest=_text(payload.get("manifest_set_sha256"), "manifest_set_sha256"),
         installer_version=_text(payload.get("installer_version"), "installer_version"),
         transaction_id=_text(payload.get("transaction_id"), "transaction_id"),
         disposition="candidate",
-        install_health=_text(payload.get("install_health"), "install_health"),
-        activation_state=_text(payload.get("activation_state"), "activation_state"),
-        runtime_health=_text(payload.get("runtime_health"), "runtime_health"),
+        install_health=install_health,
+        activation_state=activation_state,
+        runtime_health=runtime_health,
         components=MappingProxyType(components),
         capabilities=MappingProxyType(capabilities),
         artifacts=MappingProxyType(artifacts),
     )
 
 
-def _run(argv: tuple[str, ...], *, timeout: float = 4.0) -> subprocess.CompletedProcess[str] | None:
+@dataclass(frozen=True)
+class _ProbeFailure:
+    kind: str
+    detail: str
+
+
+def _run(argv: tuple[str, ...], *, timeout: float = 4.0) -> subprocess.CompletedProcess[str] | _ProbeFailure:
     try:
         return subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
+    except subprocess.TimeoutExpired:
+        return _ProbeFailure("timeout", f"command exceeded the {timeout:g}s observation deadline")
+    except (OSError, UnicodeError) as exc:
+        return _ProbeFailure("io_error", f"{type(exc).__name__}: {exc}")
+
+
+def _which(executable: str) -> str | None | _ProbeFailure:
+    try:
+        return shutil.which(executable)
+    except OSError as exc:
+        return _ProbeFailure("io_error", f"{type(exc).__name__}: {exc}")
+
+
+def _unknown_probe(spec, failure: _ProbeFailure | None = None) -> CapabilityObservation:
+    if failure is None:
+        detail = "probe result was not available"
+    else:
+        detail = f"{failure.kind}: {failure.detail}"
+    return CapabilityObservation(spec.id, "unknown", detail=detail)
 
 
 def _probe_capability(spec) -> CapabilityObservation:
     kind = spec.probe.kind
     args = spec.probe.args
-    try:
-        if kind == "executable":
-            executable = str(args["executable"])
-            path = shutil.which(executable)
-            if not path:
-                return CapabilityObservation(spec.id, "missing", detail=f"{executable} not found")
-            version = None
-            version_argv = tuple(str(x) for x in args.get("version_argv", ()))
-            if version_argv:
-                result = _run((path, *version_argv))
-                if result is None or result.returncode != 0:
-                    return CapabilityObservation(spec.id, "failed", detail=f"cannot query {executable} version")
-                combined = (result.stdout or result.stderr).strip()
-                version = combined.splitlines()[0] if combined else None
-            return CapabilityObservation(spec.id, "pass", version=version, detail=f"{executable} available")
+    if kind == "executable":
+        executable = str(args["executable"])
+        path = _which(executable)
+        if isinstance(path, _ProbeFailure):
+            return _unknown_probe(spec, path)
+        if not path:
+            return CapabilityObservation(spec.id, "missing", detail=f"{executable} not found")
+        version = None
+        version_argv = tuple(str(x) for x in args.get("version_argv", ()))
+        if version_argv:
+            result = _run((path, *version_argv))
+            if isinstance(result, _ProbeFailure) or result is None:
+                return _unknown_probe(spec, result if isinstance(result, _ProbeFailure) else None)
+            if result.returncode != 0:
+                return CapabilityObservation(spec.id, "failed", detail=f"cannot query {executable} version")
+            combined = (result.stdout or result.stderr).strip()
+            version = combined.splitlines()[0] if combined else None
+        return CapabilityObservation(spec.id, "pass", version=version, detail=f"{executable} available")
 
-        if kind == "pkg_config":
-            pc = shutil.which("pkg-config")
-            if not pc:
-                return CapabilityObservation(spec.id, "missing", detail="pkg-config unavailable")
-            module = str(args["module"])
-            minimum = args.get("minimum_version")
-            check_argv = (pc, f"--atleast-version={minimum}", module) if minimum else (pc, "--exists", module)
-            check = _run(check_argv)
-            if check is None or check.returncode != 0:
-                return CapabilityObservation(spec.id, "missing", detail=f"pkg-config module {module} unavailable")
-            version_result = _run((pc, "--modversion", module))
-            version = version_result.stdout.strip() if version_result and version_result.returncode == 0 else None
-            return CapabilityObservation(spec.id, "pass", version=version or None, detail=f"pkg-config module {module} available")
+    if kind == "pkg_config":
+        pc = _which("pkg-config")
+        if isinstance(pc, _ProbeFailure):
+            return _unknown_probe(spec, pc)
+        if not pc:
+            return CapabilityObservation(spec.id, "missing", detail="pkg-config unavailable")
+        module = str(args["module"])
+        minimum = args.get("minimum_version")
+        check_argv = (pc, f"--atleast-version={minimum}", module) if minimum else (pc, "--exists", module)
+        check = _run(check_argv)
+        if isinstance(check, _ProbeFailure) or check is None:
+            return _unknown_probe(spec, check if isinstance(check, _ProbeFailure) else None)
+        if check.returncode != 0:
+            return CapabilityObservation(spec.id, "missing", detail=f"pkg-config module {module} unavailable")
+        version_result = _run((pc, "--modversion", module))
+        if isinstance(version_result, _ProbeFailure) or version_result is None:
+            return _unknown_probe(spec, version_result if isinstance(version_result, _ProbeFailure) else None)
+        if version_result.returncode != 0:
+            return CapabilityObservation(spec.id, "unknown", detail=f"cannot query pkg-config module {module} version")
+        version = version_result.stdout.strip() or None
+        return CapabilityObservation(spec.id, "pass", version=version, detail=f"pkg-config module {module} available")
 
-        if kind in {"any_command", "command_group"}:
-            commands = tuple(str(x) for x in args["commands"])
-            present = [cmd for cmd in commands if shutil.which(cmd)]
-            ok = bool(present) if kind == "any_command" else len(present) == len(commands)
-            return CapabilityObservation(spec.id, "pass" if ok else "missing", detail=", ".join(present) if present else "required command unavailable")
+    if kind in {"any_command", "command_group"}:
+        commands = tuple(str(x) for x in args["commands"])
+        present: list[str] = []
+        for command in commands:
+            path = _which(command)
+            if isinstance(path, _ProbeFailure):
+                return _unknown_probe(spec, path)
+            if path:
+                present.append(command)
+        ok = bool(present) if kind == "any_command" else len(present) == len(commands)
+        return CapabilityObservation(spec.id, "pass" if ok else "missing", detail=", ".join(present) if present else "required command unavailable")
 
-        if kind == "systemd_user":
-            systemctl = shutil.which("systemctl")
-            if not systemctl:
-                return CapabilityObservation(spec.id, "missing", detail="systemctl unavailable")
-            result = _run((systemctl, "--user", "show-environment"))
-            return CapabilityObservation(spec.id, "pass" if result and result.returncode == 0 else "failed", detail="systemd user manager probe")
+    if kind == "systemd_user":
+        systemctl = _which("systemctl")
+        if isinstance(systemctl, _ProbeFailure):
+            return _unknown_probe(spec, systemctl)
+        if not systemctl:
+            return CapabilityObservation(spec.id, "missing", detail="systemctl unavailable")
+        result = _run((systemctl, "--user", "show-environment"))
+        if isinstance(result, _ProbeFailure) or result is None:
+            return _unknown_probe(spec, result if isinstance(result, _ProbeFailure) else None)
+        return CapabilityObservation(spec.id, "pass" if result.returncode == 0 else "failed", detail="systemd user manager probe")
 
-        if kind == "portal_unit":
-            systemctl = shutil.which("systemctl")
-            if not systemctl:
-                return CapabilityObservation(spec.id, "missing", detail="systemctl unavailable")
-            unit = str(args.get("unit", "xdg-desktop-portal-hyprland.service"))
-            result = _run((systemctl, "--user", "list-unit-files", unit, "--no-legend", "--no-pager"))
-            ok = bool(result and result.returncode == 0 and unit in result.stdout)
-            return CapabilityObservation(spec.id, "pass" if ok else "missing", detail=f"user unit {unit}")
+    if kind == "portal_unit":
+        systemctl = _which("systemctl")
+        if isinstance(systemctl, _ProbeFailure):
+            return _unknown_probe(spec, systemctl)
+        if not systemctl:
+            return CapabilityObservation(spec.id, "missing", detail="systemctl unavailable")
+        unit = str(args.get("unit", "xdg-desktop-portal-hyprland.service"))
+        result = _run((systemctl, "--user", "list-unit-files", unit, "--no-legend", "--no-pager"))
+        if isinstance(result, _ProbeFailure) or result is None:
+            return _unknown_probe(spec, result if isinstance(result, _ProbeFailure) else None)
+        ok = result.returncode == 0 and unit in (result.stdout or "")
+        return CapabilityObservation(spec.id, "pass" if ok else "missing", detail=f"user unit {unit}")
 
-        if kind == "tesseract_language":
-            exe = shutil.which("tesseract")
-            if not exe:
-                return CapabilityObservation(spec.id, "missing", detail="tesseract unavailable")
-            result = _run((exe, "--list-langs"), timeout=6.0)
-            language = str(args.get("language", "eng"))
-            langs = set(result.stdout.split()) if result and result.returncode == 0 else set()
-            return CapabilityObservation(spec.id, "pass" if language in langs else "missing", detail=f"tesseract language {language}")
+    if kind == "tesseract_language":
+        exe = _which("tesseract")
+        if isinstance(exe, _ProbeFailure):
+            return _unknown_probe(spec, exe)
+        if not exe:
+            return CapabilityObservation(spec.id, "missing", detail="tesseract unavailable")
+        result = _run((exe, "--list-langs"), timeout=6.0)
+        if isinstance(result, _ProbeFailure) or result is None:
+            return _unknown_probe(spec, result if isinstance(result, _ProbeFailure) else None)
+        if result.returncode != 0:
+            return CapabilityObservation(spec.id, "unknown", detail="tesseract language probe failed")
+        language = str(args.get("language", "eng"))
+        langs = set((result.stdout or "").split())
+        return CapabilityObservation(spec.id, "pass" if language in langs else "missing", detail=f"tesseract language {language}")
 
-        backend_command = {
-            "networkmanager_backend": "nmcli",
-            "bluetooth_backend": "bluetoothctl",
-            "power_profiles_backend": "powerprofilesctl",
-        }.get(kind)
-        if backend_command:
-            exe = shutil.which(backend_command)
-            if not exe:
-                return CapabilityObservation(spec.id, "missing", detail=f"{backend_command} unavailable")
-            argv = {
-                "networkmanager_backend": (exe, "-t", "-f", "STATE", "general"),
-                "bluetooth_backend": (exe, "list"),
-                "power_profiles_backend": (exe, "list"),
-            }[kind]
-            result = _run(argv, timeout=5.0)
-            if result is None or result.returncode != 0:
-                return CapabilityObservation(spec.id, "failed", detail=f"{backend_command} backend unreachable")
-            if kind == "bluetooth_backend" and not result.stdout.strip():
-                return CapabilityObservation(spec.id, "not_applicable", detail="no Bluetooth controller present")
-            return CapabilityObservation(spec.id, "pass", detail=f"{backend_command} backend reachable")
+    backend_command = {
+        "networkmanager_backend": "nmcli",
+        "bluetooth_backend": "bluetoothctl",
+        "power_profiles_backend": "powerprofilesctl",
+    }.get(kind)
+    if backend_command:
+        exe = _which(backend_command)
+        if isinstance(exe, _ProbeFailure):
+            return _unknown_probe(spec, exe)
+        if not exe:
+            return CapabilityObservation(spec.id, "missing", detail=f"{backend_command} unavailable")
+        argv = {
+            "networkmanager_backend": (exe, "-t", "-f", "STATE", "general"),
+            "bluetooth_backend": (exe, "list"),
+            "power_profiles_backend": (exe, "list"),
+        }[kind]
+        result = _run(argv, timeout=5.0)
+        if isinstance(result, _ProbeFailure) or result is None:
+            return _unknown_probe(spec, result if isinstance(result, _ProbeFailure) else None)
+        if result.returncode != 0:
+            return CapabilityObservation(spec.id, "failed", detail=f"{backend_command} backend unreachable")
+        if kind == "bluetooth_backend" and not (result.stdout or "").strip():
+            return CapabilityObservation(spec.id, "not_applicable", detail="no Bluetooth controller present")
+        return CapabilityObservation(spec.id, "pass", detail=f"{backend_command} backend reachable")
 
-        # Build/compile probes are intentionally not re-run by acceptance MVP.
-        # Their installer-observed state remains in the candidate bundle; Doctor
-        # marks the independent current observation unknown rather than lying.
-        return CapabilityObservation(spec.id, "unknown", detail=f"acceptance MVP does not independently run {kind} probe")
-    except Exception as exc:
-        return CapabilityObservation(spec.id, "unknown", detail=f"probe error: {type(exc).__name__}: {exc}")
+    # Build/compile probes are intentionally not re-run by acceptance MVP.
+    # Their installer-observed state remains in the candidate bundle; Doctor
+    # marks the independent current observation unknown rather than lying.
+    return CapabilityObservation(spec.id, "unknown", detail=f"acceptance MVP does not independently run {kind} probe")
 
 
 def _sha256(path: Path) -> str:
@@ -243,8 +509,12 @@ def _observe_artifact(accepted: ReceiptArtifact) -> ArtifactObservation:
         st = path.lstat()
     except FileNotFoundError:
         return ArtifactObservation(accepted.artifact_id, False)
-    except OSError:
-        return ArtifactObservation(accepted.artifact_id, False)
+    except OSError as exc:
+        return ArtifactObservation(
+            accepted.artifact_id,
+            False,
+            error=f"{type(exc).__name__}: {exc}",
+        )
     mode = f"{stat.S_IMODE(st.st_mode):04o}"
     sha = None
     fingerprint = None
@@ -253,14 +523,41 @@ def _observe_artifact(accepted: ReceiptArtifact) -> ArtifactObservation:
             sha = _sha256(path)
         if accepted.immutable_fingerprint:
             fingerprint = fingerprint_path(path)
-    except OSError:
-        pass
-    return ArtifactObservation(accepted.artifact_id, True, sha256=sha, immutable_fingerprint=fingerprint, mode=mode)
+    except OSError as exc:
+        return ArtifactObservation(
+            accepted.artifact_id,
+            True,
+            sha256=sha,
+            immutable_fingerprint=fingerprint,
+            mode=mode,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    return ArtifactObservation(
+        accepted.artifact_id,
+        True,
+        sha256=sha,
+        immutable_fingerprint=fingerprint,
+        mode=mode,
+    )
 
 
 def _current_snapshot(registry: ManifestRegistry, candidate: InstalledStateReceipt) -> CurrentHealthSnapshot:
     capabilities = {spec.id: _probe_capability(spec) for spec in registry.capabilities_in_order()}
-    artifacts = {aid: _observe_artifact(accepted) for aid, accepted in candidate.artifacts.items()}
+    artifacts = {
+        aid: _observe_artifact(
+            ReceiptArtifact(
+                artifact_id=aid,
+                component_id=registry.artifacts[aid].component_id,
+                path=accepted.path,
+                artifact_type=registry.artifacts[aid].type,
+                ownership=registry.artifacts[aid].ownership,
+                mode=accepted.mode,
+                sha256=accepted.sha256,
+                immutable_fingerprint=accepted.immutable_fingerprint,
+            )
+        )
+        for aid, accepted in candidate.artifacts.items()
+    }
     return CurrentHealthSnapshot(
         schema_version=1,
         captured_at=datetime.now(timezone.utc).isoformat(),
@@ -287,25 +584,43 @@ def assess_candidate_install(registry: ManifestRegistry, payload: Mapping[str, A
 
     for component in candidate.components.values():
         if component.health in {"failed", "blocked"}:
-            severity = "critical" if component.category in _CORE_CATEGORIES else "warning"
+            severity = "critical" if component.category in _BLOCKING_CATEGORIES else "warning"
             add("RH_DOCTOR_COMPONENT_UNHEALTHY", severity, component.component_id, f"candidate component state is {component.health}")
+        elif component.health == "degraded":
+            add("RH_DOCTOR_COMPONENT_DEGRADED", "warning", component.component_id, "candidate component state is degraded")
 
     for capid, observation in snapshot.capabilities.items():
         spec = registry.capabilities.get(capid)
         if spec is None or observation.state in _SATISFIED or observation.state == "unknown":
             continue
         component = registry.components.get(spec.component_id or "")
-        core = component is None or component.category in _CORE_CATEGORIES
+        blocking = component is None or component.category in _BLOCKING_CATEGORIES
         runtime = "runtime" in spec.lifecycle
-        severity = "critical" if spec.requirement == "required" and runtime and core else "warning"
+        severity = "critical" if spec.requirement == "required" and runtime and blocking else "warning"
         add("RH_DOCTOR_CAPABILITY_UNHEALTHY", severity, capid, observation.detail or observation.state)
 
+    uncertain = False
     for drift in forensic.drifts:
+        if drift.error_code == "RH_FORENSIC_DEPENDENCY_UNKNOWN":
+            capability = registry.capabilities.get(drift.subject_id)
+            if capability is not None and capability.requirement == "required":
+                uncertain = True
+                add("RH_DOCTOR_CAPABILITY_UNCERTAIN", "warning", drift.subject_id, drift.summary)
+        if drift.error_code == "RH_FORENSIC_ARTIFACT_UNKNOWN":
+            artifact = registry.artifacts.get(drift.subject_id)
+            if artifact is not None and artifact.required:
+                uncertain = True
         severity = drift.severity
         component = registry.components.get(drift.component_id or "")
-        if drift.kind.value == "dependency" and component is not None and component.category not in _CORE_CATEGORIES:
+        if drift.kind.value == "dependency" and component is not None and component.category not in _BLOCKING_CATEGORIES:
             if severity in {"critical", "error"}:
                 severity = "warning"
+        elif drift.kind.value == "artifact" and severity in {"critical", "error"}:
+            artifact = registry.artifacts.get(drift.subject_id)
+            if artifact is not None:
+                artifact_component = registry.components.get(artifact.component_id)
+                if artifact.required and artifact_component is not None and artifact_component.category in _BLOCKING_CATEGORIES:
+                    severity = "critical"
         add(drift.error_code, severity, drift.subject_id, drift.summary)
 
     if candidate.activation_state == "pending_session_restart":
@@ -321,6 +636,9 @@ def assess_candidate_install(registry: ManifestRegistry, payload: Mapping[str, A
     if critical:
         recommendation = AcceptanceRecommendation.REVERT_RECOMMENDED
         summary = "Doctor found critical evidence that makes reverting the candidate installation advisable."
+    elif uncertain:
+        recommendation = AcceptanceRecommendation.INDETERMINATE
+        summary = "Doctor could not independently establish all required candidate observations."
     elif warnings:
         recommendation = AcceptanceRecommendation.KEEP_WITH_WARNINGS
         summary = "Doctor found no critical blocker, but the candidate has warnings that should remain visible."
