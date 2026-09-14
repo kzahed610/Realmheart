@@ -222,16 +222,23 @@ class Phase16LiveInstallTests(unittest.TestCase):
         from realmheart_doctor.acceptance import DoctorAcceptanceError
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); paths,snapshot,registry,plan,build,runner,context=self._fixture(root)
+            selected_decisions=[]
+            def select_final(decision):
+                selected_decisions.append(decision)
+                return FinalAction.KEEP
             with patch("realmheart_installer.live.orchestrator.NativeBuildExecutor") as build_cls, \
                  patch("realmheart_installer.live.orchestrator.assess_candidate_install", side_effect=DoctorAcceptanceError("synthetic doctor failure")):
                 build_cls.return_value.run.return_value=build
                 result=LiveInstallExecutor(
                     plan=plan,registry=registry,context=context,paths=paths,source_root=_bootstrap.REPO_ROOT,runner=runner,snapshot=snapshot,
-                    decision_selector=lambda decision: FinalAction.KEEP,package_actions_applied=True,allow_unprivileged_system_commit=True,
+                    decision_selector=select_final,package_actions_applied=True,allow_unprivileged_system_commit=True,
                     privileged_uid=os.getuid(),privileged_gid=os.getgid(),persist_diagnostic_on_failure=False,
                 ).run()
             self.assertEqual(result.finalization.disposition,"kept")
             self.assertEqual(result.doctor_assessment.recommendation.value,"indeterminate")
+            self.assertEqual(len(selected_decisions),1)
+            self.assertTrue(selected_decisions[0].requires_explicit_choice)
+            self.assertIsNone(selected_decisions[0].default_action)
             receipt=json.loads((paths.realmheart_state/"installed-state.json").read_text())
             self.assertEqual(receipt["doctor_acceptance"]["recommendation"],"indeterminate")
 

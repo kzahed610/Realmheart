@@ -155,6 +155,17 @@ class DoctorAcceptanceTests(unittest.TestCase):
             self.assertEqual(result.checked_artifacts,1)
             self.assertEqual(result.checked_capabilities,1)
 
+    def test_noncanonical_component_pass_health_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            registry, artifact=_manifest(root)
+            artifact.write_text("ok\n")
+            payload=_candidate(registry, artifact)
+            payload["components"]["demo"]["health"] = "pass"
+
+            with self.assertRaisesRegex(DoctorAcceptanceError, "health.*invalid state"):
+                assess_candidate_install(registry, payload)
+
     def test_missing_core_artifact_recommends_revert(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); registry, artifact=_manifest(root)
@@ -311,7 +322,37 @@ class DoctorAcceptanceTests(unittest.TestCase):
                 result = assess_candidate_install(registry, payload)
 
             self.assertEqual(result.recommendation, AcceptanceRecommendation.REVERT_RECOMMENDED)
-            self.assertTrue(any(item.code == "RH_FORENSIC_DEPENDENCY_FAILED" for item in result.findings))
+            self.assertTrue(any(item.code == "RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE" for item in result.findings))
+
+    def test_incompatible_current_version_has_one_forensic_finding(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(
+                root,
+                probe_version=True,
+                minimum_version="3.0.0",
+                probe_minimum_version="3.0.0",
+            )
+            artifact.write_text("ok\n")
+            payload = _candidate(registry, artifact)
+            payload["dependencies"]["runtime.python"]["version"] = "Python 3.26.0"
+            completed = subprocess.CompletedProcess(
+                ("python3", "--version"), 0, stdout="Python 2.0.0\n", stderr=""
+            )
+            with patch("realmheart_doctor.acceptance.shutil.which", return_value="/usr/bin/python3"), patch(
+                "realmheart_doctor.acceptance._run", return_value=completed
+            ):
+                result = assess_candidate_install(registry, payload)
+
+            findings = [
+                item for item in result.findings
+                if item.subject == "runtime.python"
+                and item.code.startswith("RH_FORENSIC_DEPENDENCY_")
+            ]
+            self.assertEqual(
+                [(item.code, item.severity) for item in findings],
+                [("RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE", "critical")],
+            )
 
     def test_dependency_and_probe_version_constraints_are_both_enforced(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -334,7 +375,7 @@ class DoctorAcceptanceTests(unittest.TestCase):
                 result = assess_candidate_install(registry, payload)
 
             self.assertEqual(result.recommendation, AcceptanceRecommendation.REVERT_RECOMMENDED)
-            self.assertTrue(any(item.code == "RH_FORENSIC_DEPENDENCY_FAILED" for item in result.findings))
+            self.assertTrue(any(item.code == "RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE" for item in result.findings))
 
     def test_component_requirement_on_blocking_component_is_critical(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -96,6 +96,37 @@ class Phase20ForensicContractTests(unittest.TestCase):
             self.assertTrue(any(item.error_code == "RH_FORENSIC_DEPENDENCY_MISSING" for item in report.drifts))
             self.assertTrue(any(item.error_code == "RH_FORENSIC_ARTIFACT_HASH_DRIFT" for item in report.drifts))
 
+    def test_incompatible_current_version_emits_one_canonical_forensic_finding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            snapshot_path, snapshot_payload = self._snapshot_from_receipt(root, receipt_payload)
+            receipt_payload["dependencies"]["build.cmake"]["version"] = "3.26.0"
+            capabilities = snapshot_payload["capabilities"]
+            if not isinstance(capabilities, dict):
+                self.fail("synthetic snapshot capabilities must be an object")
+            build_cmake = capabilities["build.cmake"]
+            if not isinstance(build_cmake, dict):
+                self.fail("synthetic build.cmake observation must be an object")
+            build_cmake.update(state="pass", version="2.0.0")
+            receipt_path.write_text(json.dumps(receipt_payload), encoding="utf-8")
+            snapshot_path.write_text(json.dumps(snapshot_payload), encoding="utf-8")
+
+            report = analyze_forensics(
+                self.registry,
+                load_installed_receipt(receipt_path),
+                load_health_snapshot(snapshot_path),
+            )
+
+            findings = [
+                item for item in report.drifts
+                if item.subject_id == "build.cmake"
+            ]
+            self.assertEqual(
+                [(item.error_code, item.severity) for item in findings],
+                [("RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE", "error")],
+            )
+
     def test_one_dependency_root_collapses_multiple_capabilities_and_dependents(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

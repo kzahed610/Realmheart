@@ -50,6 +50,40 @@ def build_final_decision(
                 doctor_summary,
             )
 
+        if doctor_rec is AcceptanceRecommendation.INDETERMINATE:
+            options = rollback_options + (
+                FinalDecisionOption(
+                    FinalAction.KEEP,
+                    "Keep verified installation despite Doctor uncertainty",
+                    False,
+                    False,
+                    "installer verification passed, but Doctor could not establish an independent acceptance verdict",
+                ),
+            )
+            doctor_indeterminate_summary = doctor_summary or "Doctor could not establish an independent acceptance verdict."
+            if report.activation.state.value == "pending_session_restart":
+                summary = (
+                    "Install-time verification passed. A fresh Hyprland session is still required before runtime can become Last Known Good. "
+                    + doctor_indeterminate_summary
+                )
+            else:
+                summary = doctor_indeterminate_summary
+            return FinalDecisionPlan(
+                FinalSeverity.SUCCESS_WITH_WARNINGS,
+                report.install_health.value,
+                report.activation.state.value,
+                report.activation.runtime_health.value,
+                "Realmheart installation verified, but Doctor could not establish an independent verdict.",
+                summary,
+                options,
+                True,
+                None,
+                core_critical,
+                fx_critical,
+                doctor_rec.value,
+                doctor_summary,
+            )
+
         warning_state = bool(report.warnings) or doctor_rec in {
             AcceptanceRecommendation.KEEP_WITH_WARNINGS,
             AcceptanceRecommendation.INDETERMINATE,

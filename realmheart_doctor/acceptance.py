@@ -49,7 +49,7 @@ _CANDIDATE_READ_CHUNK_BYTES = 1024 * 1024
 _BLOCKING_CATEGORIES = {"core", "essential", "fx"}
 _CANDIDATE_COMPONENT_HEALTH = {
     "healthy", "degraded", "failed", "blocked", "unknown", "not_applicable", "pending_activation",
-    "pass", "warning", "pending", "running", "skipped",
+    "warning", "pending", "running", "skipped",
 }
 _CANDIDATE_CAPABILITY_STATES = {"pass", "missing", "failed", "not_applicable"}
 _CANDIDATE_INSTALL_HEALTH = {"healthy", "degraded", "failed"}
@@ -870,8 +870,6 @@ def assess_candidate_install(registry: ManifestRegistry, payload: Mapping[str, A
                 if artifact.required and artifact_component is not None and artifact_component.category in _BLOCKING_CATEGORIES:
                     severity = "critical"
         add(drift.error_code, severity, drift.subject_id, drift.summary)
-        if drift.error_code == "RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE":
-            add("RH_FORENSIC_DEPENDENCY_FAILED", severity, drift.subject_id, drift.summary)
 
     if candidate.activation_state == "pending_session_restart":
         add(

@@ -192,9 +192,12 @@ class LiveInstallExecutor:
             )
             decision = finalizer.decision_plan()
             self.context.persist_json("final-decision.json", decision)
-            action = decision.default_action if not decision.requires_explicit_choice else self.decision_selector(decision)
+            action = self.decision_selector(decision) if decision.requires_explicit_choice else decision.default_action
             if action is None:
-                action = self.decision_selector(decision)
+                raise InstallerError(
+                    "finalization requires an explicit decision for the observed health state",
+                    code="RH_FINAL_DECISION_REQUIRED", stage="finalization",
+                )
             final = finalizer.apply(action)
             self.context.persist_json("finalization.json", final)
             if action is not FinalAction.KEEP:

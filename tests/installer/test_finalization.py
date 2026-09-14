@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import _bootstrap
+from realmheart_doctor import AcceptanceAssessment, AcceptanceRecommendation
 from realmheart_maintenance.manifest import load_manifest
 from realmheart_installer.context import InstallContext, XdgPaths
 from realmheart_installer.constants import INSTALLER_VERSION
@@ -71,6 +72,53 @@ class Phase16FinalizationTests(unittest.TestCase):
             self.assertEqual(decision.severity, FinalSeverity.SUCCESS)
             self.assertEqual(decision.default_action, FinalAction.KEEP)
             self.assertFalse(decision.requires_explicit_choice)
+
+    def test_healthy_install_with_doctor_indeterminate_requires_explicit_choice(self):
+        with tempfile.TemporaryDirectory() as temp:
+            _, plan=self._plan(Path(temp))
+            assessment=AcceptanceAssessment(
+                1, AcceptanceRecommendation.INDETERMINATE, plan.transaction_id,
+                "0.7.8", plan.manifest_digest, 0, 0, "active", "healthy", (), 0, 0,
+                "Doctor could not establish an independent acceptance verdict",
+            )
+            decision=build_final_decision(
+                plan,
+                verification(
+                    transaction_id=plan.transaction_id,
+                    manifest_digest=plan.manifest_digest,
+                    plan_digest=plan.plan_digest,
+                ),
+                assessment,
+            )
+            self.assertEqual(decision.severity, FinalSeverity.SUCCESS_WITH_WARNINGS)
+            self.assertTrue(decision.requires_explicit_choice)
+            self.assertIsNone(decision.default_action)
+            self.assertIn(FinalAction.KEEP, {item.action for item in decision.options})
+            self.assertIn(FinalAction.RESTORE_PREVIOUS, {item.action for item in decision.options})
+
+    def test_doctor_indeterminate_preserves_pending_session_restart_boundary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            _, plan=self._plan(Path(temp))
+            assessment=AcceptanceAssessment(
+                1, AcceptanceRecommendation.INDETERMINATE, plan.transaction_id,
+                "0.7.8", plan.manifest_digest, 0, 0, "pending_session_restart", "unknown", (), 0, 0,
+                "Doctor could not establish an independent acceptance verdict",
+            )
+            report=verification(
+                transaction_id=plan.transaction_id,
+                manifest_digest=plan.manifest_digest,
+                plan_digest=plan.plan_digest,
+                activation=ActivationState.PENDING_SESSION_RESTART,
+                runtime=RuntimeHealthState.UNKNOWN,
+            )
+
+            decision=build_final_decision(plan, report, assessment)
+
+            self.assertEqual(decision.activation_state, "pending_session_restart")
+            self.assertEqual(decision.runtime_health, "unknown")
+            self.assertIn("fresh Hyprland session", decision.summary)
+            self.assertTrue(decision.requires_explicit_choice)
+            self.assertIsNone(decision.default_action)
 
     def test_pending_activation_receipt_never_claims_runtime_known_good(self):
         with tempfile.TemporaryDirectory() as temp:

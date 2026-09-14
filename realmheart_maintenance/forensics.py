@@ -1123,7 +1123,7 @@ def analyze_forensics(
         current_state = current.state
         current_compatibility = None
         current_version_bad = False
-        if current.state == "pass" and capability_version_required(registry, manifest_cap):
+        if current.state in {"pass", "failed"} and current.version is not None and capability_version_required(registry, manifest_cap):
             current_compatibility = classify_capability_version(
                 registry, manifest_cap, current.version
             )
@@ -1217,7 +1217,7 @@ def analyze_forensics(
                 affects_repair=repair,
                 summary=f"capability {capid} regressed from {accepted.state} to {current_state}",
             )
-        elif accepted.state != current_state:
+        elif accepted.state != current_state and not current_version_bad:
             add(
                 DriftKind.DEPENDENCY,
                 "RH_FORENSIC_DEPENDENCY_STATE_DRIFT",
@@ -1239,6 +1239,7 @@ def analyze_forensics(
             and accepted.version != current.version
             and accepted_compatibility is not VersionCompatibility.UNPARSEABLE
             and current_compatibility is not VersionCompatibility.UNPARSEABLE
+            and current_compatibility is not VersionCompatibility.INCOMPATIBLE
         ):
             add(
                 DriftKind.DEPENDENCY,
