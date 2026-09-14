@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -14,9 +15,17 @@ from unittest.mock import patch
 
 from . import _bootstrap
 from realmheart_doctor import AcceptanceAssessment, AcceptanceRecommendation, assess_candidate_install
-from realmheart_doctor.acceptance import DoctorAcceptanceError
+from realmheart_doctor.acceptance import DoctorAcceptanceError, _probe_capability, load_candidate_bundle
 from realmheart_doctor.cli import main as doctor_main
 from realmheart_maintenance.forensics import ForensicContractError
+from realmheart_maintenance.fingerprint import (
+    FingerprintLimitExceeded,
+    MAX_FINGERPRINT_BYTES,
+    MAX_FINGERPRINT_DEPTH,
+    MAX_FINGERPRINT_ENTRIES,
+    MAX_FINGERPRINT_SECONDS,
+    fingerprint_path,
+)
 from realmheart_maintenance.manifest import ManifestError, load_manifest
 from realmheart_installer.finalization import build_final_decision, build_installed_state_receipt
 from realmheart_installer.finalization.models import FinalAction, FinalSeverity
@@ -32,10 +41,15 @@ def _manifest(
     category: str = "core",
     capability_requirement: str = "required",
     probe_version: bool = False,
+    minimum_version: str | None = None,
+    probe_minimum_version: str | None = None,
+    artifact_template: str | None = None,
+    artifact_type: str = "file",
 ):
     components = root / "components"
     components.mkdir()
     artifact = root / "installed-demo"
+    artifact_path = artifact_template or str(artifact)
     body = f'''schema_version = 1
 release_version = "0.7.8"
 
@@ -49,6 +63,7 @@ stage = "foundation"
 [[external_dependencies]]
 id = "dep.python"
 name = "Python"
+{(f'minimum_version = "{minimum_version}"' if minimum_version else '')}
 
 [[capabilities]]
 id = "runtime.python"
@@ -61,12 +76,13 @@ component_id = "demo"
 kind = "executable"
 executable = "python3"
 {('version_argv = ["--version"]' if probe_version else '')}
+{(f'minimum_version = "{probe_minimum_version}"' if probe_minimum_version else '')}
 
 [[artifacts]]
 id = "demo.file"
 component_id = "demo"
-path = "{artifact}"
-type = "file"
+path = "{artifact_path}"
+type = "{artifact_type}"
 required = true
 ownership = "release"
 managed = true
@@ -76,6 +92,16 @@ managed = true
 
 
 def _candidate(registry, artifact: Path, *, install_health="healthy", activation="active", runtime="healthy"):
+    exists = artifact.exists() or artifact.is_symlink()
+    mode = None
+    sha256 = None
+    immutable_fingerprint = None
+    if exists:
+        observed = artifact.lstat()
+        mode = "0644"
+        if stat.S_ISREG(observed.st_mode) and not stat.S_ISLNK(observed.st_mode):
+            sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        immutable_fingerprint = fingerprint_path(artifact)
     return {
         "schema_version": 1,
         "kind": "realmheart_install_candidate",
@@ -110,11 +136,11 @@ def _candidate(registry, artifact: Path, *, install_health="healthy", activation
             "demo.file": {
                 "component_id": "demo",
                 "path": str(artifact),
-                "type": "file",
+                "type": registry.artifacts["demo.file"].type,
                 "ownership": "release",
-                "mode": "0644",
-                "sha256": None,
-                "immutable_fingerprint": None,
+                "mode": mode,
+                "sha256": sha256,
+                "immutable_fingerprint": immutable_fingerprint,
             }
         },
     }
@@ -145,7 +171,7 @@ class DoctorAcceptanceTests(unittest.TestCase):
     def test_pending_session_restart_is_not_failure(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp); registry, artifact=_manifest(root); artifact.write_text("ok\n"); artifact.chmod(0o644)
-            result=assess_candidate_install(registry,_candidate(registry,artifact,activation="pending_session_restart",runtime="unknown"))
+            result=assess_candidate_install(registry,_candidate(registry,artifact,activation="pending_session_restart",runtime="healthy"))
             self.assertEqual(result.recommendation,AcceptanceRecommendation.KEEP)
             self.assertTrue(any(x.code=="RH_DOCTOR_RUNTIME_PENDING_SESSION_RESTART" for x in result.findings))
 
@@ -187,6 +213,277 @@ class DoctorAcceptanceTests(unittest.TestCase):
             result=assess_candidate_install(registry,_candidate(registry,artifact))
             self.assertEqual(result.recommendation,AcceptanceRecommendation.REVERT_RECOMMENDED)
             self.assertTrue(any(x.code=="RH_FORENSIC_ARTIFACT_MODE_DRIFT" and x.severity=="critical" for x in result.findings))
+
+    def test_required_managed_artifact_without_integrity_is_indeterminate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root)
+            artifact.write_text("ok\n")
+            payload = _candidate(registry, artifact)
+            payload["artifacts"]["demo.file"].update(
+                mode=None,
+                sha256=None,
+                immutable_fingerprint=None,
+            )
+
+            result = assess_candidate_install(registry, payload)
+
+            self.assertEqual(result.recommendation, AcceptanceRecommendation.INDETERMINATE)
+            self.assertTrue(any(item.code == "RH_DOCTOR_ARTIFACT_INTEGRITY_UNKNOWN" for item in result.findings))
+
+    def test_artifact_symlink_is_observed_as_type_drift(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root)
+            target = root / "target"
+            target.write_text("ok\n")
+            artifact.symlink_to(target)
+
+            result = assess_candidate_install(registry, _candidate(registry, artifact))
+
+            self.assertEqual(result.recommendation, AcceptanceRecommendation.REVERT_RECOMMENDED)
+            self.assertTrue(any(item.code == "RH_FORENSIC_ARTIFACT_TYPE_DRIFT" for item in result.findings))
+
+    def test_executable_artifact_without_executable_mode_is_unhealthy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root, artifact_type="executable")
+            artifact.write_text("#!/bin/sh\nexit 0\n")
+            artifact.chmod(0o644)
+
+            result = assess_candidate_install(registry, _candidate(registry, artifact))
+
+            self.assertEqual(result.recommendation, AcceptanceRecommendation.REVERT_RECOMMENDED)
+            self.assertTrue(any(item.code == "RH_FORENSIC_ARTIFACT_MODE_DRIFT" for item in result.findings))
+
+    def test_successful_empty_or_malformed_version_is_indeterminate(self):
+        for output in ("", "not a version", "not a version 3.12.0"):
+            with self.subTest(output=output), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                registry, artifact = _manifest(root, probe_version=True)
+                artifact.write_text("ok\n")
+                payload = _candidate(registry, artifact)
+                completed = subprocess.CompletedProcess(
+                    ("python3", "--version"), 0, stdout=output, stderr=""
+                )
+                with patch("realmheart_doctor.acceptance.shutil.which", return_value="/usr/bin/python3"), patch(
+                    "realmheart_doctor.acceptance._run", return_value=completed
+                ):
+                    result = assess_candidate_install(registry, payload)
+
+                self.assertEqual(result.recommendation, AcceptanceRecommendation.INDETERMINATE)
+                self.assertTrue(any(item.code == "RH_DOCTOR_CAPABILITY_VERSION_UNKNOWN" for item in result.findings))
+
+    def test_version_probe_without_parseable_evidence_is_unknown_at_observation_boundary(self):
+        for output in (
+            "not a version 3.12.0\n",
+            "3.12.0 arbitrary text\n",
+            "not python 3.12.0\n",
+        ):
+            with self.subTest(output=output), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                registry, _ = _manifest(root, probe_version=True)
+                spec = registry.capabilities["runtime.python"]
+                completed = subprocess.CompletedProcess(
+                    ("python3", "--version"), 0, stdout=output, stderr=""
+                )
+                with patch("realmheart_doctor.acceptance.shutil.which", return_value="/usr/bin/python3"), patch(
+                    "realmheart_doctor.acceptance._run", return_value=completed
+                ):
+                    observation = _probe_capability(spec)
+
+                self.assertEqual(observation.state, "unknown")
+                self.assertIsNone(observation.version)
+
+    def test_declared_minimum_version_mismatch_recommends_revert(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root, probe_version=True, minimum_version="99.0.0")
+            artifact.write_text("ok\n")
+            payload = _candidate(registry, artifact)
+            payload["dependencies"]["runtime.python"]["version"] = "Python 3.12.0"
+            completed = subprocess.CompletedProcess(
+                ("python3", "--version"), 0, stdout="Python 3.12.0\n", stderr=""
+            )
+            with patch("realmheart_doctor.acceptance.shutil.which", return_value="/usr/bin/python3"), patch(
+                "realmheart_doctor.acceptance._run", return_value=completed
+            ):
+                result = assess_candidate_install(registry, payload)
+
+            self.assertEqual(result.recommendation, AcceptanceRecommendation.REVERT_RECOMMENDED)
+            self.assertTrue(any(item.code == "RH_FORENSIC_DEPENDENCY_FAILED" for item in result.findings))
+
+    def test_dependency_and_probe_version_constraints_are_both_enforced(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(
+                root,
+                probe_version=True,
+                minimum_version="3.0.0",
+                probe_minimum_version="99.0.0",
+            )
+            artifact.write_text("ok\n")
+            payload = _candidate(registry, artifact)
+            payload["dependencies"]["runtime.python"]["version"] = "Python 3.12.0"
+            completed = subprocess.CompletedProcess(
+                ("python3", "--version"), 0, stdout="Python 3.12.0\n", stderr=""
+            )
+            with patch("realmheart_doctor.acceptance.shutil.which", return_value="/usr/bin/python3"), patch(
+                "realmheart_doctor.acceptance._run", return_value=completed
+            ):
+                result = assess_candidate_install(registry, payload)
+
+            self.assertEqual(result.recommendation, AcceptanceRecommendation.REVERT_RECOMMENDED)
+            self.assertTrue(any(item.code == "RH_FORENSIC_DEPENDENCY_FAILED" for item in result.findings))
+
+    def test_component_requirement_on_blocking_component_is_critical(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root, category="essential", capability_requirement="component")
+            artifact.write_text("ok\n")
+            with patch("realmheart_doctor.acceptance.shutil.which", return_value=None):
+                result = assess_candidate_install(registry, _candidate(registry, artifact))
+
+            self.assertEqual(result.recommendation, AcceptanceRecommendation.REVERT_RECOMMENDED)
+            self.assertTrue(any(item.code == "RH_FORENSIC_DEPENDENCY_MISSING" and item.severity == "critical" for item in result.findings))
+
+    def test_component_requirement_on_qol_component_remains_warning(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root, category="qol", capability_requirement="component")
+            artifact.write_text("ok\n")
+            with patch("realmheart_doctor.acceptance.shutil.which", return_value=None):
+                result = assess_candidate_install(registry, _candidate(registry, artifact))
+
+            self.assertEqual(result.recommendation, AcceptanceRecommendation.KEEP_WITH_WARNINGS)
+            self.assertTrue(any(item.code == "RH_FORENSIC_DEPENDENCY_MISSING" and item.severity == "warning" for item in result.findings))
+
+    def test_failed_candidate_capability_cannot_be_greenlit_by_current_pass(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root)
+            artifact.write_text("ok\n")
+            payload = _candidate(registry, artifact)
+            payload["dependencies"]["runtime.python"]["state"] = "failed"
+
+            with patch("realmheart_doctor.acceptance.shutil.which", return_value="/usr/bin/python3"):
+                result = assess_candidate_install(registry, payload)
+
+            self.assertEqual(result.recommendation, AcceptanceRecommendation.REVERT_RECOMMENDED)
+            self.assertTrue(any(
+                item.code == "RH_DOCTOR_CAPABILITY_UNHEALTHY"
+                and item.subject == "runtime.python"
+                and item.severity == "critical"
+                for item in result.findings
+            ))
+
+    def test_blocking_capability_not_applicable_is_indeterminate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root)
+            artifact.write_text("ok\n")
+            payload = _candidate(registry, artifact)
+            payload["dependencies"]["runtime.python"]["state"] = "not_applicable"
+
+            with patch("realmheart_doctor.acceptance.shutil.which", return_value="/usr/bin/python3"):
+                result = assess_candidate_install(registry, payload)
+
+            self.assertEqual(result.recommendation, AcceptanceRecommendation.INDETERMINATE)
+            self.assertTrue(any(
+                item.code == "RH_DOCTOR_CAPABILITY_UNCERTAIN"
+                and item.subject == "runtime.python"
+                for item in result.findings
+            ))
+
+    def test_blocking_component_unestablished_health_cannot_pass(self):
+        uncertain_states = ("unknown", "pending", "running", "skipped", "not_applicable", "pending_activation")
+        for state in uncertain_states:
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                registry, artifact = _manifest(root)
+                artifact.write_text("ok\n")
+                payload = _candidate(registry, artifact)
+                payload["components"]["demo"]["health"] = state
+
+                result = assess_candidate_install(registry, payload)
+
+                self.assertEqual(result.recommendation, AcceptanceRecommendation.INDETERMINATE)
+                self.assertTrue(any(item.code == "RH_DOCTOR_COMPONENT_UNCERTAIN" for item in result.findings))
+
+    def test_blocking_component_failed_or_blocked_health_recommends_revert(self):
+        for state in ("failed", "blocked"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                registry, artifact = _manifest(root)
+                artifact.write_text("ok\n")
+                payload = _candidate(registry, artifact)
+                payload["components"]["demo"]["health"] = state
+
+                result = assess_candidate_install(registry, payload)
+
+                self.assertEqual(result.recommendation, AcceptanceRecommendation.REVERT_RECOMMENDED)
+
+    def test_top_level_runtime_and_activation_failures_participate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root)
+            artifact.write_text("ok\n")
+
+            unknown = _candidate(registry, artifact, runtime="unknown")
+            self.assertEqual(
+                assess_candidate_install(registry, unknown).recommendation,
+                AcceptanceRecommendation.INDETERMINATE,
+            )
+
+            failed = _candidate(registry, artifact, runtime="failed", activation="failed")
+            self.assertEqual(
+                assess_candidate_install(registry, failed).recommendation,
+                AcceptanceRecommendation.REVERT_RECOMMENDED,
+            )
+
+    def test_unresolved_artifact_template_is_rejected_without_prefix_authorization(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root, artifact_template="$PREFIX/bin/demo")
+            artifact.write_text("ok\n")
+            payload = _candidate(registry, artifact)
+            payload["artifacts"]["demo.file"]["path"] = str(root / "arbitrary" / "bin" / "demo")
+            with patch.dict(os.environ, {"PREFIX": ""}, clear=False):
+                with self.assertRaisesRegex(DoctorAcceptanceError, "authorized"):
+                    assess_candidate_install(registry, payload)
+
+    def test_candidate_json_and_fingerprint_limits_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            candidate = root / "candidate.json"
+            candidate.write_text(json.dumps({"padding": "x" * (2 * 1024 * 1024)}) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(DoctorAcceptanceError, "limit|size"):
+                load_candidate_bundle(candidate)
+
+            large = root / "large"
+            large.write_bytes(b"0123456789")
+            with self.assertRaises(FingerprintLimitExceeded):
+                fingerprint_path(large, max_bytes=4)
+
+    def test_resource_limit_overrides_cannot_remove_hard_bounds(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            candidate = root / "candidate.json"
+            candidate.write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(DoctorAcceptanceError, "hard|limit"):
+                load_candidate_bundle(candidate, max_bytes=2 * 1024 * 1024 + 1)
+
+            artifact = root / "artifact"
+            artifact.write_text("ok\n", encoding="utf-8")
+            kwargs_list: tuple[dict[str, int | float], ...] = (
+                {"max_entries": MAX_FINGERPRINT_ENTRIES + 1},
+                {"max_depth": MAX_FINGERPRINT_DEPTH + 1},
+                {"max_bytes": MAX_FINGERPRINT_BYTES + 1},
+                {"max_seconds": MAX_FINGERPRINT_SECONDS + 1},
+            )
+            for kwargs in kwargs_list:
+                with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, "hard|limit"):
+                    fingerprint_path(artifact, **kwargs)
 
     def test_standalone_cli_expected_errors_keep_stable_json_shape(self):
         for error in (ManifestError("bad manifest"), ForensicContractError("bad forensic input"), DoctorAcceptanceError("bad candidate")):
@@ -236,8 +533,9 @@ class DoctorAcceptanceTests(unittest.TestCase):
             registry, artifact = _manifest(root)
             artifact.write_text("ok\n")
             artifact.chmod(0o644)
+            payload = _candidate(registry, artifact)
             with patch("realmheart_doctor.acceptance.Path.lstat", side_effect=PermissionError("denied")):
-                result = assess_candidate_install(registry, _candidate(registry, artifact))
+                result = assess_candidate_install(registry, payload)
             self.assertEqual(result.recommendation, AcceptanceRecommendation.INDETERMINATE)
             self.assertTrue(any(item.code == "RH_FORENSIC_ARTIFACT_UNKNOWN" for item in result.findings))
             self.assertFalse(any(item.code == "RH_FORENSIC_ARTIFACT_MISSING" for item in result.findings))

@@ -8,19 +8,20 @@ engines, package adapters, or recovery code.
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from dataclasses import asdict, dataclass
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
-from .manifest import ManifestRegistry, VersionCompatibility, classify_version
+from .manifest import ManifestRegistry, ParsedVersion, VersionCompatibility, VersionSpec, classify_version
 
 SUPPORTED_RECEIPT_SCHEMA = 2
 SUPPORTED_HEALTH_SNAPSHOT_SCHEMA = 1
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-_SATISFIED_CAPABILITY_STATES = {"pass", "not_applicable"}
 _RECEIPT_CAPABILITY_STATES = {"pass", "missing", "failed", "not_applicable"}
 _SNAPSHOT_CAPABILITY_STATES = _RECEIPT_CAPABILITY_STATES | {"unknown"}
 _REQUIREMENTS = {"required", "component", "soft"}
@@ -29,6 +30,12 @@ _INSTALL_HEALTH = {"healthy", "degraded", "failed"}
 _ACTIVATION_STATES = {"active", "pending_session_restart", "unknown"}
 _SNAPSHOT_ACTIVATION_STATES = _ACTIVATION_STATES | {"failed"}
 _RUNTIME_HEALTH = {"healthy", "degraded", "failed", "unknown"}
+_FILESYSTEM_TYPES = {"file", "directory", "symlink", "other"}
+_IMMUTABLE_OWNERSHIPS = {"release", "system"}
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_VERSION_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?(?![A-Za-z0-9])")
+MAX_FORENSIC_JSON_BYTES = 4 * 1024 * 1024
+_FORENSIC_READ_CHUNK_BYTES = 1024 * 1024
 _COST_RANK = {"cheap": 0, "normal": 1, "expensive": 2}
 _SEVERITY_RANK = {"info": 0, "warning": 1, "error": 2, "critical": 3}
 _REPAIR_LIFECYCLES = {"build", "install", "verification", "repair"}
@@ -50,6 +57,13 @@ class ReadinessState(str, Enum):
     DEGRADED = "degraded"
     FAILED = "failed"
     UNKNOWN = "unknown"
+
+
+class ObservationOutcome(str, Enum):
+    OBSERVED = "observed"
+    MISSING = "missing"
+    UNKNOWN = "unknown"
+    LIMIT_EXCEEDED = "limit_exceeded"
 
 
 @dataclass(frozen=True)
@@ -118,6 +132,8 @@ class ArtifactObservation:
     immutable_fingerprint: str | None = None
     mode: str | None = None
     error: str | None = None
+    filesystem_type: str | None = None
+    outcome: ObservationOutcome | None = None
 
 
 @dataclass(frozen=True)
@@ -213,6 +229,171 @@ def _string_tuple(value: Any, field: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _optional_digest(value: Any, field: str) -> str | None:
+    text = _optional_string(value, field)
+    if text is not None and not _SHA256_RE.fullmatch(text):
+        raise ForensicContractError(f"{field} must be a 64-character hexadecimal SHA-256 digest or null")
+    return text
+
+
+def _observation_outcome(value: Any) -> ObservationOutcome | None:
+    if isinstance(value, ObservationOutcome):
+        return value
+    try:
+        return ObservationOutcome(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _valid_mode(value: Any) -> bool:
+    return value is None or (
+        isinstance(value, str)
+        and len(value) == 4
+        and all(character in "01234567" for character in value)
+    )
+
+
+def _valid_digest(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and _SHA256_RE.fullmatch(value) is not None)
+
+
+def _valid_observed_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    candidate = Path(value)
+    return candidate.is_absolute() and ".." not in candidate.parts
+
+
+def canonical_filesystem_type(artifact_type: str) -> str:
+    """Return the no-follow filesystem type required by an artifact kind."""
+
+    return "directory" if artifact_type == "directory" else "file"
+
+
+def artifact_integrity_fields(artifact_spec) -> frozenset[str]:
+    """Return receipt fields required to establish a canonical artifact.
+
+    Release/system artifacts are immutable receipt identities and therefore
+    require a fingerprint (and a content hash for regular-file artifacts).
+    Every required or managed artifact still requires its observed mode.  User
+    and shared artifacts intentionally do not require content hashes because
+    the installer treats their contents as mutable state.
+    """
+
+    fields: set[str] = set()
+    if artifact_spec.required or artifact_spec.managed or artifact_spec.mode is not None:
+        fields.add("mode")
+    if artifact_spec.ownership in _IMMUTABLE_OWNERSHIPS:
+        if artifact_spec.required or artifact_spec.managed:
+            fields.add("immutable_fingerprint")
+            if canonical_filesystem_type(artifact_spec.type) == "file":
+                fields.add("sha256")
+    return frozenset(fields)
+
+
+def capability_version_required(registry: ManifestRegistry, capability_spec) -> bool:
+    """Whether a capability's canonical contract requires version evidence."""
+
+    dependency = registry.dependencies.get(capability_spec.dependency_id)
+    args = capability_spec.probe.args
+    if args.get("version_argv"):
+        return True
+    if any(args.get(field) for field in ("minimum_version", "maximum_version", "exact_version", "tested_ranges", "known_incompatible")):
+        return True
+    if dependency is None:
+        return False
+    version = dependency.version
+    return bool(
+        version.minimum_version
+        or version.maximum_version
+        or version.exact_version
+        or version.tested_ranges
+        or version.known_incompatible
+    )
+
+
+def _capability_version_specs(
+    registry: ManifestRegistry,
+    capability_spec,
+) -> tuple[VersionSpec, ...]:
+    dependency = registry.dependencies.get(capability_spec.dependency_id)
+    args = capability_spec.probe.args
+    specs: list[VersionSpec] = []
+    if dependency is not None:
+        specs.append(dependency.version)
+    probe_spec = VersionSpec(
+        minimum_version=args.get("minimum_version"),
+        maximum_version=args.get("maximum_version"),
+        exact_version=args.get("exact_version"),
+        tested_ranges=tuple(args.get("tested_ranges") or ()),
+        known_incompatible=tuple(args.get("known_incompatible") or ()),
+    )
+    if any(
+        value
+        for value in (
+            probe_spec.minimum_version,
+            probe_spec.maximum_version,
+            probe_spec.exact_version,
+            probe_spec.tested_ranges,
+            probe_spec.known_incompatible,
+        )
+    ):
+        specs.append(probe_spec)
+    return tuple(specs) or (VersionSpec(),)
+
+
+def version_evidence_line(capability_spec, detected: str | None) -> str | None:
+    """Return one command-output line that identifies the canonical capability."""
+
+    if not isinstance(detected, str):
+        return None
+    args = capability_spec.probe.args
+    identity = str(args.get("executable") or args.get("module") or "")
+    identity = re.sub(r"[^a-z0-9]+", "", Path(identity).name.lower())
+    identity = re.sub(r"\d+$", "", identity)
+    for raw_line in detected.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = _VERSION_TOKEN_RE.search(line)
+        if match is None:
+            continue
+        if match.start() == 0 and not line[match.end():].strip():
+            return line
+        normalized_prefix = re.sub(r"[^a-z0-9]+", "", line[:match.start()].lower())
+        if identity and normalized_prefix.startswith(identity):
+            return line
+    return None
+
+
+_version_evidence_line = version_evidence_line
+
+
+def classify_capability_version(
+    registry: ManifestRegistry,
+    capability_spec,
+    detected: str | None,
+) -> VersionCompatibility:
+    """Classify strict version evidence using the canonical dependency spec."""
+
+    evidence = version_evidence_line(capability_spec, detected)
+    if evidence is None:
+        return VersionCompatibility.UNPARSEABLE
+    if ParsedVersion.parse(evidence) is None:
+        return VersionCompatibility.UNPARSEABLE
+    compatibilities = tuple(
+        classify_version(spec, evidence)
+        for spec in _capability_version_specs(registry, capability_spec)
+    )
+    if VersionCompatibility.INCOMPATIBLE in compatibilities:
+        return VersionCompatibility.INCOMPATIBLE
+    if VersionCompatibility.UNPARSEABLE in compatibilities:
+        return VersionCompatibility.UNPARSEABLE
+    if VersionCompatibility.SATISFIED_TESTED in compatibilities:
+        return VersionCompatibility.SATISFIED_TESTED
+    return VersionCompatibility.SATISFIED_UNTESTED
+
+
 def _expect_id(value: Any, field: str) -> str:
     text = _expect_string(value, field)
     if not _ID_RE.fullmatch(text):
@@ -220,17 +401,48 @@ def _expect_id(value: Any, field: str) -> str:
     return text
 
 
-def _load_json_file(path: Path, *, label: str) -> Mapping[str, Any]:
+def _load_json_file(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int = MAX_FORENSIC_JSON_BYTES,
+) -> Mapping[str, Any]:
     path = Path(path)
     if path.is_symlink():
         raise ForensicContractError(f"{label} must not be a symlink: {path}")
     try:
-        if not path.is_file():
+        st = path.lstat()
+        if not stat.S_ISREG(st.st_mode):
             raise ForensicContractError(f"{label} is not a regular file: {path}")
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        if type(max_bytes) is not int or max_bytes < 0:
+            raise ForensicContractError(f"{label} byte limit must be a non-negative integer")
+        if max_bytes > MAX_FORENSIC_JSON_BYTES:
+            raise ForensicContractError(
+                f"{label} byte limit exceeds hard limit {MAX_FORENSIC_JSON_BYTES}"
+            )
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(os.fspath(path), flags)
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            chunks: list[bytes] = []
+            total = 0
+            while total <= max_bytes:
+                chunk = handle.read(min(_FORENSIC_READ_CHUNK_BYTES, max_bytes - total + 1))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            raw = b"".join(chunks)
+        if len(raw) > max_bytes:
+            raise ForensicContractError(
+                f"{label} exceeds the {max_bytes}-byte observation limit"
+            )
+        text = raw.decode("utf-8")
+        payload = json.loads(text)
     except OSError as exc:
         raise ForensicContractError(f"cannot read {label}: {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except UnicodeDecodeError as exc:
+        raise ForensicContractError(f"cannot decode {label}: {exc}") from exc
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise ForensicContractError(f"cannot parse {label}: {exc}") from exc
     return _expect_mapping(payload, label)
 
@@ -297,15 +509,18 @@ def parse_installed_receipt(payload: Mapping[str, Any]) -> InstalledStateReceipt
     for raw_id, value in artifacts_raw.items():
         aid = _expect_id(raw_id, "installed-state artifact id")
         item = _expect_mapping(value, f"installed-state artifact {aid}")
+        mode = _optional_string(item.get("mode"), f"artifact {aid} mode")
+        if mode is not None and (len(mode) != 4 or any(char not in "01234567" for char in mode)):
+            raise ForensicContractError(f"artifact {aid} mode must be four octal digits or null")
         artifacts[aid] = ReceiptArtifact(
             artifact_id=aid,
             component_id=_expect_id(item.get("component_id"), f"artifact {aid} component_id"),
             path=_expect_string(item.get("path"), f"artifact {aid} path"),
             artifact_type=_expect_string(item.get("type"), f"artifact {aid} type"),
             ownership=_expect_string(item.get("ownership"), f"artifact {aid} ownership"),
-            mode=_optional_string(item.get("mode"), f"artifact {aid} mode"),
-            sha256=_optional_string(item.get("sha256"), f"artifact {aid} sha256"),
-            immutable_fingerprint=_optional_string(
+            mode=mode,
+            sha256=_optional_digest(item.get("sha256"), f"artifact {aid} sha256"),
+            immutable_fingerprint=_optional_digest(
                 item.get("immutable_fingerprint"), f"artifact {aid} immutable_fingerprint"
             ),
         )
@@ -380,15 +595,49 @@ def parse_health_snapshot(payload: Mapping[str, Any]) -> CurrentHealthSnapshot:
         exists = item.get("exists")
         if not isinstance(exists, bool):
             raise ForensicContractError(f"health snapshot artifact {aid} exists must be boolean")
+        filesystem_type = _optional_string(
+            item.get("filesystem_type"), f"health snapshot artifact {aid} filesystem_type"
+        )
+        if filesystem_type is not None and filesystem_type not in _FILESYSTEM_TYPES:
+            raise ForensicContractError(
+                f"health snapshot artifact {aid} has invalid filesystem_type {filesystem_type!r}"
+            )
+        error = _optional_string(item.get("error"), f"health snapshot artifact {aid} error")
+        raw_outcome = item.get("outcome")
+        if raw_outcome is None:
+            outcome = ObservationOutcome.UNKNOWN if error is not None else (
+                ObservationOutcome.OBSERVED if exists else ObservationOutcome.MISSING
+            )
+        else:
+            outcome_text = _expect_string(raw_outcome, f"health snapshot artifact {aid} outcome")
+            try:
+                outcome = ObservationOutcome(outcome_text)
+            except ValueError as exc:
+                raise ForensicContractError(
+                    f"health snapshot artifact {aid} has invalid outcome {outcome_text!r}"
+                ) from exc
+        if outcome is ObservationOutcome.MISSING and exists:
+            raise ForensicContractError(
+                f"health snapshot artifact {aid} missing outcome cannot have exists=true"
+            )
+        if outcome is ObservationOutcome.OBSERVED and not exists and error is None:
+            raise ForensicContractError(
+                f"health snapshot artifact {aid} observed outcome requires exists=true"
+            )
+        mode = _optional_string(item.get("mode"), f"health snapshot artifact {aid} mode")
+        if mode is not None and (len(mode) != 4 or any(char not in "01234567" for char in mode)):
+            raise ForensicContractError(f"health snapshot artifact {aid} mode must be four octal digits or null")
         artifacts[aid] = ArtifactObservation(
             artifact_id=aid,
             exists=exists,
-            sha256=_optional_string(item.get("sha256"), f"health snapshot artifact {aid} sha256"),
-            immutable_fingerprint=_optional_string(
+            sha256=_optional_digest(item.get("sha256"), f"health snapshot artifact {aid} sha256"),
+            immutable_fingerprint=_optional_digest(
                 item.get("immutable_fingerprint"), f"health snapshot artifact {aid} immutable_fingerprint"
             ),
-            mode=_optional_string(item.get("mode"), f"health snapshot artifact {aid} mode"),
-            error=_optional_string(item.get("error"), f"health snapshot artifact {aid} error"),
+            mode=mode,
+            error=error,
+            filesystem_type=filesystem_type,
+            outcome=outcome,
         )
 
     activation_state = _expect_string(payload.get("activation_state"), "health snapshot activation_state")
@@ -454,6 +703,51 @@ def _dependent_components(registry: ManifestRegistry, roots: set[str]) -> set[st
     return affected
 
 
+def _blocking_component(registry: ManifestRegistry, component_id: str | None) -> bool:
+    component = registry.components.get(component_id or "")
+    return component is not None and component.category in {"core", "essential", "fx"}
+
+
+def capability_requires_success(registry: ManifestRegistry, capability_spec) -> bool:
+    return capability_spec.requirement == "required" or (
+        capability_spec.requirement == "component"
+        and _blocking_component(registry, capability_spec.component_id)
+    )
+
+
+def capability_state_satisfied(
+    registry: ManifestRegistry,
+    capability_spec,
+    state: str,
+) -> bool:
+    """Return whether a capability state establishes its contract."""
+
+    if state == "pass":
+        return True
+    return state == "not_applicable" and not capability_requires_success(
+        registry, capability_spec
+    )
+
+
+def _capability_failure_severity(registry: ManifestRegistry, capability_spec) -> str:
+    """Map a failed capability to the same nuclear boundary as preflight."""
+
+    blocking = _blocking_component(registry, capability_spec.component_id)
+    if blocking and capability_spec.requirement == "component":
+        return "critical"
+    if blocking and capability_spec.requirement == "required" and "runtime" in capability_spec.lifecycle:
+        return "critical"
+    if capability_spec.requirement == "required":
+        return "error"
+    return "warning"
+
+
+def _artifact_failure_severity(registry: ManifestRegistry, artifact_spec) -> str:
+    if artifact_spec.required and _blocking_component(registry, artifact_spec.component_id):
+        return "critical"
+    return "error" if artifact_spec.required else "warning"
+
+
 def _repair_readiness(registry: ManifestRegistry, snapshot: CurrentHealthSnapshot) -> ReadinessState:
     relevant = [cap for cap in registry.capabilities.values() if _REPAIR_LIFECYCLES.intersection(cap.lifecycle)]
     if not relevant:
@@ -461,19 +755,33 @@ def _repair_readiness(registry: ManifestRegistry, snapshot: CurrentHealthSnapsho
     has_unknown = False
     worst = ReadinessState.HEALTHY
     for cap in relevant:
+        requires_success = capability_requires_success(registry, cap)
         current = snapshot.capabilities.get(cap.id)
         if current is None:
-            if cap.requirement == "required":
+            if requires_success:
                 has_unknown = True
             continue
-        if current.state in _SATISFIED_CAPABILITY_STATES:
+        if capability_state_satisfied(registry, cap, current.state):
+            compatibility = None
+            if capability_version_required(registry, cap):
+                compatibility = classify_capability_version(registry, cap, current.version)
+            if compatibility is VersionCompatibility.UNPARSEABLE:
+                if requires_success:
+                    has_unknown = True
+                elif worst is not ReadinessState.FAILED:
+                    worst = ReadinessState.DEGRADED
+            elif compatibility is VersionCompatibility.INCOMPATIBLE:
+                if requires_success:
+                    worst = ReadinessState.FAILED
+                elif worst is not ReadinessState.FAILED:
+                    worst = ReadinessState.DEGRADED
             continue
-        if current.state == "unknown":
-            if cap.requirement == "required":
+        if current.state in {"unknown", "not_applicable"}:
+            if requires_success:
                 has_unknown = True
             elif worst is not ReadinessState.FAILED:
                 worst = ReadinessState.DEGRADED
-        elif cap.requirement == "required":
+        elif requires_success:
             worst = ReadinessState.FAILED
         elif worst is not ReadinessState.FAILED:
             worst = ReadinessState.DEGRADED
@@ -539,13 +847,265 @@ def analyze_forensics(
             summary="current canonical manifest differs from the manifest accepted by the installed receipt",
         )
 
+    expected_component_ids = set(registry.components)
+    required_component_ids = {
+        component.id
+        for component in registry.components.values()
+        if component.category in {"core", "essential", "fx"}
+    }
+    required_component_ids.update(
+        spec.component_id
+        for spec in registry.capabilities.values()
+        if spec.component_id is not None
+        and (
+            spec.requirement == "required"
+            or (
+                spec.requirement == "component"
+                and _blocking_component(registry, spec.component_id)
+            )
+        )
+    )
+    required_component_ids.update(
+        spec.component_id for spec in registry.artifacts.values() if spec.required
+    )
+    for component_id in sorted(set(receipt.components) - expected_component_ids):
+        add(
+            DriftKind.MANIFEST,
+            "RH_FORENSIC_RECEIPT_UNKNOWN_ID",
+            "warning",
+            component_id,
+            current="unknown",
+            summary=f"installed receipt contains non-canonical component record {component_id}",
+        )
+    for component_id in sorted(required_component_ids - set(receipt.components)):
+        add(
+            DriftKind.MANIFEST,
+            "RH_FORENSIC_COMPONENT_UNKNOWN",
+            "warning",
+            component_id,
+            previous="receipt",
+            current="unknown",
+            affects_repair=True,
+            summary=f"installed receipt omitted required component record {component_id}",
+        )
+    for capability_id in sorted(set(receipt.capabilities) - set(registry.capabilities)):
+        add(
+            DriftKind.DEPENDENCY,
+            "RH_FORENSIC_RECEIPT_UNKNOWN_ID",
+            "warning",
+            capability_id,
+            current="unknown",
+            summary=f"installed receipt contains non-canonical dependency record {capability_id}",
+        )
+    for artifact_id in sorted(set(receipt.artifacts) - set(registry.artifacts)):
+        add(
+            DriftKind.ARTIFACT,
+            "RH_FORENSIC_RECEIPT_UNKNOWN_ID",
+            "warning",
+            artifact_id,
+            current="unknown",
+            summary=f"installed receipt contains non-canonical artifact record {artifact_id}",
+        )
+    required_capability_ids = {
+        spec.id
+        for spec in registry.capabilities.values()
+        if capability_requires_success(registry, spec)
+    }
+    required_artifact_ids = {
+        spec.id for spec in registry.artifacts.values() if spec.required
+    }
+    for capability_id in sorted(
+        (set(snapshot.capabilities) & set(registry.capabilities))
+        - set(receipt.capabilities)
+        - required_capability_ids
+    ):
+        spec = registry.capabilities[capability_id]
+        add(
+            DriftKind.DEPENDENCY,
+            "RH_FORENSIC_RECEIPT_CONTRACT_UNKNOWN",
+            "warning",
+            capability_id,
+            component_id=spec.component_id,
+            dependency_id=spec.dependency_id,
+            current="unknown",
+            affects_runtime="runtime" in spec.lifecycle,
+            affects_repair=bool(_REPAIR_LIFECYCLES.intersection(spec.lifecycle)),
+            summary=(
+                f"current health snapshot contains dependency {capability_id}, "
+                "but the installed receipt omitted its matching record"
+            ),
+        )
+    for artifact_id in sorted(
+        (set(snapshot.artifacts) & set(registry.artifacts))
+        - set(receipt.artifacts)
+        - required_artifact_ids
+    ):
+        spec = registry.artifacts[artifact_id]
+        add(
+            DriftKind.ARTIFACT,
+            "RH_FORENSIC_RECEIPT_CONTRACT_UNKNOWN",
+            "warning",
+            artifact_id,
+            component_id=spec.component_id,
+            current="unknown",
+            affects_runtime=True,
+            affects_repair=True,
+            summary=(
+                f"current health snapshot contains artifact {artifact_id}, "
+                "but the installed receipt omitted its matching record"
+            ),
+        )
+    for component_id, accepted_component in receipt.components.items():
+        canonical_component = registry.components.get(component_id)
+        if canonical_component is None:
+            continue
+        if (
+            accepted_component.display_name != canonical_component.name
+            or accepted_component.category != canonical_component.category
+        ):
+            add(
+                DriftKind.MANIFEST,
+                "RH_FORENSIC_RECEIPT_CONTRACT_UNKNOWN",
+                "warning",
+                component_id,
+                component_id=component_id,
+                current="unknown",
+                affects_repair=True,
+                summary=f"installed receipt component {component_id} does not match the canonical component contract",
+            )
+        for artifact_id in accepted_component.artifact_ids:
+            artifact_spec = registry.artifacts.get(artifact_id)
+            if artifact_spec is None or artifact_spec.component_id != component_id:
+                add(
+                    DriftKind.ARTIFACT,
+                    "RH_FORENSIC_RECEIPT_CONTRACT_UNKNOWN",
+                    "warning",
+                    artifact_id,
+                    component_id=component_id,
+                    current="unknown",
+                    affects_repair=True,
+                    summary=f"component {component_id} receipt coverage names a non-canonical artifact {artifact_id}",
+                )
+    for capability_id in sorted(
+        cap_id
+        for cap_id, spec in registry.capabilities.items()
+        if spec.requirement == "required"
+        or (
+            spec.requirement == "component"
+            and _blocking_component(registry, spec.component_id)
+        )
+    ):
+        if capability_id in receipt.capabilities:
+            continue
+        spec = registry.capabilities[capability_id]
+        add(
+            DriftKind.DEPENDENCY,
+            "RH_FORENSIC_DEPENDENCY_UNKNOWN",
+            "warning",
+            capability_id,
+            component_id=spec.component_id,
+            dependency_id=spec.dependency_id,
+            previous="receipt",
+            current="unknown",
+            affects_runtime="runtime" in spec.lifecycle,
+            affects_repair=bool(_REPAIR_LIFECYCLES.intersection(spec.lifecycle)),
+            summary=f"installed receipt omitted required dependency record {capability_id}",
+        )
+    for artifact_id in sorted(
+        artifact_id for artifact_id, spec in registry.artifacts.items() if spec.required
+    ):
+        if artifact_id in receipt.artifacts:
+            continue
+        spec = registry.artifacts[artifact_id]
+        add(
+            DriftKind.ARTIFACT,
+            "RH_FORENSIC_ARTIFACT_UNKNOWN",
+            "warning",
+            artifact_id,
+            component_id=spec.component_id,
+            previous="receipt",
+            current="unknown",
+            affects_runtime=True,
+            summary=f"installed receipt omitted required artifact record {artifact_id}",
+        )
+    for capability_id in sorted(set(snapshot.capabilities) - set(registry.capabilities)):
+        add(
+            DriftKind.DEPENDENCY,
+            "RH_FORENSIC_SNAPSHOT_UNKNOWN_ID",
+            "warning",
+            capability_id,
+            current="unknown",
+            summary=f"current health snapshot contains non-canonical dependency record {capability_id}",
+        )
+    for artifact_id in sorted(set(snapshot.artifacts) - set(registry.artifacts)):
+        add(
+            DriftKind.ARTIFACT,
+            "RH_FORENSIC_SNAPSHOT_UNKNOWN_ID",
+            "warning",
+            artifact_id,
+            current="unknown",
+            summary=f"current health snapshot contains non-canonical artifact record {artifact_id}",
+        )
+
     for capid, accepted in receipt.capabilities.items():
         current = snapshot.capabilities.get(capid)
         manifest_cap = registry.capabilities.get(capid)
         if manifest_cap is None:
             continue
+        if (
+            accepted.component_id != manifest_cap.component_id
+            or accepted.requirement != manifest_cap.requirement
+            or accepted.lifecycle != manifest_cap.lifecycle
+        ):
+            add(
+                DriftKind.DEPENDENCY,
+                "RH_FORENSIC_RECEIPT_CONTRACT_UNKNOWN",
+                "warning",
+                capid,
+                component_id=manifest_cap.component_id,
+                dependency_id=manifest_cap.dependency_id,
+                current="unknown",
+                affects_repair=True,
+                summary=f"installed receipt dependency {capid} does not match the canonical capability contract",
+            )
+        dependency_id = manifest_cap.dependency_id
+        runtime = "runtime" in manifest_cap.lifecycle
+        repair = bool(_REPAIR_LIFECYCLES.intersection(manifest_cap.lifecycle))
+        accepted_compatibility = None
+        if accepted.state == "pass" and capability_version_required(registry, manifest_cap):
+            accepted_compatibility = classify_capability_version(
+                registry, manifest_cap, accepted.version
+            )
+            if accepted_compatibility is VersionCompatibility.UNPARSEABLE:
+                add(
+                    DriftKind.DEPENDENCY,
+                    "RH_FORENSIC_DEPENDENCY_VERSION_UNKNOWN",
+                    "warning",
+                    capid,
+                    component_id=manifest_cap.component_id,
+                    dependency_id=dependency_id,
+                    previous=accepted.version,
+                    current="unknown",
+                    affects_runtime=runtime,
+                    affects_repair=repair,
+                    summary=f"capability {capid} accepted state lacks parseable required version evidence",
+                )
+            elif accepted_compatibility is VersionCompatibility.INCOMPATIBLE:
+                add(
+                    DriftKind.DEPENDENCY,
+                    "RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE",
+                    _capability_failure_severity(registry, manifest_cap),
+                    capid,
+                    component_id=manifest_cap.component_id,
+                    dependency_id=dependency_id,
+                    previous=accepted.version,
+                    current="incompatible",
+                    affects_runtime=runtime,
+                    affects_repair=repair,
+                    summary=f"capability {capid} accepted version violates the canonical compatibility contract",
+                )
         if current is None:
-            if manifest_cap.requirement == "required":
+            if manifest_cap.requirement != "soft":
                 add(
                     DriftKind.DEPENDENCY,
                     "RH_FORENSIC_DEPENDENCY_UNKNOWN",
@@ -560,12 +1120,74 @@ def analyze_forensics(
                     summary=f"capability {capid} was not included in the current health snapshot",
                 )
             continue
-        dependency_id = manifest_cap.dependency_id
-        runtime = "runtime" in manifest_cap.lifecycle
-        repair = bool(_REPAIR_LIFECYCLES.intersection(manifest_cap.lifecycle))
-        was_ok = accepted.state in _SATISFIED_CAPABILITY_STATES
-        is_ok = current.state in _SATISFIED_CAPABILITY_STATES
-        if current.state == "unknown":
+        current_state = current.state
+        current_compatibility = None
+        current_version_bad = False
+        if current.state == "pass" and capability_version_required(registry, manifest_cap):
+            current_compatibility = classify_capability_version(
+                registry, manifest_cap, current.version
+            )
+            if current_compatibility is VersionCompatibility.UNPARSEABLE:
+                current_state = "unknown"
+                add(
+                    DriftKind.DEPENDENCY,
+                    "RH_FORENSIC_DEPENDENCY_VERSION_UNKNOWN",
+                    "warning",
+                    capid,
+                    component_id=manifest_cap.component_id,
+                    dependency_id=dependency_id,
+                    previous=accepted.state,
+                    current=current.version,
+                    affects_runtime=runtime,
+                    affects_repair=repair,
+                    summary=f"capability {capid} current state is pass but its required version evidence is not parseable",
+                )
+            elif current_compatibility is VersionCompatibility.INCOMPATIBLE:
+                current_state = "failed"
+                current_version_bad = True
+                add(
+                    DriftKind.DEPENDENCY,
+                    "RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE",
+                    _capability_failure_severity(registry, manifest_cap),
+                    capid,
+                    component_id=manifest_cap.component_id,
+                    dependency_id=dependency_id,
+                    previous=accepted.version,
+                    current=current.version,
+                    affects_runtime=runtime,
+                    affects_repair=repair,
+                    summary=f"capability {capid} current version violates the canonical compatibility contract",
+                )
+        was_ok = (
+            capability_state_satisfied(registry, manifest_cap, accepted.state)
+            and accepted_compatibility
+            not in {VersionCompatibility.UNPARSEABLE, VersionCompatibility.INCOMPATIBLE}
+        )
+        is_ok = capability_state_satisfied(registry, manifest_cap, current_state)
+        if accepted.state == "not_applicable" and capability_requires_success(
+            registry, manifest_cap
+        ):
+            add(
+                DriftKind.DEPENDENCY,
+                "RH_FORENSIC_DEPENDENCY_UNKNOWN",
+                "warning",
+                capid,
+                component_id=manifest_cap.component_id,
+                dependency_id=dependency_id,
+                previous="not_applicable",
+                current="unknown",
+                affects_runtime=runtime,
+                affects_repair=repair,
+                summary=(
+                    f"blocking capability {capid} was marked not_applicable, "
+                    "so its health was not established"
+                ),
+            )
+        if current_state == "unknown":
+            if current.state == "unknown":
+                current_detail = "current state could not be independently established"
+            else:
+                current_detail = "current version evidence could not be independently established"
             add(
                 DriftKind.DEPENDENCY,
                 "RH_FORENSIC_DEPENDENCY_UNKNOWN",
@@ -574,14 +1196,14 @@ def analyze_forensics(
                 component_id=manifest_cap.component_id,
                 dependency_id=dependency_id,
                 previous=accepted.state,
-                current=current.state,
+                current="unknown",
                 affects_runtime=runtime,
                 affects_repair=repair,
-                summary=f"capability {capid} current state could not be independently established",
+                summary=f"capability {capid} {current_detail}",
             )
-        elif was_ok and not is_ok:
-            severity = "critical" if manifest_cap.requirement == "required" and runtime else "error" if manifest_cap.requirement != "soft" else "warning"
-            code = "RH_FORENSIC_DEPENDENCY_MISSING" if current.state == "missing" else "RH_FORENSIC_DEPENDENCY_FAILED"
+        elif was_ok and not is_ok and not current_version_bad:
+            severity = _capability_failure_severity(registry, manifest_cap)
+            code = "RH_FORENSIC_DEPENDENCY_MISSING" if current_state == "missing" else "RH_FORENSIC_DEPENDENCY_FAILED"
             add(
                 DriftKind.DEPENDENCY,
                 code,
@@ -590,12 +1212,12 @@ def analyze_forensics(
                 component_id=manifest_cap.component_id,
                 dependency_id=dependency_id,
                 previous=accepted.state,
-                current=current.state,
+                current=current_state,
                 affects_runtime=runtime,
                 affects_repair=repair,
-                summary=f"capability {capid} regressed from {accepted.state} to {current.state}",
+                summary=f"capability {capid} regressed from {accepted.state} to {current_state}",
             )
-        elif accepted.state != current.state:
+        elif accepted.state != current_state:
             add(
                 DriftKind.DEPENDENCY,
                 "RH_FORENSIC_DEPENDENCY_STATE_DRIFT",
@@ -604,22 +1226,26 @@ def analyze_forensics(
                 component_id=manifest_cap.component_id,
                 dependency_id=dependency_id,
                 previous=accepted.state,
-                current=current.state,
+                current=current_state,
                 affects_runtime=runtime,
                 affects_repair=repair,
-                summary=f"capability {capid} state changed from {accepted.state} to {current.state}",
+                summary=f"capability {capid} state changed from {accepted.state} to {current_state}",
             )
 
-        if current.state != "unknown" and accepted.version and current.version and accepted.version != current.version:
-            dep_spec = registry.dependencies.get(dependency_id)
-            incompatible = False
-            if dep_spec is not None:
-                compatibility = classify_version(dep_spec.version, current.version)
-                incompatible = compatibility is VersionCompatibility.INCOMPATIBLE
+        if (
+            current_state != "unknown"
+            and accepted.version
+            and current.version
+            and accepted.version != current.version
+            and accepted_compatibility is not VersionCompatibility.UNPARSEABLE
+            and current_compatibility is not VersionCompatibility.UNPARSEABLE
+        ):
             add(
                 DriftKind.DEPENDENCY,
-                "RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE" if incompatible else "RH_FORENSIC_DEPENDENCY_VERSION_DRIFT",
-                "error" if incompatible else "warning",
+                "RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE"
+                if current_compatibility is VersionCompatibility.INCOMPATIBLE
+                else "RH_FORENSIC_DEPENDENCY_VERSION_DRIFT",
+                "error" if current_compatibility is VersionCompatibility.INCOMPATIBLE else "warning",
                 capid,
                 component_id=manifest_cap.component_id,
                 dependency_id=dependency_id,
@@ -635,6 +1261,91 @@ def analyze_forensics(
         manifest_artifact = registry.artifacts.get(aid)
         if manifest_artifact is None:
             continue
+        invalid_accepted_fields = [
+            field
+            for field, value in (
+                ("path", accepted.path),
+                ("mode", accepted.mode),
+                ("sha256", accepted.sha256),
+                ("immutable_fingerprint", accepted.immutable_fingerprint),
+            )
+            if (
+                (field == "path" and not _valid_observed_path(value))
+                or (field == "mode" and not _valid_mode(value))
+                or (field in {"sha256", "immutable_fingerprint"} and not _valid_digest(value))
+            )
+        ]
+        if invalid_accepted_fields:
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_ARTIFACT_UNKNOWN",
+                "warning",
+                aid,
+                component_id=manifest_artifact.component_id,
+                previous="receipt",
+                current="unknown",
+                affects_runtime=True,
+                summary=(
+                    f"artifact {aid} receipt evidence is invalid: "
+                    f"{', '.join(invalid_accepted_fields)}"
+                ),
+            )
+            continue
+        if (
+            accepted.component_id != manifest_artifact.component_id
+            or accepted.artifact_type != manifest_artifact.type
+            or accepted.ownership != manifest_artifact.ownership
+        ):
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_RECEIPT_CONTRACT_UNKNOWN",
+                "warning",
+                aid,
+                component_id=manifest_artifact.component_id,
+                current="unknown",
+                affects_repair=True,
+                summary=f"installed receipt artifact {aid} does not match the canonical artifact contract",
+            )
+        accepted_component = receipt.components.get(manifest_artifact.component_id)
+        if accepted_component is None or aid not in accepted_component.artifact_ids:
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_RECEIPT_CONTRACT_UNKNOWN",
+                "warning",
+                aid,
+                component_id=manifest_artifact.component_id,
+                current="unknown",
+                affects_repair=True,
+                summary=f"installed receipt artifact {aid} is omitted from its component coverage",
+            )
+        if manifest_artifact.mode is not None and accepted.mode is not None and accepted.mode != manifest_artifact.mode:
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_RECEIPT_CONTRACT_UNKNOWN",
+                "warning",
+                aid,
+                component_id=manifest_artifact.component_id,
+                previous=manifest_artifact.mode,
+                current=accepted.mode,
+                affects_repair=True,
+                summary=f"installed receipt artifact {aid} mode does not match the canonical artifact contract",
+            )
+        required_fields = artifact_integrity_fields(manifest_artifact)
+        missing_accepted = sorted(
+            field for field in required_fields if getattr(accepted, field) is None
+        )
+        if missing_accepted:
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_ARTIFACT_UNKNOWN",
+                "warning",
+                aid,
+                component_id=manifest_artifact.component_id,
+                previous="present",
+                current="unknown",
+                affects_runtime=True,
+                summary=f"artifact {aid} receipt evidence is incomplete: missing {', '.join(missing_accepted)}",
+            )
         if current is None:
             if manifest_artifact.required:
                 add(
@@ -648,6 +1359,87 @@ def analyze_forensics(
                     affects_runtime=True,
                     summary=f"artifact {aid} was not included in the current health snapshot",
                 )
+            continue
+        invalid_current_fields = [
+            field
+            for field, value in (
+                ("exists", current.exists),
+                ("sha256", current.sha256),
+                ("immutable_fingerprint", current.immutable_fingerprint),
+                ("mode", current.mode),
+                ("filesystem_type", current.filesystem_type),
+                ("error", current.error),
+            )
+            if (
+                (field == "exists" and type(value) is not bool)
+                or (field in {"sha256", "immutable_fingerprint"} and not _valid_digest(value))
+                or (field == "mode" and not _valid_mode(value))
+                or (field == "filesystem_type" and value is not None and value not in _FILESYSTEM_TYPES)
+                or (field == "error" and value is not None and not isinstance(value, str))
+            )
+        ]
+        if invalid_current_fields:
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_ARTIFACT_UNKNOWN",
+                "warning",
+                aid,
+                component_id=manifest_artifact.component_id,
+                previous="present",
+                current="unknown",
+                affects_runtime=True,
+                summary=(
+                    f"artifact {aid} observation evidence is invalid: "
+                    f"{', '.join(invalid_current_fields)}"
+                ),
+            )
+            continue
+        if current.outcome is None:
+            outcome = (
+                ObservationOutcome.UNKNOWN
+                if current.error is not None
+                else ObservationOutcome.OBSERVED
+                if current.exists
+                else ObservationOutcome.MISSING
+            )
+        else:
+            outcome = _observation_outcome(current.outcome)
+        if outcome is None or (
+            outcome is ObservationOutcome.MISSING and current.exists
+        ) or (
+            outcome is ObservationOutcome.OBSERVED
+            and not current.exists
+            and current.error is None
+        ):
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_ARTIFACT_UNKNOWN",
+                "warning",
+                aid,
+                component_id=manifest_artifact.component_id,
+                previous="present",
+                current="unknown",
+                affects_runtime=True,
+                summary=f"artifact {aid} observation outcome is invalid or contradictory",
+            )
+            continue
+        if outcome in {ObservationOutcome.UNKNOWN, ObservationOutcome.LIMIT_EXCEEDED}:
+            detail = current.error or (
+                "observation exceeded its resource limit"
+                if outcome is ObservationOutcome.LIMIT_EXCEEDED
+                else "observation could not be independently established"
+            )
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_ARTIFACT_UNKNOWN",
+                "warning",
+                aid,
+                component_id=manifest_artifact.component_id,
+                previous="present",
+                current="unknown",
+                affects_runtime=True,
+                summary=f"artifact {aid} observation was inconclusive: {detail}",
+            )
             continue
         if current.error is not None:
             add(
@@ -666,7 +1458,7 @@ def analyze_forensics(
             add(
                 DriftKind.ARTIFACT,
                 "RH_FORENSIC_ARTIFACT_MISSING",
-                "critical" if manifest_artifact.required and registry.components[manifest_artifact.component_id].category in {"core", "essential", "fx"} else "error",
+                _artifact_failure_severity(registry, manifest_artifact),
                 aid,
                 component_id=manifest_artifact.component_id,
                 previous="present",
@@ -675,14 +1467,8 @@ def analyze_forensics(
                 summary=f"artifact {aid} recorded by the installed receipt is now missing",
             )
             continue
-        incomplete_fields = []
-        if accepted.sha256 and not current.sha256:
-            incomplete_fields.append("sha256")
-        if accepted.immutable_fingerprint and not current.immutable_fingerprint:
-            incomplete_fields.append("immutable_fingerprint")
-        if accepted.mode and not current.mode:
-            incomplete_fields.append("mode")
-        if incomplete_fields:
+        expected_type = canonical_filesystem_type(manifest_artifact.type)
+        if current.filesystem_type is None:
             add(
                 DriftKind.ARTIFACT,
                 "RH_FORENSIC_ARTIFACT_UNKNOWN",
@@ -692,9 +1478,59 @@ def analyze_forensics(
                 previous="present",
                 current="unknown",
                 affects_runtime=True,
-                summary=f"artifact {aid} observation is incomplete: missing {', '.join(incomplete_fields)}",
+                summary=f"artifact {aid} observation is incomplete: missing filesystem_type",
             )
-        if accepted.sha256 and current.sha256 and accepted.sha256 != current.sha256:
+        elif current.filesystem_type != expected_type:
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_ARTIFACT_TYPE_DRIFT",
+                _artifact_failure_severity(registry, manifest_artifact),
+                aid,
+                component_id=manifest_artifact.component_id,
+                previous=expected_type,
+                current=current.filesystem_type,
+                affects_runtime=True,
+                summary=f"artifact {aid} has filesystem type {current.filesystem_type}, expected {expected_type}",
+            )
+            continue
+        if manifest_artifact.type == "executable" and current.mode is not None:
+            try:
+                executable_mode = bool(int(current.mode, 8) & 0o111)
+            except (TypeError, ValueError):
+                executable_mode = False
+            if not executable_mode:
+                add(
+                    DriftKind.ARTIFACT,
+                    "RH_FORENSIC_ARTIFACT_MODE_DRIFT",
+                    _artifact_failure_severity(registry, manifest_artifact),
+                    aid,
+                    component_id=manifest_artifact.component_id,
+                    previous="executable-bit",
+                    current=current.mode,
+                    affects_runtime=True,
+                    summary=f"executable artifact {aid} has no executable permission bit",
+                )
+        missing_current = sorted(
+            field for field in required_fields if getattr(current, field) is None
+        )
+        if missing_current:
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_ARTIFACT_UNKNOWN",
+                "warning",
+                aid,
+                component_id=manifest_artifact.component_id,
+                previous="present",
+                current="unknown",
+                affects_runtime=True,
+                summary=f"artifact {aid} observation is incomplete: missing {', '.join(missing_current)}",
+            )
+        if (
+            "sha256" in required_fields
+            and accepted.sha256
+            and current.sha256
+            and accepted.sha256 != current.sha256
+        ):
             add(
                 DriftKind.ARTIFACT,
                 "RH_FORENSIC_ARTIFACT_HASH_DRIFT",
@@ -707,7 +1543,8 @@ def analyze_forensics(
                 summary=f"immutable artifact {aid} no longer matches its accepted SHA-256",
             )
         if (
-            accepted.immutable_fingerprint
+            "immutable_fingerprint" in required_fields
+            and accepted.immutable_fingerprint
             and current.immutable_fingerprint
             and accepted.immutable_fingerprint != current.immutable_fingerprint
         ):
@@ -722,11 +1559,23 @@ def analyze_forensics(
                 affects_runtime=True,
                 summary=f"immutable artifact {aid} no longer matches its accepted fingerprint",
             )
-        if accepted.mode and current.mode and accepted.mode != current.mode:
+        if manifest_artifact.mode and current.mode and manifest_artifact.mode != current.mode:
             add(
                 DriftKind.ARTIFACT,
                 "RH_FORENSIC_ARTIFACT_MODE_DRIFT",
-                "error" if manifest_artifact.required else "warning",
+                _artifact_failure_severity(registry, manifest_artifact),
+                aid,
+                component_id=manifest_artifact.component_id,
+                previous=manifest_artifact.mode,
+                current=current.mode,
+                affects_runtime=True,
+                summary=f"artifact {aid} mode differs from the canonical mode {manifest_artifact.mode}",
+            )
+        if "mode" in required_fields and accepted.mode and current.mode and accepted.mode != current.mode:
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_ARTIFACT_MODE_DRIFT",
+                _artifact_failure_severity(registry, manifest_artifact),
                 aid,
                 component_id=manifest_artifact.component_id,
                 previous=accepted.mode,
@@ -756,6 +1605,50 @@ def analyze_forensics(
             current=snapshot.runtime_health,
             affects_runtime=True,
             summary=f"runtime health changed from {receipt.runtime_health} to {snapshot.runtime_health}",
+        )
+    if snapshot.activation_state == "unknown":
+        add(
+            DriftKind.RUNTIME,
+            "RH_FORENSIC_ACTIVATION_UNKNOWN",
+            "warning",
+            "runtime.activation",
+            previous=receipt.activation_state,
+            current="unknown",
+            affects_runtime=True,
+            summary="current activation state could not be independently established",
+        )
+    elif snapshot.activation_state == "failed":
+        add(
+            DriftKind.RUNTIME,
+            "RH_FORENSIC_ACTIVATION_FAILED",
+            "critical",
+            "runtime.activation",
+            previous=receipt.activation_state,
+            current="failed",
+            affects_runtime=True,
+            summary="current activation probe reports a failed runtime activation",
+        )
+    if snapshot.runtime_health == "unknown":
+        add(
+            DriftKind.RUNTIME,
+            "RH_FORENSIC_RUNTIME_HEALTH_UNKNOWN",
+            "warning",
+            "runtime.health",
+            previous=receipt.runtime_health,
+            current="unknown",
+            affects_runtime=True,
+            summary="current runtime health could not be independently established",
+        )
+    elif snapshot.runtime_health == "failed":
+        add(
+            DriftKind.RUNTIME,
+            "RH_FORENSIC_RUNTIME_HEALTH_FAILED",
+            "critical",
+            "runtime.health",
+            previous=receipt.runtime_health,
+            current="failed",
+            affects_runtime=True,
+            summary="current runtime health is failed",
         )
 
     incidents: list[ForensicIncident] = []

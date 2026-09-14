@@ -5,10 +5,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from . import _bootstrap
 from realmheart_maintenance import (
+    ArtifactObservation,
+    CurrentHealthSnapshot,
     DriftKind,
     ForensicContractError,
     ReadinessState,
@@ -57,6 +60,7 @@ class Phase20ForensicContractTests(unittest.TestCase):
                 "sha256": item.get("sha256"),
                 "immutable_fingerprint": item.get("immutable_fingerprint"),
                 "mode": item.get("mode"),
+                "filesystem_type": "directory" if item["type"] == "directory" else "file",
             }
             for aid, item in receipt["artifacts"].items()
         }
@@ -146,7 +150,12 @@ class Phase20ForensicContractTests(unittest.TestCase):
             report = analyze_forensics(self.registry, load_installed_receipt(receipt_path), load_health_snapshot(snapshot_path))
 
             self.assertEqual(report.repair_readiness, ReadinessState.UNKNOWN)
-            unknown_drift = next(item for item in report.drifts if item.subject_id == "build.cmake")
+            unknown_drift = next(
+                item
+                for item in report.drifts
+                if item.subject_id == "build.cmake"
+                and item.error_code == "RH_FORENSIC_DEPENDENCY_UNKNOWN"
+            )
             self.assertEqual(unknown_drift.error_code, "RH_FORENSIC_DEPENDENCY_UNKNOWN")
             self.assertEqual(unknown_drift.severity, "warning")
             self.assertNotEqual(unknown_drift.error_code, "RH_FORENSIC_DEPENDENCY_FAILED")
@@ -193,7 +202,7 @@ class Phase20ForensicContractTests(unittest.TestCase):
             root = Path(temp)
             receipt_path, receipt_payload = self._generated_receipt(root)
             snapshot_path, snapshot_payload = self._snapshot_from_receipt(root, receipt_payload)
-            optional = next(spec for spec in self.registry.capabilities.values() if spec.requirement != "required")
+            optional = next(spec for spec in self.registry.capabilities.values() if spec.requirement == "soft")
             capabilities = snapshot_payload["capabilities"]
             if not isinstance(capabilities, dict):
                 self.fail("synthetic snapshot capabilities must be an object")
@@ -203,6 +212,203 @@ class Phase20ForensicContractTests(unittest.TestCase):
             report = analyze_forensics(self.registry, load_installed_receipt(receipt_path), load_health_snapshot(snapshot_path))
 
             self.assertFalse(any(item.subject_id == optional.id for item in report.drifts))
+
+    def test_missing_required_receipt_records_are_explicit_unknown_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            snapshot_path, _ = self._snapshot_from_receipt(root, receipt_payload)
+            required_capability = next(
+                spec.id for spec in self.registry.capabilities.values() if spec.requirement == "required"
+            )
+            required_artifact = next(
+                spec.id for spec in self.registry.artifacts.values() if spec.required
+            )
+            receipt_payload["dependencies"].pop(required_capability)
+            receipt_payload["artifacts"].pop(required_artifact)
+            receipt_path.write_text(json.dumps(receipt_payload), encoding="utf-8")
+
+            report = analyze_forensics(
+                self.registry,
+                load_installed_receipt(receipt_path),
+                load_health_snapshot(snapshot_path),
+            )
+
+            self.assertTrue(report.has_drift)
+            self.assertTrue(any(
+                item.subject_id == required_capability
+                and item.error_code == "RH_FORENSIC_DEPENDENCY_UNKNOWN"
+                for item in report.drifts
+            ))
+            self.assertTrue(any(
+                item.subject_id == required_artifact
+                and item.error_code == "RH_FORENSIC_ARTIFACT_UNKNOWN"
+                for item in report.drifts
+            ))
+
+    def test_unknown_receipt_ids_are_explicit_contract_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            snapshot_path, _ = self._snapshot_from_receipt(root, receipt_payload)
+            known_capability = next(iter(receipt_payload["dependencies"].values()))
+            known_artifact = next(iter(receipt_payload["artifacts"].values()))
+            receipt_payload["dependencies"]["receipt.unknown-capability"] = dict(known_capability)
+            receipt_payload["artifacts"]["receipt.unknown-artifact"] = dict(known_artifact)
+            receipt_path.write_text(json.dumps(receipt_payload), encoding="utf-8")
+
+            report = analyze_forensics(
+                self.registry,
+                load_installed_receipt(receipt_path),
+                load_health_snapshot(snapshot_path),
+            )
+
+            unknown = [item for item in report.drifts if item.error_code == "RH_FORENSIC_RECEIPT_UNKNOWN_ID"]
+            self.assertEqual(
+                {item.subject_id for item in unknown},
+                {"receipt.unknown-capability", "receipt.unknown-artifact"},
+            )
+            self.assertTrue(report.has_drift)
+
+    def test_missing_optional_component_observation_is_non_nuclear(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            snapshot_path, snapshot_payload = self._snapshot_from_receipt(root, receipt_payload)
+            optional_component = next(
+                spec for spec in self.registry.capabilities.values()
+                if spec.requirement == "component"
+                and spec.component_id is not None
+                and self.registry.components[spec.component_id].category not in {"core", "essential", "fx"}
+            )
+            snapshot_payload["capabilities"].pop(optional_component.id)
+            snapshot_path.write_text(json.dumps(snapshot_payload), encoding="utf-8")
+
+            report = analyze_forensics(
+                self.registry,
+                load_installed_receipt(receipt_path),
+                load_health_snapshot(snapshot_path),
+            )
+
+            drift = next(item for item in report.drifts if item.subject_id == optional_component.id)
+            self.assertEqual(drift.error_code, "RH_FORENSIC_DEPENDENCY_UNKNOWN")
+            self.assertEqual(drift.severity, "warning")
+            self.assertFalse(any(item.severity == "critical" for item in report.drifts))
+
+    def test_omitted_optional_receipt_record_with_matching_snapshot_is_contract_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            snapshot_path, _ = self._snapshot_from_receipt(root, receipt_payload)
+            optional = next(
+                spec for spec in self.registry.capabilities.values() if spec.requirement == "soft"
+            )
+            receipt_payload["dependencies"].pop(optional.id)
+            receipt_path.write_text(json.dumps(receipt_payload), encoding="utf-8")
+
+            report = analyze_forensics(
+                self.registry,
+                load_installed_receipt(receipt_path),
+                load_health_snapshot(snapshot_path),
+            )
+
+            coverage = [
+                item for item in report.drifts
+                if item.subject_id == optional.id
+                and item.error_code == "RH_FORENSIC_RECEIPT_CONTRACT_UNKNOWN"
+            ]
+            self.assertEqual(len(coverage), 1)
+            self.assertEqual(coverage[0].current, "unknown")
+            self.assertEqual(coverage[0].severity, "warning")
+            self.assertTrue(report.has_drift)
+
+    def test_direct_invalid_artifact_observation_outcome_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            receipt = load_installed_receipt(receipt_path)
+            artifact = receipt.artifacts["core.binary"]
+            snapshot = CurrentHealthSnapshot(
+                schema_version=1,
+                captured_at="2026-09-13T12:00:00+00:00",
+                activation_state=receipt.activation_state,
+                runtime_health=receipt.runtime_health,
+                capabilities={},
+                artifacts={
+                    "core.binary": ArtifactObservation(
+                        artifact_id="core.binary",
+                        exists=True,
+                        sha256=artifact.sha256,
+                        immutable_fingerprint=artifact.immutable_fingerprint,
+                        mode=artifact.mode,
+                        filesystem_type="file",
+                        outcome="not-a-valid-outcome",  # type: ignore[arg-type]
+                    )
+                },
+            )
+
+            report = analyze_forensics(self.registry, receipt, snapshot)
+
+            unknown = [
+                item for item in report.drifts
+                if item.subject_id == "core.binary"
+                and item.error_code == "RH_FORENSIC_ARTIFACT_UNKNOWN"
+            ]
+            self.assertTrue(unknown)
+            self.assertFalse(any(
+                item.subject_id == "core.binary"
+                and item.error_code == "RH_FORENSIC_ARTIFACT_HASH_DRIFT"
+                for item in report.drifts
+            ))
+
+    def test_direct_invalid_receipt_digest_is_unknown_not_hash_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            snapshot_path, _ = self._snapshot_from_receipt(root, receipt_payload)
+            receipt = load_installed_receipt(receipt_path)
+            artifacts = dict(receipt.artifacts)
+            artifacts["core.binary"] = replace(artifacts["core.binary"], sha256="not-a-digest")
+            receipt = replace(receipt, artifacts=artifacts)
+
+            report = analyze_forensics(self.registry, receipt, load_health_snapshot(snapshot_path))
+
+            self.assertTrue(any(
+                item.subject_id == "core.binary"
+                and item.error_code == "RH_FORENSIC_ARTIFACT_UNKNOWN"
+                for item in report.drifts
+            ))
+            self.assertFalse(any(
+                item.subject_id == "core.binary"
+                and item.error_code == "RH_FORENSIC_ARTIFACT_HASH_DRIFT"
+                for item in report.drifts
+            ))
+
+    def test_direct_artifact_observation_without_outcome_keeps_missing_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            snapshot = CurrentHealthSnapshot(
+                schema_version=1,
+                captured_at="2026-09-13T12:00:00+00:00",
+                activation_state=receipt_payload["activation_state"],
+                runtime_health=receipt_payload["runtime_health"],
+                capabilities={},
+                artifacts={"core.binary": ArtifactObservation("core.binary", False)},
+            )
+
+            report = analyze_forensics(
+                self.registry,
+                load_installed_receipt(receipt_path),
+                snapshot,
+            )
+
+            missing = [
+                item for item in report.drifts
+                if item.subject_id == "core.binary"
+                and item.error_code == "RH_FORENSIC_ARTIFACT_MISSING"
+            ]
+            self.assertEqual(len(missing), 1)
 
     def test_health_check_selection_honors_context_cost_and_side_effect_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

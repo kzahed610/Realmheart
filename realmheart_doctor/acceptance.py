@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -17,32 +18,47 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from realmheart_maintenance.fingerprint import fingerprint_path
+from realmheart_maintenance.fingerprint import (
+    FingerprintLimitExceeded,
+    MAX_SHA256_BYTES,
+    fingerprint_path,
+)
 from realmheart_maintenance.forensics import (
     ArtifactObservation,
     CapabilityObservation,
     CurrentHealthSnapshot,
     InstalledStateReceipt,
+    ObservationOutcome,
     ReceiptArtifact,
     ReceiptCapability,
     ReceiptComponent,
     analyze_forensics,
+    artifact_integrity_fields,
+    capability_state_satisfied,
+    capability_version_required,
+    classify_capability_version,
+    version_evidence_line,
 )
-from realmheart_maintenance.manifest import ManifestRegistry
+from realmheart_maintenance.manifest import ManifestRegistry, ParsedVersion, VersionCompatibility
 
 from .models import AcceptanceAssessment, AcceptanceFinding, AcceptanceRecommendation
 
 CANDIDATE_SCHEMA_VERSION = 1
-_SATISFIED = {"pass", "not_applicable"}
+MAX_CANDIDATE_JSON_BYTES = 2 * 1024 * 1024
+_CANDIDATE_READ_CHUNK_BYTES = 1024 * 1024
 _BLOCKING_CATEGORIES = {"core", "essential", "fx"}
 _CANDIDATE_COMPONENT_HEALTH = {
-    "healthy", "degraded", "failed", "blocked", "not_applicable", "pending_activation",
+    "healthy", "degraded", "failed", "blocked", "unknown", "not_applicable", "pending_activation",
     "pass", "warning", "pending", "running", "skipped",
 }
 _CANDIDATE_CAPABILITY_STATES = {"pass", "missing", "failed", "not_applicable"}
 _CANDIDATE_INSTALL_HEALTH = {"healthy", "degraded", "failed"}
-_CANDIDATE_ACTIVATION_STATES = {"active", "pending_session_restart", "unknown"}
+_CANDIDATE_ACTIVATION_STATES = {"active", "pending_session_restart", "unknown", "failed"}
 _CANDIDATE_RUNTIME_HEALTH = {"healthy", "degraded", "failed", "unknown"}
+_CANONICAL_PATH_TOKENS = {
+    "$HOME", "$XDG_CONFIG_HOME", "$XDG_STATE_HOME", "$PREFIX", "$LIBEXEC", "$SYSCONF",
+}
+_PATH_TOKEN_RE = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*")
 
 
 class DoctorAcceptanceError(ValueError):
@@ -65,6 +81,13 @@ def _optional_text(value: Any, field: str) -> str | None:
     if value is None:
         return None
     return _text(value, field)
+
+
+def _optional_digest(value: Any, field: str) -> str | None:
+    text = _optional_text(value, field)
+    if text is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", text):
+        raise DoctorAcceptanceError(f"{field} must be a 64-character hexadecimal SHA-256 digest or null")
+    return text
 
 
 def _string_list(value: Any, field: str) -> tuple[str, ...]:
@@ -99,57 +122,82 @@ def _validate_coverage(
 
 
 def _canonical_path_matches(declared: str, candidate: str) -> bool:
-    """Accept a candidate path only when it matches the manifest path template."""
+    """Accept only exact paths resolved from explicit canonical variables."""
 
-    if "\x00" in candidate or ".." in PurePosixPath(candidate).parts:
+    if "\x00" in declared or "\x00" in candidate:
         return False
-    if declared == candidate:
-        return True
+    if not Path(candidate).is_absolute() or ".." in PurePosixPath(candidate).parts:
+        return False
+    tokens = _PATH_TOKEN_RE.findall(declared)
+    if any(token not in _CANONICAL_PATH_TOKENS for token in tokens):
+        return False
+    if "$" in declared and not tokens:
+        return False
 
-    replacements = {
-        "$HOME": os.environ.get("HOME", str(Path.home())),
-        "$XDG_CONFIG_HOME": os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")),
-        "$XDG_STATE_HOME": os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state")),
+    replacements: dict[str, str] = {}
+    defaults = {
+        "$HOME": str(Path.home()),
+        "$XDG_CONFIG_HOME": str(Path.home() / ".config"),
+        "$XDG_STATE_HOME": str(Path.home() / ".local" / "state"),
     }
-    if os.environ.get("PREFIX"):
-        replacements["$PREFIX"] = os.environ["PREFIX"]
-    if os.environ.get("LIBEXEC"):
-        replacements["$LIBEXEC"] = os.environ["LIBEXEC"]
-    if os.environ.get("SYSCONF"):
-        replacements["$SYSCONF"] = os.environ["SYSCONF"]
+    for token, default in defaults.items():
+        value = os.environ.get(token[1:]) or default
+        if not Path(value).is_absolute() or ".." in PurePosixPath(value).parts:
+            return False
+        replacements[token] = value
+    for token in ("$PREFIX", "$LIBEXEC", "$SYSCONF"):
+        value = os.environ.get(token[1:])
+        if not value or not Path(value).is_absolute() or ".." in PurePosixPath(value).parts:
+            if token in tokens:
+                return False
+            continue
+        replacements[token] = value
     expanded = declared
     for token, value in replacements.items():
         expanded = expanded.replace(token, value)
-    if expanded == candidate:
-        return True
-
-    if not Path(candidate).is_absolute():
-        return False
-    for token in ("$PREFIX", "$LIBEXEC", "$SYSCONF"):
-        if declared.count(token) != 1:
-            continue
-        prefix, suffix = declared.split(token, 1)
-        if prefix and not candidate.startswith(prefix):
-            continue
-        if suffix and not candidate.endswith(suffix):
-            continue
-        start = len(prefix)
-        end = len(candidate) - len(suffix) if suffix else len(candidate)
-        variable_value = candidate[start:end]
-        if variable_value.startswith("/") and variable_value != "/":
-            return True
-        if not variable_value and not prefix and suffix.startswith("/") and candidate == suffix:
-            return True
-    return False
+    return expanded == candidate
 
 
-def load_candidate_bundle(path: Path) -> Mapping[str, Any]:
+def load_candidate_bundle(
+    path: Path,
+    *,
+    max_bytes: int = MAX_CANDIDATE_JSON_BYTES,
+) -> Mapping[str, Any]:
     path = Path(path)
-    if path.is_symlink() or not path.is_file():
-        raise DoctorAcceptanceError(f"candidate bundle must be a regular non-symlink file: {path}")
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise DoctorAcceptanceError("candidate bundle byte limit must be a non-negative integer")
+    if max_bytes > MAX_CANDIDATE_JSON_BYTES:
+        raise DoctorAcceptanceError(
+            f"candidate bundle byte limit exceeds hard limit {MAX_CANDIDATE_JSON_BYTES}"
+        )
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        st = path.lstat()
+        if not stat.S_ISREG(st.st_mode):
+            raise DoctorAcceptanceError(f"candidate bundle must be a regular non-symlink file: {path}")
+        if st.st_size > max_bytes:
+            raise DoctorAcceptanceError(
+                f"candidate bundle exceeds the {max_bytes}-byte observation limit"
+            )
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(os.fspath(path), flags)
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            chunks: list[bytes] = []
+            total = 0
+            while total <= max_bytes:
+                chunk = handle.read(min(_CANDIDATE_READ_CHUNK_BYTES, max_bytes - total + 1))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            raw = b"".join(chunks)
+        if len(raw) > max_bytes:
+            raise DoctorAcceptanceError(
+                f"candidate bundle exceeds the {max_bytes}-byte observation limit"
+            )
+        payload = json.loads(raw.decode("utf-8"))
+    except DoctorAcceptanceError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise DoctorAcceptanceError(f"cannot read candidate bundle: {exc}") from exc
     return _mapping(payload, "candidate bundle")
 
@@ -172,7 +220,12 @@ def _candidate_receipt(payload: Mapping[str, Any], registry: ManifestRegistry) -
     required_component_ids = {
         spec.component_id
         for spec in registry.capabilities.values()
-        if spec.requirement == "required" and spec.component_id is not None
+        if spec.component_id is not None
+        and spec.requirement in {"required", "component"}
+        and (
+            spec.requirement == "required"
+            or registry.components[spec.component_id].category in _BLOCKING_CATEGORIES
+        )
     }
     required_component_ids.update(
         spec.component_id for spec in registry.artifacts.values() if spec.required
@@ -191,7 +244,16 @@ def _candidate_receipt(payload: Mapping[str, Any], registry: ManifestRegistry) -
     _validate_coverage(
         dependencies_raw,
         expected=set(registry.capabilities),
-        required={capid for capid, spec in registry.capabilities.items() if spec.requirement == "required"},
+        required={
+            capid
+            for capid, spec in registry.capabilities.items()
+            if spec.requirement == "required"
+            or (
+                spec.requirement == "component"
+                and spec.component_id is not None
+                and registry.components[spec.component_id].category in _BLOCKING_CATEGORIES
+            )
+        },
         field="dependencies",
     )
     _validate_coverage(
@@ -293,6 +355,8 @@ def _candidate_receipt(payload: Mapping[str, Any], registry: ManifestRegistry) -
         mode = _optional_text(raw.get("mode"), f"artifact {aid}.mode")
         if mode is not None and (len(mode) != 4 or any(char not in "01234567" for char in mode)):
             raise DoctorAcceptanceError(f"artifact {aid}.mode must be four octal digits or null")
+        if canonical.mode is not None and mode is not None and mode != canonical.mode:
+            raise DoctorAcceptanceError(f"artifact {aid}.mode does not match the canonical manifest")
         artifacts[aid] = ReceiptArtifact(
             artifact_id=aid,
             component_id=component_id,
@@ -300,8 +364,8 @@ def _candidate_receipt(payload: Mapping[str, Any], registry: ManifestRegistry) -
             artifact_type=artifact_type,
             ownership=ownership,
             mode=mode,
-            sha256=_optional_text(raw.get("sha256"), f"artifact {aid}.sha256"),
-            immutable_fingerprint=_optional_text(raw.get("immutable_fingerprint"), f"artifact {aid}.immutable_fingerprint"),
+            sha256=_optional_digest(raw.get("sha256"), f"artifact {aid}.sha256"),
+            immutable_fingerprint=_optional_digest(raw.get("immutable_fingerprint"), f"artifact {aid}.immutable_fingerprint"),
         )
 
     for aid, artifact in artifacts.items():
@@ -369,7 +433,46 @@ def _unknown_probe(spec, failure: _ProbeFailure | None = None) -> CapabilityObse
     return CapabilityObservation(spec.id, "unknown", detail=detail)
 
 
-def _probe_capability(spec) -> CapabilityObservation:
+def _probe_version_evidence(spec, *values: Any) -> str | None:
+    for value in values:
+        evidence = version_evidence_line(spec, value)
+        if evidence is not None:
+            return evidence
+    return None
+
+
+def _version_required(spec, registry: ManifestRegistry | None) -> bool:
+    if registry is not None:
+        return capability_version_required(registry, spec)
+    args = spec.probe.args
+    return bool(
+        args.get("version_argv")
+        or args.get("minimum_version")
+        or args.get("maximum_version")
+        or args.get("exact_version")
+        or args.get("tested_ranges")
+        or args.get("known_incompatible")
+    )
+
+
+def _classify_probe_version(
+    spec,
+    version: str | None,
+    registry: ManifestRegistry | None,
+) -> VersionCompatibility:
+    evidence = version_evidence_line(spec, version)
+    if evidence is None or ParsedVersion.parse(evidence) is None:
+        return VersionCompatibility.UNPARSEABLE
+    if registry is None:
+        return VersionCompatibility.SATISFIED_UNTESTED
+    return classify_capability_version(registry, spec, evidence)
+
+
+def _probe_capability(
+    spec,
+    *,
+    registry: ManifestRegistry | None = None,
+) -> CapabilityObservation:
     kind = spec.probe.kind
     args = spec.probe.args
     if kind == "executable":
@@ -381,14 +484,34 @@ def _probe_capability(spec) -> CapabilityObservation:
             return CapabilityObservation(spec.id, "missing", detail=f"{executable} not found")
         version = None
         version_argv = tuple(str(x) for x in args.get("version_argv", ()))
+        version_required = _version_required(spec, registry)
+        if version_required and not version_argv:
+            return CapabilityObservation(
+                spec.id,
+                "unknown",
+                detail=f"cannot establish {executable} version: no version probe is declared",
+            )
         if version_argv:
             result = _run((path, *version_argv))
             if isinstance(result, _ProbeFailure) or result is None:
                 return _unknown_probe(spec, result if isinstance(result, _ProbeFailure) else None)
             if result.returncode != 0:
                 return CapabilityObservation(spec.id, "failed", detail=f"cannot query {executable} version")
-            combined = (result.stdout or result.stderr).strip()
-            version = combined.splitlines()[0] if combined else None
+            version = _probe_version_evidence(spec, result.stdout, result.stderr)
+            compatibility = _classify_probe_version(spec, version, registry)
+            if compatibility is VersionCompatibility.UNPARSEABLE:
+                return CapabilityObservation(
+                    spec.id,
+                    "unknown",
+                    detail=f"{executable} returned no parseable version evidence",
+                )
+            if compatibility is VersionCompatibility.INCOMPATIBLE:
+                return CapabilityObservation(
+                    spec.id,
+                    "failed",
+                    version=version,
+                    detail=f"{executable} version violates the canonical compatibility contract",
+                )
         return CapabilityObservation(spec.id, "pass", version=version, detail=f"{executable} available")
 
     if kind == "pkg_config":
@@ -410,7 +533,23 @@ def _probe_capability(spec) -> CapabilityObservation:
             return _unknown_probe(spec, version_result if isinstance(version_result, _ProbeFailure) else None)
         if version_result.returncode != 0:
             return CapabilityObservation(spec.id, "unknown", detail=f"cannot query pkg-config module {module} version")
-        version = version_result.stdout.strip() or None
+        version = _probe_version_evidence(spec, version_result.stdout, version_result.stderr)
+        version_required = _version_required(spec, registry)
+        if version_required:
+            compatibility = _classify_probe_version(spec, version, registry)
+            if compatibility is VersionCompatibility.UNPARSEABLE:
+                return CapabilityObservation(
+                    spec.id,
+                    "unknown",
+                    detail=f"pkg-config module {module} returned no parseable version evidence",
+                )
+            if compatibility is VersionCompatibility.INCOMPATIBLE:
+                return CapabilityObservation(
+                    spec.id,
+                    "failed",
+                    version=version,
+                    detail=f"pkg-config module {module} version violates the canonical compatibility contract",
+                )
         return CapabilityObservation(spec.id, "pass", version=version, detail=f"pkg-config module {module} available")
 
     if kind in {"any_command", "command_group"}:
@@ -495,42 +634,90 @@ def _probe_capability(spec) -> CapabilityObservation:
     return CapabilityObservation(spec.id, "unknown", detail=f"acceptance MVP does not independently run {kind} probe")
 
 
-def _sha256(path: Path) -> str:
+def _sha256(path: Path, *, max_bytes: int = MAX_SHA256_BYTES) -> str:
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("sha256 byte limit must be a non-negative integer")
+    if max_bytes > MAX_SHA256_BYTES:
+        raise ValueError(f"sha256 byte limit exceeds hard limit {MAX_SHA256_BYTES}")
     hasher = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(os.fspath(path), flags)
+    used_bytes = 0
+    with os.fdopen(descriptor, "rb", closefd=True) as handle:
+        while True:
+            remaining = max_bytes - used_bytes
+            chunk = handle.read(min(1024 * 1024, remaining + 1))
+            if not chunk:
+                break
+            if len(chunk) > remaining:
+                raise FingerprintLimitExceeded("sha256_bytes", max_bytes, used_bytes + len(chunk))
             hasher.update(chunk)
+            used_bytes += len(chunk)
     return hasher.hexdigest()
 
 
-def _observe_artifact(accepted: ReceiptArtifact) -> ArtifactObservation:
+def _filesystem_type(mode: int) -> str:
+    if stat.S_ISREG(mode):
+        return "file"
+    if stat.S_ISDIR(mode):
+        return "directory"
+    if stat.S_ISLNK(mode):
+        return "symlink"
+    return "other"
+
+
+def _observe_artifact(
+    accepted: ReceiptArtifact,
+    *,
+    required_fields: frozenset[str] = frozenset(),
+) -> ArtifactObservation:
     path = Path(accepted.path)
     try:
         st = path.lstat()
     except FileNotFoundError:
-        return ArtifactObservation(accepted.artifact_id, False)
+        return ArtifactObservation(
+            accepted.artifact_id,
+            False,
+            filesystem_type=None,
+            outcome=ObservationOutcome.MISSING,
+        )
     except OSError as exc:
         return ArtifactObservation(
             accepted.artifact_id,
             False,
             error=f"{type(exc).__name__}: {exc}",
+            outcome=ObservationOutcome.UNKNOWN,
         )
     mode = f"{stat.S_IMODE(st.st_mode):04o}"
+    filesystem_type = _filesystem_type(st.st_mode)
     sha = None
     fingerprint = None
     try:
-        if accepted.sha256 and stat.S_ISREG(st.st_mode) and not stat.S_ISLNK(st.st_mode):
+        if "sha256" in required_fields and filesystem_type == "file":
             sha = _sha256(path)
-        if accepted.immutable_fingerprint:
+        if "immutable_fingerprint" in required_fields:
             fingerprint = fingerprint_path(path)
-    except OSError as exc:
+    except FingerprintLimitExceeded as exc:
         return ArtifactObservation(
             accepted.artifact_id,
             True,
             sha256=sha,
             immutable_fingerprint=fingerprint,
             mode=mode,
+            filesystem_type=filesystem_type,
+            error=str(exc),
+            outcome=ObservationOutcome.LIMIT_EXCEEDED,
+        )
+    except (OSError, UnicodeError, RecursionError) as exc:
+        return ArtifactObservation(
+            accepted.artifact_id,
+            True,
+            sha256=sha,
+            immutable_fingerprint=fingerprint,
+            mode=mode,
+            filesystem_type=filesystem_type,
             error=f"{type(exc).__name__}: {exc}",
+            outcome=ObservationOutcome.UNKNOWN,
         )
     return ArtifactObservation(
         accepted.artifact_id,
@@ -538,11 +725,16 @@ def _observe_artifact(accepted: ReceiptArtifact) -> ArtifactObservation:
         sha256=sha,
         immutable_fingerprint=fingerprint,
         mode=mode,
+        filesystem_type=filesystem_type,
+        outcome=ObservationOutcome.OBSERVED,
     )
 
 
 def _current_snapshot(registry: ManifestRegistry, candidate: InstalledStateReceipt) -> CurrentHealthSnapshot:
-    capabilities = {spec.id: _probe_capability(spec) for spec in registry.capabilities_in_order()}
+    capabilities = {
+        spec.id: _probe_capability(spec, registry=registry)
+        for spec in registry.capabilities_in_order()
+    }
     artifacts = {
         aid: _observe_artifact(
             ReceiptArtifact(
@@ -554,7 +746,8 @@ def _current_snapshot(registry: ManifestRegistry, candidate: InstalledStateRecei
                 mode=accepted.mode,
                 sha256=accepted.sha256,
                 immutable_fingerprint=accepted.immutable_fingerprint,
-            )
+            ),
+            required_fields=artifact_integrity_fields(registry.artifacts[aid]),
         )
         for aid, accepted in candidate.artifacts.items()
     }
@@ -568,6 +761,17 @@ def _current_snapshot(registry: ManifestRegistry, candidate: InstalledStateRecei
     )
 
 
+def _capability_failure_severity(registry: ManifestRegistry, spec) -> str:
+    component = registry.components.get(spec.component_id or "")
+    blocking = component is None or component.category in _BLOCKING_CATEGORIES
+    if blocking and (
+        spec.requirement == "component"
+        or (spec.requirement == "required" and "runtime" in spec.lifecycle)
+    ):
+        return "critical"
+    return "warning"
+
+
 def assess_candidate_install(registry: ManifestRegistry, payload: Mapping[str, Any]) -> AcceptanceAssessment:
     candidate = _candidate_receipt(payload, registry)
     snapshot = _current_snapshot(registry, candidate)
@@ -577,10 +781,33 @@ def assess_candidate_install(registry: ManifestRegistry, payload: Mapping[str, A
     def add(code: str, severity: str, subject: str, summary: str) -> None:
         findings.append(AcceptanceFinding(code, severity, subject, summary))
 
+    uncertain = False
     if candidate.install_health == "failed":
         add("RH_DOCTOR_CANDIDATE_INSTALL_FAILED", "critical", "installation", "installer verification already classified the candidate installation as failed")
     elif candidate.install_health == "degraded":
         add("RH_DOCTOR_CANDIDATE_INSTALL_DEGRADED", "warning", "installation", "installer verification classified the candidate installation as degraded")
+
+    for capid, accepted in candidate.capabilities.items():
+        spec = registry.capabilities.get(capid)
+        if spec is None:
+            continue
+        if capability_state_satisfied(registry, spec, accepted.state):
+            continue
+        if accepted.state == "not_applicable":
+            uncertain = True
+            add(
+                "RH_DOCTOR_CAPABILITY_UNCERTAIN",
+                "warning",
+                capid,
+                "blocking capability was marked not_applicable instead of being established",
+            )
+            continue
+        add(
+            "RH_DOCTOR_CAPABILITY_UNHEALTHY",
+            _capability_failure_severity(registry, spec),
+            capid,
+            f"candidate capability state is {accepted.state}",
+        )
 
     for component in candidate.components.values():
         if component.health in {"failed", "blocked"}:
@@ -588,28 +815,49 @@ def assess_candidate_install(registry: ManifestRegistry, payload: Mapping[str, A
             add("RH_DOCTOR_COMPONENT_UNHEALTHY", severity, component.component_id, f"candidate component state is {component.health}")
         elif component.health == "degraded":
             add("RH_DOCTOR_COMPONENT_DEGRADED", "warning", component.component_id, "candidate component state is degraded")
+        elif component.health == "warning":
+            add("RH_DOCTOR_COMPONENT_DEGRADED", "warning", component.component_id, "candidate component state is warning")
+        elif component.health in {"unknown", "pending", "running", "skipped", "not_applicable", "pending_activation"}:
+            blocking = component.category in _BLOCKING_CATEGORIES
+            uncertain = uncertain or blocking
+            add(
+                "RH_DOCTOR_COMPONENT_UNCERTAIN",
+                "warning",
+                component.component_id,
+                f"candidate component state is not established: {component.health}",
+            )
 
     for capid, observation in snapshot.capabilities.items():
         spec = registry.capabilities.get(capid)
-        if spec is None or observation.state in _SATISFIED or observation.state == "unknown":
+        if spec is None or capability_state_satisfied(registry, spec, observation.state) or observation.state == "unknown":
             continue
-        component = registry.components.get(spec.component_id or "")
-        blocking = component is None or component.category in _BLOCKING_CATEGORIES
-        runtime = "runtime" in spec.lifecycle
-        severity = "critical" if spec.requirement == "required" and runtime and blocking else "warning"
+        severity = _capability_failure_severity(registry, spec)
         add("RH_DOCTOR_CAPABILITY_UNHEALTHY", severity, capid, observation.detail or observation.state)
 
-    uncertain = False
     for drift in forensic.drifts:
-        if drift.error_code == "RH_FORENSIC_DEPENDENCY_UNKNOWN":
+        if drift.error_code in {
+            "RH_FORENSIC_DEPENDENCY_UNKNOWN",
+            "RH_FORENSIC_DEPENDENCY_VERSION_UNKNOWN",
+        }:
             capability = registry.capabilities.get(drift.subject_id)
-            if capability is not None and capability.requirement == "required":
+            component = registry.components.get(capability.component_id) if capability and capability.component_id else None
+            blocking_component = component is not None and component.category in _BLOCKING_CATEGORIES
+            critical_evidence = capability is not None and (
+                capability.requirement == "required"
+                or (capability.requirement == "component" and blocking_component)
+            )
+            if critical_evidence:
                 uncertain = True
+            if drift.error_code == "RH_FORENSIC_DEPENDENCY_VERSION_UNKNOWN":
+                add("RH_DOCTOR_CAPABILITY_VERSION_UNKNOWN", "warning", drift.subject_id, drift.summary)
+            elif critical_evidence:
                 add("RH_DOCTOR_CAPABILITY_UNCERTAIN", "warning", drift.subject_id, drift.summary)
         if drift.error_code == "RH_FORENSIC_ARTIFACT_UNKNOWN":
             artifact = registry.artifacts.get(drift.subject_id)
             if artifact is not None and artifact.required:
                 uncertain = True
+                if "receipt evidence is incomplete" in drift.summary:
+                    add("RH_DOCTOR_ARTIFACT_INTEGRITY_UNKNOWN", "warning", drift.subject_id, drift.summary)
         severity = drift.severity
         component = registry.components.get(drift.component_id or "")
         if drift.kind.value == "dependency" and component is not None and component.category not in _BLOCKING_CATEGORIES:
@@ -622,6 +870,8 @@ def assess_candidate_install(registry: ManifestRegistry, payload: Mapping[str, A
                 if artifact.required and artifact_component is not None and artifact_component.category in _BLOCKING_CATEGORIES:
                     severity = "critical"
         add(drift.error_code, severity, drift.subject_id, drift.summary)
+        if drift.error_code == "RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE":
+            add("RH_FORENSIC_DEPENDENCY_FAILED", severity, drift.subject_id, drift.summary)
 
     if candidate.activation_state == "pending_session_restart":
         add(
@@ -629,6 +879,44 @@ def assess_candidate_install(registry: ManifestRegistry, payload: Mapping[str, A
             "info",
             "runtime.activation",
             "deployment checks can pass, but runtime Last Known Good must wait for a fresh Hyprland session",
+        )
+    elif candidate.activation_state == "unknown":
+        uncertain = True
+        add(
+            "RH_DOCTOR_RUNTIME_ACTIVATION_UNKNOWN",
+            "warning",
+            "runtime.activation",
+            "candidate activation state was not independently established",
+        )
+    elif candidate.activation_state == "failed":
+        add(
+            "RH_DOCTOR_RUNTIME_ACTIVATION_FAILED",
+            "critical",
+            "runtime.activation",
+            "candidate activation state is failed",
+        )
+
+    if candidate.runtime_health == "unknown":
+        uncertain = True
+        add(
+            "RH_DOCTOR_RUNTIME_HEALTH_UNKNOWN",
+            "warning",
+            "runtime.health",
+            "candidate runtime health was not independently established",
+        )
+    elif candidate.runtime_health == "failed":
+        add(
+            "RH_DOCTOR_RUNTIME_HEALTH_FAILED",
+            "critical",
+            "runtime.health",
+            "candidate runtime health is failed",
+        )
+    elif candidate.runtime_health == "degraded":
+        add(
+            "RH_DOCTOR_RUNTIME_HEALTH_DEGRADED",
+            "warning",
+            "runtime.health",
+            "candidate runtime health is degraded",
         )
 
     critical = any(item.severity == "critical" for item in findings)

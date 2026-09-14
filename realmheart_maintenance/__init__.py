@@ -48,6 +48,7 @@ from .forensics import (
     ForensicIncident,
     ForensicReport,
     InstalledStateReceipt,
+    ObservationOutcome,
     ReadinessState,
     analyze_forensics,
     load_health_snapshot,
@@ -60,7 +61,7 @@ from .forensics import (
 __all__ += [
     "ArtifactObservation", "CapabilityObservation", "CurrentHealthSnapshot",
     "DriftKind", "DriftRecord", "ForensicContractError", "ForensicIncident",
-    "ForensicReport", "InstalledStateReceipt", "ReadinessState",
+    "ForensicReport", "InstalledStateReceipt", "ObservationOutcome", "ReadinessState",
     "analyze_forensics", "load_health_snapshot", "load_installed_receipt",
     "parse_health_snapshot", "parse_installed_receipt", "select_health_checks",
 ]
