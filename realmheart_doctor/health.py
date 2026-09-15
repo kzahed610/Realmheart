@@ -7,6 +7,7 @@ it never repairs, activates, or mutates Realmheart state.
 from __future__ import annotations
 
 import configparser
+import errno
 import hashlib
 import inspect
 import json
@@ -84,8 +85,8 @@ _SECRET_FLAG_RE = re.compile(
     r"(?i)((?:--?)(?:password|passwd|token|secret|api[_-]?key|authorization|credential|private[_-]?key)(?:=|\s+))(\"[^\"]*\"|'[^']*'|[^\s,;}]+)"
 )
 _BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([^\s,;]+)")
-_SHELL_WRAPPERS = {"sh", "bash", "dash", "zsh", "fish", "ksh", "csh", "tcsh"}
-_SHELL_COMMAND_FLAGS = frozenset({"-c", "-C", "--command"})
+_SHELL_WRAPPERS = {"ash", "bash", "csh", "dash", "fish", "ksh", "mksh", "nu", "rbash", "sh", "tcsh", "yash", "zsh"}
+_INDIRECT_LAUNCHERS = frozenset({"busybox", "command", "env", "exec", "xargs"})
 _PRIVILEGE_WRAPPERS = frozenset({"sudo", "doas", "pkexec"})
 _REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SECRET_REPLACEMENT = "[REDACTED]"
@@ -175,6 +176,16 @@ class HealthOperations(Protocol):
 
     def run(
         self,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        max_output_bytes: int,
+    ) -> CommandObservation:
+        ...
+
+    def run_descriptor(
+        self,
+        path: Path,
         argv: Sequence[str],
         *,
         timeout: float,
@@ -304,6 +315,7 @@ def _run_bounded_process(
     *,
     timeout: float,
     max_output_bytes: int,
+    executable_fd: int | None = None,
 ) -> CommandObservation:
     """Run argv without a shell while bounding time, output, and cleanup."""
 
@@ -318,19 +330,37 @@ def _run_bounded_process(
     error_detail: str | None = None
 
     try:
-        process = subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            shell=False,
-            close_fds=True,
-            start_new_session=True,
-        )
+        if executable_fd is None:
+            process = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+                close_fds=True,
+                start_new_session=True,
+            )
+        else:
+            # Python exposes fd-backed exec through ``os.execve`` on some
+            # POSIX builds but does not expose it as a Popen argument.  The
+            # proc-fd executable path is safe here because the descriptor is
+            # opened with O_NOFOLLOW, kept alive with pass_fds, and never
+            # resolved through PATH.
+            process = subprocess.Popen(
+                argv,
+                executable=f"/proc/self/fd/{executable_fd}",
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                shell=False,
+                close_fds=True,
+                pass_fds=(executable_fd,),
+                start_new_session=True,
+            )
     except FileNotFoundError:
         return CommandObservation(
             argv,
-            error_code="executable_missing",
+            error_code=("descriptor_execution_unavailable" if executable_fd is not None else "executable_missing"),
             error_detail="FileNotFoundError",
             duration_ms=(time.monotonic() - started) * 1000.0,
         )
@@ -474,8 +504,44 @@ class ReadOnlyHealthOperations:
         timeout: float,
         max_output_bytes: int,
     ) -> CommandObservation:
-        return _run_bounded_process(
-            tuple(argv),
+        command = tuple(argv)
+        if not command or not _trusted_absolute_executable(command[0]):
+            return CommandObservation(
+                command,
+                error_code="invalid_executable",
+                error_detail="absolute executable identity required",
+            )
+        return self.run_descriptor(
+            Path(command[0]),
+            command,
+            timeout=timeout,
+            max_output_bytes=max_output_bytes,
+        )
+
+    def run_descriptor(
+        self,
+        path: Path,
+        argv: Sequence[str],
+        *,
+        timeout: float,
+        max_output_bytes: int,
+    ) -> CommandObservation:
+        command = tuple(argv)
+        if not command or command[0] != os.fspath(path):
+            return CommandObservation(
+                command,
+                error_code="invalid_executable",
+                error_detail="descriptor path and argv identity differ",
+            )
+        if _normalise_argv(command) is None:
+            return CommandObservation(
+                command,
+                error_code="invalid_command",
+                error_detail="shell or privilege wrapper rejected",
+            )
+        return _run_bounded_descriptor(
+            Path(path),
+            command,
             timeout=timeout,
             max_output_bytes=max_output_bytes,
         )
@@ -733,21 +799,35 @@ def _normalise_argv(raw: object) -> tuple[str, ...] | None:
         if encoded_length > MAX_ARGUMENT_BYTES or total_bytes > MAX_ARGUMENT_BYTES:
             return None
         result.append(item)
-    for index, item in enumerate(result):
+    for item in result:
         executable_name = Path(item).name.lower()
-        if executable_name in _PRIVILEGE_WRAPPERS:
+        if (
+            executable_name in _PRIVILEGE_WRAPPERS
+            or executable_name in _SHELL_WRAPPERS
+            or executable_name in _INDIRECT_LAUNCHERS
+        ):
             return None
-        if executable_name not in _SHELL_WRAPPERS:
-            continue
-        for flag in result[index + 1 :]:
-            if (
-                flag in _SHELL_COMMAND_FLAGS
-                or flag.startswith("-c")
-                or flag.startswith("-C")
-                or flag.startswith("--command=")
-            ):
-                return None
     return tuple(result)
+
+
+def _trusted_absolute_executable(value: object) -> bool:
+    """Accept only one concrete absolute executable identity.
+
+    A relative name would make ``Popen`` consult inherited ``PATH``.  Dot
+    segments, duplicate separators, and trailing separators are rejected as
+    ambiguous spellings rather than normalized into an authorization decision.
+    """
+
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    if not value.startswith("/") or value.startswith("//"):
+        return False
+    if any(part in {"", ".", ".."} for part in value.split("/")[1:]):
+        return False
+    try:
+        return len(value.encode("utf-8", errors="surrogateescape")) <= MAX_ARGUMENT_BYTES
+    except UnicodeError:
+        return False
 
 
 def _command_tail(args: Mapping[str, Any], *, version: bool) -> tuple[object, ...] | None:
@@ -819,6 +899,125 @@ def _command_from_args(
     if tail is None:
         return None
     return _normalise_argv((artifact_executable, *tail))
+
+
+def _descriptor_execution_available() -> bool:
+    """Return whether this Python process can execute an already-open fd."""
+
+    execve = getattr(os, "execve", None)
+    supports_fd = getattr(os, "supports_fd", ())
+    return (
+        callable(execve)
+        and execve in supports_fd
+        and os.path.isdir("/proc/self/fd")
+    )
+
+
+def _open_executable_descriptor(path: Path) -> tuple[int | None, str | None]:
+    """Open one regular executable without following any path symlink."""
+
+    path_text = os.fspath(path)
+    if not _trusted_absolute_executable(path_text):
+        return None, "invalid_executable"
+    if not _descriptor_execution_available():
+        return None, "descriptor_execution_unavailable"
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    nonblocking = getattr(os, "O_NONBLOCK", None)
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if nofollow is None or nonblocking is None or directory_flag is None:
+        return None, "descriptor_execution_unavailable"
+    cloexec = getattr(os, "O_CLOEXEC", None)
+    common_flags = os.O_RDONLY | nofollow | directory_flag
+    if cloexec is not None:
+        common_flags |= cloexec
+    file_flags = os.O_RDONLY | nofollow | nonblocking
+    if cloexec is not None:
+        file_flags |= cloexec
+    components = path_text.split("/")[1:]
+    if not components:
+        return None, "invalid_executable"
+    parent_descriptor: int | None = None
+    descriptor: int | None = None
+    try:
+        parent_descriptor = os.open("/", common_flags)
+        for component in components[:-1]:
+            child_descriptor = os.open(component, common_flags, dir_fd=parent_descriptor)
+            try:
+                os.close(parent_descriptor)
+            except OSError:
+                os.close(child_descriptor)
+                raise
+            parent_descriptor = child_descriptor
+        descriptor = os.open(components[-1], file_flags, dir_fd=parent_descriptor)
+    except FileNotFoundError:
+        error_code = "executable_missing"
+    except PermissionError:
+        error_code = "permission_denied"
+    except (NotImplementedError, TypeError):
+        error_code = "descriptor_execution_unavailable"
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            error_code = "symlink_forbidden"
+        else:
+            error_code = "descriptor_open_failed"
+    else:
+        error_code = None
+    finally:
+        if parent_descriptor is not None:
+            try:
+                os.close(parent_descriptor)
+            except OSError:
+                pass
+    if error_code is not None or descriptor is None:
+        if descriptor is not None:
+            os.close(descriptor)
+        return None, error_code or "descriptor_open_failed"
+
+    keep_open = False
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            return None, "artifact_not_regular"
+        if not metadata.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+            return None, "artifact_not_executable"
+        keep_open = True
+        return descriptor, None
+    except PermissionError:
+        return None, "permission_denied"
+    except OSError:
+        return None, "descriptor_observation_failed"
+    finally:
+        if not keep_open:
+            os.close(descriptor)
+
+
+def _run_bounded_descriptor(
+    path: Path,
+    argv: tuple[str, ...],
+    *,
+    timeout: float,
+    max_output_bytes: int,
+) -> CommandObservation:
+    """Run one executable through a descriptor-bound process seam."""
+
+    started = time.monotonic()
+    descriptor, error_code = _open_executable_descriptor(path)
+    if error_code is not None or descriptor is None:
+        return CommandObservation(
+            argv,
+            error_code=error_code or "descriptor_execution_unavailable",
+            error_detail=error_code,
+            duration_ms=(time.monotonic() - started) * 1000.0,
+        )
+    try:
+        return _run_bounded_process(
+            argv,
+            timeout=timeout,
+            max_output_bytes=max_output_bytes,
+            executable_fd=descriptor,
+        )
+    finally:
+        os.close(descriptor)
 
 
 def _coerce_command_observation(raw: object, argv: tuple[str, ...]) -> CommandObservation | None:
@@ -1852,11 +2051,11 @@ class HealthCheckExecutor:
                 return _payload(HealthStatus.UNKNOWN, error, detail="canonical executable path could not be established")
             if path is None or artifact is None:
                 return _payload(HealthStatus.UNKNOWN, "missing_artifact_spec", detail="canonical executable path could not be established")
-            if _expected_filesystem_type(getattr(artifact, "type", None)) != "file":
+            if getattr(artifact, "type", None) != "executable":
                 return _payload(
                     HealthStatus.UNKNOWN,
                     "artifact_type_mismatch",
-                    detail="command probe artifact is not declared as a regular file",
+                    detail="command probe artifact must be declared as executable",
                 )
             artifact_executable = os.fspath(path)
 
@@ -1867,13 +2066,28 @@ class HealthCheckExecutor:
         )
         if argv is None:
             return _payload(HealthStatus.UNKNOWN, "invalid_command", detail="Doctor accepts only a non-empty structured argv")
-        try:
-            raw = self._call_operation(
-                self.operations.run,
-                argv,
-                timeout=timeout_seconds,
-                max_output_bytes=self.max_output_bytes,
+        if artifact_executable is None and not _trusted_absolute_executable(argv[0]):
+            return _payload(
+                HealthStatus.UNKNOWN,
+                "invalid_command",
+                detail="artifact-less command probes require a trusted absolute executable",
             )
+        try:
+            if artifact_executable is not None:
+                raw = self._call_operation(
+                    self.operations.run_descriptor,
+                    Path(artifact_executable),
+                    argv,
+                    timeout=timeout_seconds,
+                    max_output_bytes=self.max_output_bytes,
+                )
+            else:
+                raw = self._call_operation(
+                    self.operations.run,
+                    argv,
+                    timeout=timeout_seconds,
+                    max_output_bytes=self.max_output_bytes,
+                )
             observation = _coerce_command_observation(raw, argv)
         except BaseException as exc:
             return _operation_failure(exc)
