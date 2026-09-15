@@ -8,7 +8,6 @@ engines, package adapters, or recovery code.
 from __future__ import annotations
 
 import json
-import os
 import re
 import stat
 from dataclasses import asdict, dataclass
@@ -17,6 +16,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
+from .fingerprint import FingerprintLimitExceeded, read_regular_file
 from .manifest import (
     ManifestRegistry,
     ParsedVersion,
@@ -52,7 +52,6 @@ _IMMUTABLE_OWNERSHIPS = {"release", "system"}
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _VERSION_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?(?![A-Za-z0-9])")
 MAX_FORENSIC_JSON_BYTES = 4 * 1024 * 1024
-_FORENSIC_READ_CHUNK_BYTES = 1024 * 1024
 _COST_RANK = {"cheap": 0, "normal": 1, "expensive": 2}
 _SEVERITY_RANK = {"info": 0, "warning": 1, "error": 2, "critical": 3}
 _REPAIR_LIFECYCLES = {"build", "install", "verification", "repair"}
@@ -466,10 +465,10 @@ def _load_json_file(
     max_bytes: int = MAX_FORENSIC_JSON_BYTES,
 ) -> Mapping[str, Any]:
     path = Path(path)
-    if path.is_symlink():
-        raise ForensicContractError(f"{label} must not be a symlink: {path}")
     try:
         st = path.lstat()
+        if stat.S_ISLNK(st.st_mode):
+            raise ForensicContractError(f"{label} must not be a symlink: {path}")
         if not stat.S_ISREG(st.st_mode):
             raise ForensicContractError(f"{label} is not a regular file: {path}")
         if type(max_bytes) is not int or max_bytes < 0:
@@ -478,24 +477,20 @@ def _load_json_file(
             raise ForensicContractError(
                 f"{label} byte limit exceeds hard limit {MAX_FORENSIC_JSON_BYTES}"
             )
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-        descriptor = os.open(os.fspath(path), flags)
-        with os.fdopen(descriptor, "rb", closefd=True) as handle:
-            chunks: list[bytes] = []
-            total = 0
-            while total <= max_bytes:
-                chunk = handle.read(min(_FORENSIC_READ_CHUNK_BYTES, max_bytes - total + 1))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-            raw = b"".join(chunks)
-        if len(raw) > max_bytes:
-            raise ForensicContractError(
-                f"{label} exceeds the {max_bytes}-byte observation limit"
-            )
+        raw = read_regular_file(
+            path,
+            max_bytes=max_bytes,
+            hard_limit=MAX_FORENSIC_JSON_BYTES,
+            initial_stat=st,
+        )
         text = raw.decode("utf-8")
         payload = json.loads(text)
+    except ForensicContractError:
+        raise
+    except FingerprintLimitExceeded as exc:
+        raise ForensicContractError(
+            f"{label} exceeds the {max_bytes}-byte observation limit"
+        ) from exc
     except OSError as exc:
         raise ForensicContractError(f"cannot read {label}: {exc}") from exc
     except UnicodeDecodeError as exc:

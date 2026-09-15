@@ -26,11 +26,13 @@ from realmheart_doctor.cli import main as doctor_main
 from realmheart_maintenance.forensics import ForensicContractError
 from realmheart_maintenance.fingerprint import (
     FingerprintLimitExceeded,
+    FingerprintObservationError,
     MAX_FINGERPRINT_BYTES,
     MAX_FINGERPRINT_DEPTH,
     MAX_FINGERPRINT_ENTRIES,
     MAX_FINGERPRINT_SECONDS,
     fingerprint_path,
+    observe_path,
 )
 from realmheart_maintenance.manifest import ManifestError, load_manifest
 from realmheart_installer.finalization import build_final_decision, build_installed_state_receipt
@@ -527,6 +529,139 @@ class DoctorAcceptanceTests(unittest.TestCase):
             large.write_bytes(b"0123456789")
             with self.assertRaises(FingerprintLimitExceeded):
                 fingerprint_path(large, max_bytes=4)
+
+    def test_candidate_loader_rejects_symlink_without_following_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "candidate-target.json"
+            target.write_text("{}", encoding="utf-8")
+            link = root / "candidate.json"
+            link.symlink_to(target)
+
+            with self.assertRaisesRegex(DoctorAcceptanceError, "regular non-symlink|symlink"):
+                load_candidate_bundle(link)
+
+    def test_candidate_loader_rejects_descriptor_identity_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            candidate = Path(temp) / "candidate.json"
+            candidate.write_text("{}", encoding="utf-8")
+
+            def mismatched_fstat(descriptor):
+                actual = os.fstat(descriptor)
+                return os.stat_result(
+                    (
+                        actual.st_mode,
+                        actual.st_ino + 1,
+                        actual.st_dev,
+                        actual.st_nlink,
+                        actual.st_uid,
+                        actual.st_gid,
+                        actual.st_size,
+                        actual.st_atime,
+                        actual.st_mtime,
+                        actual.st_ctime,
+                    )
+                )
+
+            with patch(
+                "realmheart_maintenance.fingerprint._fstat",
+                side_effect=mismatched_fstat,
+            ):
+                with self.assertRaisesRegex(DoctorAcceptanceError, "cannot read candidate bundle"):
+                    load_candidate_bundle(candidate)
+
+    def test_descriptor_identity_mismatch_never_becomes_a_clean_fingerprint(self):
+        with tempfile.TemporaryDirectory() as temp:
+            artifact = Path(temp) / "artifact"
+            artifact.write_bytes(b"bound content")
+
+            def mismatched_fstat(descriptor):
+                actual = os.fstat(descriptor)
+                return os.stat_result(
+                    (
+                        actual.st_mode,
+                        actual.st_ino + 1,
+                        actual.st_dev,
+                        actual.st_nlink,
+                        actual.st_uid,
+                        actual.st_gid,
+                        actual.st_size,
+                        actual.st_atime,
+                        actual.st_mtime,
+                        actual.st_ctime,
+                    )
+                )
+
+            # The seam injects a replacement inode at the descriptor boundary;
+            # no scheduler timing or concurrent mutator is needed.
+            with patch(
+                "realmheart_maintenance.fingerprint._fstat",
+                side_effect=mismatched_fstat,
+            ):
+                with self.assertRaisesRegex(FingerprintObservationError, "identity/type changed"):
+                    fingerprint_path(artifact)
+
+    def test_descriptor_race_is_preserved_as_unknown_artifact_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root)
+            artifact.write_bytes(b"bound content")
+            payload = _candidate(registry, artifact)
+
+            def mismatched_fstat(descriptor):
+                actual = os.fstat(descriptor)
+                return os.stat_result(
+                    (
+                        actual.st_mode,
+                        actual.st_ino + 1,
+                        actual.st_dev,
+                        actual.st_nlink,
+                        actual.st_uid,
+                        actual.st_gid,
+                        actual.st_size,
+                        actual.st_atime,
+                        actual.st_mtime,
+                        actual.st_ctime,
+                    )
+                )
+
+            with patch(
+                "realmheart_maintenance.fingerprint._fstat",
+                side_effect=mismatched_fstat,
+            ):
+                result = assess_candidate_install(registry, payload)
+
+            self.assertEqual(result.recommendation, AcceptanceRecommendation.INDETERMINATE)
+            self.assertTrue(any(item.code == "RH_FORENSIC_ARTIFACT_UNKNOWN" for item in result.findings))
+            self.assertFalse(any(item.code == "RH_FORENSIC_ARTIFACT_HASH_DRIFT" for item in result.findings))
+
+    def test_descriptor_observation_returns_both_hashes_for_a_valid_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            artifact = Path(temp) / "artifact"
+            artifact.write_bytes(b"bound content")
+
+            observation = observe_path(
+                artifact,
+                include_sha256=True,
+                include_fingerprint=True,
+            )
+
+            self.assertTrue(observation.exists)
+            self.assertEqual(observation.filesystem_type, "file")
+            self.assertEqual(observation.sha256, hashlib.sha256(b"bound content").hexdigest())
+            self.assertEqual(observation.immutable_fingerprint, fingerprint_path(artifact))
+
+    def test_directory_fingerprint_limits_entries_and_content_bytes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "tree"
+            root.mkdir()
+            (root / "a").write_bytes(b"ab")
+            (root / "b").write_bytes(b"cd")
+
+            with self.assertRaisesRegex(FingerprintLimitExceeded, "entries"):
+                fingerprint_path(root, max_entries=1)
+            with self.assertRaisesRegex(FingerprintLimitExceeded, "bytes"):
+                fingerprint_path(root, max_bytes=1)
 
     def test_resource_limit_overrides_cannot_remove_hard_bounds(self):
         with tempfile.TemporaryDirectory() as temp:

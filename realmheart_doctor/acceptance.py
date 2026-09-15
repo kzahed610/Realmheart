@@ -5,9 +5,7 @@ input data, never executable Doctor behavior.
 """
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 import re
 import shutil
 import stat
@@ -21,7 +19,8 @@ from typing import Any, Mapping
 from realmheart_maintenance.fingerprint import (
     FingerprintLimitExceeded,
     MAX_SHA256_BYTES,
-    fingerprint_path,
+    observe_path,
+    read_regular_file,
 )
 from realmheart_maintenance.forensics import (
     ArtifactObservation,
@@ -50,7 +49,6 @@ from .models import AcceptanceAssessment, AcceptanceFinding, AcceptanceRecommend
 
 CANDIDATE_SCHEMA_VERSION = 1
 MAX_CANDIDATE_JSON_BYTES = 2 * 1024 * 1024
-_CANDIDATE_READ_CHUNK_BYTES = 1024 * 1024
 _BLOCKING_CATEGORIES = {"core", "essential", "fx"}
 _CANDIDATE_COMPONENT_HEALTH = {
     "healthy", "degraded", "failed", "blocked", "unknown", "not_applicable", "pending_activation",
@@ -148,25 +146,19 @@ def load_candidate_bundle(
             raise DoctorAcceptanceError(
                 f"candidate bundle exceeds the {max_bytes}-byte observation limit"
             )
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-        descriptor = os.open(os.fspath(path), flags)
-        with os.fdopen(descriptor, "rb", closefd=True) as handle:
-            chunks: list[bytes] = []
-            total = 0
-            while total <= max_bytes:
-                chunk = handle.read(min(_CANDIDATE_READ_CHUNK_BYTES, max_bytes - total + 1))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                total += len(chunk)
-            raw = b"".join(chunks)
-        if len(raw) > max_bytes:
-            raise DoctorAcceptanceError(
-                f"candidate bundle exceeds the {max_bytes}-byte observation limit"
-            )
+        raw = read_regular_file(
+            path,
+            max_bytes=max_bytes,
+            hard_limit=MAX_CANDIDATE_JSON_BYTES,
+            initial_stat=st,
+        )
         payload = json.loads(raw.decode("utf-8"))
     except DoctorAcceptanceError:
         raise
+    except FingerprintLimitExceeded as exc:
+        raise DoctorAcceptanceError(
+            f"candidate bundle exceeds the {max_bytes}-byte observation limit"
+        ) from exc
     except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise DoctorAcceptanceError(f"cannot read candidate bundle: {exc}") from exc
     return _mapping(payload, "candidate bundle")
@@ -609,21 +601,10 @@ def _sha256(path: Path, *, max_bytes: int = MAX_SHA256_BYTES) -> str:
         raise ValueError("sha256 byte limit must be a non-negative integer")
     if max_bytes > MAX_SHA256_BYTES:
         raise ValueError(f"sha256 byte limit exceeds hard limit {MAX_SHA256_BYTES}")
-    hasher = hashlib.sha256()
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(os.fspath(path), flags)
-    used_bytes = 0
-    with os.fdopen(descriptor, "rb", closefd=True) as handle:
-        while True:
-            remaining = max_bytes - used_bytes
-            chunk = handle.read(min(1024 * 1024, remaining + 1))
-            if not chunk:
-                break
-            if len(chunk) > remaining:
-                raise FingerprintLimitExceeded("sha256_bytes", max_bytes, used_bytes + len(chunk))
-            hasher.update(chunk)
-            used_bytes += len(chunk)
-    return hasher.hexdigest()
+    observation = observe_path(path, include_sha256=True, max_bytes=max_bytes)
+    if not observation.exists or observation.filesystem_type != "file" or observation.sha256 is None:
+        raise OSError(f"cannot compute SHA-256 for non-regular file: {path}")
+    return observation.sha256
 
 
 def _filesystem_type(mode: int) -> str:
@@ -662,20 +643,18 @@ def _observe_artifact(
         )
     mode = f"{stat.S_IMODE(st.st_mode):04o}"
     filesystem_type = _filesystem_type(st.st_mode)
-    sha = None
-    fingerprint = None
     try:
-        if "sha256" in required_fields and filesystem_type == "file":
-            sha = _sha256(path)
-        if "immutable_fingerprint" in required_fields:
-            fingerprint = fingerprint_path(path)
+        observation = observe_path(
+            path,
+            include_sha256=("sha256" in required_fields and filesystem_type == "file"),
+            include_fingerprint=("immutable_fingerprint" in required_fields),
+            initial_stat=st,
+        )
     except FingerprintLimitExceeded as exc:
         return ArtifactObservation(
             accepted.artifact_id,
             True,
             path=accepted.path,
-            sha256=sha,
-            immutable_fingerprint=fingerprint,
             mode=mode,
             filesystem_type=filesystem_type,
             error=str(exc),
@@ -686,8 +665,6 @@ def _observe_artifact(
             accepted.artifact_id,
             True,
             path=accepted.path,
-            sha256=sha,
-            immutable_fingerprint=fingerprint,
             mode=mode,
             filesystem_type=filesystem_type,
             error=f"{type(exc).__name__}: {exc}",
@@ -697,8 +674,8 @@ def _observe_artifact(
         accepted.artifact_id,
         True,
         path=accepted.path,
-        sha256=sha,
-        immutable_fingerprint=fingerprint,
+        sha256=observation.sha256,
+        immutable_fingerprint=observation.immutable_fingerprint,
         mode=mode,
         filesystem_type=filesystem_type,
         outcome=ObservationOutcome.OBSERVED,

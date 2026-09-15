@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from . import _bootstrap
 from realmheart_maintenance import (
@@ -1062,6 +1063,37 @@ contexts = ["doctor_background"]
             link.symlink_to(target)
             with self.assertRaisesRegex(ForensicContractError, "symlink"):
                 load_installed_receipt(link)
+
+    def test_receipt_loader_rejects_descriptor_identity_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            receipt = Path(temp) / "installed-state.json"
+            receipt.write_text("{}", encoding="utf-8")
+
+            def mismatched_fstat(descriptor):
+                actual = os.fstat(descriptor)
+                return os.stat_result(
+                    (
+                        actual.st_mode,
+                        actual.st_ino + 1,
+                        actual.st_dev,
+                        actual.st_nlink,
+                        actual.st_uid,
+                        actual.st_gid,
+                        actual.st_size,
+                        actual.st_atime,
+                        actual.st_mtime,
+                        actual.st_ctime,
+                    )
+                )
+
+            # This deterministic seam proves a receipt cannot be parsed from a
+            # descriptor whose inode differs from the authorized pathname.
+            with patch(
+                "realmheart_maintenance.fingerprint._fstat",
+                side_effect=mismatched_fstat,
+            ):
+                with self.assertRaisesRegex(ForensicContractError, "cannot read installed-state receipt"):
+                    load_installed_receipt(receipt)
 
 
     def test_persisted_vocabulary_is_validated_instead_of_silently_extended(self) -> None:
