@@ -229,11 +229,15 @@ def _descriptor_flags(*, directory: bool) -> int:
         flags |= cloexec
     if not directory:
         nonblocking = getattr(os, "O_NONBLOCK", None)
-        if nonblocking is not None:
-            # A regular file normally ignores this flag.  If the pathname is
-            # replaced with a FIFO before open, it prevents the safety check
-            # below from blocking before fstat can reject the special file.
-            flags |= nonblocking
+        if nonblocking is None:
+            raise DescriptorSafetyError(
+                "descriptor-safe non-blocking open is unavailable on this platform",
+                reason="unsupported",
+            )
+        # A regular file normally ignores this flag.  If the pathname is
+        # replaced with a FIFO before open, it prevents the safety check below
+        # from blocking before fstat can reject the special file.
+        flags |= nonblocking
     if directory:
         directory_flag = getattr(os, "O_DIRECTORY", None)
         if directory_flag is None:
@@ -254,7 +258,7 @@ def _open_descriptor(
     flags = _descriptor_flags(directory=directory)
     try:
         return _open(path, flags, dir_fd=dir_fd)
-    except TypeError as exc:
+    except (NotImplementedError, TypeError) as exc:
         raise DescriptorSafetyError(
             "descriptor-relative open is unavailable on this platform",
             reason="unsupported",
