@@ -27,7 +27,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, cast, runtime_checkable
 
 from realmheart_maintenance.fingerprint import (
     FingerprintLimitExceeded,
@@ -77,6 +77,8 @@ MAX_VERSION_TOKEN_BYTES = 256
 MAX_SOCKET_PATH_BYTES = 107
 MIN_PASSTHROUGH_FD = 3
 EXECUTABLE_HEADER_BYTES = 4
+EXECUTABLE_SNAPSHOT_CHUNK_BYTES = 1024 * 1024
+MAX_EXECUTABLE_SNAPSHOT_BYTES = MAX_FILE_BYTES
 
 _VERSION_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9])v?(\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?)(?![A-Za-z0-9])"
@@ -994,10 +996,18 @@ def _relocate_descriptor(descriptor: int) -> tuple[int | None, str | None]:
     if duplicate_function is None:
         duplicate_function = getattr(fcntl, "F_DUPFD", None)
     if duplicate_function is None:
+        try:
+            os.close(descriptor)
+        except OSError:
+            return descriptor, "descriptor_relocation_unavailable"
         return None, "descriptor_relocation_unavailable"
     try:
         relocated = fcntl.fcntl(descriptor, duplicate_function, MIN_PASSTHROUGH_FD)
     except (OSError, ValueError, TypeError):
+        try:
+            os.close(descriptor)
+        except OSError:
+            return descriptor, "descriptor_relocation_failed"
         return None, "descriptor_relocation_failed"
     try:
         os.close(descriptor)
@@ -1006,7 +1016,7 @@ def _relocate_descriptor(descriptor: int) -> tuple[int | None, str | None]:
             os.close(relocated)
         except OSError:
             pass
-        return None, "descriptor_relocation_failed"
+        return descriptor, "descriptor_relocation_failed"
     return relocated, None
 
 
@@ -1034,6 +1044,169 @@ def _authorise_executable_descriptor(descriptor: int, metadata: os.stat_result) 
     if header != b"\x7fELF":
         return "unsupported_executable"
     return None
+
+
+def _read_descriptor_content(descriptor: int) -> tuple[bytes | None, str | None]:
+    """Read one bounded descriptor snapshot without following its path."""
+
+    pread = getattr(os, "pread", None)
+    if not callable(pread):
+        return None, "immutable_snapshot_unavailable"
+    content = bytearray()
+    offset = 0
+    try:
+        while True:
+            chunk = pread(descriptor, EXECUTABLE_SNAPSHOT_CHUNK_BYTES, offset)
+            if not isinstance(chunk, bytes):
+                return None, "immutable_snapshot_unavailable"
+            if not chunk:
+                return bytes(content), None
+            if len(content) + len(chunk) > MAX_EXECUTABLE_SNAPSHOT_BYTES:
+                return None, "artifact_snapshot_too_large"
+            content.extend(chunk)
+            offset += len(chunk)
+    except (AttributeError, OSError):
+        return None, "immutable_snapshot_unavailable"
+
+
+def _same_executable_metadata(left: os.stat_result, right: os.stat_result) -> bool:
+    """Compare the source identity and mutation-relevant metadata."""
+
+    return (
+        left.st_dev == right.st_dev
+        and left.st_ino == right.st_ino
+        and left.st_mode == right.st_mode
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+    )
+
+
+def _snapshot_executable_descriptor(
+    descriptor: int,
+    metadata: os.stat_result,
+) -> tuple[int | None, str | None]:
+    """Create a private immutable/read-only copy, re-authorize, and relocate it."""
+
+    first_content, error_code = _read_descriptor_content(descriptor)
+    if error_code is not None or first_content is None:
+        return None, error_code or "immutable_snapshot_unavailable"
+    second_content, error_code = _read_descriptor_content(descriptor)
+    if error_code is not None or second_content is None:
+        return None, error_code or "immutable_snapshot_unavailable"
+    try:
+        current_metadata = os.fstat(descriptor)
+    except (AttributeError, OSError):
+        return None, "immutable_snapshot_unavailable"
+    if (
+        first_content != second_content
+        or len(first_content) != metadata.st_size
+        or not _same_executable_metadata(metadata, current_metadata)
+    ):
+        return None, "artifact_snapshot_unstable"
+
+    memfd_create = getattr(os, "memfd_create", None)
+    add_seals = getattr(fcntl, "F_ADD_SEALS", None)
+    get_seals = getattr(fcntl, "F_GET_SEALS", None)
+    allow_sealing = getattr(os, "MFD_ALLOW_SEALING", None)
+    close_on_exec = getattr(os, "MFD_CLOEXEC", None)
+    seal_names = ("F_SEAL_SEAL", "F_SEAL_SHRINK", "F_SEAL_GROW", "F_SEAL_WRITE")
+    seal_values: tuple[int, ...] = tuple(
+        value for value in (getattr(fcntl, name, None) for name in seal_names) if isinstance(value, int)
+    )
+    use_memfd = (
+        callable(memfd_create)
+        and isinstance(add_seals, int)
+        and isinstance(get_seals, int)
+        and isinstance(allow_sealing, int)
+        and isinstance(close_on_exec, int)
+        and len(seal_values) == len(seal_names)
+    )
+    tmpfile_flag = getattr(os, "O_TMPFILE", None)
+    tmpfile_close_on_exec = getattr(os, "O_CLOEXEC", None)
+    use_tmpfile = isinstance(tmpfile_flag, int) and isinstance(tmpfile_close_on_exec, int)
+    if not use_memfd and not use_tmpfile:
+        return None, "immutable_snapshot_unavailable"
+
+    add_seals_value = cast(int, add_seals)
+    get_seals_value = cast(int, get_seals)
+    allow_sealing_value = cast(int, allow_sealing)
+    close_on_exec_value = cast(int, close_on_exec)
+    tmpfile_flag_value = cast(int, tmpfile_flag)
+    tmpfile_close_on_exec_value = cast(int, tmpfile_close_on_exec)
+    memfd_create_function = cast(Callable[[str, int], int], memfd_create) if use_memfd else None
+    snapshot_descriptor: int | None = None
+    keep_open = False
+    try:
+        if memfd_create_function is not None:
+            snapshot_descriptor = memfd_create_function(
+                "realmheart-doctor-executable",
+                allow_sealing_value | close_on_exec_value,
+            )
+        else:
+            for directory in ("/tmp", "/var/tmp", "/dev/shm"):
+                try:
+                    snapshot_descriptor = os.open(
+                        directory,
+                        tmpfile_flag_value | os.O_RDWR | tmpfile_close_on_exec_value,
+                        0o700,
+                    )
+                    break
+                except OSError:
+                    continue
+        if type(snapshot_descriptor) is not int:
+            return None, "immutable_snapshot_unavailable"
+        write_offset = 0
+        while write_offset < len(first_content):
+            written = os.write(
+                snapshot_descriptor,
+                first_content[write_offset : write_offset + EXECUTABLE_SNAPSHOT_CHUNK_BYTES],
+            )
+            if type(written) is not int or written <= 0:
+                return None, "immutable_snapshot_unavailable"
+            write_offset += written
+        os.fchmod(snapshot_descriptor, stat.S_IMODE(metadata.st_mode))
+        if memfd_create_function is not None:
+            seal_mask = 0
+            for value in seal_values:
+                seal_mask |= value
+            fcntl.fcntl(snapshot_descriptor, add_seals_value, seal_mask)
+            observed_seals = fcntl.fcntl(snapshot_descriptor, get_seals_value)
+            if type(observed_seals) is not int or observed_seals & seal_mask != seal_mask:
+                return None, "immutable_snapshot_unavailable"
+        else:
+            readonly_descriptor: int | None = None
+            try:
+                readonly_descriptor = os.open(
+                    f"/proc/self/fd/{snapshot_descriptor}",
+                    os.O_RDONLY | tmpfile_close_on_exec_value,
+                )
+                os.close(snapshot_descriptor)
+            except OSError:
+                if readonly_descriptor is not None:
+                    try:
+                        os.close(readonly_descriptor)
+                    except OSError:
+                        pass
+                raise
+            snapshot_descriptor = readonly_descriptor
+        snapshot_metadata = os.fstat(snapshot_descriptor)
+        error_code = _authorise_executable_descriptor(snapshot_descriptor, snapshot_metadata)
+        if error_code is not None:
+            return None, error_code
+        snapshot_descriptor, error_code = _relocate_descriptor(snapshot_descriptor)
+        if error_code is not None or snapshot_descriptor is None:
+            return None, error_code or "descriptor_relocation_failed"
+        keep_open = True
+        return snapshot_descriptor, None
+    except (AttributeError, OSError, PermissionError, TypeError, ValueError):
+        return None, "immutable_snapshot_unavailable"
+    finally:
+        if not keep_open and snapshot_descriptor is not None:
+            try:
+                os.close(snapshot_descriptor)
+            except OSError:
+                pass
 
 
 def _open_executable_descriptor(path: Path) -> tuple[int | None, str | None]:
@@ -1096,27 +1269,24 @@ def _open_executable_descriptor(path: Path) -> tuple[int | None, str | None]:
             os.close(descriptor)
         return None, error_code or "descriptor_open_failed"
 
-    keep_open = False
     try:
         metadata = os.fstat(descriptor)
         error_code = _authorise_executable_descriptor(descriptor, metadata)
         if error_code is not None:
             return None, error_code
-        descriptor, error_code = _relocate_descriptor(descriptor)
-        if error_code is not None or descriptor is None:
-            return None, error_code or "descriptor_relocation_failed"
-        keep_open = True
-        return descriptor, None
+        snapshot_descriptor, error_code = _snapshot_executable_descriptor(descriptor, metadata)
+        if error_code is not None or snapshot_descriptor is None:
+            return None, error_code or "immutable_snapshot_unavailable"
+        return snapshot_descriptor, None
     except PermissionError:
         return None, "permission_denied"
     except OSError:
         return None, "descriptor_observation_failed"
     finally:
-        if not keep_open and descriptor is not None:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
 
 
 def _run_bounded_descriptor(

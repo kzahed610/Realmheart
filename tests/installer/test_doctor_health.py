@@ -11,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+import realmheart_doctor.health as health
 from . import _bootstrap
 from realmheart_doctor.health import (
     CommandObservation,
@@ -18,6 +19,7 @@ from realmheart_doctor.health import (
     HealthStatus,
     SocketEndpoint,
     SocketObservation,
+    _relocate_descriptor,
 )
 from realmheart_maintenance.fingerprint import PathObservation
 from realmheart_maintenance.manifest import load_manifest
@@ -668,6 +670,62 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                         os.close(saved_fd)
 
             self.assertEqual(result.status, HealthStatus.PASS)
+
+    def test_descriptor_snapshot_rejects_same_inode_mutation_during_copy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, executable_path = _manifest(root)
+            executable_path.write_bytes(Path(APPROVED_TRUE_EXECUTABLE).read_bytes())
+            executable_path.chmod(0o755)
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                artifact_id="demo.exec",
+                args={"args": []},
+            )
+            registry = replace(registry, health_checks=checks)
+
+            original_pread = health.os.pread
+            mutated = False
+
+            def mutate_after_snapshot_read(descriptor, size, offset):
+                nonlocal mutated
+                chunk = original_pread(descriptor, size, offset)
+                if size > health.EXECUTABLE_HEADER_BYTES and offset == 0 and not mutated:
+                    mutated = True
+                    with executable_path.open("r+b") as stream:
+                        stream.write(b"NOPE")
+                        stream.flush()
+                return chunk
+
+            with patch("realmheart_doctor.health.os.pread", side_effect=mutate_after_snapshot_read), patch(
+                "realmheart_doctor.health._run_bounded_process"
+            ) as run:
+                result = HealthCheckExecutor(max_seconds=2).execute(
+                    registry, check_ids=("check.runtime",)
+                ).result_for("check.runtime")
+
+            self.assertEqual(result.status, HealthStatus.UNKNOWN)
+            self.assertEqual(result.reason_code, "artifact_snapshot_unstable")
+            run.assert_not_called()
+
+    def test_descriptor_relocation_closes_original_when_duplication_is_unavailable(self):
+        with patch("realmheart_doctor.health.fcntl.F_DUPFD_CLOEXEC", None), patch(
+            "realmheart_doctor.health.fcntl.F_DUPFD", None
+        ), patch("realmheart_doctor.health.os.close") as close:
+            result = _relocate_descriptor(2)
+
+        self.assertEqual(result, (None, "descriptor_relocation_unavailable"))
+        close.assert_called_once_with(2)
+
+    def test_descriptor_relocation_closes_original_when_duplication_fails(self):
+        with patch("realmheart_doctor.health.fcntl.fcntl", side_effect=OSError), patch(
+            "realmheart_doctor.health.os.close"
+        ) as close:
+            result = _relocate_descriptor(2)
+
+        self.assertEqual(result, (None, "descriptor_relocation_failed"))
+        close.assert_called_once_with(2)
 
     def test_shell_shebang_artifact_is_rejected_before_execution(self):
         with tempfile.TemporaryDirectory() as temp:
