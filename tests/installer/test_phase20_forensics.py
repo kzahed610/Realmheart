@@ -127,6 +127,94 @@ class Phase20ForensicContractTests(unittest.TestCase):
                 [("RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE", "error")],
             )
 
+    def test_required_pass_observation_without_version_is_explicit_unknown_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            dependencies = receipt_payload["dependencies"]
+            if not isinstance(dependencies, dict):
+                self.fail("generated receipt dependencies must be an object")
+            build_cmake_receipt = dependencies["build.cmake"]
+            if not isinstance(build_cmake_receipt, dict):
+                self.fail("generated build.cmake receipt must be an object")
+            build_cmake_receipt["version"] = "3.30.0"
+            receipt_path.write_text(json.dumps(receipt_payload), encoding="utf-8")
+            snapshot_path, snapshot_payload = self._snapshot_from_receipt(root, receipt_payload)
+            capabilities = snapshot_payload["capabilities"]
+            if not isinstance(capabilities, dict):
+                self.fail("synthetic snapshot capabilities must be an object")
+            build_cmake = capabilities["build.cmake"]
+            if not isinstance(build_cmake, dict):
+                self.fail("synthetic build.cmake observation must be an object")
+            build_cmake.update(state="pass", version=None)
+            snapshot_path.write_text(json.dumps(snapshot_payload), encoding="utf-8")
+
+            report = analyze_forensics(
+                self.registry,
+                load_installed_receipt(receipt_path),
+                load_health_snapshot(snapshot_path),
+            )
+
+            version_unknown = [
+                item for item in report.drifts
+                if item.subject_id == "build.cmake"
+                and item.error_code == "RH_FORENSIC_DEPENDENCY_VERSION_UNKNOWN"
+            ]
+            dependency_unknown = [
+                item for item in report.drifts
+                if item.subject_id == "build.cmake"
+                and item.error_code == "RH_FORENSIC_DEPENDENCY_UNKNOWN"
+            ]
+            self.assertEqual(len(version_unknown), 1)
+            self.assertEqual(version_unknown[0].severity, "warning")
+            self.assertEqual(len(dependency_unknown), 1)
+            self.assertEqual(dependency_unknown[0].current, "unknown")
+            self.assertEqual(report.repair_readiness, ReadinessState.UNKNOWN)
+            self.assertTrue(report.has_drift)
+
+    def test_failed_observation_preserves_failure_when_version_is_unparseable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            dependencies = receipt_payload["dependencies"]
+            if not isinstance(dependencies, dict):
+                self.fail("generated receipt dependencies must be an object")
+            python3_receipt = dependencies["runtime.python3"]
+            if not isinstance(python3_receipt, dict):
+                self.fail("generated runtime.python3 receipt must be an object")
+            python3_receipt["version"] = "3.12.0"
+            receipt_path.write_text(json.dumps(receipt_payload), encoding="utf-8")
+            snapshot_path, snapshot_payload = self._snapshot_from_receipt(root, receipt_payload)
+            capabilities = snapshot_payload["capabilities"]
+            if not isinstance(capabilities, dict):
+                self.fail("synthetic snapshot capabilities must be an object")
+            python3 = capabilities["runtime.python3"]
+            if not isinstance(python3, dict):
+                self.fail("synthetic runtime.python3 observation must be an object")
+            python3.update(state="failed", version="not-a-version")
+            snapshot_path.write_text(json.dumps(snapshot_payload), encoding="utf-8")
+
+            report = analyze_forensics(
+                self.registry,
+                load_installed_receipt(receipt_path),
+                load_health_snapshot(snapshot_path),
+            )
+
+            findings = [
+                item for item in report.drifts
+                if item.subject_id == "runtime.python3"
+            ]
+            self.assertEqual(
+                [(item.error_code, item.severity, item.current) for item in findings],
+                [
+                    ("RH_FORENSIC_DEPENDENCY_VERSION_UNKNOWN", "warning", "not-a-version"),
+                    ("RH_FORENSIC_DEPENDENCY_FAILED", "critical", "failed"),
+                ],
+            )
+            self.assertIn("regressed from pass to failed", findings[1].summary)
+            self.assertNotIn("state is pass", findings[0].summary)
+
+
     def test_one_dependency_root_collapses_multiple_capabilities_and_dependents(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -552,6 +640,23 @@ contexts = ["doctor_background"]
             receipt_payload["dependencies"][capid]["state"] = "banana"
             receipt_path.write_text(json.dumps(receipt_payload), encoding="utf-8")
             with self.assertRaisesRegex(ForensicContractError, "invalid state"):
+                load_installed_receipt(receipt_path)
+
+    def test_receipt_component_health_rejects_noncanonical_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            receipt_path, receipt_payload = self._generated_receipt(root)
+            components = receipt_payload["components"]
+            if not isinstance(components, dict):
+                self.fail("generated receipt components must be an object")
+            component_id = next(iter(components))
+            component = components[component_id]
+            if not isinstance(component, dict):
+                self.fail("generated receipt component must be an object")
+            component["health"] = "bogus"
+            receipt_path.write_text(json.dumps(receipt_payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(ForensicContractError, "invalid health"):
                 load_installed_receipt(receipt_path)
 
     def test_standalone_consumer_runs_without_loading_installer_package(self) -> None:

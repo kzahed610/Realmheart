@@ -26,6 +26,14 @@ _RECEIPT_CAPABILITY_STATES = {"pass", "missing", "failed", "not_applicable"}
 _SNAPSHOT_CAPABILITY_STATES = _RECEIPT_CAPABILITY_STATES | {"unknown"}
 _REQUIREMENTS = {"required", "component", "soft"}
 _LIFECYCLES = {"build", "install", "runtime", "verification", "repair", "ordering"}
+_COMPONENT_HEALTH = {
+    "healthy",
+    "degraded",
+    "failed",
+    "blocked",
+    "not_applicable",
+    "pending_activation",
+}
 _INSTALL_HEALTH = {"healthy", "degraded", "failed"}
 _ACTIVATION_STATES = {"active", "pending_session_restart", "unknown"}
 _SNAPSHOT_ACTIVATION_STATES = _ACTIVATION_STATES | {"failed"}
@@ -470,11 +478,14 @@ def parse_installed_receipt(payload: Mapping[str, Any]) -> InstalledStateReceipt
     for raw_id, value in components_raw.items():
         cid = _expect_id(raw_id, "installed-state component id")
         item = _expect_mapping(value, f"installed-state component {cid}")
+        health = _expect_string(item.get("health"), f"component {cid} health")
+        if health not in _COMPONENT_HEALTH:
+            raise ForensicContractError(f"component {cid} has invalid health {health!r}")
         components[cid] = ReceiptComponent(
             component_id=cid,
             display_name=_expect_string(item.get("display_name", cid), f"component {cid} display_name"),
             category=_expect_string(item.get("category", "unknown"), f"component {cid} category"),
-            health=_expect_string(item.get("health"), f"component {cid} health"),
+            health=health,
             blocked_by=_string_tuple(item.get("blocked_by", []), f"component {cid} blocked_by"),
             artifact_ids=_string_tuple(item.get("artifact_ids", []), f"component {cid} artifact_ids"),
             build_unit_ids=_string_tuple(item.get("build_unit_ids", []), f"component {cid} build_unit_ids"),
@@ -1123,12 +1134,13 @@ def analyze_forensics(
         current_state = current.state
         current_compatibility = None
         current_version_bad = False
-        if current.state in {"pass", "failed"} and current.version is not None and capability_version_required(registry, manifest_cap):
+        if current.state in {"pass", "failed"} and capability_version_required(registry, manifest_cap):
             current_compatibility = classify_capability_version(
                 registry, manifest_cap, current.version
             )
             if current_compatibility is VersionCompatibility.UNPARSEABLE:
-                current_state = "unknown"
+                if current.state == "pass":
+                    current_state = "unknown"
                 add(
                     DriftKind.DEPENDENCY,
                     "RH_FORENSIC_DEPENDENCY_VERSION_UNKNOWN",
@@ -1140,7 +1152,10 @@ def analyze_forensics(
                     current=current.version,
                     affects_runtime=runtime,
                     affects_repair=repair,
-                    summary=f"capability {capid} current state is pass but its required version evidence is not parseable",
+                    summary=(
+                        f"capability {capid} current state is {current.state} "
+                        "but its required version evidence is not parseable"
+                    ),
                 )
             elif current_compatibility is VersionCompatibility.INCOMPATIBLE:
                 current_state = "failed"
