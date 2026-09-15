@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from dataclasses import replace
@@ -708,6 +709,145 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             self.assertEqual(result.status, HealthStatus.UNKNOWN)
             self.assertEqual(result.reason_code, "artifact_snapshot_unstable")
             run.assert_not_called()
+
+    def test_blocked_snapshot_cannot_launch_after_timeout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, executable_path = _manifest(root)
+            executable_path.write_bytes(Path(APPROVED_TRUE_EXECUTABLE).read_bytes())
+            executable_path.chmod(0o755)
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                artifact_id="demo.exec",
+                args={"args": []},
+            )
+            registry = replace(registry, health_checks=checks)
+
+            release = threading.Event()
+            launch_marker = root / "launch-marker"
+            original_pread = health.os.pread
+
+            def blocked_pread(descriptor, size, offset):
+                chunk = original_pread(descriptor, size, offset)
+                if size > health.EXECUTABLE_HEADER_BYTES:
+                    release.wait()
+                return chunk
+
+            def record_launch(argv, **kwargs):
+                launch_marker.write_text("launched", encoding="ascii")
+                return CommandObservation(tuple(argv), 0)
+
+            baseline_threads = {
+                thread.ident
+                for thread in threading.enumerate()
+                if thread.name == "realmheart-doctor-probe"
+            }
+            with patch("realmheart_doctor.health.os.pread", side_effect=blocked_pread), patch(
+                "realmheart_doctor.health._run_bounded_process", side_effect=record_launch
+            ):
+                try:
+                    result = HealthCheckExecutor(
+                        max_seconds=0.03,
+                        worker_cleanup_seconds=0.01,
+                    ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
+                    self.assertEqual(result.status, HealthStatus.UNKNOWN)
+                    self.assertIn(result.reason_code, {"timeout", "budget_exhausted"})
+
+                    release.set()
+                    deadline = time.monotonic() + 1.0
+                    while time.monotonic() < deadline and not launch_marker.exists():
+                        time.sleep(0.005)
+                    self.assertFalse(launch_marker.exists())
+                finally:
+                    release.set()
+                    deadline = time.monotonic() + 1.0
+                    while time.monotonic() < deadline:
+                        active = {
+                            thread.ident
+                            for thread in threading.enumerate()
+                            if thread.name == "realmheart-doctor-probe"
+                        }
+                        if active <= baseline_threads:
+                            break
+                        time.sleep(0.005)
+
+    def test_repeated_snapshot_timeouts_do_not_accumulate_workers_or_descriptors(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, executable_path = _manifest(root)
+            executable_path.write_bytes(Path(APPROVED_TRUE_EXECUTABLE).read_bytes())
+            executable_path.chmod(0o755)
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                artifact_id="demo.exec",
+                args={"args": []},
+            )
+            registry = replace(registry, health_checks=checks)
+
+            original_pread = health.os.pread
+            current_block: list[tuple[threading.Event, Path] | None] = [None]
+            gates: list[threading.Event] = []
+
+            def blocked_pread(descriptor, size, offset):
+                chunk = original_pread(descriptor, size, offset)
+                if size > health.EXECUTABLE_HEADER_BYTES:
+                    block = current_block[0]
+                    if block is None:
+                        raise AssertionError("snapshot read was not assigned a cancellation gate")
+                    gate, entered = block
+                    entered.write_text("entered", encoding="ascii")
+                    gate.wait()
+                return chunk
+
+            def descriptor_count() -> int:
+                return len(os.listdir("/proc/self/fd"))
+
+            baseline_threads = {
+                thread.ident
+                for thread in threading.enumerate()
+                if thread.name == "realmheart-doctor-probe"
+            }
+            baseline_descriptors = descriptor_count()
+            with patch("realmheart_doctor.health.os.pread", side_effect=blocked_pread), patch(
+                "realmheart_doctor.health._run_bounded_process",
+                return_value=CommandObservation((str(executable_path),), 0),
+            ):
+                try:
+                    for index in range(8):
+                        gate = threading.Event()
+                        entered = root / f"entered-{index}"
+                        gates.append(gate)
+                        current_block[0] = (gate, entered)
+                        result = HealthCheckExecutor(
+                            max_seconds=0.03,
+                            worker_cleanup_seconds=0.01,
+                        ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
+                        self.assertEqual(result.status, HealthStatus.UNKNOWN)
+                        self.assertIn(result.reason_code, {"timeout", "budget_exhausted"})
+                        self.assertTrue(entered.exists())
+
+                    active_threads = {
+                        thread.ident
+                        for thread in threading.enumerate()
+                        if thread.name == "realmheart-doctor-probe"
+                    }
+                    self.assertLessEqual(len(active_threads - baseline_threads), 0)
+                    self.assertLessEqual(descriptor_count() - baseline_descriptors, 1)
+                finally:
+                    for gate in gates:
+                        gate.set()
+                    deadline = time.monotonic() + 1.0
+                    while time.monotonic() < deadline:
+                        active = {
+                            thread.ident
+                            for thread in threading.enumerate()
+                            if thread.name == "realmheart-doctor-probe"
+                        }
+                        if active <= baseline_threads:
+                            break
+                        time.sleep(0.005)
 
     def test_descriptor_relocation_closes_original_when_duplication_is_unavailable(self):
         with patch("realmheart_doctor.health.fcntl.F_DUPFD_CLOEXEC", None), patch(
