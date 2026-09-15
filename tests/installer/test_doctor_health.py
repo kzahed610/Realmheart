@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import tempfile
 import time
@@ -22,6 +23,9 @@ from realmheart_maintenance.fingerprint import PathObservation
 from realmheart_maintenance.manifest import load_manifest
 
 PYTHON_EXECUTABLE = str(Path(sys.executable).resolve())
+APPROVED_TRUE_EXECUTABLE = "/usr/bin/true"
+APPROVED_PRINTF_EXECUTABLE = "/usr/bin/printf"
+APPROVED_SLEEP_EXECUTABLE = "/usr/bin/sleep"
 
 
 class FakeOperations:
@@ -123,7 +127,7 @@ component_id = "demo"
 check = "version_probe"
 contexts = ["doctor_background"]
 [health_checks.args]
-argv = ["{PYTHON_EXECUTABLE}", "--version"]
+argv = ["{APPROVED_PRINTF_EXECUTABLE}", "Demo 1.2.3\\n"]
 version_prefix = "demo"
 
 [[health_checks]]
@@ -132,7 +136,7 @@ component_id = "demo"
 check = "runtime_probe"
 contexts = ["doctor_background"]
 [health_checks.args]
-argv = ["{PYTHON_EXECUTABLE}", "--health"]
+argv = ["{APPROVED_TRUE_EXECUTABLE}"]
 
 [[health_checks]]
 id = "check.config"
@@ -159,7 +163,7 @@ cost = "normal"
 side_effects = "starts_component"
 contexts = ["doctor_background"]
 [health_checks.args]
-argv = ["{PYTHON_EXECUTABLE}", "--smoke"]
+argv = ["{APPROVED_TRUE_EXECUTABLE}"]
 '''
     (components / "demo.toml").write_text(body, encoding="utf-8")
     return load_manifest(components), file_path, executable_path
@@ -181,6 +185,24 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             self.assertEqual(report.result_for("check.exists").status, HealthStatus.PASS)
             self.assertEqual(report.result_for("check.executable").status, HealthStatus.PASS)
             self.assertEqual(len([call for call in ops.calls if call[0] == "observe_path"]), 2)
+
+    def test_artifact_executable_requires_readable_non_special_mode(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry, _, executable_path = _manifest(Path(temp))
+            for mode, reason_code in (
+                (0o111, "artifact_not_readable"),
+                (0o4755, "special_mode_forbidden"),
+                (0o2755, "special_mode_forbidden"),
+            ):
+                ops = FakeOperations()
+                ops.paths[executable_path] = PathObservation(True, mode, "file")
+
+                result = HealthCheckExecutor(ops).execute(
+                    registry, check_ids=("check.executable",)
+                ).result_for("check.executable")
+
+                self.assertEqual(result.status, HealthStatus.FAIL)
+                self.assertEqual(result.reason_code, reason_code)
 
     def test_missing_artifact_is_an_observed_failure(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -208,10 +230,10 @@ class DoctorHealthExecutorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             registry, _, _ = _manifest(Path(temp))
             ops = FakeOperations()
-            ops.commands[(PYTHON_EXECUTABLE, "--version")] = CommandObservation(
-                (PYTHON_EXECUTABLE, "--version"), 0, stdout="Demo 1.2.3\n"
+            ops.commands[(APPROVED_PRINTF_EXECUTABLE, "Demo 1.2.3\n")] = CommandObservation(
+                (APPROVED_PRINTF_EXECUTABLE, "Demo 1.2.3\n"), 0, stdout="Demo 1.2.3\n"
             )
-            ops.commands[(PYTHON_EXECUTABLE, "--health")] = CommandObservation((PYTHON_EXECUTABLE, "--health"), 0)
+            ops.commands[(APPROVED_TRUE_EXECUTABLE,)] = CommandObservation((APPROVED_TRUE_EXECUTABLE,), 0)
 
             report = HealthCheckExecutor(ops).execute(registry, check_ids=("check.version", "check.runtime"))
 
@@ -219,8 +241,8 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             self.assertEqual(report.result_for("check.version").value, "1.2.3")
             self.assertEqual(report.result_for("check.runtime").status, HealthStatus.PASS)
             self.assertEqual([call[1] for call in ops.calls if call[0] == "run"], [
-                (PYTHON_EXECUTABLE, "--version"),
-                (PYTHON_EXECUTABLE, "--health"),
+                (APPROVED_PRINTF_EXECUTABLE, "Demo 1.2.3\n"),
+                (APPROVED_TRUE_EXECUTABLE,),
             ])
 
     def test_socket_and_process_smoke_are_bounded_supported_types(self):
@@ -229,7 +251,7 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             ops = FakeOperations()
             endpoint = next(iter(registry.health_checks["check.socket"].args.values()))
             ops.sockets[SocketEndpoint("unix", path=endpoint)] = SocketObservation(True)
-            ops.commands[(PYTHON_EXECUTABLE, "--smoke")] = CommandObservation((PYTHON_EXECUTABLE, "--smoke"), 0)
+            ops.commands[(APPROVED_TRUE_EXECUTABLE,)] = CommandObservation((APPROVED_TRUE_EXECUTABLE,), 0)
 
             report = HealthCheckExecutor(ops).execute(
                 registry,
@@ -245,22 +267,22 @@ class DoctorHealthExecutorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             registry, _, _ = _manifest(Path(temp))
             ops = FakeOperations()
-            ops.commands[(PYTHON_EXECUTABLE, "--version")] = CommandObservation(
-                (PYTHON_EXECUTABLE, "--version"), None, timed_out=True, error_code="timeout"
+            ops.commands[(APPROVED_PRINTF_EXECUTABLE, "Demo 1.2.3\n")] = CommandObservation(
+                (APPROVED_PRINTF_EXECUTABLE, "Demo 1.2.3\n"), None, timed_out=True, error_code="timeout"
             )
             timeout_report = HealthCheckExecutor(ops).execute(registry, check_ids=("check.version",))
             self.assertEqual(timeout_report.result_for("check.version").status, HealthStatus.UNKNOWN)
             self.assertEqual(timeout_report.result_for("check.version").reason_code, "timeout")
 
-            ops.commands[(PYTHON_EXECUTABLE, "--version")] = CommandObservation(
-                (PYTHON_EXECUTABLE, "--version"), None, error_code="executable_missing"
+            ops.commands[(APPROVED_PRINTF_EXECUTABLE, "Demo 1.2.3\n")] = CommandObservation(
+                (APPROVED_PRINTF_EXECUTABLE, "Demo 1.2.3\n"), None, error_code="executable_missing"
             )
             missing_report = HealthCheckExecutor(ops).execute(registry, check_ids=("check.version",))
             self.assertEqual(missing_report.result_for("check.version").status, HealthStatus.UNKNOWN)
             self.assertEqual(missing_report.result_for("check.version").reason_code, "executable_missing")
 
-            ops.commands[(PYTHON_EXECUTABLE, "--version")] = CommandObservation(
-                (PYTHON_EXECUTABLE, "--version"), 0, stdout="not a version\n"
+            ops.commands[(APPROVED_PRINTF_EXECUTABLE, "Demo 1.2.3\n")] = CommandObservation(
+                (APPROVED_PRINTF_EXECUTABLE, "Demo 1.2.3\n"), 0, stdout="not a version\n"
             )
             malformed_report = HealthCheckExecutor(ops).execute(registry, check_ids=("check.version",))
             self.assertEqual(malformed_report.result_for("check.version").status, HealthStatus.UNKNOWN)
@@ -283,8 +305,8 @@ class DoctorHealthExecutorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             registry, _, _ = _manifest(Path(temp))
             ops = FakeOperations()
-            ops.commands[(PYTHON_EXECUTABLE, "--health")] = CommandObservation(
-                (PYTHON_EXECUTABLE, "--health"), 0,
+            ops.commands[(APPROVED_TRUE_EXECUTABLE,)] = CommandObservation(
+                (APPROVED_TRUE_EXECUTABLE,), 0,
                 stdout="password=super-secret " + "x" * 200,
             )
 
@@ -406,11 +428,14 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             checks["check.runtime"] = replace(
                 checks["check.runtime"],
                 timeout_ms=80,
-                args={"argv": [PYTHON_EXECUTABLE, "-c", "import time; time.sleep(2)"]},
+                args={"argv": [APPROVED_SLEEP_EXECUTABLE, "2"]},
             )
             checks["check.version"] = replace(
                 checks["check.version"],
-                args={"argv": [PYTHON_EXECUTABLE, "-c", "print('Python 1.2.3')"]},
+                args={
+                    "argv": [APPROVED_PRINTF_EXECUTABLE, "Demo 1.2.3\n"],
+                    "version_prefix": "demo",
+                },
             )
             registry = replace(registry, health_checks=checks)
 
@@ -427,7 +452,7 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                     "check.runtime": replace(
                         checks["check.runtime"],
                         timeout_ms=1000,
-                        args={"argv": [PYTHON_EXECUTABLE, "-c", "print('x' * 100000)"]},
+                        args={"argv": [APPROVED_PRINTF_EXECUTABLE, "x" * 1000]},
                     ),
                 },
             )
@@ -581,14 +606,14 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             artifacts = dict(registry.artifacts)
             artifacts["demo.exec"] = replace(
                 artifacts["demo.exec"],
-                path=PYTHON_EXECUTABLE,
+                path=APPROVED_PRINTF_EXECUTABLE,
             )
             checks = dict(registry.health_checks)
             checks["check.version"] = replace(
                 checks["check.version"],
                 artifact_id="demo.exec",
                 args={
-                    "args": ["-c", "print('Demo 1.2.3')"],
+                    "args": ["Demo 1.2.3\n"],
                     "version_prefix": "demo",
                 },
             )
@@ -604,6 +629,173 @@ class DoctorHealthExecutorTests(unittest.TestCase):
 
             self.assertEqual(result.status, HealthStatus.PASS)
             self.assertEqual(result.value, "1.2.3")
+
+    def test_descriptor_operation_relocates_executable_away_from_stdio(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry, _, _ = _manifest(Path(temp))
+            artifacts = dict(registry.artifacts)
+            artifacts["demo.exec"] = replace(
+                artifacts["demo.exec"],
+                path=APPROVED_TRUE_EXECUTABLE,
+            )
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                artifact_id="demo.exec",
+                args={"args": []},
+            )
+            registry = replace(registry, artifacts=artifacts, health_checks=checks)
+
+            saved_fds: list[int | None] = []
+            for fd in range(3):
+                try:
+                    saved_fds.append(os.dup(fd))
+                except OSError:
+                    saved_fds.append(None)
+            try:
+                for fd in range(3):
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                result = HealthCheckExecutor(max_seconds=2).execute(
+                    registry, check_ids=("check.runtime",)
+                ).result_for("check.runtime")
+            finally:
+                for fd, saved_fd in enumerate(saved_fds):
+                    if saved_fd is not None:
+                        os.dup2(saved_fd, fd)
+                        os.close(saved_fd)
+
+            self.assertEqual(result.status, HealthStatus.PASS)
+
+    def test_shell_shebang_artifact_is_rejected_before_execution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, executable_path = _manifest(root)
+            marker = root / "shell-marker"
+            executable_path.write_text(
+                f"#!/bin/sh\nprintf touched > {marker}\nprintf 'Demo 1.2.3\\n'\n",
+                encoding="utf-8",
+            )
+            executable_path.chmod(0o755)
+            checks = dict(registry.health_checks)
+            checks["check.version"] = replace(
+                checks["check.version"],
+                artifact_id="demo.exec",
+                args={"args": ["--version"]},
+            )
+            registry = replace(registry, health_checks=checks)
+
+            result = HealthCheckExecutor(max_seconds=2).execute(
+                registry, check_ids=("check.version",)
+            ).result_for("check.version")
+
+            self.assertEqual(result.status, HealthStatus.UNKNOWN)
+            self.assertEqual(result.reason_code, "unsupported_executable")
+            self.assertFalse(marker.exists())
+
+    def test_env_shebang_is_rejected_without_inherited_path_lookup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, executable_path = _manifest(root)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            marker = root / "env-marker"
+            interpreter = bin_dir / "doctor-env-probe"
+            interpreter.write_text(
+                f"#!/bin/sh\nprintf touched > {marker}\nprintf 'Demo 1.2.3\\n'\n",
+                encoding="utf-8",
+            )
+            interpreter.chmod(0o755)
+            executable_path.write_text("#!/usr/bin/env doctor-env-probe\n", encoding="utf-8")
+            executable_path.chmod(0o755)
+            checks = dict(registry.health_checks)
+            checks["check.version"] = replace(
+                checks["check.version"],
+                artifact_id="demo.exec",
+                args={"args": ["--version"]},
+            )
+            registry = replace(registry, health_checks=checks)
+
+            with patch.dict("os.environ", {"PATH": str(bin_dir)}, clear=False):
+                result = HealthCheckExecutor(max_seconds=2).execute(
+                    registry, check_ids=("check.version",)
+                ).result_for("check.version")
+
+            self.assertEqual(result.status, HealthStatus.UNKNOWN)
+            self.assertEqual(result.reason_code, "unsupported_executable")
+            self.assertFalse(marker.exists())
+
+    def test_interpreters_and_alternate_launchers_require_approved_identity_and_schema(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry, _, _ = _manifest(Path(temp))
+            check = registry.health_checks["check.runtime"]
+            for argv in (
+                [PYTHON_EXECUTABLE, "-c", "open('/tmp/doctor-marker', 'w').write('ran')"],
+                ["/usr/bin/setsid", APPROVED_TRUE_EXECUTABLE],
+                ["/usr/bin/systemd-run", "--wait", APPROVED_TRUE_EXECUTABLE],
+                ["/usr/bin/su", "-c", APPROVED_TRUE_EXECUTABLE],
+            ):
+                check.args["argv"] = argv
+                ops = FakeOperations()
+
+                result = HealthCheckExecutor(ops).execute(
+                    registry, check_ids=("check.runtime",)
+                ).result_for("check.runtime")
+
+                self.assertEqual(result.status, HealthStatus.UNKNOWN)
+                self.assertEqual(result.reason_code, "invalid_command")
+                self.assertEqual(ops.calls, [])
+
+    def test_setuid_and_setgid_executables_are_rejected_before_execution(self):
+        for special_mode in (0o4755, 0o2755, 0o6755):
+            with self.subTest(mode=oct(special_mode)), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                registry, _, executable_path = _manifest(root)
+                marker = root / "special-mode-marker"
+                executable_path.write_text(
+                    f"#!/bin/sh\nprintf touched > {marker}\nprintf 'Demo 1.2.3\\n'\n",
+                    encoding="utf-8",
+                )
+                executable_path.chmod(special_mode)
+                checks = dict(registry.health_checks)
+                checks["check.version"] = replace(
+                    checks["check.version"],
+                    artifact_id="demo.exec",
+                    args={"args": ["--version"]},
+                )
+                registry = replace(registry, health_checks=checks)
+
+                result = HealthCheckExecutor(max_seconds=2).execute(
+                    registry, check_ids=("check.version",)
+                ).result_for("check.version")
+
+                self.assertEqual(result.status, HealthStatus.UNKNOWN)
+                self.assertEqual(result.reason_code, "special_mode_forbidden")
+                self.assertFalse(marker.exists())
+
+    def test_approved_elf_artifact_remains_executable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry, _, _ = _manifest(Path(temp))
+            artifacts = dict(registry.artifacts)
+            artifacts["demo.exec"] = replace(
+                artifacts["demo.exec"],
+                path=APPROVED_TRUE_EXECUTABLE,
+            )
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                artifact_id="demo.exec",
+                args={"args": []},
+            )
+            registry = replace(registry, artifacts=artifacts, health_checks=checks)
+
+            result = HealthCheckExecutor(max_seconds=2).execute(
+                registry, check_ids=("check.runtime",)
+            ).result_for("check.runtime")
+
+            self.assertEqual(result.status, HealthStatus.PASS)
 
     def test_default_descriptor_operation_rejects_symlinked_artifact(self):
         with tempfile.TemporaryDirectory() as temp:

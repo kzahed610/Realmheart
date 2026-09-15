@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import configparser
 import errno
+import fcntl
 import hashlib
 import inspect
 import json
@@ -74,6 +75,8 @@ MAX_ARGUMENT_BYTES = 64 * 1024
 MAX_DETAIL_BYTES = 512
 MAX_VERSION_TOKEN_BYTES = 256
 MAX_SOCKET_PATH_BYTES = 107
+MIN_PASSTHROUGH_FD = 3
+EXECUTABLE_HEADER_BYTES = 4
 
 _VERSION_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9])v?(\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?)(?![A-Za-z0-9])"
@@ -85,9 +88,25 @@ _SECRET_FLAG_RE = re.compile(
     r"(?i)((?:--?)(?:password|passwd|token|secret|api[_-]?key|authorization|credential|private[_-]?key)(?:=|\s+))(\"[^\"]*\"|'[^']*'|[^\s,;}]+)"
 )
 _BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([^\s,;]+)")
-_SHELL_WRAPPERS = {"ash", "bash", "csh", "dash", "fish", "ksh", "mksh", "nu", "rbash", "sh", "tcsh", "yash", "zsh"}
-_INDIRECT_LAUNCHERS = frozenset({"busybox", "command", "env", "exec", "xargs"})
-_PRIVILEGE_WRAPPERS = frozenset({"sudo", "doas", "pkexec"})
+_APPROVED_VERSION_FLAGS = frozenset({"--version", "-V", "--help", "-h"})
+_APPROVED_PROBE_FLAGS = frozenset(
+    {"--version", "-V", "--help", "-h", "--health", "--smoke", "--status", "--check"}
+)
+_APPROVED_ARTIFACTLESS_EXECUTABLES = {
+    # Artifact-less probes are intentionally limited to fixed, read-only
+    # utility identities.  There is no PATH lookup or basename inference.
+    "/usr/bin/false": "no_args",
+    "/usr/bin/printf": "printf",
+    "/usr/bin/sleep": "sleep",
+    "/usr/bin/true": "no_args",
+}
+_SANITIZED_ENVIRONMENT = {
+    "LANG": "C",
+    "LC_ALL": "C",
+    "LC_CTYPE": "C",
+    "PATH": "/usr/bin:/bin",
+    "TZ": "UTC",
+}
 _REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SECRET_REPLACEMENT = "[REDACTED]"
 
@@ -339,6 +358,7 @@ def _run_bounded_process(
                 shell=False,
                 close_fds=True,
                 start_new_session=True,
+                env=dict(_SANITIZED_ENVIRONMENT),
             )
         else:
             # Python exposes fd-backed exec through ``os.execve`` on some
@@ -356,6 +376,7 @@ def _run_bounded_process(
                 close_fds=True,
                 pass_fds=(executable_fd,),
                 start_new_session=True,
+                env=dict(_SANITIZED_ENVIRONMENT),
             )
     except FileNotFoundError:
         return CommandObservation(
@@ -511,6 +532,12 @@ class ReadOnlyHealthOperations:
                 error_code="invalid_executable",
                 error_detail="absolute executable identity required",
             )
+        if not _approved_artifactless_arguments(command):
+            return CommandObservation(
+                command,
+                error_code="invalid_command",
+                error_detail="executable identity or argument schema is not approved",
+            )
         return self.run_descriptor(
             Path(command[0]),
             command,
@@ -537,7 +564,17 @@ class ReadOnlyHealthOperations:
             return CommandObservation(
                 command,
                 error_code="invalid_command",
-                error_detail="shell or privilege wrapper rejected",
+                error_detail="structured argv rejected",
+            )
+        if command[0] in _APPROVED_ARTIFACTLESS_EXECUTABLES:
+            approved = _approved_artifactless_arguments(command)
+        else:
+            approved = _approved_probe_arguments(command, version=False)
+        if not approved:
+            return CommandObservation(
+                command,
+                error_code="invalid_command",
+                error_detail="executable identity or argument schema is not approved",
             )
         return _run_bounded_descriptor(
             Path(path),
@@ -799,14 +836,6 @@ def _normalise_argv(raw: object) -> tuple[str, ...] | None:
         if encoded_length > MAX_ARGUMENT_BYTES or total_bytes > MAX_ARGUMENT_BYTES:
             return None
         result.append(item)
-    for item in result:
-        executable_name = Path(item).name.lower()
-        if (
-            executable_name in _PRIVILEGE_WRAPPERS
-            or executable_name in _SHELL_WRAPPERS
-            or executable_name in _INDIRECT_LAUNCHERS
-        ):
-            return None
     return tuple(result)
 
 
@@ -828,6 +857,49 @@ def _trusted_absolute_executable(value: object) -> bool:
         return len(value.encode("utf-8", errors="surrogateescape")) <= MAX_ARGUMENT_BYTES
     except UnicodeError:
         return False
+
+
+def _approved_artifactless_arguments(argv: tuple[str, ...]) -> bool:
+    """Validate an artifact-less command against an exact identity policy."""
+
+    if not argv:
+        return False
+    schema = _APPROVED_ARTIFACTLESS_EXECUTABLES.get(argv[0])
+    if schema == "no_args":
+        return len(argv) == 1
+    if schema == "printf":
+        # GNU printf has no read-only guarantee for option forms such as -v.
+        # Allow only literal format/argument data and never an option.
+        return len(argv) >= 2 and all(not value.startswith("-") for value in argv[1:])
+    if schema == "sleep":
+        return len(argv) == 2 and re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", argv[1]) is not None
+    return False
+
+
+def _approved_probe_arguments(argv: tuple[str, ...], *, version: bool) -> bool:
+    """Validate the narrow argv grammar shared by declared ELF artifacts."""
+
+    tail = argv[1:]
+    if len(tail) > 1:
+        return False
+    if version:
+        return len(tail) == 1 and tail[0] in _APPROVED_VERSION_FLAGS
+    return not tail or tail[0] in _APPROVED_PROBE_FLAGS
+
+
+def _authorise_command_argv(
+    argv: tuple[str, ...],
+    *,
+    artifact_bound: bool,
+    version: bool,
+) -> bool:
+    """Apply positive command identity and argument authorization."""
+
+    if artifact_bound:
+        if argv[0] in _APPROVED_ARTIFACTLESS_EXECUTABLES:
+            return _approved_artifactless_arguments(argv)
+        return _approved_probe_arguments(argv, version=version)
+    return _approved_artifactless_arguments(argv)
 
 
 def _command_tail(args: Mapping[str, Any], *, version: bool) -> tuple[object, ...] | None:
@@ -913,8 +985,59 @@ def _descriptor_execution_available() -> bool:
     )
 
 
+def _relocate_descriptor(descriptor: int) -> tuple[int | None, str | None]:
+    """Move a passed executable descriptor out of the stdio range."""
+
+    if descriptor >= MIN_PASSTHROUGH_FD:
+        return descriptor, None
+    duplicate_function = getattr(fcntl, "F_DUPFD_CLOEXEC", None)
+    if duplicate_function is None:
+        duplicate_function = getattr(fcntl, "F_DUPFD", None)
+    if duplicate_function is None:
+        return None, "descriptor_relocation_unavailable"
+    try:
+        relocated = fcntl.fcntl(descriptor, duplicate_function, MIN_PASSTHROUGH_FD)
+    except (OSError, ValueError, TypeError):
+        return None, "descriptor_relocation_failed"
+    try:
+        os.close(descriptor)
+    except OSError:
+        try:
+            os.close(relocated)
+        except OSError:
+            pass
+        return None, "descriptor_relocation_failed"
+    return relocated, None
+
+
+def _authorise_executable_descriptor(descriptor: int, metadata: os.stat_result) -> str | None:
+    """Authorize a descriptor by mode and executable file format.
+
+    Script support is deliberately absent: without a signed/content-bound
+    script contract, a shebang would be an interpreter-selection escape hatch.
+    """
+
+    if not stat.S_ISREG(metadata.st_mode):
+        return "artifact_not_regular"
+    if not metadata.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+        return "artifact_not_executable"
+    if not metadata.st_mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH):
+        return "artifact_not_readable"
+    if metadata.st_mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX):
+        return "special_mode_forbidden"
+    try:
+        header = os.pread(descriptor, EXECUTABLE_HEADER_BYTES, 0)
+    except (AttributeError, OSError):
+        return "artifact_not_readable"
+    if header.startswith(b"#!"):
+        return "unsupported_executable"
+    if header != b"\x7fELF":
+        return "unsupported_executable"
+    return None
+
+
 def _open_executable_descriptor(path: Path) -> tuple[int | None, str | None]:
-    """Open one regular executable without following any path symlink."""
+    """Open and authorize one regular ELF executable without symlink follows."""
 
     path_text = os.fspath(path)
     if not _trusted_absolute_executable(path_text):
@@ -976,10 +1099,12 @@ def _open_executable_descriptor(path: Path) -> tuple[int | None, str | None]:
     keep_open = False
     try:
         metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            return None, "artifact_not_regular"
-        if not metadata.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-            return None, "artifact_not_executable"
+        error_code = _authorise_executable_descriptor(descriptor, metadata)
+        if error_code is not None:
+            return None, error_code
+        descriptor, error_code = _relocate_descriptor(descriptor)
+        if error_code is not None or descriptor is None:
+            return None, error_code or "descriptor_relocation_failed"
         keep_open = True
         return descriptor, None
     except PermissionError:
@@ -987,8 +1112,11 @@ def _open_executable_descriptor(path: Path) -> tuple[int | None, str | None]:
     except OSError:
         return None, "descriptor_observation_failed"
     finally:
-        if not keep_open:
-            os.close(descriptor)
+        if not keep_open and descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def _run_bounded_descriptor(
@@ -1860,6 +1988,18 @@ class HealthCheckExecutor:
             return _payload(HealthStatus.UNKNOWN, "mode_unavailable", detail="executable mode could not be observed")
         if not mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
             return _payload(HealthStatus.FAIL, "artifact_not_executable", detail="executable artifact has no execute bit")
+        if not mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH):
+            return _payload(
+                HealthStatus.FAIL,
+                "artifact_not_readable",
+                detail="executable artifact must be readable for format authorization",
+            )
+        if mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX):
+            return _payload(
+                HealthStatus.FAIL,
+                "special_mode_forbidden",
+                detail="executable artifact has a special permission bit",
+            )
         return _payload(HealthStatus.PASS, "observed", detail="canonical artifact is executable")
 
     def _file_hash_matches(
@@ -2071,6 +2211,16 @@ class HealthCheckExecutor:
                 HealthStatus.UNKNOWN,
                 "invalid_command",
                 detail="artifact-less command probes require a trusted absolute executable",
+            )
+        if not _authorise_command_argv(
+            argv,
+            artifact_bound=artifact_executable is not None,
+            version=version,
+        ):
+            return _payload(
+                HealthStatus.UNKNOWN,
+                "invalid_command",
+                detail="executable identity or argument schema is not approved",
             )
         try:
             if artifact_executable is not None:
