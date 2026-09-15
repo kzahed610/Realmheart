@@ -1094,23 +1094,6 @@ def analyze_forensics(
             affects_repair=bool(_REPAIR_LIFECYCLES.intersection(spec.lifecycle)),
             summary=f"installed receipt omitted required dependency record {capability_id}",
         )
-    for artifact_id in sorted(
-        artifact_id for artifact_id, spec in registry.artifacts.items() if spec.required
-    ):
-        if artifact_id in receipt.artifacts:
-            continue
-        spec = registry.artifacts[artifact_id]
-        add(
-            DriftKind.ARTIFACT,
-            "RH_FORENSIC_ARTIFACT_UNKNOWN",
-            "warning",
-            artifact_id,
-            component_id=spec.component_id,
-            previous="receipt",
-            current="unknown",
-            affects_runtime=True,
-            summary=f"installed receipt omitted required artifact record {artifact_id}",
-        )
     for capability_id in sorted(set(snapshot.capabilities) - set(registry.capabilities)):
         add(
             DriftKind.DEPENDENCY,
@@ -1375,21 +1358,13 @@ def analyze_forensics(
             )
             return
 
-        if accepted is not None:
+        unknown_reasons: list[str] = []
+        if accepted is None:
+            unknown_reasons.append("installed receipt artifact record is missing")
+        else:
             observed = normalize_observed_artifact_path(accepted.path)
             if observed is None:
-                add(
-                    DriftKind.ARTIFACT,
-                    "RH_FORENSIC_ARTIFACT_PATH_UNKNOWN",
-                    "warning",
-                    artifact_id,
-                    component_id=manifest_artifact.component_id,
-                    previous=authorized,
-                    current="unknown",
-                    affects_runtime=True,
-                    affects_repair=True,
-                    summary=f"artifact {artifact_id} receipt path is missing, relative, or ambiguous",
-                )
+                unknown_reasons.append("installed receipt path is missing, relative, or ambiguous")
             elif observed != authorized:
                 add(
                     DriftKind.ARTIFACT,
@@ -1408,26 +1383,34 @@ def analyze_forensics(
                 )
 
         if current is None:
-            return
-        if snapshot.schema_version < SUPPORTED_HEALTH_SNAPSHOT_SCHEMA:
-            add(
-                DriftKind.ARTIFACT,
-                "RH_FORENSIC_ARTIFACT_PATH_UNKNOWN",
-                "warning",
-                artifact_id,
-                component_id=manifest_artifact.component_id,
-                previous=authorized,
-                current=f"snapshot-schema-{snapshot.schema_version}",
-                affects_runtime=True,
-                affects_repair=True,
-                summary=(
-                    f"artifact {artifact_id} current path evidence uses health snapshot schema "
-                    f"{snapshot.schema_version}, which predates artifact path binding"
-                ),
+            unknown_reasons.append("current health snapshot artifact record is missing")
+        elif snapshot.schema_version < SUPPORTED_HEALTH_SNAPSHOT_SCHEMA:
+            unknown_reasons.append(
+                f"current path evidence uses health snapshot schema {snapshot.schema_version}, "
+                "which predates artifact path binding"
             )
-            return
-        observed = normalize_observed_artifact_path(current.path)
-        if observed is None:
+        else:
+            observed = normalize_observed_artifact_path(current.path)
+            if observed is None:
+                unknown_reasons.append("current path is missing, relative, or ambiguous")
+            elif observed != authorized:
+                add(
+                    DriftKind.ARTIFACT,
+                    "RH_FORENSIC_ARTIFACT_PATH_DRIFT",
+                    _artifact_failure_severity(registry, manifest_artifact),
+                    artifact_id,
+                    component_id=manifest_artifact.component_id,
+                    previous=authorized,
+                    current=observed,
+                    affects_runtime=True,
+                    affects_repair=True,
+                    summary=(
+                        f"artifact {artifact_id} current path {observed} does not match "
+                        f"the canonical authorized path {authorized}"
+                    ),
+                )
+
+        if unknown_reasons:
             add(
                 DriftKind.ARTIFACT,
                 "RH_FORENSIC_ARTIFACT_PATH_UNKNOWN",
@@ -1438,28 +1421,13 @@ def analyze_forensics(
                 current="unknown",
                 affects_runtime=True,
                 affects_repair=True,
-                summary=f"artifact {artifact_id} current path is missing, relative, or ambiguous",
-            )
-        elif observed != authorized:
-            add(
-                DriftKind.ARTIFACT,
-                "RH_FORENSIC_ARTIFACT_PATH_DRIFT",
-                _artifact_failure_severity(registry, manifest_artifact),
-                artifact_id,
-                component_id=manifest_artifact.component_id,
-                previous=authorized,
-                current=observed,
-                affects_runtime=True,
-                affects_repair=True,
                 summary=(
-                    f"artifact {artifact_id} current path {observed} does not match "
-                    f"the canonical authorized path {authorized}"
+                    f"artifact {artifact_id} path evidence is incomplete: "
+                    f"{'; '.join(unknown_reasons)}"
                 ),
             )
 
-    for artifact_id in sorted(
-        (set(receipt.artifacts) | set(snapshot.artifacts)) & set(registry.artifacts)
-    ):
+    for artifact_id in sorted(registry.artifacts):
         manifest_artifact = registry.artifacts[artifact_id]
         check_artifact_path_binding(
             artifact_id,
@@ -1476,14 +1444,12 @@ def analyze_forensics(
         invalid_accepted_fields = [
             field
             for field, value in (
-                ("path", accepted.path),
                 ("mode", accepted.mode),
                 ("sha256", accepted.sha256),
                 ("immutable_fingerprint", accepted.immutable_fingerprint),
             )
             if (
-                (field == "path" and not _valid_observed_path(value))
-                or (field == "mode" and not _valid_mode(value))
+                (field == "mode" and not _valid_mode(value))
                 or (field in {"sha256", "immutable_fingerprint"} and not _valid_digest(value))
             )
         ]
@@ -1559,18 +1525,6 @@ def analyze_forensics(
                 summary=f"artifact {aid} receipt evidence is incomplete: missing {', '.join(missing_accepted)}",
             )
         if current is None:
-            if manifest_artifact.required:
-                add(
-                    DriftKind.ARTIFACT,
-                    "RH_FORENSIC_ARTIFACT_UNKNOWN",
-                    "warning",
-                    aid,
-                    component_id=manifest_artifact.component_id,
-                    previous="present",
-                    current="unknown",
-                    affects_runtime=True,
-                    summary=f"artifact {aid} was not included in the current health snapshot",
-                )
             continue
         invalid_current_fields = [
             field
@@ -1579,7 +1533,6 @@ def analyze_forensics(
                 ("sha256", current.sha256),
                 ("immutable_fingerprint", current.immutable_fingerprint),
                 ("mode", current.mode),
-                ("path", current.path),
                 ("filesystem_type", current.filesystem_type),
                 ("error", current.error),
             )
@@ -1587,7 +1540,6 @@ def analyze_forensics(
                 (field == "exists" and type(value) is not bool)
                 or (field in {"sha256", "immutable_fingerprint"} and not _valid_digest(value))
                 or (field == "mode" and not _valid_mode(value))
-                or (field == "path" and not _valid_observed_path(value))
                 or (field == "filesystem_type" and value is not None and value not in _FILESYSTEM_TYPES)
                 or (field == "error" and value is not None and not isinstance(value, str))
             )

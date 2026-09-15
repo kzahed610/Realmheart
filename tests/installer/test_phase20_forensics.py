@@ -111,6 +111,7 @@ class Phase20ForensicContractTests(unittest.TestCase):
         optional: bool = False,
         legacy_snapshot_schema: bool = False,
         omit_receipt_artifact: bool = False,
+        omit_snapshot_artifact: bool = False,
     ) -> ForensicReport:
         receipt_path, receipt_payload = self._generated_receipt(root)
         snapshot_path, snapshot_payload = self._snapshot_from_receipt(root, receipt_payload)
@@ -145,6 +146,8 @@ class Phase20ForensicContractTests(unittest.TestCase):
             target_snapshot.pop("path", None)
         if omit_receipt_artifact:
             receipt_artifacts.pop(target_id, None)
+        if omit_snapshot_artifact:
+            snapshot_artifacts.pop(target_id, None)
 
         artifacts = {
             aid: replace(
@@ -268,6 +271,74 @@ class Phase20ForensicContractTests(unittest.TestCase):
             )
             self.assertEqual(drift.severity, "critical")
             self.assertEqual(report.repair_readiness, ReadinessState.FAILED)
+
+    def test_required_artifact_omitted_from_both_sources_is_one_path_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._path_binding_case(
+                Path(temp),
+                omit_receipt_artifact=True,
+                omit_snapshot_artifact=True,
+            )
+
+            drifts = [item for item in report.drifts if item.subject_id == "core.binary"]
+            self.assertEqual(
+                [item.error_code for item in drifts],
+                ["RH_FORENSIC_ARTIFACT_PATH_UNKNOWN"],
+            )
+            self.assertTrue(drifts[0].affects_repair)
+            self.assertEqual(report.repair_readiness, ReadinessState.UNKNOWN)
+
+    def test_required_receipt_only_artifact_is_path_unknown_and_not_duplicate_generic_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._path_binding_case(
+                Path(temp),
+                omit_snapshot_artifact=True,
+            )
+
+            drifts = [item for item in report.drifts if item.subject_id == "core.binary"]
+            self.assertEqual(
+                [item.error_code for item in drifts],
+                ["RH_FORENSIC_ARTIFACT_PATH_UNKNOWN"],
+            )
+            self.assertEqual(report.repair_readiness, ReadinessState.UNKNOWN)
+
+    def test_required_snapshot_only_artifact_is_path_unknown_and_not_duplicate_generic_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._path_binding_case(
+                Path(temp),
+                omit_receipt_artifact=True,
+            )
+
+            drifts = [item for item in report.drifts if item.subject_id == "core.binary"]
+            self.assertEqual(
+                [item.error_code for item in drifts],
+                ["RH_FORENSIC_ARTIFACT_PATH_UNKNOWN"],
+            )
+            self.assertEqual(report.repair_readiness, ReadinessState.UNKNOWN)
+
+    def test_optional_artifact_omitted_from_both_sources_degrades_without_required_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._path_binding_case(
+                Path(temp),
+                optional=True,
+                omit_receipt_artifact=True,
+                omit_snapshot_artifact=True,
+            )
+
+            drifts = [item for item in report.drifts if item.subject_id == "core.binary"]
+            self.assertEqual(
+                [item.error_code for item in drifts],
+                ["RH_FORENSIC_ARTIFACT_PATH_UNKNOWN"],
+            )
+            self.assertEqual(drifts[0].severity, "warning")
+            self.assertEqual(report.repair_readiness, ReadinessState.DEGRADED)
+
+    def test_complete_canonical_artifact_coverage_keeps_repair_readiness_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._path_binding_case(Path(temp))
+
+            self.assertFalse(any(item.kind is DriftKind.ARTIFACT for item in report.drifts))
+            self.assertEqual(report.repair_readiness, ReadinessState.HEALTHY)
 
     def test_legacy_snapshot_schema_is_loaded_but_path_uncertain(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -664,9 +735,10 @@ class Phase20ForensicContractTests(unittest.TestCase):
             report = analyze_forensics(self.registry, load_installed_receipt(receipt_path), load_health_snapshot(snapshot_path))
 
             missing = next(item for item in report.drifts if item.subject_id == "core.binary")
-            self.assertEqual(missing.error_code, "RH_FORENSIC_ARTIFACT_UNKNOWN")
+            self.assertEqual(missing.error_code, "RH_FORENSIC_ARTIFACT_PATH_UNKNOWN")
             self.assertEqual(missing.current, "unknown")
             self.assertEqual(missing.severity, "warning")
+            self.assertTrue(missing.affects_repair)
             self.assertTrue(report.has_drift)
 
     def test_missing_optional_capability_observation_preserves_optional_semantics(self) -> None:
@@ -714,7 +786,7 @@ class Phase20ForensicContractTests(unittest.TestCase):
             ))
             self.assertTrue(any(
                 item.subject_id == required_artifact
-                and item.error_code == "RH_FORENSIC_ARTIFACT_UNKNOWN"
+                and item.error_code == "RH_FORENSIC_ARTIFACT_PATH_UNKNOWN"
                 for item in report.drifts
             ))
 
