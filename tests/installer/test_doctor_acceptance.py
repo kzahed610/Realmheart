@@ -15,7 +15,13 @@ from unittest.mock import patch
 
 from . import _bootstrap
 from realmheart_doctor import AcceptanceAssessment, AcceptanceRecommendation, assess_candidate_install
-from realmheart_doctor.acceptance import DoctorAcceptanceError, _probe_capability, load_candidate_bundle
+from realmheart_doctor.acceptance import (
+    DoctorAcceptanceError,
+    _candidate_receipt,
+    _current_snapshot,
+    _probe_capability,
+    load_candidate_bundle,
+)
 from realmheart_doctor.cli import main as doctor_main
 from realmheart_maintenance.forensics import ForensicContractError
 from realmheart_maintenance.fingerprint import (
@@ -154,6 +160,19 @@ class DoctorAcceptanceTests(unittest.TestCase):
             self.assertEqual(result.recommendation,AcceptanceRecommendation.KEEP)
             self.assertEqual(result.checked_artifacts,1)
             self.assertEqual(result.checked_capabilities,1)
+
+    def test_candidate_current_snapshot_is_schema_two_and_path_bound(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root)
+            artifact.write_text("ok\n")
+            artifact.chmod(0o644)
+
+            candidate = _candidate(registry, artifact)
+            snapshot = _current_snapshot(registry, _candidate_receipt(candidate, registry))
+
+            self.assertEqual(snapshot.schema_version, 2)
+            self.assertEqual(snapshot.artifacts["demo.file"].path, str(artifact))
 
     def test_noncanonical_component_pass_health_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:

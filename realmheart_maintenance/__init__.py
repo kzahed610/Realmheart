@@ -17,8 +17,11 @@ from .manifest import (
     ProbeSpec,
     VersionCompatibility,
     VersionSpec,
+    canonical_artifact_path_matches,
     classify_version,
     load_manifest,
+    normalize_observed_artifact_path,
+    resolve_canonical_artifact_path,
 )
 
 __all__ = [
@@ -34,8 +37,11 @@ __all__ = [
     "ProbeSpec",
     "VersionCompatibility",
     "VersionSpec",
+    "canonical_artifact_path_matches",
     "classify_version",
     "load_manifest",
+    "normalize_observed_artifact_path",
+    "resolve_canonical_artifact_path",
 ]
 
 from .forensics import (
@@ -55,6 +61,7 @@ from .forensics import (
     load_installed_receipt,
     parse_health_snapshot,
     parse_installed_receipt,
+    serialize_health_snapshot,
     select_health_checks,
 )
 
@@ -63,5 +70,6 @@ __all__ += [
     "DriftKind", "DriftRecord", "ForensicContractError", "ForensicIncident",
     "ForensicReport", "InstalledStateReceipt", "ObservationOutcome", "ReadinessState",
     "analyze_forensics", "load_health_snapshot", "load_installed_receipt",
-    "parse_health_snapshot", "parse_installed_receipt", "select_health_checks",
+    "parse_health_snapshot", "parse_installed_receipt", "serialize_health_snapshot",
+    "select_health_checks",
 ]

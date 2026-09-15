@@ -7,6 +7,8 @@ independent binding registries keyed by stable IDs.
 from __future__ import annotations
 
 import hashlib
+import os
+import posixpath
 import re
 import tomllib
 from dataclasses import dataclass
@@ -36,6 +38,10 @@ _ALLOWED_PROBES = {
     "power_profiles_backend", "systemd_user", "portal_unit", "any_command", "command_group",
 }
 _FORBIDDEN_COMPONENT_KEYS = {"install", "rollback", "repair", "handler", "python_handler", "callable", "module_path"}
+_CANONICAL_PATH_TOKENS = frozenset({
+    "$HOME", "$XDG_CONFIG_HOME", "$XDG_STATE_HOME", "$PREFIX", "$LIBEXEC", "$SYSCONF",
+})
+_PATH_TOKEN_RE = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*")
 
 
 class ManifestError(ValueError):
@@ -277,6 +283,83 @@ def _safe_artifact_path(path: str) -> bool:
         return False
     normalized = path.replace("$HOME", "HOME").replace("$XDG_CONFIG_HOME", "XDG_CONFIG_HOME").replace("$XDG_STATE_HOME", "XDG_STATE_HOME").replace("$PREFIX", "PREFIX").replace("$LIBEXEC", "LIBEXEC").replace("$SYSCONF", "SYSCONF")
     return ".." not in PurePosixPath(normalized).parts
+
+
+def _normalize_absolute_artifact_path(value: Any) -> str | None:
+    """Return a strict concrete POSIX path or ``None``.
+
+    Forensic evidence is compared as a normalized absolute path, but path
+    spellings that require interpretation are rejected rather than normalized
+    into authorization.  In particular, traversal, relative paths, duplicate
+    leading separators, dot segments, and token-bearing observations are not
+    valid concrete evidence.
+    """
+
+    if not isinstance(value, str) or not value or "\x00" in value or "$" in value:
+        return None
+    if not value.startswith("/") or value.startswith("//"):
+        return None
+    pure = PurePosixPath(value)
+    if not pure.is_absolute() or ".." in pure.parts:
+        return None
+    normalized = posixpath.normpath(value)
+    if normalized != value or not normalized.startswith("/") or normalized.startswith("//"):
+        return None
+    return normalized
+
+
+def normalize_observed_artifact_path(value: Any) -> str | None:
+    """Normalize one concrete receipt/snapshot artifact path if authorized."""
+
+    return _normalize_absolute_artifact_path(value)
+
+
+def resolve_canonical_artifact_path(declared: Any) -> str | None:
+    """Expand the manifest's narrowly allowed path tokens to one path.
+
+    ``$HOME``, ``$XDG_CONFIG_HOME``, and ``$XDG_STATE_HOME`` have the same
+    deterministic defaults as the Doctor acceptance boundary.  ``$PREFIX``,
+    ``$LIBEXEC``, and ``$SYSCONF`` must be explicitly supplied as safe absolute
+    environment values.  Unknown or unresolved tokens never become part of an
+    authorized path.
+    """
+
+    if not isinstance(declared, str) or not declared or "\x00" in declared:
+        return None
+    tokens = _PATH_TOKEN_RE.findall(declared)
+    if any(token not in _CANONICAL_PATH_TOKENS for token in tokens):
+        return None
+    if "$" in declared and not tokens:
+        return None
+
+    defaults = {
+        "$HOME": str(Path.home()),
+        "$XDG_CONFIG_HOME": str(Path.home() / ".config"),
+        "$XDG_STATE_HOME": str(Path.home() / ".local" / "state"),
+    }
+    replacements: dict[str, str] = {}
+    for token in tokens:
+        if token in defaults:
+            value = os.environ.get(token[1:]) or defaults[token]
+        else:
+            value = os.environ.get(token[1:])
+        normalized = _normalize_absolute_artifact_path(value)
+        if normalized is None:
+            return None
+        replacements[token] = normalized
+
+    expanded = declared
+    for token, value in replacements.items():
+        expanded = expanded.replace(token, value)
+    return _normalize_absolute_artifact_path(expanded)
+
+
+def canonical_artifact_path_matches(declared: Any, observed: Any) -> bool:
+    """Return whether concrete evidence is exactly the manifest's path."""
+
+    authorized = resolve_canonical_artifact_path(declared)
+    concrete = normalize_observed_artifact_path(observed)
+    return authorized is not None and concrete == authorized
 
 
 def _insert_unique(target: dict[str, Any], key: str, value: Any, *, what: str) -> None:

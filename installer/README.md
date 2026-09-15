@@ -777,7 +777,7 @@ current health snapshot (later read-only observation)
 `realmheart_maintenance.forensics` provides:
 
 - strict, symlink-safe loading of schema-v2 `installed-state.json`;
-- a schema-v1 read-only current-health snapshot shape;
+- a schema-v2 read-only current-health snapshot shape with path-bound artifact observations (legacy schema-v1 snapshots are loaded as path-uncertain evidence);
 - dependency, artifact, manifest-identity, activation, and runtime drift records;
 - stable `RH_FORENSIC_*` error vocabulary;
 - dependency-root incident collapsing with transitive affected components;

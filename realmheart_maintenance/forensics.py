@@ -17,10 +17,19 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
-from .manifest import ManifestRegistry, ParsedVersion, VersionCompatibility, VersionSpec, classify_version
+from .manifest import (
+    ManifestRegistry,
+    ParsedVersion,
+    VersionCompatibility,
+    VersionSpec,
+    classify_version,
+    normalize_observed_artifact_path,
+    resolve_canonical_artifact_path,
+)
 
 SUPPORTED_RECEIPT_SCHEMA = 2
-SUPPORTED_HEALTH_SNAPSHOT_SCHEMA = 1
+SUPPORTED_HEALTH_SNAPSHOT_SCHEMA = 2
+LEGACY_HEALTH_SNAPSHOT_SCHEMA = 1
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _RECEIPT_CAPABILITY_STATES = {"pass", "missing", "failed", "not_applicable"}
 _SNAPSHOT_CAPABILITY_STATES = _RECEIPT_CAPABILITY_STATES | {"unknown"}
@@ -142,6 +151,7 @@ class ArtifactObservation:
     error: str | None = None
     filesystem_type: str | None = None
     outcome: ObservationOutcome | None = None
+    path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +162,49 @@ class CurrentHealthSnapshot:
     runtime_health: str
     capabilities: Mapping[str, CapabilityObservation]
     artifacts: Mapping[str, ArtifactObservation]
+
+
+def serialize_health_snapshot(snapshot: CurrentHealthSnapshot) -> dict[str, object]:
+    """Return the JSON contract for a current-health snapshot.
+
+    The path is serialized even when ``None`` so a legacy or incomplete
+    in-memory observation cannot be mistaken for a path-bound observation by a
+    downstream consumer.
+    """
+
+    capabilities = {
+        capability_id: {
+            "state": observation.state,
+            "version": observation.version,
+            "detail": observation.detail,
+        }
+        for capability_id, observation in snapshot.capabilities.items()
+    }
+    artifacts = {
+        artifact_id: {
+            "path": observation.path,
+            "exists": observation.exists,
+            "sha256": observation.sha256,
+            "immutable_fingerprint": observation.immutable_fingerprint,
+            "mode": observation.mode,
+            "error": observation.error,
+            "filesystem_type": observation.filesystem_type,
+            "outcome": (
+                observation.outcome.value
+                if isinstance(observation.outcome, ObservationOutcome)
+                else observation.outcome
+            ),
+        }
+        for artifact_id, observation in snapshot.artifacts.items()
+    }
+    return {
+        "schema_version": snapshot.schema_version,
+        "captured_at": snapshot.captured_at,
+        "activation_state": snapshot.activation_state,
+        "runtime_health": snapshot.runtime_health,
+        "capabilities": capabilities,
+        "artifacts": artifacts,
+    }
 
 
 @dataclass(frozen=True)
@@ -266,10 +319,7 @@ def _valid_digest(value: Any) -> bool:
 
 
 def _valid_observed_path(value: Any) -> bool:
-    if not isinstance(value, str) or not value or "\x00" in value:
-        return False
-    candidate = Path(value)
-    return candidate.is_absolute() and ".." not in candidate.parts
+    return normalize_observed_artifact_path(value) is not None
 
 
 def canonical_filesystem_type(artifact_type: str) -> str:
@@ -579,8 +629,11 @@ def parse_health_snapshot(payload: Mapping[str, Any]) -> CurrentHealthSnapshot:
         raise ForensicContractError(
             f"health snapshot schema {schema} is newer than supported schema {SUPPORTED_HEALTH_SNAPSHOT_SCHEMA}"
         )
-    if schema != SUPPORTED_HEALTH_SNAPSHOT_SCHEMA:
-        raise ForensicContractError(f"unsupported health snapshot schema {schema}")
+    if schema not in {LEGACY_HEALTH_SNAPSHOT_SCHEMA, SUPPORTED_HEALTH_SNAPSHOT_SCHEMA}:
+        raise ForensicContractError(
+            f"unsupported health snapshot schema {schema}; "
+            f"artifact path binding requires schema {SUPPORTED_HEALTH_SNAPSHOT_SCHEMA}"
+        )
 
     capabilities_raw = _expect_mapping(payload.get("capabilities", {}), "health snapshot capabilities")
     artifacts_raw = _expect_mapping(payload.get("artifacts", {}), "health snapshot artifacts")
@@ -638,6 +691,7 @@ def parse_health_snapshot(payload: Mapping[str, Any]) -> CurrentHealthSnapshot:
         mode = _optional_string(item.get("mode"), f"health snapshot artifact {aid} mode")
         if mode is not None and (len(mode) != 4 or any(char not in "01234567" for char in mode)):
             raise ForensicContractError(f"health snapshot artifact {aid} mode must be four octal digits or null")
+        observed_path = _optional_string(item.get("path"), f"health snapshot artifact {aid} path")
         artifacts[aid] = ArtifactObservation(
             artifact_id=aid,
             exists=exists,
@@ -649,6 +703,7 @@ def parse_health_snapshot(payload: Mapping[str, Any]) -> CurrentHealthSnapshot:
             error=error,
             filesystem_type=filesystem_type,
             outcome=outcome,
+            path=observed_path,
         )
 
     activation_state = _expect_string(payload.get("activation_state"), "health snapshot activation_state")
@@ -759,10 +814,12 @@ def _artifact_failure_severity(registry: ManifestRegistry, artifact_spec) -> str
     return "error" if artifact_spec.required else "warning"
 
 
-def _repair_readiness(registry: ManifestRegistry, snapshot: CurrentHealthSnapshot) -> ReadinessState:
+def _repair_readiness(
+    registry: ManifestRegistry,
+    snapshot: CurrentHealthSnapshot,
+    drifts: Sequence[DriftRecord] = (),
+) -> ReadinessState:
     relevant = [cap for cap in registry.capabilities.values() if _REPAIR_LIFECYCLES.intersection(cap.lifecycle)]
-    if not relevant:
-        return ReadinessState.HEALTHY
     has_unknown = False
     worst = ReadinessState.HEALTHY
     for cap in relevant:
@@ -794,6 +851,21 @@ def _repair_readiness(registry: ManifestRegistry, snapshot: CurrentHealthSnapsho
                 worst = ReadinessState.DEGRADED
         elif requires_success:
             worst = ReadinessState.FAILED
+        elif worst is not ReadinessState.FAILED:
+            worst = ReadinessState.DEGRADED
+    for drift in drifts:
+        if drift.error_code not in {
+            "RH_FORENSIC_ARTIFACT_PATH_DRIFT",
+            "RH_FORENSIC_ARTIFACT_PATH_UNKNOWN",
+        }:
+            continue
+        artifact = registry.artifacts.get(drift.subject_id)
+        if artifact is None:
+            continue
+        if drift.error_code == "RH_FORENSIC_ARTIFACT_PATH_DRIFT" and artifact.required:
+            worst = ReadinessState.FAILED
+        elif artifact.required:
+            has_unknown = True
         elif worst is not ReadinessState.FAILED:
             worst = ReadinessState.DEGRADED
     if worst is ReadinessState.FAILED:
@@ -1278,6 +1350,124 @@ def analyze_forensics(
                 summary=f"capability {capid} version changed from {accepted.version} to {current.version}",
             )
 
+    def check_artifact_path_binding(
+        artifact_id: str,
+        manifest_artifact,
+        accepted: ReceiptArtifact | None,
+        current: ArtifactObservation | None,
+    ) -> None:
+        authorized = resolve_canonical_artifact_path(manifest_artifact.path)
+        if authorized is None:
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_ARTIFACT_PATH_UNKNOWN",
+                "warning",
+                artifact_id,
+                component_id=manifest_artifact.component_id,
+                previous=manifest_artifact.path,
+                current="unresolved",
+                affects_runtime=True,
+                affects_repair=True,
+                summary=(
+                    f"artifact {artifact_id} canonical manifest path cannot be resolved "
+                    "using the allowed path-token environment"
+                ),
+            )
+            return
+
+        if accepted is not None:
+            observed = normalize_observed_artifact_path(accepted.path)
+            if observed is None:
+                add(
+                    DriftKind.ARTIFACT,
+                    "RH_FORENSIC_ARTIFACT_PATH_UNKNOWN",
+                    "warning",
+                    artifact_id,
+                    component_id=manifest_artifact.component_id,
+                    previous=authorized,
+                    current="unknown",
+                    affects_runtime=True,
+                    affects_repair=True,
+                    summary=f"artifact {artifact_id} receipt path is missing, relative, or ambiguous",
+                )
+            elif observed != authorized:
+                add(
+                    DriftKind.ARTIFACT,
+                    "RH_FORENSIC_ARTIFACT_PATH_DRIFT",
+                    _artifact_failure_severity(registry, manifest_artifact),
+                    artifact_id,
+                    component_id=manifest_artifact.component_id,
+                    previous=authorized,
+                    current=observed,
+                    affects_runtime=True,
+                    affects_repair=True,
+                    summary=(
+                        f"artifact {artifact_id} receipt path {observed} does not match "
+                        f"the canonical authorized path {authorized}"
+                    ),
+                )
+
+        if current is None:
+            return
+        if snapshot.schema_version < SUPPORTED_HEALTH_SNAPSHOT_SCHEMA:
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_ARTIFACT_PATH_UNKNOWN",
+                "warning",
+                artifact_id,
+                component_id=manifest_artifact.component_id,
+                previous=authorized,
+                current=f"snapshot-schema-{snapshot.schema_version}",
+                affects_runtime=True,
+                affects_repair=True,
+                summary=(
+                    f"artifact {artifact_id} current path evidence uses health snapshot schema "
+                    f"{snapshot.schema_version}, which predates artifact path binding"
+                ),
+            )
+            return
+        observed = normalize_observed_artifact_path(current.path)
+        if observed is None:
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_ARTIFACT_PATH_UNKNOWN",
+                "warning",
+                artifact_id,
+                component_id=manifest_artifact.component_id,
+                previous=authorized,
+                current="unknown",
+                affects_runtime=True,
+                affects_repair=True,
+                summary=f"artifact {artifact_id} current path is missing, relative, or ambiguous",
+            )
+        elif observed != authorized:
+            add(
+                DriftKind.ARTIFACT,
+                "RH_FORENSIC_ARTIFACT_PATH_DRIFT",
+                _artifact_failure_severity(registry, manifest_artifact),
+                artifact_id,
+                component_id=manifest_artifact.component_id,
+                previous=authorized,
+                current=observed,
+                affects_runtime=True,
+                affects_repair=True,
+                summary=(
+                    f"artifact {artifact_id} current path {observed} does not match "
+                    f"the canonical authorized path {authorized}"
+                ),
+            )
+
+    for artifact_id in sorted(
+        (set(receipt.artifacts) | set(snapshot.artifacts)) & set(registry.artifacts)
+    ):
+        manifest_artifact = registry.artifacts[artifact_id]
+        check_artifact_path_binding(
+            artifact_id,
+            manifest_artifact,
+            receipt.artifacts.get(artifact_id),
+            snapshot.artifacts.get(artifact_id),
+        )
+
     for aid, accepted in receipt.artifacts.items():
         current = snapshot.artifacts.get(aid)
         manifest_artifact = registry.artifacts.get(aid)
@@ -1389,6 +1579,7 @@ def analyze_forensics(
                 ("sha256", current.sha256),
                 ("immutable_fingerprint", current.immutable_fingerprint),
                 ("mode", current.mode),
+                ("path", current.path),
                 ("filesystem_type", current.filesystem_type),
                 ("error", current.error),
             )
@@ -1396,6 +1587,7 @@ def analyze_forensics(
                 (field == "exists" and type(value) is not bool)
                 or (field in {"sha256", "immutable_fingerprint"} and not _valid_digest(value))
                 or (field == "mode" and not _valid_mode(value))
+                or (field == "path" and not _valid_observed_path(value))
                 or (field == "filesystem_type" and value is not None and value not in _FILESYSTEM_TYPES)
                 or (field == "error" and value is not None and not isinstance(value, str))
             )
@@ -1724,7 +1916,7 @@ def analyze_forensics(
         receipt_transaction_id=receipt.transaction_id,
         snapshot_captured_at=snapshot.captured_at,
         runtime_health=snapshot.runtime_health,
-        repair_readiness=_repair_readiness(registry, snapshot),
+        repair_readiness=_repair_readiness(registry, snapshot, drifts),
         selected_health_check_ids=select_health_checks(
             registry, context=health_context, max_cost=max_health_cost
         ),

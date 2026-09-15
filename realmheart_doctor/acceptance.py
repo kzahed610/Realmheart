@@ -14,7 +14,7 @@ import stat
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -39,7 +39,12 @@ from realmheart_maintenance.forensics import (
     classify_capability_version,
     version_evidence_line,
 )
-from realmheart_maintenance.manifest import ManifestRegistry, ParsedVersion, VersionCompatibility
+from realmheart_maintenance.manifest import (
+    ManifestRegistry,
+    ParsedVersion,
+    VersionCompatibility,
+    canonical_artifact_path_matches,
+)
 
 from .models import AcceptanceAssessment, AcceptanceFinding, AcceptanceRecommendation
 
@@ -55,10 +60,6 @@ _CANDIDATE_CAPABILITY_STATES = {"pass", "missing", "failed", "not_applicable"}
 _CANDIDATE_INSTALL_HEALTH = {"healthy", "degraded", "failed"}
 _CANDIDATE_ACTIVATION_STATES = {"active", "pending_session_restart", "unknown", "failed"}
 _CANDIDATE_RUNTIME_HEALTH = {"healthy", "degraded", "failed", "unknown"}
-_CANONICAL_PATH_TOKENS = {
-    "$HOME", "$XDG_CONFIG_HOME", "$XDG_STATE_HOME", "$PREFIX", "$LIBEXEC", "$SYSCONF",
-}
-_PATH_TOKEN_RE = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*")
 
 
 class DoctorAcceptanceError(ValueError):
@@ -124,38 +125,7 @@ def _validate_coverage(
 def _canonical_path_matches(declared: str, candidate: str) -> bool:
     """Accept only exact paths resolved from explicit canonical variables."""
 
-    if "\x00" in declared or "\x00" in candidate:
-        return False
-    if not Path(candidate).is_absolute() or ".." in PurePosixPath(candidate).parts:
-        return False
-    tokens = _PATH_TOKEN_RE.findall(declared)
-    if any(token not in _CANONICAL_PATH_TOKENS for token in tokens):
-        return False
-    if "$" in declared and not tokens:
-        return False
-
-    replacements: dict[str, str] = {}
-    defaults = {
-        "$HOME": str(Path.home()),
-        "$XDG_CONFIG_HOME": str(Path.home() / ".config"),
-        "$XDG_STATE_HOME": str(Path.home() / ".local" / "state"),
-    }
-    for token, default in defaults.items():
-        value = os.environ.get(token[1:]) or default
-        if not Path(value).is_absolute() or ".." in PurePosixPath(value).parts:
-            return False
-        replacements[token] = value
-    for token in ("$PREFIX", "$LIBEXEC", "$SYSCONF"):
-        value = os.environ.get(token[1:])
-        if not value or not Path(value).is_absolute() or ".." in PurePosixPath(value).parts:
-            if token in tokens:
-                return False
-            continue
-        replacements[token] = value
-    expanded = declared
-    for token, value in replacements.items():
-        expanded = expanded.replace(token, value)
-    return expanded == candidate
+    return canonical_artifact_path_matches(declared, candidate)
 
 
 def load_candidate_bundle(
@@ -678,6 +648,7 @@ def _observe_artifact(
         return ArtifactObservation(
             accepted.artifact_id,
             False,
+            path=accepted.path,
             filesystem_type=None,
             outcome=ObservationOutcome.MISSING,
         )
@@ -685,6 +656,7 @@ def _observe_artifact(
         return ArtifactObservation(
             accepted.artifact_id,
             False,
+            path=accepted.path,
             error=f"{type(exc).__name__}: {exc}",
             outcome=ObservationOutcome.UNKNOWN,
         )
@@ -701,6 +673,7 @@ def _observe_artifact(
         return ArtifactObservation(
             accepted.artifact_id,
             True,
+            path=accepted.path,
             sha256=sha,
             immutable_fingerprint=fingerprint,
             mode=mode,
@@ -712,6 +685,7 @@ def _observe_artifact(
         return ArtifactObservation(
             accepted.artifact_id,
             True,
+            path=accepted.path,
             sha256=sha,
             immutable_fingerprint=fingerprint,
             mode=mode,
@@ -722,6 +696,7 @@ def _observe_artifact(
     return ArtifactObservation(
         accepted.artifact_id,
         True,
+        path=accepted.path,
         sha256=sha,
         immutable_fingerprint=fingerprint,
         mode=mode,
@@ -752,7 +727,7 @@ def _current_snapshot(registry: ManifestRegistry, candidate: InstalledStateRecei
         for aid, accepted in candidate.artifacts.items()
     }
     return CurrentHealthSnapshot(
-        schema_version=1,
+        schema_version=2,
         captured_at=datetime.now(timezone.utc).isoformat(),
         activation_state=candidate.activation_state,
         runtime_health=candidate.runtime_health,
@@ -852,7 +827,10 @@ def assess_candidate_install(registry: ManifestRegistry, payload: Mapping[str, A
                 add("RH_DOCTOR_CAPABILITY_VERSION_UNKNOWN", "warning", drift.subject_id, drift.summary)
             elif critical_evidence:
                 add("RH_DOCTOR_CAPABILITY_UNCERTAIN", "warning", drift.subject_id, drift.summary)
-        if drift.error_code == "RH_FORENSIC_ARTIFACT_UNKNOWN":
+        if drift.error_code in {
+            "RH_FORENSIC_ARTIFACT_UNKNOWN",
+            "RH_FORENSIC_ARTIFACT_PATH_UNKNOWN",
+        }:
             artifact = registry.artifacts.get(drift.subject_id)
             if artifact is not None and artifact.required:
                 uncertain = True

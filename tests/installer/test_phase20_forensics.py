@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,7 @@ from realmheart_maintenance import (
     load_health_snapshot,
     load_installed_receipt,
     load_manifest,
+    serialize_health_snapshot,
     select_health_checks,
 )
 from realmheart_installer.finalization import build_installed_state_receipt
@@ -40,6 +42,26 @@ class Phase20ForensicContractTests(unittest.TestCase):
         helper = Phase13VerificationTests()
         helper.setUp()
         paths, runner, plan, build = helper._fixture(root / "fixture")
+        fixture_root = root / "fixture"
+        environment = {
+            "HOME": str(fixture_root / "home"),
+            "XDG_CONFIG_HOME": str(fixture_root / "cfg"),
+            "XDG_STATE_HOME": str(fixture_root / "state"),
+            "PREFIX": str(fixture_root / "prefix"),
+            "LIBEXEC": str(fixture_root / "prefix" / "libexec"),
+            "SYSCONF": str(fixture_root / "etc"),
+        }
+        previous_environment = {key: os.environ.get(key) for key in environment}
+        os.environ.update(environment)
+
+        def restore_environment() -> None:
+            for key, value in previous_environment.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.addCleanup(restore_environment)
         report = helper._engine(paths, runner, plan, build).run()
         payload = build_installed_state_receipt(plan, report)
         path = root / "installed-state.json"
@@ -57,6 +79,7 @@ class Phase20ForensicContractTests(unittest.TestCase):
         }
         artifacts = {
             aid: {
+                "path": item["path"],
                 "exists": True,
                 "sha256": item.get("sha256"),
                 "immutable_fingerprint": item.get("immutable_fingerprint"),
@@ -66,7 +89,7 @@ class Phase20ForensicContractTests(unittest.TestCase):
             for aid, item in receipt["artifacts"].items()
         }
         payload: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "captured_at": "2026-09-13T12:00:00+00:00",
             "activation_state": receipt["activation_state"],
             "runtime_health": receipt["runtime_health"],
@@ -76,6 +99,204 @@ class Phase20ForensicContractTests(unittest.TestCase):
         path = root / "current-health.json"
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return path, payload
+
+    def _path_binding_case(
+        self,
+        root: Path,
+        *,
+        receipt_path_override: str | None = None,
+        snapshot_path_override: str | None = None,
+        omit_snapshot_path: bool = False,
+        unresolved_manifest_path: bool = False,
+        optional: bool = False,
+        legacy_snapshot_schema: bool = False,
+        omit_receipt_artifact: bool = False,
+    ) -> ForensicReport:
+        receipt_path, receipt_payload = self._generated_receipt(root)
+        snapshot_path, snapshot_payload = self._snapshot_from_receipt(root, receipt_payload)
+        receipt_artifacts = receipt_payload["artifacts"]
+        snapshot_artifacts = snapshot_payload["artifacts"]
+        if not isinstance(receipt_artifacts, dict) or not isinstance(snapshot_artifacts, dict):
+            self.fail("synthetic artifact records must be objects")
+
+        for aid, item in receipt_artifacts.items():
+            if not isinstance(item, dict) or not isinstance(snapshot_artifacts.get(aid), dict):
+                self.fail(f"synthetic artifact {aid} records must be objects")
+            snapshot_item = snapshot_artifacts[aid]
+            if not isinstance(snapshot_item, dict):
+                self.fail(f"synthetic artifact {aid} snapshot must be an object")
+            snapshot_item["path"] = item["path"]
+        canonical_paths = {
+            aid: str(item["path"])
+            for aid, item in receipt_artifacts.items()
+            if isinstance(item, dict)
+        }
+
+        target_id = "core.binary"
+        target_receipt = receipt_artifacts[target_id]
+        target_snapshot = snapshot_artifacts[target_id]
+        if not isinstance(target_receipt, dict) or not isinstance(target_snapshot, dict):
+            self.fail("synthetic core.binary records must be objects")
+        if receipt_path_override is not None:
+            target_receipt["path"] = receipt_path_override
+        if snapshot_path_override is not None:
+            target_snapshot["path"] = snapshot_path_override
+        if omit_snapshot_path:
+            target_snapshot.pop("path", None)
+        if omit_receipt_artifact:
+            receipt_artifacts.pop(target_id, None)
+
+        artifacts = {
+            aid: replace(
+                spec,
+                path=(
+                    "$UNRESOLVED/bin/realmheart"
+                    if aid == target_id and unresolved_manifest_path
+                    else canonical_paths[aid]
+                ),
+                required=(False if aid == target_id and optional else spec.required),
+            )
+            for aid, spec in self.registry.artifacts.items()
+        }
+        registry = replace(self.registry, artifacts=artifacts, capabilities={})
+        if legacy_snapshot_schema:
+            snapshot_payload["schema_version"] = 1
+
+        receipt_path.write_text(json.dumps(receipt_payload), encoding="utf-8")
+        snapshot_path.write_text(json.dumps(snapshot_payload), encoding="utf-8")
+        return analyze_forensics(
+            registry,
+            load_installed_receipt(receipt_path),
+            load_health_snapshot(snapshot_path),
+        )
+
+    def test_receipt_artifact_path_redirect_is_not_hidden_by_matching_snapshot_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._path_binding_case(
+                Path(temp),
+                receipt_path_override="/tmp/unauthorized-receipt-target",
+            )
+
+            drifts = [
+                item for item in report.drifts
+                if item.subject_id == "core.binary"
+                and item.error_code == "RH_FORENSIC_ARTIFACT_PATH_DRIFT"
+            ]
+            self.assertEqual(len(drifts), 1)
+            self.assertEqual(drifts[0].severity, "critical")
+            self.assertEqual(report.repair_readiness, ReadinessState.FAILED)
+
+    def test_snapshot_artifact_path_redirect_is_not_hidden_by_matching_receipt_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._path_binding_case(
+                Path(temp),
+                snapshot_path_override="/tmp/unauthorized-snapshot-target",
+            )
+
+            drifts = [
+                item for item in report.drifts
+                if item.subject_id == "core.binary"
+                and item.error_code == "RH_FORENSIC_ARTIFACT_PATH_DRIFT"
+            ]
+            self.assertEqual(len(drifts), 1)
+            self.assertEqual(drifts[0].severity, "critical")
+            self.assertEqual(report.repair_readiness, ReadinessState.FAILED)
+
+    def test_missing_snapshot_artifact_path_is_explicitly_uncertain(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._path_binding_case(Path(temp), omit_snapshot_path=True)
+
+            drifts = [
+                item for item in report.drifts
+                if item.subject_id == "core.binary"
+                and item.error_code == "RH_FORENSIC_ARTIFACT_PATH_UNKNOWN"
+            ]
+            self.assertEqual(len(drifts), 1)
+            self.assertEqual(drifts[0].severity, "warning")
+            self.assertEqual(report.repair_readiness, ReadinessState.UNKNOWN)
+
+    def test_unresolved_manifest_artifact_token_is_not_authorized(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._path_binding_case(Path(temp), unresolved_manifest_path=True)
+
+            drifts = [
+                item for item in report.drifts
+                if item.subject_id == "core.binary"
+                and item.error_code == "RH_FORENSIC_ARTIFACT_PATH_UNKNOWN"
+            ]
+            self.assertGreaterEqual(len(drifts), 1)
+            self.assertEqual(report.repair_readiness, ReadinessState.UNKNOWN)
+
+    def test_valid_canonical_artifact_path_is_clean_for_path_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._path_binding_case(Path(temp))
+
+            self.assertFalse(any(
+                item.subject_id == "core.binary"
+                and "PATH_" in item.error_code
+                for item in report.drifts
+            ))
+
+    def test_optional_artifact_path_redirect_is_warning_and_degraded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._path_binding_case(
+                Path(temp),
+                snapshot_path_override="/tmp/unauthorized-optional-target",
+                optional=True,
+            )
+
+            drift = next(
+                item for item in report.drifts
+                if item.subject_id == "core.binary"
+                and item.error_code == "RH_FORENSIC_ARTIFACT_PATH_DRIFT"
+            )
+            self.assertEqual(drift.severity, "warning")
+            self.assertEqual(report.repair_readiness, ReadinessState.DEGRADED)
+
+    def test_snapshot_path_is_checked_even_when_receipt_omits_artifact_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._path_binding_case(
+                Path(temp),
+                snapshot_path_override="/tmp/unauthorized-without-receipt-target",
+                omit_receipt_artifact=True,
+            )
+
+            drift = next(
+                item for item in report.drifts
+                if item.subject_id == "core.binary"
+                and item.error_code == "RH_FORENSIC_ARTIFACT_PATH_DRIFT"
+            )
+            self.assertEqual(drift.severity, "critical")
+            self.assertEqual(report.repair_readiness, ReadinessState.FAILED)
+
+    def test_legacy_snapshot_schema_is_loaded_but_path_uncertain(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._path_binding_case(Path(temp), legacy_snapshot_schema=True)
+
+            self.assertTrue(any(
+                item.subject_id == "core.binary"
+                and item.error_code == "RH_FORENSIC_ARTIFACT_PATH_UNKNOWN"
+                for item in report.drifts
+            ))
+            self.assertEqual(report.repair_readiness, ReadinessState.UNKNOWN)
+
+    def test_snapshot_serializer_preserves_observed_artifact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            receipt_path, receipt_payload = self._generated_receipt(Path(temp))
+            snapshot_path, _ = self._snapshot_from_receipt(Path(temp), receipt_payload)
+            snapshot = load_health_snapshot(snapshot_path)
+
+            serialized = serialize_health_snapshot(snapshot)
+            artifacts = serialized["artifacts"]
+            if not isinstance(artifacts, dict):
+                self.fail("serialized artifact collection must be an object")
+            serialized_artifact = artifacts["core.binary"]
+            if not isinstance(serialized_artifact, dict):
+                self.fail("serialized core.binary observation must be an object")
+            self.assertEqual(
+                serialized_artifact["path"],
+                load_installed_receipt(receipt_path).artifacts["core.binary"].path,
+            )
 
     def _report_for_capability_state(
         self,
@@ -580,7 +801,7 @@ class Phase20ForensicContractTests(unittest.TestCase):
             receipt = load_installed_receipt(receipt_path)
             artifact = receipt.artifacts["core.binary"]
             snapshot = CurrentHealthSnapshot(
-                schema_version=1,
+                schema_version=2,
                 captured_at="2026-09-13T12:00:00+00:00",
                 activation_state=receipt.activation_state,
                 runtime_health=receipt.runtime_health,
@@ -589,6 +810,7 @@ class Phase20ForensicContractTests(unittest.TestCase):
                     "core.binary": ArtifactObservation(
                         artifact_id="core.binary",
                         exists=True,
+                        path=artifact.path,
                         sha256=artifact.sha256,
                         immutable_fingerprint=artifact.immutable_fingerprint,
                         mode=artifact.mode,
@@ -640,12 +862,18 @@ class Phase20ForensicContractTests(unittest.TestCase):
             root = Path(temp)
             receipt_path, receipt_payload = self._generated_receipt(root)
             snapshot = CurrentHealthSnapshot(
-                schema_version=1,
+                schema_version=2,
                 captured_at="2026-09-13T12:00:00+00:00",
                 activation_state=receipt_payload["activation_state"],
                 runtime_health=receipt_payload["runtime_health"],
                 capabilities={},
-                artifacts={"core.binary": ArtifactObservation("core.binary", False)},
+                artifacts={
+                    "core.binary": ArtifactObservation(
+                        "core.binary",
+                        False,
+                        path=load_installed_receipt(receipt_path).artifacts["core.binary"].path,
+                    )
+                },
             )
 
             report = analyze_forensics(
