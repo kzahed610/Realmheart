@@ -575,6 +575,36 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             )
             self.assertFalse(any(call[0] == "run" for call in ops.calls))
 
+    def test_default_descriptor_operation_executes_regular_artifact(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry, _, _ = _manifest(Path(temp))
+            artifacts = dict(registry.artifacts)
+            artifacts["demo.exec"] = replace(
+                artifacts["demo.exec"],
+                path=PYTHON_EXECUTABLE,
+            )
+            checks = dict(registry.health_checks)
+            checks["check.version"] = replace(
+                checks["check.version"],
+                artifact_id="demo.exec",
+                args={
+                    "args": ["-c", "print('Demo 1.2.3')"],
+                    "version_prefix": "demo",
+                },
+            )
+            registry = replace(
+                registry,
+                artifacts=artifacts,
+                health_checks=checks,
+            )
+
+            result = HealthCheckExecutor(max_seconds=2).execute(
+                registry, check_ids=("check.version",)
+            ).result_for("check.version")
+
+            self.assertEqual(result.status, HealthStatus.PASS)
+            self.assertEqual(result.value, "1.2.3")
+
     def test_default_descriptor_operation_rejects_symlinked_artifact(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
