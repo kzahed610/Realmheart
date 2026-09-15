@@ -40,3 +40,34 @@ class AcceptanceAssessment:
         payload = asdict(self)
         payload["recommendation"] = self.recommendation.value
         return payload
+
+
+# Doctor health models live with their executor so the operations seam and the
+# result contract cannot drift apart.  Re-export the model names here for
+# callers that use this package's established models module.
+from .health import (  # noqa: E402
+    HealthCheckExecutionReport,
+    HealthCheckExecutionResult,
+    HealthCheckReport,
+    HealthCheckResult,
+    HealthCheckRun,
+    HealthCheckState,
+    HealthCheckStatus,
+    HealthCheckOutcome,
+    HealthStatus,
+)
+
+__all__ = [
+    "AcceptanceAssessment",
+    "AcceptanceFinding",
+    "AcceptanceRecommendation",
+    "HealthCheckExecutionReport",
+    "HealthCheckExecutionResult",
+    "HealthCheckReport",
+    "HealthCheckResult",
+    "HealthCheckRun",
+    "HealthCheckState",
+    "HealthCheckStatus",
+    "HealthCheckOutcome",
+    "HealthStatus",
+]
