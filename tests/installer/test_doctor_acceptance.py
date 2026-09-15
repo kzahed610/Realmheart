@@ -25,12 +25,14 @@ from realmheart_doctor.acceptance import (
 from realmheart_doctor.cli import main as doctor_main
 from realmheart_maintenance.forensics import ForensicContractError
 from realmheart_maintenance.fingerprint import (
+    DescriptorSafetyError,
     FingerprintLimitExceeded,
     FingerprintObservationError,
     MAX_FINGERPRINT_BYTES,
     MAX_FINGERPRINT_DEPTH,
     MAX_FINGERPRINT_ENTRIES,
     MAX_FINGERPRINT_SECONDS,
+    _open_descriptor,
     fingerprint_path,
     observe_path,
 )
@@ -650,6 +652,64 @@ class DoctorAcceptanceTests(unittest.TestCase):
             self.assertEqual(observation.filesystem_type, "file")
             self.assertEqual(observation.sha256, hashlib.sha256(b"bound content").hexdigest())
             self.assertEqual(observation.immutable_fingerprint, fingerprint_path(artifact))
+
+    def test_relative_open_notimplemented_is_structured_descriptor_safety_error(self):
+        with patch(
+            "realmheart_maintenance.fingerprint._descriptor_flags",
+            return_value=0,
+        ), patch(
+            "realmheart_maintenance.fingerprint._open",
+            side_effect=NotImplementedError("dir_fd is unsupported"),
+        ) as open_mock:
+            with self.assertRaisesRegex(DescriptorSafetyError, "descriptor-relative open") as raised:
+                _open_descriptor("child", dir_fd=42)
+
+        self.assertEqual(raised.exception.reason, "unsupported")
+        open_mock.assert_called_once()
+        self.assertEqual(open_mock.call_args.kwargs["dir_fd"], 42)
+
+    def test_non_directory_open_requires_nonblocking_before_open(self):
+        with patch.dict(
+            os.__dict__,
+            {"O_NOFOLLOW": 0x100, "O_NONBLOCK": None},
+        ), patch("realmheart_maintenance.fingerprint._open") as open_mock:
+            with self.assertRaisesRegex(DescriptorSafetyError, "non-blocking") as raised:
+                _open_descriptor("regular-file")
+
+        self.assertEqual(raised.exception.reason, "unsupported")
+        open_mock.assert_not_called()
+
+    def test_directory_open_preserves_directory_semantics_without_nonblocking(self):
+        with patch.dict(
+            os.__dict__,
+            {"O_NOFOLLOW": 0x100, "O_DIRECTORY": 0x200, "O_CLOEXEC": None, "O_NONBLOCK": None},
+        ), patch("realmheart_maintenance.fingerprint._open", return_value=123) as open_mock:
+            descriptor = _open_descriptor("directory", directory=True, dir_fd=42)
+
+        self.assertEqual(descriptor, 123)
+        open_mock.assert_called_once_with("directory", os.O_RDONLY | 0x100 | 0x200, dir_fd=42)
+
+    def test_unsupported_relative_open_is_unknown_artifact_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, artifact = _manifest(root, artifact_type="directory")
+            artifact.mkdir()
+            (artifact / "child").write_text("bound content", encoding="utf-8")
+            payload = _candidate(registry, artifact)
+
+            def unsupported_relative_open(path, flags, *, dir_fd=None):
+                if dir_fd is not None:
+                    raise NotImplementedError("dir_fd is unsupported")
+                return os.open(path, flags)
+
+            with patch(
+                "realmheart_maintenance.fingerprint._open",
+                side_effect=unsupported_relative_open,
+            ):
+                result = assess_candidate_install(registry, payload)
+
+            self.assertEqual(result.recommendation, AcceptanceRecommendation.INDETERMINATE)
+            self.assertTrue(any(item.code == "RH_FORENSIC_ARTIFACT_UNKNOWN" for item in result.findings))
 
     def test_directory_fingerprint_limits_entries_and_content_bytes(self):
         with tempfile.TemporaryDirectory() as temp:

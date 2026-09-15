@@ -1095,6 +1095,23 @@ contexts = ["doctor_background"]
                 with self.assertRaisesRegex(ForensicContractError, "cannot read installed-state receipt"):
                     load_installed_receipt(receipt)
 
+    def test_receipt_loader_surfaces_missing_nonblocking_as_contract_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            receipt = Path(temp) / "installed-state.json"
+            receipt.write_text("{}", encoding="utf-8")
+
+            with patch.dict(
+                os.__dict__,
+                {"O_NOFOLLOW": 0x100, "O_NONBLOCK": None},
+            ):
+                with self.assertRaisesRegex(
+                    ForensicContractError,
+                    "cannot read installed-state receipt.*non-blocking",
+                ) as raised:
+                    load_installed_receipt(receipt)
+
+            self.assertEqual(type(raised.exception.__cause__).__name__, "DescriptorSafetyError")
+
 
     def test_persisted_vocabulary_is_validated_instead_of_silently_extended(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
