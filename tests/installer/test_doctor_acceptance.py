@@ -324,7 +324,7 @@ class DoctorAcceptanceTests(unittest.TestCase):
             self.assertEqual(result.recommendation, AcceptanceRecommendation.REVERT_RECOMMENDED)
             self.assertTrue(any(item.code == "RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE" for item in result.findings))
 
-    def test_incompatible_current_version_has_one_forensic_finding(self):
+    def test_incompatible_current_version_preserves_observed_failure_finding(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             registry, artifact = _manifest(
@@ -351,7 +351,10 @@ class DoctorAcceptanceTests(unittest.TestCase):
             ]
             self.assertEqual(
                 [(item.code, item.severity) for item in findings],
-                [("RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE", "critical")],
+                [
+                    ("RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE", "critical"),
+                    ("RH_FORENSIC_DEPENDENCY_FAILED", "critical"),
+                ],
             )
 
     def test_dependency_and_probe_version_constraints_are_both_enforced(self):

@@ -14,6 +14,7 @@ from realmheart_maintenance import (
     CurrentHealthSnapshot,
     DriftKind,
     ForensicContractError,
+    ForensicReport,
     ReadinessState,
     analyze_forensics,
     load_health_snapshot,
@@ -75,6 +76,42 @@ class Phase20ForensicContractTests(unittest.TestCase):
         path = root / "current-health.json"
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return path, payload
+
+    def _report_for_capability_state(
+        self,
+        root: Path,
+        *,
+        capability_id: str,
+        accepted_state: str,
+        accepted_version: str | None,
+        current_state: str,
+        current_version: str | None,
+    ) -> ForensicReport:
+        receipt_path, receipt_payload = self._generated_receipt(root)
+        dependencies = receipt_payload["dependencies"]
+        if not isinstance(dependencies, dict):
+            self.fail("generated receipt dependencies must be an object")
+        accepted = dependencies[capability_id]
+        if not isinstance(accepted, dict):
+            self.fail(f"generated {capability_id} receipt must be an object")
+        accepted.update(state=accepted_state, version=accepted_version)
+        receipt_path.write_text(json.dumps(receipt_payload), encoding="utf-8")
+
+        snapshot_path, snapshot_payload = self._snapshot_from_receipt(root, receipt_payload)
+        capabilities = snapshot_payload["capabilities"]
+        if not isinstance(capabilities, dict):
+            self.fail("synthetic snapshot capabilities must be an object")
+        current = capabilities[capability_id]
+        if not isinstance(current, dict):
+            self.fail(f"synthetic {capability_id} observation must be an object")
+        current.update(state=current_state, version=current_version)
+        snapshot_path.write_text(json.dumps(snapshot_payload), encoding="utf-8")
+
+        return analyze_forensics(
+            self.registry,
+            load_installed_receipt(receipt_path),
+            load_health_snapshot(snapshot_path),
+        )
 
     def test_generated_installer_receipt_supports_three_way_dependency_and_artifact_diff(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -213,6 +250,101 @@ class Phase20ForensicContractTests(unittest.TestCase):
             )
             self.assertIn("regressed from pass to failed", findings[1].summary)
             self.assertNotIn("state is pass", findings[0].summary)
+
+    def test_current_failed_state_is_not_gated_by_unhealthy_accepted_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._report_for_capability_state(
+                Path(temp),
+                capability_id="runtime.python3",
+                accepted_state="missing",
+                accepted_version="3.12.0",
+                current_state="failed",
+                current_version="not-a-version",
+            )
+
+            findings = [item for item in report.drifts if item.subject_id == "runtime.python3"]
+            self.assertEqual(
+                [(item.error_code, item.severity, item.current) for item in findings],
+                [
+                    ("RH_FORENSIC_DEPENDENCY_VERSION_UNKNOWN", "warning", "not-a-version"),
+                    ("RH_FORENSIC_DEPENDENCY_FAILED", "critical", "failed"),
+                ],
+            )
+            self.assertFalse(any(item.error_code == "RH_FORENSIC_DEPENDENCY_STATE_DRIFT" for item in findings))
+
+    def test_current_missing_state_classifies_unparseable_version_without_generic_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._report_for_capability_state(
+                Path(temp),
+                capability_id="runtime.python3",
+                accepted_state="missing",
+                accepted_version="3.12.0",
+                current_state="missing",
+                current_version="not-a-version",
+            )
+
+            findings = [item for item in report.drifts if item.subject_id == "runtime.python3"]
+            self.assertEqual(
+                [(item.error_code, item.severity, item.current) for item in findings],
+                [
+                    ("RH_FORENSIC_DEPENDENCY_VERSION_UNKNOWN", "warning", "not-a-version"),
+                    ("RH_FORENSIC_DEPENDENCY_MISSING", "critical", "missing"),
+                ],
+            )
+            self.assertFalse(any(item.error_code == "RH_FORENSIC_DEPENDENCY_VERSION_DRIFT" for item in findings))
+            self.assertTrue(report.has_drift)
+
+    def test_current_missing_state_classifies_incompatible_version_without_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._report_for_capability_state(
+                Path(temp),
+                capability_id="runtime.hyprctl",
+                accepted_state="missing",
+                accepted_version="hyprctl 0.57.0",
+                current_state="missing",
+                current_version="hyprctl 0.55.0",
+            )
+
+            findings = [item for item in report.drifts if item.subject_id == "runtime.hyprctl"]
+            self.assertEqual(
+                [(item.error_code, item.severity, item.current) for item in findings],
+                [
+                    ("RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE", "critical", "hyprctl 0.55.0"),
+                    ("RH_FORENSIC_DEPENDENCY_MISSING", "critical", "missing"),
+                ],
+            )
+            self.assertEqual(
+                sum(item.error_code == "RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE" for item in findings),
+                1,
+            )
+            self.assertFalse(any(item.error_code == "RH_FORENSIC_DEPENDENCY_VERSION_DRIFT" for item in findings))
+
+    def test_current_healthy_pass_is_not_reported_as_failure_after_unhealthy_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            report = self._report_for_capability_state(
+                Path(temp),
+                capability_id="runtime.python3",
+                accepted_state="missing",
+                accepted_version="3.12.0",
+                current_state="pass",
+                current_version="3.12.0",
+            )
+
+            findings = [item for item in report.drifts if item.subject_id == "runtime.python3"]
+            self.assertEqual(
+                [(item.error_code, item.severity, item.current) for item in findings],
+                [("RH_FORENSIC_DEPENDENCY_STATE_DRIFT", "warning", "pass")],
+            )
+            self.assertFalse(
+                any(
+                    item.error_code
+                    in {
+                        "RH_FORENSIC_DEPENDENCY_MISSING",
+                        "RH_FORENSIC_DEPENDENCY_FAILED",
+                    }
+                    for item in findings
+                )
+            )
 
 
     def test_one_dependency_root_collapses_multiple_capabilities_and_dependents(self) -> None:

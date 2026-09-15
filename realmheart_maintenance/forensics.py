@@ -1134,7 +1134,8 @@ def analyze_forensics(
         current_state = current.state
         current_compatibility = None
         current_version_bad = False
-        if current.state in {"pass", "failed"} and capability_version_required(registry, manifest_cap):
+        current_failure_observed = current.state in {"missing", "failed"}
+        if current.state in {"pass", "missing", "failed"} and capability_version_required(registry, manifest_cap):
             current_compatibility = classify_capability_version(
                 registry, manifest_cap, current.version
             )
@@ -1158,8 +1159,9 @@ def analyze_forensics(
                     ),
                 )
             elif current_compatibility is VersionCompatibility.INCOMPATIBLE:
-                current_state = "failed"
-                current_version_bad = True
+                if current.state == "pass":
+                    current_state = "failed"
+                    current_version_bad = True
                 add(
                     DriftKind.DEPENDENCY,
                     "RH_FORENSIC_DEPENDENCY_VERSION_INCOMPATIBLE",
@@ -1216,7 +1218,7 @@ def analyze_forensics(
                 affects_repair=repair,
                 summary=f"capability {capid} {current_detail}",
             )
-        elif was_ok and not is_ok and not current_version_bad:
+        elif current_failure_observed or (was_ok and not is_ok and not current_version_bad):
             severity = _capability_failure_severity(registry, manifest_cap)
             code = "RH_FORENSIC_DEPENDENCY_MISSING" if current_state == "missing" else "RH_FORENSIC_DEPENDENCY_FAILED"
             add(
@@ -1230,7 +1232,11 @@ def analyze_forensics(
                 current=current_state,
                 affects_runtime=runtime,
                 affects_repair=repair,
-                summary=f"capability {capid} regressed from {accepted.state} to {current_state}",
+                summary=(
+                    f"capability {capid} remains {current_state} in the current health snapshot"
+                    if current_failure_observed and accepted.state == current_state
+                    else f"capability {capid} regressed from {accepted.state} to {current_state}"
+                ),
             )
         elif accepted.state != current_state and not current_version_bad:
             add(
