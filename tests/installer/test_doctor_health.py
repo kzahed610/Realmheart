@@ -950,6 +950,205 @@ class DoctorHealthExecutorTests(unittest.TestCase):
         request_cleanup.assert_called_once()
         self.assertTrue(request_cleanup.call_args.kwargs["require_empty"])
 
+    def test_missing_supervisor_report_requires_final_request_proof_before_fallback_pass(self):
+        class DeadSupervisor:
+            pid = 424242
+
+            def is_alive(self):
+                return False
+
+            def join(self, *, timeout=None):
+                self.timeout = timeout
+
+        class MissingCleanupConnection:
+            def poll(self, timeout):
+                return False
+
+        worker_identity = health._HealthWorkerIdentity(
+            424242,
+            424242,
+            424242,
+            start_time=123,
+            verified=True,
+        )
+        request_identity = health._HealthWorkerIdentity(
+            424100,
+            11,
+            11,
+            start_time=456,
+            child_subreaper=True,
+            verified=True,
+        )
+
+        def cleanup_request(**kwargs):
+            # Model a late descendant that cleanup can contain, but strict
+            # final proof must still reject for an original PASS payload.
+            return kwargs.get("require_empty") is not True
+
+        with patch.object(health, "_health_cleanup_request_boundary", side_effect=cleanup_request) as request_cleanup:
+            result = health._reap_health_worker(
+                DeadSupervisor(),
+                0.01,
+                process_group_owned=True,
+                worker_identity=worker_identity,
+                tracked_descendants={424300: 777},
+                request_identity=request_identity,
+                request_baseline={},
+                shutdown_event=threading.Event(),
+                cleanup_connection=MissingCleanupConnection(),
+                require_final_request_proof=True,
+            )
+
+        self.assertFalse(result)
+        request_cleanup.assert_called_once()
+        self.assertTrue(request_cleanup.call_args.kwargs["require_empty"])
+
+    def test_post_kill_missing_supervisor_report_requires_final_request_proof(self):
+        class PostKillSupervisor:
+            pid = 424242
+
+            def __init__(self):
+                self.alive = True
+                self.join_calls = 0
+
+            def is_alive(self):
+                return self.alive
+
+            def join(self, *, timeout=None):
+                self.join_calls += 1
+                if self.join_calls >= 2:
+                    self.alive = False
+
+        class MissingCleanupConnection:
+            def poll(self, timeout):
+                return False
+
+        worker_identity = health._HealthWorkerIdentity(
+            424242,
+            424242,
+            424242,
+            start_time=123,
+            verified=True,
+        )
+        request_identity = health._HealthWorkerIdentity(
+            424100,
+            11,
+            11,
+            start_time=456,
+            child_subreaper=True,
+            verified=True,
+        )
+
+        def cleanup_request(**kwargs):
+            return kwargs.get("require_empty") is not True
+
+        with patch.object(health, "_signal_health_worker", return_value=True) as signal_worker, patch.object(
+            health, "_health_cleanup_request_boundary", side_effect=cleanup_request
+        ) as request_cleanup:
+            result = health._reap_health_worker(
+                PostKillSupervisor(),
+                0.01,
+                process_group_owned=True,
+                worker_identity=worker_identity,
+                tracked_descendants={424300: 777},
+                request_identity=request_identity,
+                request_baseline={},
+                shutdown_event=threading.Event(),
+                cleanup_connection=MissingCleanupConnection(),
+                require_final_request_proof=True,
+            )
+
+        self.assertFalse(result)
+        signal_worker.assert_called_once()
+        request_cleanup.assert_called_once()
+        self.assertTrue(request_cleanup.call_args.kwargs["require_empty"])
+
+    def test_pass_payload_cannot_survive_a_missing_supervisor_cleanup_report(self):
+        if os.name != "posix":
+            self.skipTest("supervisor-loss process-boundary test is POSIX-specific")
+
+        for mode in ("report_missing", "post_kill"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                registry, _, _ = _manifest(root)
+                marker = root / f"descendant-{mode}.pid"
+
+                def raw_pass_supervisor(
+                    _executor,
+                    _registry,
+                    _spec,
+                    *,
+                    connection,
+                    ready_connection,
+                    launch_event,
+                    deadline,
+                    **kwargs,
+                ):
+                    if not health._establish_health_worker_group():
+                        os._exit(90)
+                    ready_connection.send(health._health_worker_ready_message())
+                    if not launch_event.wait(max(0.0, deadline - time.monotonic())):
+                        os._exit(91)
+                    # Keep the deliberately orphaned test child alive after
+                    # this fake supervisor exits or is group-killed.
+                    if not health._health_prctl(health._HEALTH_PR_SET_PDEATHSIG, 0):
+                        os._exit(92)
+                    connection.send(health._payload(HealthStatus.PASS, "probe_ok"))
+                    child_pid = os.fork()
+                    if child_pid == 0:
+                        health._health_prctl(health._HEALTH_PR_SET_PDEATHSIG, 0)
+                        marker.write_text(str(os.getpid()), encoding="ascii")
+                        for resource in (connection, ready_connection, kwargs.get("cleanup_connection")):
+                            if resource is not None:
+                                try:
+                                    resource.close()
+                                except (OSError, ValueError):
+                                    pass
+                        while True:
+                            time.sleep(1.0)
+                    marker_deadline = time.monotonic() + 1.0
+                    while not marker.exists() and time.monotonic() < marker_deadline:
+                        time.sleep(0.001)
+                    if mode == "report_missing":
+                        os._exit(0)
+                    while True:
+                        time.sleep(1.0)
+
+                checks = dict(registry.health_checks)
+                checks["check.runtime"] = replace(
+                    checks["check.runtime"],
+                    timeout_ms=500,
+                    args={"args": []},
+                )
+                registry = replace(registry, health_checks=checks)
+
+                try:
+                    with patch.object(health, "_run_health_supervisor", raw_pass_supervisor):
+                        result = HealthCheckExecutor(
+                            max_seconds=1.5,
+                            worker_cleanup_seconds=0.05,
+                        ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
+
+                    self.assertEqual(result.status, HealthStatus.UNKNOWN)
+                    self.assertEqual(result.reason_code, "worker_cleanup_incomplete")
+                    self.assertTrue(marker.exists(), "the fake supervisor did not create its descendant")
+                    descendant_pid = int(marker.read_text(encoding="ascii"))
+                    self.assertTrue(
+                        _wait_for_process_exit(descendant_pid),
+                        f"the {mode} fallback left a reparented descendant alive",
+                    )
+                finally:
+                    if marker.exists():
+                        try:
+                            descendant_pid = int(marker.read_text(encoding="ascii"))
+                        except (OSError, ValueError):
+                            descendant_pid = None
+                        if descendant_pid is not None and not _process_is_absent(descendant_pid):
+                            try:
+                                os.kill(descendant_pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+
     def test_public_default_process_operations_require_the_supervisor_boundary(self):
         operations = health.ReadOnlyHealthOperations()
         with patch("realmheart_doctor.health.subprocess.Popen") as popen:

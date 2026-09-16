@@ -3829,7 +3829,11 @@ def _reap_health_worker(
             # instead of treating the missing report as proof of cleanup.
             successful = False
             if not alive:
-                return cleanup_valid and worker_stop_confirmed and request_side_cleanup()
+                return (
+                    cleanup_valid
+                    and worker_stop_confirmed
+                    and request_side_cleanup(require_empty=require_final_request_proof)
+                )
         if alive:
             if not _signal_health_worker(
                 process,
@@ -3851,7 +3855,11 @@ def _reap_health_worker(
                 successful = False
                 worker_stop_confirmed = False
         if not alive and not report_received:
-            return cleanup_valid and worker_stop_confirmed and request_side_cleanup()
+            return (
+                cleanup_valid
+                and worker_stop_confirmed
+                and request_side_cleanup(require_empty=require_final_request_proof)
+            )
         if not alive and report_received:
             # A supervisor's confirmed report covers only the boundary it
             # could observe.  The request-side subreaper must perform its own
