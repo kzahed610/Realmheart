@@ -675,7 +675,7 @@ def _health_launch_gate_allowed(
 ) -> bool:
     """Check a child-side launch permit immediately before exec."""
 
-    if time.monotonic() >= deadline:
+    if not _health_launch_preflight_allowed(deadline):
         return False
     try:
         os.set_blocking(gate_descriptor, wait_for_permit)
@@ -688,11 +688,30 @@ def _health_launch_gate_allowed(
         return False
     if not wait_for_permit and permit not in {b"", b"P"}:
         return False
+    return _health_launch_preflight_allowed(deadline, final_check=final_check)
+
+
+def _health_launch_preflight_allowed(
+    deadline: float,
+    *,
+    final_check: Callable[[], bool] | None = None,
+) -> bool:
+    """Complete child-side checks before the supervisor commits launch authority."""
+
     if time.monotonic() >= deadline:
         return False
     if final_check is not None and not final_check():
         return False
     return time.monotonic() < deadline
+
+
+def _health_launch_commit_barrier() -> None:
+    """Stop the child until the supervisor commits native exec via pidfd."""
+
+    try:
+        os.kill(os.getpid(), signal.SIGSTOP)
+    except (AttributeError, OSError, TypeError, ValueError):
+        os._exit(125)
 
 
 def _health_launch_gate_preexec(
@@ -701,15 +720,15 @@ def _health_launch_gate_preexec(
     *,
     final_check: Callable[[], bool] | None = None,
 ) -> None:
-    """Reject a forked child unless its parent grants a live launch permit."""
+    """Wait for a supervisor-committed launch permit before native exec."""
 
     try:
-        allowed = _health_launch_gate_allowed(
-            deadline,
-            gate_descriptor,
-            final_check=final_check,
-            wait_for_permit=True,
-        )
+        allowed = _health_launch_preflight_allowed(deadline, final_check=final_check)
+        if allowed:
+            os.set_blocking(gate_descriptor, True)
+            allowed = os.read(gate_descriptor, 1) == b"P"
+    except (BlockingIOError, InterruptedError, NotImplementedError, OSError):
+        allowed = False
     finally:
         try:
             os.close(gate_descriptor)
@@ -1735,6 +1754,8 @@ def _run_bounded_process(
     launch_gate_failed = [False]
     launch_signal_failed = [False]
     launch_authority_revoked = [False]
+    launch_authority_committed = [False]
+    launch_authority_lock = threading.Lock()
     gate_stop: threading.Event | None = None
     gate_thread: threading.Thread | None = None
 
@@ -1845,30 +1866,37 @@ def _run_bounded_process(
         read_pid = pid_read
         write_pid = pid_write
 
-        def write_gate_token(token: bytes) -> None:
+        def write_gate_token(token: bytes) -> bool:
             try:
-                os.write(write_gate, token)
+                return os.write(write_gate, token) == len(token)
             except (BrokenPipeError, OSError):
-                pass
+                return False
 
         def watch_launch_gate() -> None:
             nonlocal launch_pid, launch_pidfd
+            status_buffer = bytearray()
+            pid_announced = False
+            ready_announced = False
             permit_sent = False
             while not gate_stop.is_set():
-                if launch_pid is None:
+                if not ready_announced:
                     try:
-                        raw_pid = os.read(read_pid, 32)
+                        status_buffer.extend(os.read(read_pid, 64))
                     except (BlockingIOError, InterruptedError):
-                        raw_pid = b""
+                        pass
                     except (NotImplementedError, OSError):
                         launch_gate_failed[0] = True
-                        raw_pid = b""
-                    if raw_pid:
-                        try:
-                            candidate_pid = int(raw_pid.decode("ascii"))
-                        except (UnicodeError, ValueError):
-                            launch_gate_failed[0] = True
-                        else:
+                    if len(status_buffer) > 64:
+                        launch_gate_failed[0] = True
+                    while not launch_gate_failed[0] and b"\n" in status_buffer:
+                        line, _, remainder = status_buffer.partition(b"\n")
+                        status_buffer = bytearray(remainder)
+                        if not pid_announced:
+                            try:
+                                candidate_pid = int(line.decode("ascii"))
+                            except (UnicodeError, ValueError):
+                                launch_gate_failed[0] = True
+                                break
                             candidate_pidfd = _health_pidfd_open(candidate_pid)
                             if candidate_pidfd is None or not _health_pidfd_send_signal(candidate_pidfd, 0):
                                 if candidate_pidfd is not None:
@@ -1886,22 +1914,24 @@ def _run_bounded_process(
                                         pass
                                     launch_gate_failed[0] = True
                                 else:
+                                    pid_announced = True
                                     launch_pid = candidate_pid
                                     launch_pidfd = candidate_pidfd
                                     # Establish the identity and its kernel
-                                    # cancellation authority before releasing
-                                    # the child-side gate.  Registration itself
-                                    # is repeated after Popen returns so
-                                    # worker-loss hooks cannot strand a child
-                                    # between launch and tracker ownership.
+                                    # cancellation authority before the child
+                                    # can request the final launch commit.
                                     _HEALTH_WORKER_TRACKED_DESCENDANTS[candidate_pid] = record.start_time
+                        elif line == b"R":
+                            ready_announced = True
+                        else:
+                            launch_gate_failed[0] = True
                 cancelled = (
                     cancellation is not None and cancellation.is_cancelled()
                 ) or time.monotonic() >= operation_deadline
                 if launch_gate_failed[0]:
                     write_gate_token(b"C")
                     return
-                if cancelled:
+                if cancelled and not launch_authority_committed[0]:
                     launch_authority_revoked[0] = True
                     write_gate_token(b"C")
                     if launch_pidfd is not None:
@@ -1910,13 +1940,93 @@ def _run_bounded_process(
                     elif launch_pid is not None:
                         launch_signal_failed[0] = True
                     return
-                if launch_pid is not None and not permit_sent:
-                    if launch_pidfd is None or not _health_pidfd_send_signal(launch_pidfd, 0):
+                if ready_announced and launch_pid is not None and not permit_sent:
+                    with launch_authority_lock:
+                        if cancellation is not None and cancellation.is_cancelled():
+                            launch_authority_revoked[0] = True
+                            write_gate_token(b"C")
+                            if launch_pidfd is not None:
+                                if not _health_pidfd_send_signal(launch_pidfd, signal.SIGKILL):
+                                    launch_signal_failed[0] = True
+                            else:
+                                launch_signal_failed[0] = True
+                            return
+                        if time.monotonic() >= operation_deadline:
+                            launch_authority_revoked[0] = True
+                            write_gate_token(b"C")
+                            if launch_pidfd is not None:
+                                if not _health_pidfd_send_signal(launch_pidfd, signal.SIGKILL):
+                                    launch_signal_failed[0] = True
+                            else:
+                                launch_signal_failed[0] = True
+                            return
+                        if launch_pidfd is None or not _health_pidfd_send_signal(launch_pidfd, 0):
+                            launch_gate_failed[0] = True
+                            write_gate_token(b"C")
+                            return
+                        # The pipe token only arms the child-side barrier.  The
+                        # kernel SIGCONT below is the launch-authority commit.
+                        if not write_gate_token(b"P"):
+                            launch_gate_failed[0] = True
+                            if not _health_pidfd_send_signal(launch_pidfd, signal.SIGKILL):
+                                launch_signal_failed[0] = True
+                            return
+                        permit_sent = True
+                    continue
+                if (
+                    ready_announced
+                    and launch_pid is not None
+                    and permit_sent
+                    and not launch_authority_committed[0]
+                ):
+                    record = _read_health_process_record(launch_pid)
+                    if record is None or record.state == "Z":
                         launch_gate_failed[0] = True
-                        write_gate_token(b"C")
+                        if launch_pidfd is not None and not _health_pidfd_send_signal(
+                            launch_pidfd,
+                            signal.SIGKILL,
+                        ):
+                            launch_signal_failed[0] = True
                         return
-                    write_gate_token(b"P")
-                    permit_sent = True
+                    if record.state not in {"T", "t"}:
+                        gate_stop.wait(min(0.005, max(0.0, operation_deadline - time.monotonic())))
+                        continue
+                    with launch_authority_lock:
+                        if cancellation is not None and cancellation.is_cancelled():
+                            launch_authority_revoked[0] = True
+                            if not _health_pidfd_send_signal(launch_pidfd, signal.SIGKILL):
+                                launch_signal_failed[0] = True
+                            return
+                        if time.monotonic() >= operation_deadline:
+                            launch_authority_revoked[0] = True
+                            if not _health_pidfd_send_signal(launch_pidfd, signal.SIGKILL):
+                                launch_signal_failed[0] = True
+                            return
+                        if not _health_pidfd_send_signal(launch_pidfd, 0):
+                            launch_gate_failed[0] = True
+                            if not _health_pidfd_send_signal(launch_pidfd, signal.SIGKILL):
+                                launch_signal_failed[0] = True
+                            return
+                        if cancellation is not None and cancellation.is_cancelled():
+                            launch_authority_revoked[0] = True
+                            if not _health_pidfd_send_signal(launch_pidfd, signal.SIGKILL):
+                                launch_signal_failed[0] = True
+                            return
+                        if time.monotonic() >= operation_deadline:
+                            launch_authority_revoked[0] = True
+                            if not _health_pidfd_send_signal(launch_pidfd, signal.SIGKILL):
+                                launch_signal_failed[0] = True
+                            return
+                        # SIGCONT is the kernel launch-authority linearization
+                        # point.  SIGKILL ordered before it keeps the child
+                        # stopped/dead; SIGCONT ordered first commits launch.
+                        if not _health_pidfd_send_signal(launch_pidfd, signal.SIGCONT):
+                            launch_gate_failed[0] = True
+                            if not _health_pidfd_send_signal(launch_pidfd, signal.SIGKILL):
+                                launch_signal_failed[0] = True
+                            return
+                        launch_authority_committed[0] = True
+                    return
                 gate_stop.wait(min(0.005, max(0.0, operation_deadline - time.monotonic())))
 
         gate_thread = threading.Thread(
@@ -1931,6 +2041,27 @@ def _run_bounded_process(
             assert pid_write is not None
             try:
                 os.write(pid_write, str(os.getpid()).encode("ascii"))
+                os.write(pid_write, b"\n")
+                if cancellation is None:
+                    final_check: Callable[[], bool] | None = None
+                else:
+                    launch_cancellation = cancellation
+                    final_check = lambda: not launch_cancellation.is_cancelled()
+                if not _health_launch_preflight_allowed(
+                    operation_deadline,
+                    final_check=final_check,
+                ):
+                    os._exit(125)
+                if _HEALTH_WORKER_GROUP_OWNED:
+                    _health_probe_preexec()
+                # This is deliberately the last child-side cancellation check.
+                # The child reports readiness only after it returns, and the
+                # supervisor owns the cancellation/commit decision from there.
+                if cancellation is not None and cancellation.is_cancelled():
+                    os._exit(125)
+                if time.monotonic() >= operation_deadline:
+                    os._exit(125)
+                os.write(pid_write, b"R\n")
             except (BrokenPipeError, OSError):
                 os._exit(125)
             finally:
@@ -1938,22 +2069,11 @@ def _run_bounded_process(
                     os.close(pid_write)
                 except OSError:
                     pass
-            if cancellation is None:
-                final_check: Callable[[], bool] | None = None
-            else:
-                launch_cancellation = cancellation
-                final_check = lambda: not launch_cancellation.is_cancelled()
             _health_launch_gate_preexec(
                 operation_deadline,
                 gate_read,
-                final_check=final_check,
             )
-            if _HEALTH_WORKER_GROUP_OWNED:
-                _health_probe_preexec()
-            if cancellation is not None and cancellation.is_cancelled():
-                os._exit(125)
-            if time.monotonic() >= operation_deadline:
-                os._exit(125)
+            _health_launch_commit_barrier()
 
         popen_options: dict[str, Any] = {
             "stdin": subprocess.DEVNULL,

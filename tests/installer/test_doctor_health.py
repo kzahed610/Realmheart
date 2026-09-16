@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import errno
+import multiprocessing
 import os
 import shutil
 import signal
@@ -2266,6 +2267,169 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             self.assertEqual(result.status, HealthStatus.UNKNOWN)
             self.assertIn(result.reason_code, {"timeout", "budget_exhausted"})
             self.assertFalse(marker.exists(), "the authorized ELF executed after its deadline")
+
+    def test_launch_authority_commit_rejects_revocation_after_child_preflight(self):
+        if os.name != "posix":
+            self.skipTest("launch-authority process boundary is POSIX-specific")
+        with tempfile.TemporaryDirectory() as temp:
+            marker = Path(temp) / "launched"
+            record = health._read_health_process_record(os.getpid())
+            self.assertIsNotNone(record)
+
+            class RaceCancellation:
+                def __init__(self, parent_pid: int) -> None:
+                    self.parent_pid = parent_pid
+                    self.shared = multiprocessing.Event()
+                    self.child_main_calls = 0
+
+                def is_cancelled(self) -> bool:
+                    if (
+                        os.getpid() != self.parent_pid
+                        and threading.current_thread() is threading.main_thread()
+                    ):
+                        self.child_main_calls += 1
+                        if self.child_main_calls == 2:
+                            # Revoke after the child-side check returns but
+                            # before the supervisor can commit launch.
+                            self.shared.set()
+                            return False
+                    return self.shared.is_set()
+
+            previous_group_owned = health._HEALTH_WORKER_GROUP_OWNED
+            previous_identity = health._HEALTH_WORKER_IDENTITY
+            previous_containment_valid = health._HEALTH_WORKER_CONTAINMENT_VALID
+            previous_tracked = dict(health._HEALTH_WORKER_TRACKED_DESCENDANTS)
+            previous_reaped = set(health._HEALTH_WORKER_REAPED_PROBES)
+            health._HEALTH_WORKER_GROUP_OWNED = True
+            health._HEALTH_WORKER_CONTAINMENT_VALID = True
+            health._HEALTH_WORKER_IDENTITY = health._HealthWorkerIdentity(
+                os.getpid(),
+                record.session_id,
+                record.process_group_id,
+                record.start_time,
+                child_subreaper=True,
+                verified=True,
+            )
+            health._HEALTH_WORKER_TRACKED_DESCENDANTS.clear()
+            health._HEALTH_WORKER_REAPED_PROBES.clear()
+            cancellation = RaceCancellation(os.getpid())
+            original_signal = health._health_pidfd_send_signal
+
+            def delayed_kill(descriptor: int, signal_number: int) -> bool:
+                if signal_number == signal.SIGKILL:
+                    time.sleep(0.05)
+                return original_signal(descriptor, signal_number)
+
+            try:
+                with patch.object(health, "_health_pidfd_send_signal", side_effect=delayed_kill):
+                    observation = health._run_bounded_process(
+                        ("/usr/bin/touch", str(marker)),
+                        timeout=1.0,
+                        max_output_bytes=1024,
+                        deadline=time.monotonic() + 1.0,
+                        cancellation=cancellation,
+                    )
+            finally:
+                health._HEALTH_WORKER_GROUP_OWNED = previous_group_owned
+                health._HEALTH_WORKER_IDENTITY = previous_identity
+                health._HEALTH_WORKER_CONTAINMENT_VALID = previous_containment_valid
+                health._HEALTH_WORKER_TRACKED_DESCENDANTS.clear()
+                health._HEALTH_WORKER_TRACKED_DESCENDANTS.update(previous_tracked)
+                health._HEALTH_WORKER_REAPED_PROBES.clear()
+                health._HEALTH_WORKER_REAPED_PROBES.update(previous_reaped)
+
+            self.assertTrue(observation.timed_out)
+            self.assertEqual(observation.error_code, "timeout")
+            self.assertFalse(marker.exists(), "the executable launched after authority revocation")
+
+    def test_launch_commit_barrier_rejects_revocation_before_sigcont(self):
+        if os.name != "posix":
+            self.skipTest("launch-authority process boundary is POSIX-specific")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, executable_path = _manifest(root)
+            _build_launch_marker_probe(executable_path)
+            marker = executable_path.with_name(executable_path.name + ".launched")
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                artifact_id="demo.exec",
+                timeout_ms=1000,
+                args={"args": []},
+            )
+            registry = replace(registry, health_checks=checks)
+            record = health._read_health_process_record(os.getpid())
+            self.assertIsNotNone(record)
+
+            class Cancellation:
+                def __init__(self) -> None:
+                    self.shared = multiprocessing.Event()
+
+                def is_cancelled(self) -> bool:
+                    return self.shared.is_set()
+
+            previous_group_owned = health._HEALTH_WORKER_GROUP_OWNED
+            previous_identity = health._HEALTH_WORKER_IDENTITY
+            previous_containment = health._HEALTH_WORKER_CONTAINMENT_VALID
+            previous_tracked = dict(health._HEALTH_WORKER_TRACKED_DESCENDANTS)
+            previous_reaped = set(health._HEALTH_WORKER_REAPED_PROBES)
+            health._HEALTH_WORKER_GROUP_OWNED = True
+            health._HEALTH_WORKER_CONTAINMENT_VALID = True
+            health._HEALTH_WORKER_IDENTITY = health._HealthWorkerIdentity(
+                os.getpid(),
+                record.session_id,
+                record.process_group_id,
+                record.start_time,
+                child_subreaper=True,
+                verified=True,
+            )
+            health._HEALTH_WORKER_TRACKED_DESCENDANTS.clear()
+            health._HEALTH_WORKER_REAPED_PROBES.clear()
+            cancellation = Cancellation()
+            original_signal = health._health_pidfd_send_signal
+            commit_identity_checks = 0
+
+            def revoke_during_commit_check(descriptor: int, signal_number: int) -> bool:
+                nonlocal commit_identity_checks
+                if (
+                    signal_number == 0
+                    and threading.current_thread().name == "realmheart-doctor-launch-gate"
+                ):
+                    commit_identity_checks += 1
+                    if commit_identity_checks == 3:
+                        # The child is already stopped at the kernel barrier;
+                        # revoke before the supervisor can issue SIGCONT.
+                        cancellation.shared.set()
+                if signal_number == signal.SIGKILL:
+                    time.sleep(0.05)
+                return original_signal(descriptor, signal_number)
+
+            try:
+                with patch.object(
+                    health,
+                    "_health_pidfd_send_signal",
+                    side_effect=revoke_during_commit_check,
+                ):
+                    payload = HealthCheckExecutor()._run_check(
+                        registry,
+                        registry.health_checks["check.runtime"],
+                        timeout_seconds=1.0,
+                        deadline=time.monotonic() + 1.0,
+                        cancellation=cancellation,
+                    )
+            finally:
+                health._HEALTH_WORKER_GROUP_OWNED = previous_group_owned
+                health._HEALTH_WORKER_IDENTITY = previous_identity
+                health._HEALTH_WORKER_CONTAINMENT_VALID = previous_containment
+                health._HEALTH_WORKER_TRACKED_DESCENDANTS.clear()
+                health._HEALTH_WORKER_TRACKED_DESCENDANTS.update(previous_tracked)
+                health._HEALTH_WORKER_REAPED_PROBES.clear()
+                health._HEALTH_WORKER_REAPED_PROBES.update(previous_reaped)
+
+            self.assertGreaterEqual(commit_identity_checks, 3)
+            self.assertIs(payload.status, HealthStatus.UNKNOWN)
+            self.assertNotEqual(payload.status, HealthStatus.PASS)
+            self.assertFalse(marker.exists(), "the executable launched before the SIGCONT commit")
 
     def test_pidfd_launch_authority_is_preflighted_before_probe_launch(self):
         with tempfile.TemporaryDirectory() as temp:
