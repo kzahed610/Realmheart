@@ -2516,6 +2516,110 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             self.assertNotEqual(payload.status, HealthStatus.PASS)
             self.assertFalse(marker.exists(), "the executable launched after SIGCONT-entry revocation")
 
+    def test_unsolicited_sigcont_before_supervisor_commit_is_bounded_unknown(self):
+        if os.name != "posix":
+            self.skipTest("launch-authority process boundary is POSIX-specific")
+        with tempfile.TemporaryDirectory() as temp:
+            marker = Path(temp) / "launched"
+            record = health._read_health_process_record(os.getpid())
+            self.assertIsNotNone(record)
+
+            previous_group_owned = health._HEALTH_WORKER_GROUP_OWNED
+            previous_identity = health._HEALTH_WORKER_IDENTITY
+            previous_containment = health._HEALTH_WORKER_CONTAINMENT_VALID
+            previous_tracked = dict(health._HEALTH_WORKER_TRACKED_DESCENDANTS)
+            previous_reaped = set(health._HEALTH_WORKER_REAPED_PROBES)
+            health._HEALTH_WORKER_GROUP_OWNED = True
+            health._HEALTH_WORKER_CONTAINMENT_VALID = True
+            health._HEALTH_WORKER_IDENTITY = health._HealthWorkerIdentity(
+                os.getpid(),
+                record.session_id,
+                record.process_group_id,
+                record.start_time,
+                child_subreaper=True,
+                verified=True,
+            )
+            health._HEALTH_WORKER_TRACKED_DESCENDANTS.clear()
+            health._HEALTH_WORKER_REAPED_PROBES.clear()
+
+            child_pid: list[int | None] = [None]
+            external_sent = False
+            original_open = health._health_pidfd_open
+            original_signal = health._health_pidfd_send_signal
+
+            def remember_child(pid: int) -> int | None:
+                descriptor = original_open(pid)
+                if pid != os.getpid():
+                    child_pid[0] = pid
+                return descriptor
+
+            def send_external_resume(descriptor: int, signal_number: int) -> bool:
+                nonlocal external_sent
+                if (
+                    signal_number == 0
+                    and not external_sent
+                    and threading.current_thread().name == "realmheart-doctor-launch-gate"
+                ):
+                    pid = child_pid[0]
+                    child_record = health._read_health_process_record(pid) if pid is not None else None
+                    if child_record is not None and child_record.state in {"T", "t"}:
+                        attacker = os.fork()
+                        if attacker == 0:
+                            try:
+                                os.kill(pid, signal.SIGCONT)
+                            except (OSError, ProcessLookupError):
+                                pass
+                            os._exit(0)
+                        os.waitpid(attacker, 0)
+                        external_sent = True
+                return original_signal(descriptor, signal_number)
+
+            try:
+                with patch.object(health, "_health_pidfd_open", side_effect=remember_child), patch.object(
+                    health, "_health_pidfd_send_signal", side_effect=send_external_resume
+                ):
+                    observation = health._run_bounded_process(
+                        ("/usr/bin/touch", str(marker)),
+                        timeout=1.0,
+                        max_output_bytes=1024,
+                        deadline=time.monotonic() + 1.0,
+                    )
+            finally:
+                health._HEALTH_WORKER_GROUP_OWNED = previous_group_owned
+                health._HEALTH_WORKER_IDENTITY = previous_identity
+                health._HEALTH_WORKER_CONTAINMENT_VALID = previous_containment
+                health._HEALTH_WORKER_TRACKED_DESCENDANTS.clear()
+                health._HEALTH_WORKER_TRACKED_DESCENDANTS.update(previous_tracked)
+                health._HEALTH_WORKER_REAPED_PROBES.clear()
+                health._HEALTH_WORKER_REAPED_PROBES.update(previous_reaped)
+
+            self.assertTrue(external_sent, "the adversarial SIGCONT was not delivered during the stopped window")
+            self.assertTrue(observation.timed_out or observation.error_code is not None)
+            self.assertIn(observation.error_code, {"launch_authority_uncommitted", "launch_cleanup_failed"})
+            self.assertFalse(marker.exists(), "an unsolicited SIGCONT crossed into native exec")
+
+    def test_authenticated_supervisor_resume_executes_before_pass(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, executable_path = _manifest(root)
+            _build_launch_marker_probe(executable_path)
+            marker = executable_path.with_name(executable_path.name + ".launched")
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                artifact_id="demo.exec",
+                timeout_ms=3000,
+                args={"args": []},
+            )
+            registry = replace(registry, health_checks=checks)
+
+            result = HealthCheckExecutor(max_seconds=4).execute(
+                registry, check_ids=("check.runtime",)
+            ).result_for("check.runtime")
+
+            self.assertEqual(result.status, HealthStatus.PASS)
+            self.assertTrue(marker.exists(), "the supervisor-authorized executable did not launch")
+
     def test_pidfd_launch_authority_is_preflighted_before_probe_launch(self):
         with tempfile.TemporaryDirectory() as temp:
             registry, _, _ = _manifest(Path(temp))
