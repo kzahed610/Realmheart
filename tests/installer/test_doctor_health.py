@@ -201,21 +201,23 @@ def _active_processes_for_command(argv: tuple[str, ...]) -> set[int]:
     return matches
 
 
-def _process_is_live(pid: int) -> bool:
+def _process_is_absent(pid: int) -> bool:
     try:
-        state = (Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()[0])
-    except (OSError, UnicodeError, IndexError):
+        (Path(f"/proc/{pid}/stat")).read_text(encoding="ascii")
+    except FileNotFoundError:
+        return True
+    except (OSError, UnicodeError):
         return False
-    return state != "Z"
+    return False
 
 
 def _wait_for_process_exit(pid: int, timeout: float = 1.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not _process_is_live(pid):
+        if _process_is_absent(pid):
             return True
         time.sleep(0.01)
-    return not _process_is_live(pid)
+    return _process_is_absent(pid)
 
 
 def _caller_subreaper_state() -> bool:
@@ -730,6 +732,29 @@ class DoctorHealthExecutorTests(unittest.TestCase):
         self.assertEqual(descendants, {})
         self.assertEqual(tracked, {})
 
+    def test_request_boundary_surfaces_signal_failure(self):
+        request = health._HealthWorkerIdentity(
+            100,
+            10,
+            10,
+            start_time=1,
+            child_subreaper=True,
+            verified=True,
+        )
+        tracked: dict[int, int | None] = {300: 3}
+        record = health._HealthProcessRecord(300, 100, 30, 30, 3, "S")
+        with patch.object(
+            health,
+            "_health_sample_request_owned_processes",
+            return_value=({300: record}, True),
+        ), patch.object(health, "_health_signal_tracked_descendants", return_value=False) as signal_tracked, patch.object(
+            health, "_health_reap_tracked_children", return_value=True
+        ):
+            result = health._health_cleanup_request_boundary(request, {}, tracked, 0.0)
+
+        self.assertFalse(result)
+        signal_tracked.assert_called_once()
+
     def test_public_default_process_operations_require_the_supervisor_boundary(self):
         operations = health.ReadOnlyHealthOperations()
         with patch("realmheart_doctor.health.subprocess.Popen") as popen:
@@ -960,7 +985,7 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                     "an escaped descendant survived cleanup after worker loss",
                 )
             finally:
-                if _process_is_live(escaped_pid):
+                if not _process_is_absent(escaped_pid):
                     try:
                         os.kill(escaped_pid, signal.SIGKILL)
                     except ProcessLookupError:
@@ -1022,7 +1047,7 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                     "an escaped descendant survived cleanup after supervisor loss",
                 )
             finally:
-                if _process_is_live(escaped_pid):
+                if not _process_is_absent(escaped_pid):
                     try:
                         os.kill(escaped_pid, signal.SIGKILL)
                     except ProcessLookupError:
@@ -1142,7 +1167,7 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                     "a setsid/double-fork descendant survived the bounded Doctor cleanup",
                 )
             finally:
-                if _process_is_live(escaped_pid):
+                if not _process_is_absent(escaped_pid):
                     try:
                         os.kill(escaped_pid, signal.SIGKILL)
                     except ProcessLookupError:
@@ -1178,7 +1203,7 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                     "an escaped descendant survived cleanup when pidfds were unavailable",
                 )
             finally:
-                if _process_is_live(escaped_pid):
+                if not _process_is_absent(escaped_pid):
                     try:
                         os.kill(escaped_pid, signal.SIGKILL)
                     except ProcessLookupError:

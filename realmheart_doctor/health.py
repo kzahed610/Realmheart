@@ -934,6 +934,14 @@ def _health_sample_request_owned_processes(
         records = _snapshot_health_processes()
     if not isinstance(records, Mapping) or not records:
         return None
+    for pid, record in records.items():
+        if (
+            type(pid) is not int
+            or pid <= 0
+            or not isinstance(record, _HealthProcessRecord)
+            or record.pid != pid
+        ):
+            return None
     root = records.get(request_identity.pid)
     if (
         not isinstance(root, _HealthProcessRecord)
@@ -1358,11 +1366,28 @@ def _health_cleanup_request_boundary(
     if (
         not request_identity.verified
         or not request_identity.child_subreaper
+        or type(request_identity.pid) is not int
+        or request_identity.pid <= 0
+        or type(request_identity.session_id) is not int
+        or request_identity.session_id <= 0
+        or type(request_identity.process_group_id) is not int
+        or request_identity.process_group_id <= 0
         or type(request_identity.start_time) is not int
+        or request_identity.start_time <= 0
         or not isinstance(baseline, Mapping)
     ):
         return False
-    if private_boundary is not None and not private_boundary.verified:
+    if private_boundary is not None and (
+        not private_boundary.verified
+        or type(private_boundary.pid) is not int
+        or private_boundary.pid <= 0
+        or type(private_boundary.session_id) is not int
+        or private_boundary.session_id <= 0
+        or type(private_boundary.process_group_id) is not int
+        or private_boundary.process_group_id <= 0
+        or type(private_boundary.start_time) is not int
+        or private_boundary.start_time <= 0
+    ):
         return False
     try:
         cleanup_timeout = float(timeout)
@@ -1378,6 +1403,9 @@ def _health_cleanup_request_boundary(
     reap_pending: set[int] = set()
     reap_failures: set[int] = set()
     not_owned: set[int] = set()
+    signal_failed = False
+    signal_attempted = False
+    signal_settled = False
     stable_empty = False
 
     while True:
@@ -1390,12 +1418,22 @@ def _health_cleanup_request_boundary(
         if sampled is None:
             stable_empty = False
             if tracked:
-                _health_signal_tracked_descendants(
+                signal_attempted = True
+                if not _health_signal_tracked_descendants(
                     tracked,
                     signal.SIGKILL,
                     private_boundary=private_boundary,
                     protected_boundary=request_identity,
-                )
+                ):
+                    signal_failed = True
+                if signal_attempted and not signal_settled and cleanup_timeout > 0:
+                    # SIGKILL is delivered synchronously to the target group,
+                    # but a target may not become waitable until it next
+                    # reaches the kernel.  Reserve one small, bounded settle
+                    # window before the identity-bound reap pass so a tight
+                    # cleanup budget cannot strand a zombie.
+                    time.sleep(min(0.005, cleanup_timeout))
+                    signal_settled = True
                 _health_reap_tracked_children(
                     tracked,
                     owner_pid=request_identity.pid,
@@ -1411,12 +1449,22 @@ def _health_cleanup_request_boundary(
                 stable_empty = False
             if live:
                 stable_empty = False
-                _health_signal_tracked_descendants(
+                signal_attempted = True
+                if not _health_signal_tracked_descendants(
                     tracked,
                     signal.SIGKILL,
                     private_boundary=private_boundary,
                     protected_boundary=request_identity,
-                )
+                ):
+                    signal_failed = True
+            if signal_attempted and not signal_settled and cleanup_timeout > 0:
+                # SIGKILL is delivered synchronously to the target group, but
+                # a target may not become waitable until it next reaches the
+                # kernel.  Reserve one small, bounded settle window before
+                # the identity-bound reap pass so a tight cleanup budget
+                # cannot strand a zombie.
+                time.sleep(min(0.005, cleanup_timeout))
+                signal_settled = True
             reap_ok = _health_reap_tracked_children(
                 tracked,
                 owner_pid=request_identity.pid,
@@ -1430,6 +1478,7 @@ def _health_cleanup_request_boundary(
                 and not live
                 and reap_ok
                 and not reap_failures
+                and not signal_failed
                 and _health_tracked_processes_absent(tracked)
             ):
                 if stable_empty:
