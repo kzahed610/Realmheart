@@ -952,15 +952,23 @@ def _health_sample_request_owned_processes(
 
     # Validate every identity already handed to the request before accepting
     # any new process.  A reused PID is an ambiguity, not a new owned child.
+    # Keep the ambiguity in the tracker as ``None``: the signal and reap
+    # helpers already fail closed for that value, and retaining it prevents a
+    # later sample from treating the reused PID as a fresh descendant.
+    snapshot_valid = True
     for pid, expected_start in tracked.items():
-        if type(pid) is not int or pid <= 0 or type(expected_start) is not int:
+        if type(pid) is not int or pid <= 0:
             return ({}, False)
+        if type(expected_start) is not int:
+            snapshot_valid = False
+            continue
         current = records.get(pid)
         if current is not None and (
             not isinstance(current, _HealthProcessRecord)
             or current.start_time != expected_start
         ):
-            return ({}, False)
+            tracked[pid] = None
+            snapshot_valid = False
 
     sampled = _health_sample_descendants(
         request_identity.pid,
@@ -976,14 +984,23 @@ def _health_sample_request_owned_processes(
     for pid, expected_start in excluded.items():
         current = descendants.get(pid)
         if current is not None and current.start_time != expected_start:
-            return {}, False
+            # An excluded worker identity can also be reused between the
+            # supervisor report and this request-side proof.  It is never
+            # owned by this boundary, but that ambiguity must not suppress
+            # partitioning and cleanup of the other tracked identities.
+            snapshot_valid = False
 
     owned: dict[int, _HealthProcessRecord] = {}
     for pid, record in descendants.items():
+        if pid in tracked and tracked[pid] is None:
+            # Never signal or wait on a PID after its tracked identity was
+            # invalidated, even if /proc now shows a replacement process.
+            snapshot_valid = False
+            continue
         excluded_start = excluded.get(pid)
         if excluded_start is not None:
             if record.start_time != excluded_start:
-                return {}, False
+                snapshot_valid = False
             continue
         baseline_start = baseline.get(pid)
         if baseline_start is not None and baseline_start == record.start_time:
@@ -995,7 +1012,7 @@ def _health_sample_request_owned_processes(
         updated_tracked[pid] = record.start_time
     tracked.clear()
     tracked.update(updated_tracked)
-    return owned, True
+    return owned, snapshot_valid
 
 
 def _health_signal_tracked_descendants(
@@ -1115,8 +1132,14 @@ def _health_reap_tracked_children(
     pending: set[int] | None = None,
     failed: set[int] | None = None,
     not_owned: set[int] | None = None,
+    allow_absent: bool = False,
 ) -> bool:
-    """Reap adopted descendants without ever waiting indefinitely."""
+    """Reap adopted descendants without ever waiting indefinitely.
+
+    ``allow_absent`` is reserved for a complete request-side snapshot: when
+    the identity is no longer readable and ``kill(pid, 0)`` proves ESRCH, the
+    tracker can discard it without attempting a PID-based wait.
+    """
 
     successful = True
     for pid in tuple(tracked):
@@ -1128,6 +1151,18 @@ def _health_reap_tracked_children(
             continue
         record = _read_health_process_record(pid)
         if record is None:
+            if allow_absent:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    tracked.pop(pid, None)
+                    continue
+                except OSError as exc:
+                    if exc.errno == errno.ESRCH:
+                        tracked.pop(pid, None)
+                        continue
+                except (AttributeError, TypeError, ValueError):
+                    pass
             if owner_pid is not None and not_owned is not None:
                 not_owned.add(pid)
             successful = False
@@ -1352,6 +1387,7 @@ def _health_cleanup_request_boundary(
     *,
     excluded_identities: Mapping[int, int] | None = None,
     private_boundary: _HealthWorkerIdentity | None = None,
+    require_empty: bool = False,
 ) -> bool:
     """Contain descendants adopted by the request after supervisor loss.
 
@@ -1389,6 +1425,8 @@ def _health_cleanup_request_boundary(
         or private_boundary.start_time <= 0
     ):
         return False
+    if type(require_empty) is not bool:
+        return False
     try:
         cleanup_timeout = float(timeout)
     except (TypeError, ValueError):
@@ -1406,6 +1444,7 @@ def _health_cleanup_request_boundary(
     signal_failed = False
     signal_attempted = False
     signal_settled = False
+    final_proof_violation = False
     stable_empty = False
 
     while True:
@@ -1445,9 +1484,18 @@ def _health_cleanup_request_boundary(
         else:
             owned, snapshot_valid = sampled
             live = {pid: record for pid, record in owned.items() if record.state != "Z"}
+            if require_empty and owned:
+                # A confirmed supervisor report is only reusable as a PASS
+                # when this final request-side proof starts empty.  We still
+                # contain and reap anything discovered here, but the late
+                # descendant makes the observation explicitly UNKNOWN.
+                final_proof_violation = True
+            if any(type(start_time) is not int for start_time in tracked.values()):
+                snapshot_valid = False
             if not snapshot_valid:
                 stable_empty = False
-            if live:
+            signalable_tracked = any(type(start_time) is int for start_time in tracked.values())
+            if live or (not snapshot_valid and signalable_tracked):
                 stable_empty = False
                 signal_attempted = True
                 if not _health_signal_tracked_descendants(
@@ -1472,6 +1520,7 @@ def _health_cleanup_request_boundary(
                 pending=reap_pending,
                 failed=reap_failures,
                 not_owned=not_owned,
+                allow_absent=snapshot_valid,
             )
             if (
                 snapshot_valid
@@ -1482,7 +1531,7 @@ def _health_cleanup_request_boundary(
                 and _health_tracked_processes_absent(tracked)
             ):
                 if stable_empty:
-                    return True
+                    return not final_proof_violation
                 stable_empty = True
             else:
                 stable_empty = False
@@ -3653,8 +3702,14 @@ def _reap_health_worker(
     fallback_owner_pid: int | None = None,
     request_identity: _HealthWorkerIdentity | None = None,
     request_baseline: Mapping[int, int] | None = None,
+    require_final_request_proof: bool = True,
 ) -> bool:
-    """Stop and boundedly reap a worker, its private session, and escaped children."""
+    """Stop and boundedly reap a worker, its private session, and escaped children.
+
+    A confirmed supervisor report can be reused for a PASS only when
+    ``require_final_request_proof`` also passes the request-side strict-empty
+    boundary proof.
+    """
 
     try:
         cleanup_timeout = min(max(0.0, float(cleanup_seconds)), MAX_WORKER_CLEANUP_SECONDS)
@@ -3665,6 +3720,8 @@ def _reap_health_worker(
         cleanup_valid = math.isfinite(cleanup_timeout)
     if not cleanup_valid:
         cleanup_timeout = 0.0
+    if type(require_final_request_proof) is not bool:
+        return False
     tracked = tracked_descendants if tracked_descendants is not None else {}
     successful = cleanup_valid
     worker_stop_confirmed = cleanup_valid
@@ -3685,7 +3742,11 @@ def _reap_health_worker(
         successful = False
         worker_stop_confirmed = False
 
-    def request_side_cleanup() -> bool:
+    def request_side_cleanup(
+        *,
+        require_request_boundary: bool = False,
+        require_empty: bool = False,
+    ) -> bool:
         if worker_identity is None:
             return False
         try:
@@ -3702,7 +3763,10 @@ def _reap_health_worker(
                     cleanup_timeout,
                     excluded_identities=excluded,
                     private_boundary=worker_identity,
+                    require_empty=require_empty,
                 )
+            if require_request_boundary:
+                return False
             return _health_cleanup_boundary(
                 worker_identity,
                 tracked,
@@ -3742,8 +3806,19 @@ def _reap_health_worker(
             else:
                 successful = successful and confirmed
             if isinstance(raw_tracked, Mapping):
+                missing = object()
                 for pid, start_time in raw_tracked.items():
-                    if type(pid) is int and pid > 0 and (start_time is None or type(start_time) is int):
+                    if type(pid) is not int or pid <= 0 or (start_time is not None and type(start_time) is not int):
+                        continue
+                    existing_start = tracked.get(pid, missing)
+                    if existing_start is None:
+                        # A request-side identity mismatch is sticky.  A
+                        # later supervisor report must not re-authorize the
+                        # reused PID for signaling or waiting.
+                        continue
+                    if type(existing_start) is int and type(start_time) is int and existing_start != start_time:
+                        tracked[pid] = None
+                    else:
                         tracked[pid] = start_time
             else:
                 successful = False
@@ -3777,8 +3852,17 @@ def _reap_health_worker(
                 worker_stop_confirmed = False
         if not alive and not report_received:
             return cleanup_valid and worker_stop_confirmed and request_side_cleanup()
-        if not alive and report_received and not successful:
-            return cleanup_valid and worker_stop_confirmed and request_side_cleanup()
+        if not alive and report_received:
+            # A supervisor's confirmed report covers only the boundary it
+            # could observe.  The request-side subreaper must perform its own
+            # bounded, strict-empty proof before a PASS payload is reusable;
+            # this catches descendants created or reparented in the report
+            # handoff window and fails closed on an incomplete /proc view.
+            final_request_proof = request_side_cleanup(
+                require_request_boundary=True,
+                require_empty=require_final_request_proof,
+            )
+            return cleanup_valid and worker_stop_confirmed and successful and final_request_proof
         return successful and worker_stop_confirmed and not alive
 
     if not alive:
@@ -4437,7 +4521,7 @@ class HealthCheckExecutor:
                 return
             _owned, _snapshot_valid = snapshot
 
-        def cleanup_worker() -> bool:
+        def cleanup_worker(*, require_final_request_proof: bool = False) -> bool:
             nonlocal cleanup_attempted, cleanup_confirmed
             if cleanup_attempted:
                 return cleanup_confirmed
@@ -4458,6 +4542,7 @@ class HealthCheckExecutor:
                 fallback_owner_pid=os.getpid(),
                 request_identity=request_identity,
                 request_baseline=request_baseline,
+                require_final_request_proof=require_final_request_proof,
             )
             return cleanup_confirmed
 
@@ -4557,7 +4642,9 @@ class HealthCheckExecutor:
                         sample_request_owned_processes()
                         next_sample_at = self.clock() + 0.02
             if isinstance(raw, _CheckPayload):
-                confirmed = cleanup_worker()
+                confirmed = cleanup_worker(
+                    require_final_request_proof=raw.status is HealthStatus.PASS,
+                )
                 expired = self.clock() >= deadline
                 if not process_group_owned or not confirmed:
                     if isinstance(raw, _CheckPayload) and raw.status is HealthStatus.UNKNOWN:

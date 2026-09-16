@@ -732,6 +732,33 @@ class DoctorHealthExecutorTests(unittest.TestCase):
         self.assertEqual(descendants, {})
         self.assertEqual(tracked, {})
 
+    def test_request_boundary_partitions_stale_identity_from_matching_sibling(self):
+        helper = health._health_sample_request_owned_processes
+        request = health._HealthWorkerIdentity(
+            100,
+            10,
+            10,
+            start_time=1,
+            child_subreaper=True,
+            verified=True,
+        )
+        records = {
+            100: health._HealthProcessRecord(100, 1, 10, 10, 1, "S"),
+            200: health._HealthProcessRecord(200, 100, 200, 200, 99, "S"),
+            300: health._HealthProcessRecord(300, 100, 300, 300, 3, "S"),
+        }
+        tracked: dict[int, int | None] = {200: 2, 300: 3}
+
+        with patch.object(health, "_snapshot_health_processes", return_value=records):
+            sampled = helper(request, tracked, {})
+
+        self.assertIsNotNone(sampled)
+        assert sampled is not None
+        descendants, valid = sampled
+        self.assertFalse(valid)
+        self.assertEqual(set(descendants), {300})
+        self.assertEqual(tracked, {200: None, 300: 3})
+
     def test_request_boundary_surfaces_signal_failure(self):
         request = health._HealthWorkerIdentity(
             100,
@@ -754,6 +781,174 @@ class DoctorHealthExecutorTests(unittest.TestCase):
 
         self.assertFalse(result)
         signal_tracked.assert_called_once()
+
+    def test_request_cleanup_signals_and_reaps_matching_sibling_after_stale_identity(self):
+        request = health._HealthWorkerIdentity(
+            100,
+            10,
+            10,
+            start_time=1,
+            child_subreaper=True,
+            verified=True,
+        )
+        records = {
+            100: health._HealthProcessRecord(100, 1, 10, 10, 1, "S"),
+            200: health._HealthProcessRecord(200, 100, 200, 200, 99, "S"),
+            300: health._HealthProcessRecord(300, 100, 301, 300, 3, "S"),
+        }
+        tracked: dict[int, int | None] = {200: 2, 300: 3}
+        sampled_calls = 0
+        signalled: list[int] = []
+        waited: list[int] = []
+        real_sample_request_owned = health._health_sample_request_owned_processes
+
+        def sample_request_owned(*args, **kwargs):
+            nonlocal sampled_calls
+            sampled_calls += 1
+            if sampled_calls == 1:
+                return real_sample_request_owned(
+                    *args,
+                    records=records,
+                    **kwargs,
+                )
+            return {}, True
+
+        def wait_tracked(current, **kwargs):
+            waited.extend(pid for pid, start_time in current.items() if start_time == 3)
+            current.pop(300, None)
+            return True
+
+        with patch.object(health, "_health_sample_request_owned_processes", side_effect=sample_request_owned), patch.object(
+            health, "_read_health_process_record", side_effect=lambda pid: records.get(pid)
+        ), patch.object(
+            health,
+            "_health_signal_process_identity",
+            side_effect=lambda pid, *args, **kwargs: signalled.append(pid) or True,
+        ), patch.object(health, "_health_reap_tracked_children", side_effect=wait_tracked), patch.object(
+            health, "_health_tracked_processes_absent", return_value=True
+        ):
+            result = health._health_cleanup_request_boundary(request, {}, tracked, 0.03)
+
+        self.assertFalse(result)
+        self.assertEqual(signalled, [300])
+        self.assertEqual(waited, [300])
+        self.assertEqual(tracked, {200: None})
+
+    def test_final_request_proof_rejects_a_descendant_seen_after_supervisor_pass(self):
+        request = health._HealthWorkerIdentity(
+            100,
+            10,
+            10,
+            start_time=1,
+            child_subreaper=True,
+            verified=True,
+        )
+        descendant = health._HealthProcessRecord(300, 100, 30, 30, 3, "S")
+        tracked: dict[int, int | None] = {300: 3}
+        snapshots = iter((({300: descendant}, True), ({}, True), ({}, True)))
+
+        def reap_tracked(current, **kwargs):
+            current.clear()
+            return True
+
+        with patch.object(
+            health,
+            "_health_sample_request_owned_processes",
+            side_effect=lambda *args, **kwargs: next(snapshots),
+        ), patch.object(health, "_health_signal_tracked_descendants", return_value=True) as signal_tracked, patch.object(
+            health, "_health_reap_tracked_children", side_effect=reap_tracked
+        ), patch.object(health, "_health_tracked_processes_absent", return_value=True):
+            result = health._health_cleanup_request_boundary(
+                request,
+                {},
+                tracked,
+                0.05,
+                require_empty=True,
+            )
+
+        self.assertFalse(result)
+        signal_tracked.assert_called_once()
+
+    def test_final_request_proof_accepts_only_two_complete_empty_snapshots(self):
+        request = health._HealthWorkerIdentity(
+            100,
+            10,
+            10,
+            start_time=1,
+            child_subreaper=True,
+            verified=True,
+        )
+        sample_calls = 0
+
+        def sample_empty(*args, **kwargs):
+            nonlocal sample_calls
+            sample_calls += 1
+            return {}, True
+
+        with patch.object(health, "_health_sample_request_owned_processes", side_effect=sample_empty), patch.object(
+            health, "_health_reap_tracked_children", return_value=True
+        ), patch.object(health, "_health_tracked_processes_absent", return_value=True):
+            result = health._health_cleanup_request_boundary(
+                request,
+                {},
+                {},
+                0.05,
+                require_empty=True,
+            )
+
+        self.assertTrue(result)
+        self.assertEqual(sample_calls, 2)
+
+    def test_confirmed_supervisor_report_requires_final_request_proof(self):
+        class DeadSupervisor:
+            pid = 424242
+
+            def is_alive(self):
+                return False
+
+            def join(self, *, timeout=None):
+                self.timeout = timeout
+
+        class ConfirmedCleanupConnection:
+            def poll(self, timeout):
+                return True
+
+            def recv(self):
+                return {"confirmed": True, "tracked": {424300: 777}}
+
+        worker_identity = health._HealthWorkerIdentity(
+            424242,
+            424242,
+            424242,
+            start_time=123,
+            verified=True,
+        )
+        request_identity = health._HealthWorkerIdentity(
+            424100,
+            11,
+            11,
+            start_time=456,
+            child_subreaper=True,
+            verified=True,
+        )
+        stale_tracked: dict[int, int | None] = {424300: None}
+        with patch.object(health, "_health_cleanup_request_boundary", return_value=False) as request_cleanup:
+            result = health._reap_health_worker(
+                DeadSupervisor(),
+                0.01,
+                process_group_owned=True,
+                worker_identity=worker_identity,
+                tracked_descendants=stale_tracked,
+                request_identity=request_identity,
+                request_baseline={},
+                shutdown_event=threading.Event(),
+                cleanup_connection=ConfirmedCleanupConnection(),
+            )
+
+        self.assertFalse(result)
+        self.assertEqual(stale_tracked, {424300: None})
+        request_cleanup.assert_called_once()
+        self.assertTrue(request_cleanup.call_args.kwargs["require_empty"])
 
     def test_public_default_process_operations_require_the_supervisor_boundary(self):
         operations = health.ReadOnlyHealthOperations()
@@ -1286,7 +1481,10 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                 with patch("realmheart_doctor.health.subprocess.Popen", side_effect=launch_then_block):
                     started = time.monotonic()
                     result = HealthCheckExecutor(
-                        max_seconds=0.04,
+                        # Leave enough scheduling room for the inner worker
+                        # to create the real child before the request budget
+                        # cancels the deliberately blocked Popen seam.
+                        max_seconds=0.20,
                         worker_cleanup_seconds=0.02,
                     ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
                     elapsed = time.monotonic() - started
@@ -1735,7 +1933,10 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                         worker_cleanup_seconds=0.01,
                     ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
                     self.assertEqual(result.status, HealthStatus.UNKNOWN)
-                    self.assertIn(result.reason_code, {"timeout", "budget_exhausted"})
+                    self.assertIn(
+                        result.reason_code,
+                        {"timeout", "budget_exhausted", "worker_cleanup_incomplete"},
+                    )
 
                     release.set()
                     deadline = time.monotonic() + 1.0
@@ -1837,7 +2038,10 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                             worker_cleanup_seconds=0.01,
                         ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
                         self.assertEqual(result.status, HealthStatus.UNKNOWN)
-                        self.assertIn(result.reason_code, {"timeout", "budget_exhausted"})
+                        self.assertIn(
+                            result.reason_code,
+                            {"timeout", "budget_exhausted", "worker_cleanup_incomplete"},
+                        )
                         self.assertTrue(entered.exists())
 
                     active_threads = {
