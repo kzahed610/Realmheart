@@ -240,13 +240,14 @@ def _build_session_escape_probe(path: Path) -> None:
     source.write_text(
         """
 #define _GNU_SOURCE
+#include <sys/prctl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 int main(int argc, char **argv) {
-    if (argc != 1 || setsid() < 0) {
+    if (argc != 1 || prctl(PR_SET_PDEATHSIG, 0) != 0 || setsid() < 0) {
         return 90;
     }
     pid_t child = fork();
@@ -621,6 +622,114 @@ class DoctorHealthExecutorTests(unittest.TestCase):
         ), patch.object(health, "_HEALTH_PROC_SCAN_LIMIT", 1):
             self.assertIsNone(health._snapshot_health_processes())
 
+        with patch.object(health.os, "scandir", return_value=Entries(["self", "thread-self"])):
+            self.assertIsNone(health._snapshot_health_processes())
+
+    def test_request_handoff_binds_identity_and_existing_descendants(self):
+        request = health._HealthProcessRecord(100, 1, 10, 10, 11, "S")
+        existing = health._HealthProcessRecord(200, 100, 20, 20, 22, "S")
+        records = {100: request, 200: existing}
+        with patch.object(health, "_health_child_subreaper_state", return_value=True), patch.object(
+            health.os, "getpid", return_value=100
+        ), patch.object(health, "_read_health_process_record", return_value=request), patch.object(
+            health, "_snapshot_health_processes", return_value=records
+        ):
+            handoff = health._establish_health_request_handoff()
+
+        self.assertIsNotNone(handoff)
+        assert handoff is not None
+        identity, baseline = handoff
+        self.assertEqual(identity.pid, 100)
+        self.assertEqual(identity.start_time, 11)
+        self.assertTrue(identity.child_subreaper)
+        self.assertEqual(baseline, {200: 22})
+
+        with patch.object(health, "_health_child_subreaper_state", return_value=True), patch.object(
+            health.os, "getpid", return_value=100
+        ), patch.object(health, "_read_health_process_record", return_value=request), patch.object(
+            health, "_snapshot_health_processes", return_value=None
+        ):
+            self.assertIsNone(health._establish_health_request_handoff())
+
+    def test_incomplete_snapshot_still_signals_known_tracked_identities(self):
+        identity = health._HealthWorkerIdentity(
+            424200,
+            424200,
+            424200,
+            start_time=120,
+            verified=True,
+        )
+        tracked: dict[int, int | None] = {424243: 123}
+        with patch.object(health, "_health_sample_private_processes", return_value=None), patch.object(
+            health, "_health_signal_tracked_descendants", return_value=True
+        ) as signal_tracked:
+            result = health._health_cleanup_boundary(identity, tracked, 0.0)
+
+        self.assertFalse(result)
+        signal_tracked.assert_called_once()
+
+    def test_request_boundary_enumerates_only_new_adopted_descendants(self):
+        helper = health._health_sample_request_owned_processes
+        request = health._HealthWorkerIdentity(
+            100,
+            10,
+            10,
+            start_time=1,
+            child_subreaper=True,
+            verified=True,
+        )
+        records = {
+            100: health._HealthProcessRecord(100, 1, 10, 10, 1, "S"),
+            200: health._HealthProcessRecord(200, 100, 200, 200, 2, "Z"),
+            300: health._HealthProcessRecord(300, 100, 300, 300, 3, "S"),
+            400: health._HealthProcessRecord(400, 100, 400, 400, 4, "S"),
+        }
+        tracked: dict[int, int | None] = {}
+        with patch.object(health, "_snapshot_health_processes", return_value=records):
+            sampled = helper(
+                request,
+                tracked,
+                {200: 2},
+                excluded_identities={200: 2},
+            )
+
+        self.assertIsNotNone(sampled)
+        assert sampled is not None
+        descendants, valid = sampled
+        self.assertTrue(valid)
+        self.assertEqual(set(descendants), {300, 400})
+        self.assertEqual(tracked, {300: 3, 400: 4})
+
+    def test_request_boundary_rejects_an_excluded_identity_reuse(self):
+        helper = health._health_sample_request_owned_processes
+        request = health._HealthWorkerIdentity(
+            100,
+            10,
+            10,
+            start_time=1,
+            child_subreaper=True,
+            verified=True,
+        )
+        records = {
+            100: health._HealthProcessRecord(100, 1, 10, 10, 1, "S"),
+            200: health._HealthProcessRecord(200, 100, 200, 200, 99, "S"),
+        }
+        tracked: dict[int, int | None] = {}
+        with patch.object(health, "_snapshot_health_processes", return_value=records):
+            sampled = helper(
+                request,
+                tracked,
+                {},
+                excluded_identities={200: 2},
+            )
+
+        self.assertIsNotNone(sampled)
+        assert sampled is not None
+        descendants, valid = sampled
+        self.assertFalse(valid)
+        self.assertEqual(descendants, {})
+        self.assertEqual(tracked, {})
+
     def test_public_default_process_operations_require_the_supervisor_boundary(self):
         operations = health.ReadOnlyHealthOperations()
         with patch("realmheart_doctor.health.subprocess.Popen") as popen:
@@ -668,6 +777,53 @@ class DoctorHealthExecutorTests(unittest.TestCase):
 
         self.assertTrue(result)
         cleanup.assert_called_once()
+
+    def test_supervisor_loss_fallback_uses_the_request_handoff_boundary(self):
+        class DeadSupervisor:
+            pid = 424242
+
+            def is_alive(self):
+                return False
+
+            def join(self, *, timeout=None):
+                self.timeout = timeout
+
+        class EmptyCleanupConnection:
+            def poll(self, timeout):
+                return False
+
+        identity = health._HealthWorkerIdentity(
+            424242,
+            424242,
+            424242,
+            start_time=123,
+            verified=True,
+        )
+        request_identity = health._HealthWorkerIdentity(
+            424100,
+            11,
+            11,
+            start_time=456,
+            child_subreaper=True,
+            verified=True,
+        )
+        with patch.object(health, "_health_cleanup_request_boundary", return_value=True) as request_cleanup, patch.object(
+            health, "_health_cleanup_boundary", side_effect=AssertionError("dead-root cleanup is insufficient")
+        ):
+            result = health._reap_health_worker(
+                DeadSupervisor(),
+                0.01,
+                process_group_owned=True,
+                worker_identity=identity,
+                tracked_descendants={},
+                request_identity=request_identity,
+                request_baseline={},
+                shutdown_event=threading.Event(),
+                cleanup_connection=EmptyCleanupConnection(),
+            )
+
+        self.assertTrue(result)
+        request_cleanup.assert_called_once()
 
     def test_pidfd_unavailability_uses_only_a_verified_private_process_group(self):
         record = health._HealthProcessRecord(424242, 1, 424242, 424242, 123, "S")
@@ -810,6 +966,68 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                     except ProcessLookupError:
                         pass
 
+    def test_supervisor_loss_before_first_sample_contains_a_pdeathsig_escape(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, executable_path = _manifest(root)
+            _build_session_escape_probe(executable_path)
+            marker = executable_path.with_name(executable_path.name + ".pid")
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                artifact_id="demo.exec",
+                timeout_ms=500,
+                args={"args": []},
+            )
+            registry = replace(registry, health_checks=checks)
+
+            request_pid = os.getpid()
+            real_private_sample = health._health_sample_private_processes
+            request_sample_calls = 0
+
+            def kill_supervisor_before_sample(identity, tracked):
+                if (
+                    os.getpid() != request_pid
+                    and os.getppid() == request_pid
+                    and health._HEALTH_WORKER_GROUP_OWNED
+                    and marker.exists()
+                ):
+                    os.kill(os.getpid(), signal.SIGKILL)
+                return real_private_sample(identity, tracked)
+
+            real_request_sample = health._health_sample_request_owned_processes
+
+            def defer_request_sampling(*args, **kwargs):
+                nonlocal request_sample_calls
+                request_sample_calls += 1
+                if request_sample_calls <= 10:
+                    return None
+                return real_request_sample(*args, **kwargs)
+
+            with patch.object(health, "_health_sample_private_processes", side_effect=kill_supervisor_before_sample), patch.object(
+                health, "_health_sample_request_owned_processes", side_effect=defer_request_sampling
+            ), patch.object(health, "_health_pidfd_open", return_value=None):
+                result = HealthCheckExecutor(
+                    max_seconds=0.5,
+                    worker_cleanup_seconds=0.05,
+                ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
+
+            self.assertEqual(result.status, HealthStatus.UNKNOWN)
+            self.assertGreaterEqual(request_sample_calls, 11)
+            self.assertTrue(marker.exists(), "the probe did not create an escaped descendant")
+            escaped_pid = int(marker.read_text(encoding="ascii"))
+            try:
+                self.assertTrue(
+                    _wait_for_process_exit(escaped_pid),
+                    "an escaped descendant survived cleanup after supervisor loss",
+                )
+            finally:
+                if _process_is_live(escaped_pid):
+                    try:
+                        os.kill(escaped_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
     def test_identity_failure_never_falls_back_to_an_unbound_worker_signal(self):
         process = type("Process", (), {"pid": 424242})()
         identity = health._HealthWorkerIdentity(
@@ -844,15 +1062,38 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             )
 
     def test_reaping_requires_a_successful_waitpid_completion(self):
-        with patch("realmheart_doctor.health.os.waitpid", return_value=(0, 0)):
+        record = health._HealthProcessRecord(424242, 1, 1, 1, 123, "Z")
+        with patch.object(health, "_read_health_process_record", return_value=record), patch(
+            "realmheart_doctor.health.os.waitpid", return_value=(0, 0)
+        ):
             self.assertFalse(health._health_reap_tracked_children({424242: 123}))
-        with patch("realmheart_doctor.health.os.waitpid", return_value=(424242, 0)):
+        with patch.object(health, "_read_health_process_record", return_value=record), patch(
+            "realmheart_doctor.health.os.waitpid", return_value=(424242, 0)
+        ):
             self.assertTrue(health._health_reap_tracked_children({424242: 123}))
         for error in (ChildProcessError(), OSError(errno.ECHILD, "not a child"), OSError(errno.ESRCH, "gone")):
-            with self.subTest(error=type(error).__name__), patch(
-                "realmheart_doctor.health.os.waitpid", side_effect=error
-            ):
+            with self.subTest(error=type(error).__name__), patch.object(
+                health, "_read_health_process_record", return_value=record
+            ), patch("realmheart_doctor.health.os.waitpid", side_effect=error):
                 self.assertFalse(health._health_reap_tracked_children({424242: 123}))
+
+    def test_reaping_refuses_a_reused_pid_before_waitpid(self):
+        current = health._HealthProcessRecord(424242, 1, 1, 1, 999, "Z")
+        tracked: dict[int, int | None] = {424242: 123}
+        failed: set[int] = set()
+        with patch.object(health, "_read_health_process_record", return_value=current), patch.object(
+            health.os, "waitpid"
+        ) as waitpid:
+            result = health._health_reap_tracked_children(
+                tracked,
+                owner_pid=1,
+                failed=failed,
+            )
+
+        self.assertFalse(result)
+        self.assertEqual(tracked, {424242: 123})
+        self.assertEqual(failed, {424242})
+        waitpid.assert_not_called()
 
     def test_zombie_is_not_absent_without_reaping_proof(self):
         zombie = health._HealthProcessRecord(424242, 1, 1, 1, 123, "Z")

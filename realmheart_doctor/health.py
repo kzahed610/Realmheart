@@ -726,7 +726,11 @@ def _snapshot_health_processes() -> dict[int, _HealthProcessRecord] | None:
                         break
                     records[record.pid] = record
                 else:
-                    return records
+                    # A process table without any numeric entries is not a
+                    # proof that the boundary is empty.  Treat it exactly
+                    # like every other ambiguous/incomplete /proc view.
+                    if numeric_entries > 0:
+                        return records
         except (OSError, TypeError, ValueError):
             pass
     return None
@@ -736,7 +740,7 @@ def _health_sample_descendants(
     root_pid: int,
     tracked: dict[int, int | None],
     *,
-    records: dict[int, _HealthProcessRecord] | None = None,
+    records: Mapping[int, _HealthProcessRecord] | None = None,
 ) -> tuple[dict[int, _HealthProcessRecord], bool] | None:
     """Track a root's descendants while rejecting PID reuse."""
 
@@ -806,6 +810,12 @@ def _health_track_private_session_members(
         records = _snapshot_health_processes()
     if records is None:
         return None
+    root = records.get(identity.pid)
+    if (
+        not isinstance(root, _HealthProcessRecord)
+        or (identity.start_time is not None and root.start_time != identity.start_time)
+    ):
+        return None
     members: dict[int, _HealthProcessRecord] = {}
     missing = object()
     for record in records.values():
@@ -841,6 +851,143 @@ def _health_sample_private_processes(
     if sampled is None or members is None:
         return None
     return sampled, members
+
+
+def _establish_health_request_handoff() -> tuple[_HealthWorkerIdentity, dict[int, int]] | None:
+    """Capture the caller identity and pre-launch descendant boundary."""
+
+    if os.name != "posix" or _health_child_subreaper_state() is not True:
+        return None
+    try:
+        request_pid = os.getpid()
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    request_record = _read_health_process_record(request_pid)
+    if request_record is None or request_record.pid != request_pid:
+        return None
+    records = _snapshot_health_processes()
+    if not isinstance(records, Mapping) or not records:
+        return None
+    current_request = records.get(request_pid)
+    if (
+        not isinstance(current_request, _HealthProcessRecord)
+        or current_request.start_time != request_record.start_time
+    ):
+        return None
+    sampled = _health_sample_descendants(request_pid, {}, records=records)
+    if sampled is None:
+        return None
+    descendants, valid = sampled
+    if not valid:
+        return None
+    baseline = {pid: record.start_time for pid, record in descendants.items()}
+    identity = _HealthWorkerIdentity(
+        request_pid,
+        current_request.session_id,
+        current_request.process_group_id,
+        current_request.start_time,
+        child_subreaper=True,
+        verified=True,
+    )
+    return identity, baseline
+
+
+def _health_sample_request_owned_processes(
+    request_identity: _HealthWorkerIdentity,
+    tracked: dict[int, int | None],
+    baseline: Mapping[int, int],
+    *,
+    excluded_identities: Mapping[int, int] | None = None,
+    records: Mapping[int, _HealthProcessRecord] | None = None,
+) -> tuple[dict[int, _HealthProcessRecord], bool] | None:
+    """Sample only descendants created after a verified request handoff.
+
+    The request process is intentionally not a private session leader, so its
+    session membership is not an ownership boundary.  The kernel subreaper
+    relationship and the complete pre-launch descendant baseline together
+    define the boundary: every post-handoff descendant is owned, including a
+    process adopted directly by the request after its supervisor dies.
+    """
+
+    if (
+        not request_identity.verified
+        or not request_identity.child_subreaper
+        or type(request_identity.start_time) is not int
+        or not isinstance(baseline, Mapping)
+    ):
+        return None
+    excluded = {} if excluded_identities is None else excluded_identities
+    if not isinstance(excluded, Mapping):
+        return None
+    if type(request_identity.pid) is not int or request_identity.pid <= 0:
+        return None
+    if request_identity.pid in excluded:
+        return None
+    for pid, start_time in baseline.items():
+        if type(pid) is not int or pid <= 0 or type(start_time) is not int:
+            return None
+    for pid, start_time in excluded.items():
+        if type(pid) is not int or pid <= 0 or type(start_time) is not int:
+            return None
+
+    if records is None:
+        records = _snapshot_health_processes()
+    if not isinstance(records, Mapping) or not records:
+        return None
+    root = records.get(request_identity.pid)
+    if (
+        not isinstance(root, _HealthProcessRecord)
+        or root.start_time != request_identity.start_time
+        or root.pid != request_identity.pid
+    ):
+        return None
+
+    # Validate every identity already handed to the request before accepting
+    # any new process.  A reused PID is an ambiguity, not a new owned child.
+    for pid, expected_start in tracked.items():
+        if type(pid) is not int or pid <= 0 or type(expected_start) is not int:
+            return ({}, False)
+        current = records.get(pid)
+        if current is not None and (
+            not isinstance(current, _HealthProcessRecord)
+            or current.start_time != expected_start
+        ):
+            return ({}, False)
+
+    sampled = _health_sample_descendants(
+        request_identity.pid,
+        {},
+        records=records,
+    )
+    if sampled is None:
+        return None
+    descendants, valid = sampled
+    if not valid:
+        return {}, False
+
+    for pid, expected_start in excluded.items():
+        current = descendants.get(pid)
+        if current is not None and current.start_time != expected_start:
+            return {}, False
+
+    owned: dict[int, _HealthProcessRecord] = {}
+    for pid, record in descendants.items():
+        excluded_start = excluded.get(pid)
+        if excluded_start is not None:
+            if record.start_time != excluded_start:
+                return {}, False
+            continue
+        baseline_start = baseline.get(pid)
+        if baseline_start is not None and baseline_start == record.start_time:
+            continue
+        owned[pid] = record
+
+    updated_tracked = dict(tracked)
+    for pid, record in owned.items():
+        updated_tracked[pid] = record.start_time
+    tracked.clear()
+    tracked.update(updated_tracked)
+    return owned, True
 
 
 def _health_signal_tracked_descendants(
@@ -965,25 +1112,34 @@ def _health_reap_tracked_children(
 
     successful = True
     for pid in tuple(tracked):
-        if owner_pid is not None:
-            record = _read_health_process_record(pid)
-            if record is None:
-                if not_owned is not None:
-                    not_owned.add(pid)
-                successful = False
-                continue
-            elif record.parent_pid != owner_pid:
-                if not_owned is not None:
-                    not_owned.add(pid)
-                continue
-            elif not_owned is not None:
-                not_owned.discard(pid)
         expected_start = tracked.get(pid)
         if type(expected_start) is not int:
             successful = False
             if failed is not None:
                 failed.add(pid)
             continue
+        record = _read_health_process_record(pid)
+        if record is None:
+            if owner_pid is not None and not_owned is not None:
+                not_owned.add(pid)
+            successful = False
+            if failed is not None:
+                failed.add(pid)
+            continue
+        # waitpid() is PID-based.  Re-read the kernel identity immediately
+        # before it so a stale tracked PID can never reap a replacement child.
+        if record.start_time != expected_start:
+            successful = False
+            if failed is not None:
+                failed.add(pid)
+            continue
+        if owner_pid is not None:
+            if record.parent_pid != owner_pid:
+                if not_owned is not None:
+                    not_owned.add(pid)
+                continue
+            elif not_owned is not None:
+                not_owned.discard(pid)
         try:
             waited_pid, _status = os.waitpid(pid, os.WNOHANG)
             if waited_pid != pid:
@@ -1081,7 +1237,32 @@ def _health_cleanup_boundary(
     while True:
         snapshot = _health_sample_private_processes(identity, tracked)
         if snapshot is None:
-            return False
+            # An incomplete process view cannot prove that the boundary is
+            # empty.  Still use the identities already established by an
+            # earlier complete view: signal them and make any bounded reap
+            # attempt, then keep the result explicitly unconfirmed.
+            successful = False
+            if not _health_signal_tracked_descendants(
+                tracked,
+                signal.SIGKILL,
+                private_boundary=identity if owner_pid is not None else None,
+                protected_boundary=identity if owner_pid is None else None,
+            ):
+                successful = False
+            _health_reap_tracked_children(
+                tracked,
+                owner_pid=reap_owner_pid,
+                reaped=reaped,
+                pending=reap_pending,
+                failed=reap_failures,
+                not_owned=not_owned,
+            )
+            if reap_failures:
+                successful = False
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
+            continue
         sampled, members = snapshot
         descendants, sampled_ok = sampled
         session_members, members_ok = members
@@ -1153,6 +1334,114 @@ def _health_cleanup_boundary(
         if record.state != "Z"
     }
     return successful and sampled_ok and members_ok and not live and _health_tracked_processes_absent(tracked)
+
+
+def _health_cleanup_request_boundary(
+    request_identity: _HealthWorkerIdentity,
+    baseline: Mapping[int, int],
+    tracked: dict[int, int | None],
+    timeout: float,
+    *,
+    excluded_identities: Mapping[int, int] | None = None,
+    private_boundary: _HealthWorkerIdentity | None = None,
+) -> bool:
+    """Contain descendants adopted by the request after supervisor loss.
+
+    The request identity and baseline are captured before the supervisor is
+    launched.  A complete snapshot can therefore distinguish a new adopted
+    descendant from an existing request child, even after a probe has called
+    ``setsid()`` and escaped the supervisor's session.  Every incomplete view
+    keeps cleanup unconfirmed, while already tracked identities still receive
+    the best identity-bound signal available.
+    """
+
+    if (
+        not request_identity.verified
+        or not request_identity.child_subreaper
+        or type(request_identity.start_time) is not int
+        or not isinstance(baseline, Mapping)
+    ):
+        return False
+    if private_boundary is not None and not private_boundary.verified:
+        return False
+    try:
+        cleanup_timeout = float(timeout)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(cleanup_timeout) or cleanup_timeout < 0:
+        return False
+    excluded = {} if excluded_identities is None else excluded_identities
+    if not isinstance(excluded, Mapping):
+        return False
+    deadline = time.monotonic() + min(cleanup_timeout, MAX_WORKER_CLEANUP_SECONDS)
+    reaped: set[tuple[int, int]] = set()
+    reap_pending: set[int] = set()
+    reap_failures: set[int] = set()
+    not_owned: set[int] = set()
+    stable_empty = False
+
+    while True:
+        sampled = _health_sample_request_owned_processes(
+            request_identity,
+            tracked,
+            baseline,
+            excluded_identities=excluded,
+        )
+        if sampled is None:
+            stable_empty = False
+            if tracked:
+                _health_signal_tracked_descendants(
+                    tracked,
+                    signal.SIGKILL,
+                    private_boundary=private_boundary,
+                    protected_boundary=request_identity,
+                )
+                _health_reap_tracked_children(
+                    tracked,
+                    owner_pid=request_identity.pid,
+                    reaped=reaped,
+                    pending=reap_pending,
+                    failed=reap_failures,
+                    not_owned=not_owned,
+                )
+        else:
+            owned, snapshot_valid = sampled
+            live = {pid: record for pid, record in owned.items() if record.state != "Z"}
+            if not snapshot_valid:
+                stable_empty = False
+            if live:
+                stable_empty = False
+                _health_signal_tracked_descendants(
+                    tracked,
+                    signal.SIGKILL,
+                    private_boundary=private_boundary,
+                    protected_boundary=request_identity,
+                )
+            reap_ok = _health_reap_tracked_children(
+                tracked,
+                owner_pid=request_identity.pid,
+                reaped=reaped,
+                pending=reap_pending,
+                failed=reap_failures,
+                not_owned=not_owned,
+            )
+            if (
+                snapshot_valid
+                and not live
+                and reap_ok
+                and not reap_failures
+                and _health_tracked_processes_absent(tracked)
+            ):
+                if stable_empty:
+                    return True
+                stable_empty = True
+            else:
+                stable_empty = False
+
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
+    return False
 
 
 def _health_register_probe(pid: int) -> bool:
@@ -3313,6 +3602,8 @@ def _reap_health_worker(
     shutdown_event: Any = None,
     cleanup_connection: Any = None,
     fallback_owner_pid: int | None = None,
+    request_identity: _HealthWorkerIdentity | None = None,
+    request_baseline: Mapping[int, int] | None = None,
 ) -> bool:
     """Stop and boundedly reap a worker, its private session, and escaped children."""
 
@@ -3327,24 +3618,42 @@ def _reap_health_worker(
         cleanup_timeout = 0.0
     tracked = tracked_descendants if tracked_descendants is not None else {}
     successful = cleanup_valid
+    worker_stop_confirmed = cleanup_valid
     if process_group_owned and (worker_identity is None or not worker_identity.verified):
         successful = False
+        worker_stop_confirmed = False
     if process_group_owned and shutdown_event is not None:
         try:
             shutdown_event.set()
         except (OSError, RuntimeError, ValueError):
             successful = False
+            worker_stop_confirmed = False
 
     try:
         alive = bool(process.is_alive())
     except Exception:
         alive = True
         successful = False
+        worker_stop_confirmed = False
 
     def request_side_cleanup() -> bool:
         if worker_identity is None:
             return False
         try:
+            if request_identity is not None or request_baseline is not None:
+                if request_identity is None or request_baseline is None:
+                    return False
+                if type(worker_identity.start_time) is not int:
+                    return False
+                excluded = {worker_identity.pid: worker_identity.start_time}
+                return _health_cleanup_request_boundary(
+                    request_identity,
+                    request_baseline,
+                    tracked,
+                    cleanup_timeout,
+                    excluded_identities=excluded,
+                    private_boundary=worker_identity,
+                )
             return _health_cleanup_boundary(
                 worker_identity,
                 tracked,
@@ -3361,11 +3670,13 @@ def _reap_health_worker(
             process.join(timeout=min(MAX_WORKER_CLEANUP_SECONDS * 2, 0.5))
         except Exception:
             successful = False
+            worker_stop_confirmed = False
         try:
             alive = bool(process.is_alive())
         except Exception:
             alive = True
             successful = False
+            worker_stop_confirmed = False
         report: object | None = None
         if cleanup_connection is not None:
             try:
@@ -3394,7 +3705,7 @@ def _reap_health_worker(
             # instead of treating the missing report as proof of cleanup.
             successful = False
             if not alive:
-                return cleanup_valid and request_side_cleanup()
+                return cleanup_valid and worker_stop_confirmed and request_side_cleanup()
         if alive:
             if not _signal_health_worker(
                 process,
@@ -3403,26 +3714,30 @@ def _reap_health_worker(
                 worker_identity=worker_identity,
             ):
                 successful = False
+                worker_stop_confirmed = False
             try:
                 process.join(timeout=cleanup_timeout)
             except Exception:
                 successful = False
+                worker_stop_confirmed = False
             try:
                 alive = bool(process.is_alive())
             except Exception:
                 alive = True
                 successful = False
+                worker_stop_confirmed = False
         if not alive and not report_received:
-            return cleanup_valid and request_side_cleanup()
+            return cleanup_valid and worker_stop_confirmed and request_side_cleanup()
         if not alive and report_received and not successful:
-            return cleanup_valid and request_side_cleanup()
-        return successful and not alive
+            return cleanup_valid and worker_stop_confirmed and request_side_cleanup()
+        return successful and worker_stop_confirmed and not alive
 
     if not alive:
         try:
             process.join(timeout=0)
         except Exception:
             successful = False
+            worker_stop_confirmed = False
     else:
         if not _signal_health_worker(
             process,
@@ -3431,15 +3746,18 @@ def _reap_health_worker(
             worker_identity=worker_identity,
         ):
             successful = False
+            worker_stop_confirmed = False
         try:
             process.join(timeout=cleanup_timeout)
         except Exception:
             successful = False
+            worker_stop_confirmed = False
         try:
             alive = bool(process.is_alive())
         except Exception:
             alive = True
             successful = False
+            worker_stop_confirmed = False
         if alive:
             if not _signal_health_worker(
                 process,
@@ -3448,21 +3766,24 @@ def _reap_health_worker(
                 worker_identity=worker_identity,
             ):
                 successful = False
+                worker_stop_confirmed = False
             try:
                 process.join(timeout=cleanup_timeout)
             except Exception:
                 successful = False
+                worker_stop_confirmed = False
             try:
                 alive = bool(process.is_alive())
             except Exception:
                 alive = True
                 successful = False
+                worker_stop_confirmed = False
 
     if process_group_owned:
         boundary_confirmed = request_side_cleanup() if worker_identity is not None else False
         if not boundary_confirmed:
             successful = False
-    return successful and not alive
+    return successful and worker_stop_confirmed and not alive
 
 
 def _run_health_check_in_process(
@@ -3658,7 +3979,11 @@ def _run_health_supervisor(
         inner_ready_child.close()
         inner_reap_child.close()
         inner_launch_event.set()
-        next_sample_at = time.monotonic() + 0.02
+        # Start the supervisor-side tracker immediately.  The request-side
+        # handoff is the authoritative fallback, but this closes the normal
+        # worker-loss window whenever the supervisor remains alive.
+        sample_owned_processes()
+        next_sample_at = time.monotonic() + 0.005
 
         while True:
             if inner_result_parent.poll(0.005):
@@ -3690,7 +4015,7 @@ def _run_health_supervisor(
                 _health_apply_reap_notifications(tracked, worker_reaped, reap_message)
             if time.monotonic() >= next_sample_at:
                 sample_owned_processes()
-                next_sample_at = time.monotonic() + 0.02
+                next_sample_at = time.monotonic() + 0.005
 
         while not shutdown_event.is_set() and not completion_event.is_set():
             if time.monotonic() >= deadline:
@@ -4037,19 +4362,31 @@ class HealthCheckExecutor:
         process_started = False
         process_group_owned = False
         worker_identity: _HealthWorkerIdentity | None = None
+        request_identity: _HealthWorkerIdentity | None = None
+        request_baseline: Mapping[int, int] | None = None
         tracked_descendants: dict[int, int | None] = {}
         cleanup_attempted = False
         cleanup_confirmed = False
 
         def sample_request_owned_processes() -> None:
-            if not process_group_owned or worker_identity is None:
+            if (
+                not process_group_owned
+                or worker_identity is None
+                or request_identity is None
+                or request_baseline is None
+            ):
                 return
-            snapshot = _health_sample_private_processes(worker_identity, tracked_descendants)
+            if type(worker_identity.start_time) is not int:
+                return
+            snapshot = _health_sample_request_owned_processes(
+                request_identity,
+                tracked_descendants,
+                request_baseline,
+                excluded_identities={worker_identity.pid: worker_identity.start_time},
+            )
             if snapshot is None:
                 return
-            sampled, members = snapshot
-            if not sampled[1] or not members[1]:
-                return
+            _owned, _snapshot_valid = snapshot
 
         def cleanup_worker() -> bool:
             nonlocal cleanup_attempted, cleanup_confirmed
@@ -4070,6 +4407,8 @@ class HealthCheckExecutor:
                 shutdown_event=shutdown_event if process_group_owned else None,
                 cleanup_connection=cleanup_parent if process_group_owned else None,
                 fallback_owner_pid=os.getpid(),
+                request_identity=request_identity,
+                request_baseline=request_baseline,
             )
             return cleanup_confirmed
 
@@ -4095,6 +4434,17 @@ class HealthCheckExecutor:
                             max(0.0, (self.clock() - started) * 1000.0),
                         )
                     request_subreaper_changed = True
+                handoff = _establish_health_request_handoff()
+                if handoff is None:
+                    return (
+                        _payload(
+                            HealthStatus.UNKNOWN,
+                            "worker_unavailable",
+                            detail="request descendant identity handoff could not be established",
+                        ),
+                        max(0.0, (self.clock() - started) * 1000.0),
+                    )
+                request_identity, request_baseline = handoff
             process = context.Process(
                 target=_run_health_supervisor,
                 args=(self, registry, spec),
@@ -4132,7 +4482,8 @@ class HealthCheckExecutor:
             raw: object | None = None
             if process_group_owned and self.clock() < deadline:
                 launch_event.set()
-                next_sample_at = self.clock() + 0.02
+                sample_request_owned_processes()
+                next_sample_at = self.clock() + 0.005
                 while self.clock() < deadline:
                     remaining = max(0.0, deadline - self.clock())
                     if remaining <= 0:
