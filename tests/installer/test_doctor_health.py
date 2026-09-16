@@ -1385,7 +1385,7 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                     except ProcessLookupError:
                         pass
 
-    def test_supervisor_loss_before_first_sample_contains_a_pdeathsig_escape(self):
+    def test_supervisor_loss_before_first_sample_refuses_probe_without_pidfds(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             registry, _, executable_path = _manifest(root)
@@ -1433,19 +1433,8 @@ class DoctorHealthExecutorTests(unittest.TestCase):
 
             self.assertEqual(result.status, HealthStatus.UNKNOWN)
             self.assertGreaterEqual(request_sample_calls, 11)
-            self.assertTrue(marker.exists(), "the probe did not create an escaped descendant")
-            escaped_pid = int(marker.read_text(encoding="ascii"))
-            try:
-                self.assertTrue(
-                    _wait_for_process_exit(escaped_pid),
-                    "an escaped descendant survived cleanup after supervisor loss",
-                )
-            finally:
-                if not _process_is_absent(escaped_pid):
-                    try:
-                        os.kill(escaped_pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+            self.assertIn(result.reason_code, {"pidfd_unavailable", "launch_authority_unavailable"})
+            self.assertFalse(marker.exists(), "the probe launched without pidfd authority")
 
     def test_identity_failure_never_falls_back_to_an_unbound_worker_signal(self):
         process = type("Process", (), {"pid": 424242})()
@@ -1531,6 +1520,111 @@ class DoctorHealthExecutorTests(unittest.TestCase):
         self.assertEqual(result.status, HealthStatus.PASS)
         self.assertEqual(after, before)
 
+    def test_subreaper_restore_preserves_an_already_enabled_caller_state(self):
+        executor = HealthCheckExecutor()
+        successful_payload = health._payload(HealthStatus.PASS, "observed")
+        with patch.object(health, "_health_child_subreaper_state", side_effect=(True, True)), patch.object(
+            health, "_set_health_child_subreaper"
+        ) as set_subreaper, patch.object(
+            executor,
+            "_run_with_process_body",
+            return_value=(successful_payload, 1.0),
+        ):
+            payload, _duration = executor._run_with_process(
+                None,
+                None,
+                timeout_seconds=0.1,
+                deadline=time.monotonic() + 1.0,
+            )
+
+        self.assertEqual(payload.status, HealthStatus.PASS)
+        set_subreaper.assert_not_called()
+
+    def test_default_execution_preserves_an_enabled_caller_subreaper_state(self):
+        if os.name != "posix":
+            self.skipTest("child-subreaper state is Linux-specific")
+        before = _caller_subreaper_state()
+        if not health._set_health_child_subreaper(True):
+            self.skipTest("PR_SET_CHILD_SUBREAPER is unavailable")
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                registry, _, _ = _manifest(Path(temp))
+                result = HealthCheckExecutor(max_seconds=1).execute(
+                    registry, check_ids=("check.runtime",)
+                ).result_for("check.runtime")
+                after = _caller_subreaper_state()
+        finally:
+            restored = health._set_health_child_subreaper(before)
+
+        self.assertTrue(restored)
+        self.assertEqual(result.status, HealthStatus.PASS)
+        self.assertTrue(after)
+
+    def test_subreaper_restore_returns_the_original_disabled_state(self):
+        executor = HealthCheckExecutor()
+        successful_payload = health._payload(HealthStatus.PASS, "observed")
+        with patch.object(health, "_health_child_subreaper_state", side_effect=(False, False)), patch.object(
+            health, "_set_health_child_subreaper", side_effect=(True, True)
+        ) as set_subreaper, patch.object(
+            executor,
+            "_run_with_process_body",
+            return_value=(successful_payload, 1.0),
+        ):
+            payload, _duration = executor._run_with_process(
+                None,
+                None,
+                timeout_seconds=0.1,
+                deadline=time.monotonic() + 1.0,
+            )
+
+        self.assertEqual(payload.status, HealthStatus.PASS)
+        self.assertEqual(set_subreaper.call_args_list[0].args, (True,))
+        self.assertEqual(set_subreaper.call_args_list[1].args, (False,))
+
+    def test_subreaper_setter_failure_is_cleanup_incomplete_unknown(self):
+        executor = HealthCheckExecutor()
+        with patch.object(health, "_health_child_subreaper_state", side_effect=(False, False)), patch.object(
+            health, "_set_health_child_subreaper", side_effect=(False, False)
+        ) as set_subreaper, patch.object(executor, "_run_with_process_body") as body:
+            payload, _duration = executor._run_with_process(
+                None,
+                None,
+                timeout_seconds=0.1,
+                deadline=time.monotonic() + 1.0,
+            )
+
+        self.assertEqual(payload.status, HealthStatus.UNKNOWN)
+        self.assertEqual(payload.reason_code, "worker_cleanup_incomplete")
+        body.assert_not_called()
+        self.assertEqual(set_subreaper.call_count, 2)
+
+    def test_subreaper_restore_failure_and_readback_mismatch_are_unknown(self):
+        for states, setter_results in (
+            ((False, False), (True, False)),
+            ((False, True), (True, True)),
+        ):
+            with self.subTest(states=states, setter_results=setter_results):
+                executor = HealthCheckExecutor()
+                successful_payload = health._payload(HealthStatus.PASS, "observed")
+                with patch.object(
+                    health, "_health_child_subreaper_state", side_effect=states
+                ), patch.object(
+                    health, "_set_health_child_subreaper", side_effect=setter_results
+                ), patch.object(
+                    executor,
+                    "_run_with_process_body",
+                    return_value=(successful_payload, 1.0),
+                ):
+                    payload, _duration = executor._run_with_process(
+                        None,
+                        None,
+                        timeout_seconds=0.1,
+                        deadline=time.monotonic() + 1.0,
+                    )
+
+                self.assertEqual(payload.status, HealthStatus.UNKNOWN)
+                self.assertEqual(payload.reason_code, "worker_cleanup_incomplete")
+
     def test_session_escape_descendant_is_reaped_before_timeout_returns(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1567,7 +1661,7 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                     except ProcessLookupError:
                         pass
 
-    def test_session_escape_descendant_is_reaped_without_pidfds(self):
+    def test_session_escape_descendant_is_not_launched_without_pidfds(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             registry, _, executable_path = _manifest(root)
@@ -1589,19 +1683,8 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                 ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
 
             self.assertEqual(result.status, HealthStatus.UNKNOWN)
-            self.assertTrue(marker.exists(), "the probe did not create an escaped descendant")
-            escaped_pid = int(marker.read_text(encoding="ascii"))
-            try:
-                self.assertTrue(
-                    _wait_for_process_exit(escaped_pid),
-                    "an escaped descendant survived cleanup when pidfds were unavailable",
-                )
-            finally:
-                if not _process_is_absent(escaped_pid):
-                    try:
-                        os.kill(escaped_pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+            self.assertIn(result.reason_code, {"pidfd_unavailable", "launch_authority_unavailable"})
+            self.assertFalse(marker.exists(), "the probe launched without pidfd authority")
 
     def test_group_signal_failure_makes_successful_probe_cleanup_unknown(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -1620,7 +1703,7 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                 ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
 
             self.assertEqual(result.status, HealthStatus.UNKNOWN)
-            self.assertIn(result.reason_code, {"worker_cleanup_incomplete", "budget_exhausted"})
+            self.assertIn(result.reason_code, {"worker_cleanup_incomplete", "budget_exhausted", "pidfd_unavailable"})
 
     def test_worker_reaper_reports_cleanup_api_errors_with_bounded_waits(self):
         class CleanupErrorProcess:
@@ -2183,6 +2266,21 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             self.assertEqual(result.status, HealthStatus.UNKNOWN)
             self.assertIn(result.reason_code, {"timeout", "budget_exhausted"})
             self.assertFalse(marker.exists(), "the authorized ELF executed after its deadline")
+
+    def test_pidfd_launch_authority_is_preflighted_before_probe_launch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry, _, _ = _manifest(Path(temp))
+
+            with patch.object(health, "_health_pidfd_open", return_value=None), patch.object(
+                health.subprocess, "Popen"
+            ) as popen:
+                result = HealthCheckExecutor(max_seconds=1).execute(
+                    registry, check_ids=("check.runtime",)
+                ).result_for("check.runtime")
+
+            self.assertEqual(result.status, HealthStatus.UNKNOWN)
+            self.assertIn(result.reason_code, {"pidfd_unavailable", "launch_authority_unavailable"})
+            popen.assert_not_called()
 
     def test_repeated_snapshot_timeouts_do_not_accumulate_workers_or_descriptors(self):
         with tempfile.TemporaryDirectory() as temp:

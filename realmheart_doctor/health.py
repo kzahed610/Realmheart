@@ -445,6 +445,24 @@ def _set_health_child_subreaper(enabled: bool) -> bool:
     return _health_prctl(_HEALTH_PR_SET_CHILD_SUBREAPER, 1 if enabled else 0)
 
 
+def _restore_health_child_subreaper(previous: bool | None, *, required: bool) -> bool:
+    """Restore and read back the caller's child-subreaper state once."""
+
+    if type(previous) is not bool:
+        return False
+    setter_ok = True
+    if required:
+        try:
+            setter_ok = _set_health_child_subreaper(previous)
+        except BaseException:
+            setter_ok = False
+    try:
+        observed = _health_child_subreaper_state()
+    except BaseException:
+        observed = None
+    return setter_ok and observed is previous
+
+
 def _enable_health_child_subreaper() -> bool:
     """Make orphaned probe descendants reparent to their Doctor supervisor."""
 
@@ -525,6 +543,33 @@ def _health_pidfd_send_signal(descriptor: int, signal_number: int) -> bool:
         return result == 0
     except (AttributeError, NotImplementedError, OSError, TypeError, ValueError):
         return False
+
+
+def _health_launch_authority_available() -> bool:
+    """Preflight the kernel authority needed to contain an ambiguous launch."""
+
+    if os.name != "posix":
+        return False
+    try:
+        pid = os.getpid()
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+    descriptor = _health_pidfd_open(pid)
+    if descriptor is None:
+        return False
+    try:
+        # Signal zero performs the kernel permission/handle check without
+        # changing the caller.  A launch must never begin unless the same
+        # pidfd-backed authority is available for its cancellation boundary.
+        try:
+            return _health_pidfd_send_signal(descriptor, 0)
+        except BaseException:
+            return False
+    finally:
+        try:
+            os.close(descriptor)
+        except (OSError, TypeError, ValueError):
+            pass
 
 
 def _health_signal_verified_private_group(
@@ -1686,9 +1731,10 @@ def _run_bounded_process(
     pid_read: int | None = None
     pid_write: int | None = None
     launch_pid: int | None = None
-    launch_start: int | None = None
+    launch_pidfd: int | None = None
     launch_gate_failed = [False]
     launch_signal_failed = [False]
+    launch_authority_revoked = [False]
     gate_stop: threading.Event | None = None
     gate_thread: threading.Thread | None = None
 
@@ -1707,6 +1753,33 @@ def _run_bounded_process(
                     pass
         gate_read = gate_write = pid_read = pid_write = None
 
+    def close_launch_authority() -> None:
+        nonlocal launch_pidfd
+        if launch_pidfd is not None:
+            try:
+                os.close(launch_pidfd)
+            except (OSError, TypeError, ValueError):
+                pass
+            launch_pidfd = None
+
+    def terminate_launched_process() -> None:
+        if process is None or process.poll() is not None:
+            return
+        if launch_pidfd is None or not _health_pidfd_send_signal(launch_pidfd, signal.SIGKILL):
+            launch_signal_failed[0] = True
+
+    def wait_launched_process(timeout: float) -> None:
+        if process is None:
+            return
+        try:
+            process.wait(timeout=max(0.0, timeout))
+        except subprocess.TimeoutExpired:
+            terminate_launched_process()
+            try:
+                process.wait(timeout=min(0.1, max(timeout, 0.01)))
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
     if not _health_process_boundary_owned():
         return CommandObservation(
             argv,
@@ -1721,6 +1794,13 @@ def _run_bounded_process(
             timed_out=True,
             error_code="timeout",
             error_detail="process launch was cancelled before its deadline",
+            duration_ms=(time.monotonic() - started) * 1000.0,
+        )
+    if not _health_launch_authority_available():
+        return CommandObservation(
+            argv,
+            error_code="pidfd_unavailable",
+            error_detail="kernel pidfd launch authority is unavailable",
             duration_ms=(time.monotonic() - started) * 1000.0,
         )
 
@@ -1772,7 +1852,7 @@ def _run_bounded_process(
                 pass
 
         def watch_launch_gate() -> None:
-            nonlocal launch_pid, launch_start
+            nonlocal launch_pid, launch_pidfd
             permit_sent = False
             while not gate_stop.is_set():
                 if launch_pid is None:
@@ -1789,20 +1869,32 @@ def _run_bounded_process(
                         except (UnicodeError, ValueError):
                             launch_gate_failed[0] = True
                         else:
-                            record = _read_health_process_record(candidate_pid)
-                            if record is None:
+                            candidate_pidfd = _health_pidfd_open(candidate_pid)
+                            if candidate_pidfd is None or not _health_pidfd_send_signal(candidate_pidfd, 0):
+                                if candidate_pidfd is not None:
+                                    try:
+                                        os.close(candidate_pidfd)
+                                    except (OSError, TypeError, ValueError):
+                                        pass
                                 launch_gate_failed[0] = True
                             else:
-                                launch_pid = candidate_pid
-                                launch_start = record.start_time
-                                # Establish the identity before releasing the
-                                # child-side gate.  Registration itself is
-                                # repeated after Popen returns so worker-loss
-                                # hooks cannot strand a child between launch
-                                # and tracker ownership, but the gate must not
-                                # depend on a callback that can terminate the
-                                # current worker before Popen completes.
-                                _HEALTH_WORKER_TRACKED_DESCENDANTS[candidate_pid] = record.start_time
+                                record = _read_health_process_record(candidate_pid)
+                                if record is None or record.state == "Z":
+                                    try:
+                                        os.close(candidate_pidfd)
+                                    except (OSError, TypeError, ValueError):
+                                        pass
+                                    launch_gate_failed[0] = True
+                                else:
+                                    launch_pid = candidate_pid
+                                    launch_pidfd = candidate_pidfd
+                                    # Establish the identity and its kernel
+                                    # cancellation authority before releasing
+                                    # the child-side gate.  Registration itself
+                                    # is repeated after Popen returns so
+                                    # worker-loss hooks cannot strand a child
+                                    # between launch and tracker ownership.
+                                    _HEALTH_WORKER_TRACKED_DESCENDANTS[candidate_pid] = record.start_time
                 cancelled = (
                     cancellation is not None and cancellation.is_cancelled()
                 ) or time.monotonic() >= operation_deadline
@@ -1810,17 +1902,19 @@ def _run_bounded_process(
                     write_gate_token(b"C")
                     return
                 if cancelled:
+                    launch_authority_revoked[0] = True
                     write_gate_token(b"C")
-                    if launch_pid is not None and launch_start is not None:
-                        if not _health_signal_process_identity(
-                            launch_pid,
-                            launch_start,
-                            signal.SIGKILL,
-                            allow_private_group_fallback=False,
-                        ):
+                    if launch_pidfd is not None:
+                        if not _health_pidfd_send_signal(launch_pidfd, signal.SIGKILL):
                             launch_signal_failed[0] = True
+                    elif launch_pid is not None:
+                        launch_signal_failed[0] = True
                     return
                 if launch_pid is not None and not permit_sent:
+                    if launch_pidfd is None or not _health_pidfd_send_signal(launch_pidfd, 0):
+                        launch_gate_failed[0] = True
+                        write_gate_token(b"C")
+                        return
                     write_gate_token(b"P")
                     permit_sent = True
                 gate_stop.wait(min(0.005, max(0.0, operation_deadline - time.monotonic())))
@@ -1831,21 +1925,6 @@ def _run_bounded_process(
             daemon=True,
         )
         gate_thread.start()
-
-        def stop_launch_gate() -> None:
-            nonlocal gate_read, gate_write, pid_read, pid_write, gate_thread
-            if gate_stop is not None:
-                gate_stop.set()
-            if gate_thread is not None:
-                gate_thread.join(timeout=0.1)
-                gate_thread = None
-            for descriptor in (gate_read, gate_write, pid_read, pid_write):
-                if isinstance(descriptor, int):
-                    try:
-                        os.close(descriptor)
-                    except OSError:
-                        pass
-            gate_read = gate_write = pid_read = pid_write = None
 
         def launch_gate() -> None:
             assert gate_read is not None
@@ -1910,30 +1989,36 @@ def _run_bounded_process(
             )
         assert process is not None
         stop_launch_gate()
-        if launch_gate_failed[0]:
-            _terminate_process(process)
-            _wait_process(process, 0.1)
+        launch_revoked = launch_authority_revoked[0] or _operation_cancelled(
+            operation_deadline,
+            cancellation,
+        )
+        if launch_gate_failed[0] or launch_signal_failed[0] or launch_revoked:
+            terminate_launched_process()
+            wait_launched_process(0.1)
+            close_launch_authority()
             return CommandObservation(
                 argv,
-                timed_out=_operation_cancelled(operation_deadline, cancellation),
-                error_code="launch_gate_denied",
-                error_detail="worker identity could not be established before launch",
-                duration_ms=(time.monotonic() - started) * 1000.0,
-            )
-        if launch_signal_failed[0]:
-            _terminate_process(process)
-            _wait_process(process, 0.1)
-            return CommandObservation(
-                argv,
-                timed_out=True,
-                error_code="launch_cleanup_failed",
-                error_detail="worker identity-bound termination failed",
+                timed_out=launch_revoked,
+                error_code=(
+                    "timeout"
+                    if launch_revoked
+                    else "launch_cleanup_failed"
+                    if launch_signal_failed[0]
+                    else "pidfd_unavailable"
+                ),
+                error_detail=(
+                    "launch authority was revoked before executable startup"
+                    if launch_revoked
+                    else "kernel launch authority could not be established before executable startup"
+                ),
                 duration_ms=(time.monotonic() - started) * 1000.0,
             )
         if _HEALTH_WORKER_GROUP_OWNED:
             _health_register_probe(process.pid)
     except subprocess.SubprocessError as exc:
         stop_launch_gate()
+        close_launch_authority()
         cancelled = _operation_cancelled(operation_deadline, cancellation)
         return CommandObservation(
             argv,
@@ -1944,6 +2029,7 @@ def _run_bounded_process(
         )
     except FileNotFoundError:
         stop_launch_gate()
+        close_launch_authority()
         return CommandObservation(
             argv,
             error_code=("descriptor_execution_unavailable" if executable_fd is not None else "executable_missing"),
@@ -1952,6 +2038,7 @@ def _run_bounded_process(
         )
     except PermissionError:
         stop_launch_gate()
+        close_launch_authority()
         return CommandObservation(
             argv,
             error_code="permission_denied",
@@ -1960,6 +2047,7 @@ def _run_bounded_process(
         )
     except OSError as exc:
         stop_launch_gate()
+        close_launch_authority()
         return CommandObservation(
             argv,
             error_code="io_error",
@@ -1978,7 +2066,7 @@ def _run_bounded_process(
             remaining_time = operation_deadline - time.monotonic()
             if remaining_time <= 0 or _operation_cancelled(operation_deadline, cancellation):
                 timed_out = True
-                _terminate_process(process)
+                terminate_launched_process()
                 break
             events = selector.select(timeout=min(remaining_time, 0.05))
             if not events:
@@ -1986,7 +2074,7 @@ def _run_bounded_process(
             for key, _ in events:
                 if _operation_cancelled(operation_deadline, cancellation):
                     timed_out = True
-                    _terminate_process(process)
+                    terminate_launched_process()
                     break
                 try:
                     chunk = os.read(key.fd, 64 * 1024)
@@ -2002,7 +2090,7 @@ def _run_bounded_process(
                 remaining_output = max_output_bytes - used
                 if remaining_output <= 0:
                     output_limited = True
-                    _terminate_process(process)
+                    terminate_launched_process()
                     break
                 if len(chunk) > remaining_output:
                     chunk = chunk[:remaining_output]
@@ -2012,13 +2100,13 @@ def _run_bounded_process(
                 else:
                     stderr.extend(chunk)
                 if output_limited:
-                    _terminate_process(process)
+                    terminate_launched_process()
                     break
             if timed_out or output_limited:
                 break
 
         if timed_out or output_limited:
-            _wait_process(process, 0.1)
+            wait_launched_process(0.1)
         elif process.poll() is None:
             # Streams can be closed by a still-running child.  Wait for the
             # declared deadline instead of turning that case into a synthetic
@@ -2028,8 +2116,8 @@ def _run_bounded_process(
                 process.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                _terminate_process(process)
-                _wait_process(process, 0.1)
+                terminate_launched_process()
+                wait_launched_process(0.1)
     except BaseException as exc:
         # An unexpected selector/pipe failure must not leave a child alive
         # after the bounded operation has been reported to Doctor.
@@ -2048,8 +2136,8 @@ def _run_bounded_process(
                 except OSError:
                     pass
         if process.poll() is None:
-            _terminate_process(process)
-            _wait_process(process, MAX_WORKER_CLEANUP_SECONDS)
+            terminate_launched_process()
+            wait_launched_process(MAX_WORKER_CLEANUP_SECONDS)
         if process.returncode is not None and _HEALTH_WORKER_GROUP_OWNED:
             expected_start = _HEALTH_WORKER_TRACKED_DESCENDANTS.pop(process.pid, None)
             if type(expected_start) is int:
@@ -2076,6 +2164,13 @@ def _run_bounded_process(
             if error_code is None:
                 error_code = "operation_error"
                 error_detail = "pipe_close_error"
+        close_launch_authority()
+
+    if launch_authority_revoked[0] or _operation_cancelled(operation_deadline, cancellation):
+        timed_out = True
+        if error_code is None:
+            error_code = "timeout"
+            error_detail = "launch authority was revoked before the observation completed"
 
     return CommandObservation(
         argv,
@@ -4475,6 +4570,90 @@ class HealthCheckExecutor:
         timeout_seconds: float,
         deadline: float,
     ) -> tuple[_CheckPayload, float]:
+        """Run default operations while restoring the caller's subreaper bit."""
+
+        started = self.clock()
+        if os.name != "posix":
+            return self._run_with_process_body(
+                registry,
+                spec,
+                timeout_seconds=timeout_seconds,
+                deadline=deadline,
+            )
+        try:
+            request_subreaper_previous = _health_child_subreaper_state()
+        except BaseException:
+            request_subreaper_previous = None
+        if request_subreaper_previous is None:
+            return (
+                _payload(
+                    HealthStatus.UNKNOWN,
+                    "worker_unavailable",
+                    detail="request child-subreaper state could not be observed",
+                ),
+                max(0.0, (self.clock() - started) * 1000.0),
+            )
+
+        request_subreaper_restore_required = request_subreaper_previous is False
+        setup_ok = True
+        if request_subreaper_restore_required:
+            try:
+                setup_ok = _set_health_child_subreaper(True)
+            except BaseException:
+                setup_ok = False
+
+        result: tuple[_CheckPayload, float]
+        restoration_ok = False
+        try:
+            if not setup_ok:
+                result = (
+                    _payload(
+                        HealthStatus.UNKNOWN,
+                        "worker_cleanup_incomplete",
+                        detail="request child-subreaper boundary could not be established",
+                    ),
+                    max(0.0, (self.clock() - started) * 1000.0),
+                )
+            else:
+                result = self._run_with_process_body(
+                    registry,
+                    spec,
+                    timeout_seconds=timeout_seconds,
+                    deadline=deadline,
+                )
+        except BaseException as exc:
+            result = (
+                _payload(HealthStatus.UNKNOWN, "operation_error", detail=type(exc).__name__),
+                max(0.0, (self.clock() - started) * 1000.0),
+            )
+        finally:
+            try:
+                restoration_ok = _restore_health_child_subreaper(
+                    request_subreaper_previous,
+                    required=request_subreaper_restore_required,
+                )
+            except BaseException:
+                restoration_ok = False
+
+        if not restoration_ok:
+            return (
+                _payload(
+                    HealthStatus.UNKNOWN,
+                    "worker_cleanup_incomplete",
+                    detail="request child-subreaper restoration could not be confirmed",
+                ),
+                max(0.0, (self.clock() - started) * 1000.0),
+            )
+        return result
+
+    def _run_with_process_body(
+        self,
+        registry: ManifestRegistry,
+        spec: object,
+        *,
+        timeout_seconds: float,
+        deadline: float,
+    ) -> tuple[_CheckPayload, float]:
         """Run default operations in a killable process with one deadline."""
 
         started = self.clock()
@@ -4497,8 +4676,6 @@ class HealthCheckExecutor:
         launch_event = context.Event()
         completion_event = context.Event()
         shutdown_event = context.Event()
-        request_subreaper_previous = _health_child_subreaper_state()
-        request_subreaper_changed = False
         process: Any = None
         process_started = False
         process_group_owned = False
@@ -4556,26 +4733,6 @@ class HealthCheckExecutor:
 
         try:
             if os.name == "posix":
-                if request_subreaper_previous is None:
-                    return (
-                        _payload(
-                            HealthStatus.UNKNOWN,
-                            "worker_unavailable",
-                            detail="request child-subreaper state could not be observed",
-                        ),
-                        max(0.0, (self.clock() - started) * 1000.0),
-                    )
-                if not request_subreaper_previous:
-                    if not _health_prctl(_HEALTH_PR_SET_CHILD_SUBREAPER, 1):
-                        return (
-                            _payload(
-                                HealthStatus.UNKNOWN,
-                                "worker_unavailable",
-                                detail="request child-subreaper boundary could not be established",
-                            ),
-                            max(0.0, (self.clock() - started) * 1000.0),
-                        )
-                    request_subreaper_changed = True
                 handoff = _establish_health_request_handoff()
                 if handoff is None:
                     return (
@@ -4725,11 +4882,7 @@ class HealthCheckExecutor:
                     resource.close()
                 except (OSError, ValueError):
                     pass
-            if request_subreaper_changed:
-                _health_prctl(
-                    _HEALTH_PR_SET_CHILD_SUBREAPER,
-                    1 if request_subreaper_previous else 0,
-                )
+
 
     def _run_with_worker(
         self,
