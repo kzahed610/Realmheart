@@ -160,9 +160,10 @@ class _CancellationToken:
     deadline: float
     event: Any = field(default_factory=threading.Event)
     clock: Callable[[], float] = time.monotonic
+    launch_lock: Any = None
 
     def cancel(self) -> None:
-        self.event.set()
+        _health_set_cancellation(self.event, self.launch_lock)
 
     def is_cancelled(self) -> bool:
         return bool(self.event.is_set()) or self.clock() >= self.deadline
@@ -705,12 +706,78 @@ def _health_launch_preflight_allowed(
     return time.monotonic() < deadline
 
 
-def _health_launch_commit_barrier() -> None:
-    """Stop the child until the supervisor commits native exec via pidfd."""
+def _health_acquire_launch_lock(lock: Any, timeout: float) -> bool:
+    """Acquire the cross-process launch/revocation lock within a bound."""
+
+    if lock is None:
+        return True
+    acquire = getattr(lock, "acquire", None)
+    if not callable(acquire):
+        return False
+    try:
+        return bool(acquire(timeout=max(0.0, timeout)))
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+def _health_release_launch_lock(lock: Any) -> bool:
+    """Release a launch/revocation lock and report broken synchronization."""
+
+    if lock is None:
+        return True
+    release = getattr(lock, "release", None)
+    if not callable(release):
+        return False
+    try:
+        release()
+        return True
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+def _health_set_cancellation(event: Any, launch_lock: Any = None) -> bool:
+    """Revoke an operation only after serializing with launch commit."""
+
+    acquired = False
+    if launch_lock is not None:
+        acquired = _health_acquire_launch_lock(launch_lock, MAX_WORKER_CLEANUP_SECONDS)
+        if not acquired:
+            # A commit may be in flight.  Set the event so all observers still
+            # fail closed, but report the synchronization failure to callers
+            # that can surface cleanup uncertainty.
+            try:
+                event.set()
+            except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+                return False
+            return False
+    success = False
+    try:
+        event.set()
+        success = True
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        pass
+    if acquired and not _health_release_launch_lock(launch_lock):
+        success = False
+    return success
+
+
+def _health_launch_commit_barrier(
+    deadline: float | None = None,
+    *,
+    final_check: Callable[[], bool] | None = None,
+) -> None:
+    """Stop until pidfd commit, then contain revocation before native exec."""
 
     try:
         os.kill(os.getpid(), signal.SIGSTOP)
     except (AttributeError, OSError, TypeError, ValueError):
+        os._exit(125)
+    try:
+        if deadline is not None and time.monotonic() >= deadline:
+            os._exit(125)
+        if final_check is not None and not final_check():
+            os._exit(125)
+    except BaseException:
         os._exit(125)
 
 
@@ -1753,9 +1820,12 @@ def _run_bounded_process(
     launch_pidfd: int | None = None
     launch_gate_failed = [False]
     launch_signal_failed = [False]
+    launch_lock_release_failed = [False]
     launch_authority_revoked = [False]
     launch_authority_committed = [False]
-    launch_authority_lock = threading.Lock()
+    launch_authority_lock = getattr(cancellation, "launch_lock", None)
+    if launch_authority_lock is None:
+        launch_authority_lock = threading.Lock()
     gate_stop: threading.Event | None = None
     gate_thread: threading.Thread | None = None
 
@@ -1941,7 +2011,17 @@ def _run_bounded_process(
                         launch_signal_failed[0] = True
                     return
                 if ready_announced and launch_pid is not None and not permit_sent:
-                    with launch_authority_lock:
+                    lock_timeout = max(0.0, operation_deadline - time.monotonic())
+                    if not _health_acquire_launch_lock(launch_authority_lock, lock_timeout):
+                        launch_gate_failed[0] = True
+                        write_gate_token(b"C")
+                        if launch_pidfd is None or not _health_pidfd_send_signal(
+                            launch_pidfd,
+                            signal.SIGKILL,
+                        ):
+                            launch_signal_failed[0] = True
+                        return
+                    try:
                         if cancellation is not None and cancellation.is_cancelled():
                             launch_authority_revoked[0] = True
                             write_gate_token(b"C")
@@ -1972,6 +2052,15 @@ def _run_bounded_process(
                                 launch_signal_failed[0] = True
                             return
                         permit_sent = True
+                    finally:
+                        if not _health_release_launch_lock(launch_authority_lock):
+                            launch_lock_release_failed[0] = True
+                            launch_gate_failed[0] = True
+                            if launch_pidfd is None or not _health_pidfd_send_signal(
+                                launch_pidfd,
+                                signal.SIGKILL,
+                            ):
+                                launch_signal_failed[0] = True
                     continue
                 if (
                     ready_announced
@@ -1991,7 +2080,16 @@ def _run_bounded_process(
                     if record.state not in {"T", "t"}:
                         gate_stop.wait(min(0.005, max(0.0, operation_deadline - time.monotonic())))
                         continue
-                    with launch_authority_lock:
+                    lock_timeout = max(0.0, operation_deadline - time.monotonic())
+                    if not _health_acquire_launch_lock(launch_authority_lock, lock_timeout):
+                        launch_gate_failed[0] = True
+                        if launch_pidfd is None or not _health_pidfd_send_signal(
+                            launch_pidfd,
+                            signal.SIGKILL,
+                        ):
+                            launch_signal_failed[0] = True
+                        return
+                    try:
                         if cancellation is not None and cancellation.is_cancelled():
                             launch_authority_revoked[0] = True
                             if not _health_pidfd_send_signal(launch_pidfd, signal.SIGKILL):
@@ -2017,15 +2115,25 @@ def _run_bounded_process(
                             if not _health_pidfd_send_signal(launch_pidfd, signal.SIGKILL):
                                 launch_signal_failed[0] = True
                             return
-                        # SIGCONT is the kernel launch-authority linearization
-                        # point.  SIGKILL ordered before it keeps the child
-                        # stopped/dead; SIGCONT ordered first commits launch.
+                        # The shared launch lock makes cancellation and this
+                        # pidfd SIGCONT one linearizable authority decision.
+                        # SIGKILL ordered before it keeps the child stopped;
+                        # SIGCONT ordered first commits launch.
                         if not _health_pidfd_send_signal(launch_pidfd, signal.SIGCONT):
                             launch_gate_failed[0] = True
                             if not _health_pidfd_send_signal(launch_pidfd, signal.SIGKILL):
                                 launch_signal_failed[0] = True
                             return
                         launch_authority_committed[0] = True
+                    finally:
+                        if not _health_release_launch_lock(launch_authority_lock):
+                            launch_lock_release_failed[0] = True
+                            launch_gate_failed[0] = True
+                            if launch_pidfd is None or not _health_pidfd_send_signal(
+                                launch_pidfd,
+                                signal.SIGKILL,
+                            ):
+                                launch_signal_failed[0] = True
                     return
                 gate_stop.wait(min(0.005, max(0.0, operation_deadline - time.monotonic())))
 
@@ -2073,7 +2181,10 @@ def _run_bounded_process(
                 operation_deadline,
                 gate_read,
             )
-            _health_launch_commit_barrier()
+            _health_launch_commit_barrier(
+                operation_deadline,
+                final_check=final_check,
+            )
 
         popen_options: dict[str, Any] = {
             "stdin": subprocess.DEVNULL,
@@ -2113,7 +2224,12 @@ def _run_bounded_process(
             operation_deadline,
             cancellation,
         )
-        if launch_gate_failed[0] or launch_signal_failed[0] or launch_revoked:
+        if (
+            launch_gate_failed[0]
+            or launch_signal_failed[0]
+            or launch_lock_release_failed[0]
+            or launch_revoked
+        ):
             terminate_launched_process()
             wait_launched_process(0.1)
             close_launch_authority()
@@ -2124,7 +2240,7 @@ def _run_bounded_process(
                     "timeout"
                     if launch_revoked
                     else "launch_cleanup_failed"
-                    if launch_signal_failed[0]
+                    if launch_signal_failed[0] or launch_lock_release_failed[0]
                     else "pidfd_unavailable"
                 ),
                 error_detail=(
@@ -4155,6 +4271,7 @@ def _run_health_check_in_process(
     launch_event: Any,
     completion_event: Any,
     reap_connection: Any = None,
+    cancellation_lock: Any = None,
 ) -> None:
     """Run one check after a parent-approved, private-session handshake."""
 
@@ -4172,7 +4289,12 @@ def _run_health_check_in_process(
         if cancellation_event.is_set() or time.monotonic() >= deadline:
             return
 
-        cancellation = _CancellationToken(deadline, cancellation_event, time.monotonic)
+        cancellation = _CancellationToken(
+            deadline,
+            cancellation_event,
+            time.monotonic,
+            cancellation_lock,
+        )
         try:
             payload = executor._run_check(
                 registry,
@@ -4237,6 +4359,7 @@ def _run_health_supervisor(
     completion_event: Any,
     shutdown_event: Any,
     cleanup_connection: Any,
+    cancellation_lock: Any = None,
 ) -> None:
     """Own a probe worker until every adopted descendant is reaped.
 
@@ -4360,7 +4483,7 @@ def _run_health_supervisor(
                 send_payload(_payload(HealthStatus.UNKNOWN, "operation_error", detail="probe worker exited before returning a result"))
                 break
             if shutdown_event.is_set() or cancellation_event.is_set() or time.monotonic() >= deadline:
-                cancellation_event.set()
+                _health_set_cancellation(cancellation_event, cancellation_lock)
                 send_payload(_payload(HealthStatus.UNKNOWN, "budget_exhausted", detail="probe worker exceeded the Doctor deadline"))
                 break
             if inner_reap_parent.poll(0):
@@ -4386,7 +4509,7 @@ def _run_health_supervisor(
     except BaseException as exc:
         send_payload(_payload(HealthStatus.UNKNOWN, "operation_error", detail=type(exc).__name__))
     finally:
-        cancellation_event.set()
+        _health_set_cancellation(cancellation_event, cancellation_lock)
         if inner_completion_event is not None:
             try:
                 inner_completion_event.set()
@@ -4793,6 +4916,7 @@ class HealthCheckExecutor:
         ready_parent, ready_child = context.Pipe(duplex=False)
         cleanup_parent, cleanup_child = context.Pipe(duplex=False)
         cancellation_event = context.Event()
+        cancellation_lock = context.Lock()
         launch_event = context.Event()
         completion_event = context.Event()
         shutdown_event = context.Event()
@@ -4835,7 +4959,7 @@ class HealthCheckExecutor:
                 cleanup_confirmed = True
                 return True
             sample_request_owned_processes()
-            cancellation_event.set()
+            _health_set_cancellation(cancellation_event, cancellation_lock)
             cleanup_confirmed = _reap_health_worker(
                 process,
                 self.worker_cleanup_seconds,
@@ -4877,6 +5001,7 @@ class HealthCheckExecutor:
                     "completion_event": completion_event,
                     "shutdown_event": shutdown_event,
                     "cleanup_connection": cleanup_child,
+                    "cancellation_lock": cancellation_lock,
                 },
             )
             process.daemon = False
@@ -4957,7 +5082,7 @@ class HealthCheckExecutor:
                 return raw, max(0.0, (self.clock() - started) * 1000.0)
 
             expired = self.clock() >= deadline
-            cancellation_event.set()
+            _health_set_cancellation(cancellation_event, cancellation_lock)
             confirmed = cleanup_worker()
             if not confirmed:
                 code = "worker_cleanup_incomplete"
@@ -4976,7 +5101,7 @@ class HealthCheckExecutor:
                 max(0.0, (self.clock() - started) * 1000.0),
             )
         except (EOFError, OSError, RuntimeError, ValueError) as exc:
-            cancellation_event.set()
+            _health_set_cancellation(cancellation_event, cancellation_lock)
             confirmed = cleanup_worker()
             error_code = "operation_error" if confirmed else "worker_cleanup_incomplete"
             detail = (
