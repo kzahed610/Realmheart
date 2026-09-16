@@ -4450,6 +4450,7 @@ def _run_health_supervisor(
                 "launch_event": inner_launch_event,
                 "completion_event": inner_completion_event,
                 "reap_connection": inner_reap_child,
+                "cancellation_lock": cancellation_lock,
             },
         )
         inner_process.daemon = False
