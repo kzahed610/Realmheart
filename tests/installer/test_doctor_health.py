@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -196,6 +198,74 @@ def _active_processes_for_command(argv: tuple[str, ...]) -> set[int]:
         if state != "Z" and raw_argv == argv:
             matches.add(int(entry.name))
     return matches
+
+
+def _process_is_live(pid: int) -> bool:
+    try:
+        state = (Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()[0])
+    except (OSError, UnicodeError, IndexError):
+        return False
+    return state != "Z"
+
+
+def _wait_for_process_exit(pid: int, timeout: float = 1.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _process_is_live(pid):
+            return True
+        time.sleep(0.01)
+    return not _process_is_live(pid)
+
+
+def _build_session_escape_probe(path: Path) -> None:
+    compiler = shutil.which("cc")
+    if compiler is None:
+        raise unittest.SkipTest("a C compiler is required for the session-escape lifecycle test")
+    source = path.with_suffix(".c")
+    source.write_text(
+        """
+#define _GNU_SOURCE
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    if (argc != 1 || setsid() < 0) {
+        return 90;
+    }
+    pid_t child = fork();
+    if (child < 0) {
+        return 91;
+    }
+    if (child > 0) {
+        _exit(0);
+    }
+    char marker_path[4096];
+    if (snprintf(marker_path, sizeof(marker_path), "%s.pid", argv[0]) < 0) {
+        return 92;
+    }
+    FILE *marker = fopen(marker_path, "w");
+    if (marker == NULL) {
+        return 93;
+    }
+    fprintf(marker, "%ld\\n", (long)getpid());
+    fclose(marker);
+    for (;;) {
+        pause();
+    }
+}
+""",
+        encoding="ascii",
+    )
+    subprocess.run(
+        [compiler, "-O0", "-Wall", "-Werror", str(source), "-o", str(path)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=10,
+    )
+    path.chmod(0o755)
 
 
 class DoctorHealthExecutorTests(unittest.TestCase):
@@ -458,6 +528,95 @@ class DoctorHealthExecutorTests(unittest.TestCase):
 
         self.assertFalse(reaped)
         self.assertTrue(process.killed)
+        self.assertTrue(process.join_timeouts)
+        self.assertTrue(all(timeout is not None for timeout in process.join_timeouts))
+
+    def test_worker_handshake_rejects_a_group_leader_without_a_private_session(self):
+        process = type("Process", (), {"pid": 424242})()
+        with patch("realmheart_doctor.health.os.setpgid") as setpgid, patch(
+            "realmheart_doctor.health.os.getsid", return_value=424241
+        ), patch("realmheart_doctor.health.os.getpgid", return_value=424242):
+            self.assertFalse(health._claim_health_worker_group(process))
+
+        setpgid.assert_not_called()
+
+    def test_session_escape_descendant_is_reaped_before_timeout_returns(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, executable_path = _manifest(root)
+            _build_session_escape_probe(executable_path)
+            marker = executable_path.with_name(executable_path.name + ".pid")
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                artifact_id="demo.exec",
+                timeout_ms=120,
+                args={"args": []},
+            )
+            registry = replace(registry, health_checks=checks)
+
+            result = HealthCheckExecutor(
+                max_seconds=0.5,
+                worker_cleanup_seconds=0.05,
+            ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
+
+            self.assertEqual(result.status, HealthStatus.UNKNOWN)
+            self.assertIn(result.reason_code, {"timeout", "budget_exhausted"})
+            self.assertTrue(marker.exists(), "the probe did not create an escaped descendant")
+            escaped_pid = int(marker.read_text(encoding="ascii"))
+            try:
+                self.assertTrue(
+                    _wait_for_process_exit(escaped_pid),
+                    "a setsid/double-fork descendant survived the bounded Doctor cleanup",
+                )
+            finally:
+                if _process_is_live(escaped_pid):
+                    try:
+                        os.kill(escaped_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_group_signal_failure_makes_successful_probe_cleanup_unknown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry, _, _ = _manifest(Path(temp))
+            with patch("realmheart_doctor.health.os.killpg", side_effect=PermissionError("denied")):
+                result = HealthCheckExecutor(
+                    max_seconds=0.5,
+                    worker_cleanup_seconds=0.02,
+                ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
+
+            self.assertEqual(result.status, HealthStatus.UNKNOWN)
+            self.assertEqual(result.reason_code, "worker_cleanup_incomplete")
+
+    def test_worker_reaper_reports_cleanup_api_errors_with_bounded_waits(self):
+        class CleanupErrorProcess:
+            pid = 424242
+
+            def __init__(self) -> None:
+                self.join_timeouts: list[object] = []
+
+            def is_alive(self) -> bool:
+                return True
+
+            def terminate(self) -> None:
+                raise RuntimeError("terminate failed")
+
+            def kill(self) -> None:
+                raise RuntimeError("kill failed")
+
+            def join(self, *, timeout=None) -> None:
+                self.join_timeouts.append(timeout)
+                if timeout is None:
+                    raise AssertionError("worker reaper attempted an unbounded join")
+                raise RuntimeError("join failed")
+
+        process = CleanupErrorProcess()
+        started = time.monotonic()
+        reaped = health._reap_health_worker(process, 0.01)
+        elapsed = time.monotonic() - started
+
+        self.assertFalse(reaped)
+        self.assertLess(elapsed, 1.0)
         self.assertTrue(process.join_timeouts)
         self.assertTrue(all(timeout is not None for timeout in process.join_timeouts))
 
