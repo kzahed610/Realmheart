@@ -117,7 +117,7 @@ _SANITIZED_ENVIRONMENT = {
 _HEALTH_WORKER_GROUP_OWNED = False
 _HEALTH_WORKER_IDENTITY: _HealthWorkerIdentity | None = None
 _HEALTH_WORKER_TRACKED_DESCENDANTS: dict[int, int | None] = {}
-_HEALTH_WORKER_REAPED_PROBES: set[int] = set()
+_HEALTH_WORKER_REAPED_PROBES: set[tuple[int, int]] = set()
 _HEALTH_WORKER_CONTAINMENT_VALID = True
 _HEALTH_PR_SET_PDEATHSIG = 1
 _HEALTH_PR_SET_CHILD_SUBREAPER = 36
@@ -402,14 +402,53 @@ def _health_prctl(option: int, argument: int) -> bool:
         ]
         prctl.restype = ctypes.c_int
         return int(prctl(int(option), ctypes.c_ulong(argument), 0, 0, 0)) == 0
-    except (AttributeError, OSError, TypeError, ValueError):
+    except (AttributeError, NotImplementedError, OSError, TypeError, ValueError):
         return False
+
+
+def _health_child_subreaper_state() -> bool | None:
+    """Read the current child-subreaper bit without changing it."""
+
+    if os.name != "posix":
+        return None
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        prctl = getattr(libc, "prctl", None)
+        if prctl is None:
+            return None
+        value = ctypes.c_int()
+        prctl.argtypes = [
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
+        prctl.restype = ctypes.c_int
+        result = int(
+            prctl(
+                _HEALTH_PR_GET_CHILD_SUBREAPER,
+                ctypes.byref(value),
+                0,
+                0,
+                0,
+            )
+        )
+        return bool(value.value) if result == 0 else None
+    except (AttributeError, NotImplementedError, OSError, TypeError, ValueError):
+        return None
+
+
+def _set_health_child_subreaper(enabled: bool) -> bool:
+    """Set the request-side subreaper bit for one bounded cleanup window."""
+
+    return _health_prctl(_HEALTH_PR_SET_CHILD_SUBREAPER, 1 if enabled else 0)
 
 
 def _enable_health_child_subreaper() -> bool:
     """Make orphaned probe descendants reparent to their Doctor supervisor."""
 
-    return _health_prctl(_HEALTH_PR_SET_CHILD_SUBREAPER, 1)
+    return _set_health_child_subreaper(True)
 
 
 def _health_probe_preexec() -> None:
@@ -417,6 +456,17 @@ def _health_probe_preexec() -> None:
 
     if not _health_prctl(_HEALTH_PR_SET_PDEATHSIG, signal.SIGKILL):
         raise OSError(errno.ENOSYS, "probe parent-death containment is unavailable")
+
+
+def _health_process_boundary_owned() -> bool:
+    """Return whether this process is inside the Doctor-owned boundary."""
+
+    return bool(
+        _HEALTH_WORKER_GROUP_OWNED
+        and _HEALTH_WORKER_IDENTITY is not None
+        and _HEALTH_WORKER_IDENTITY.verified
+        and _HEALTH_WORKER_CONTAINMENT_VALID
+    )
 
 
 def _health_pidfd_open(pid: int) -> int | None:
@@ -429,7 +479,7 @@ def _health_pidfd_open(pid: int) -> int | None:
         try:
             descriptor = opener(pid, 0)
             return descriptor if type(descriptor) is int and descriptor >= 0 else None
-        except (AttributeError, OSError, ProcessLookupError, TypeError, ValueError):
+        except (AttributeError, NotImplementedError, OSError, ProcessLookupError, TypeError, ValueError):
             return None
     try:
         libc = ctypes.CDLL(None, use_errno=True)
@@ -441,7 +491,7 @@ def _health_pidfd_open(pid: int) -> int | None:
         if descriptor < 0:
             return None
         return descriptor
-    except (AttributeError, OSError, TypeError, ValueError):
+    except (AttributeError, NotImplementedError, OSError, TypeError, ValueError):
         return None
 
 
@@ -455,7 +505,7 @@ def _health_pidfd_send_signal(descriptor: int, signal_number: int) -> bool:
         try:
             sender(descriptor, signal_number, None, 0)
             return True
-        except (AttributeError, OSError, ProcessLookupError, TypeError, ValueError):
+        except (AttributeError, NotImplementedError, OSError, ProcessLookupError, TypeError, ValueError):
             return False
     try:
         libc = ctypes.CDLL(None, use_errno=True)
@@ -473,11 +523,55 @@ def _health_pidfd_send_signal(descriptor: int, signal_number: int) -> bool:
             )
         )
         return result == 0
-    except (AttributeError, OSError, TypeError, ValueError):
+    except (AttributeError, NotImplementedError, OSError, TypeError, ValueError):
         return False
 
 
-def _health_signal_process_identity(pid: int, expected_start: int | None, signal_number: int) -> bool:
+def _health_signal_verified_private_group(
+    record: _HealthProcessRecord,
+    expected_start: int,
+    signal_number: int,
+    private_boundary: _HealthWorkerIdentity | None = None,
+) -> bool:
+    """Use only a verified private process group when pidfds are unavailable."""
+
+    if record.state == "Z" or record.start_time != expected_start:
+        return False
+    if private_boundary is not None:
+        if (
+            record.session_id == private_boundary.session_id
+            and record.process_group_id == private_boundary.process_group_id
+        ):
+            process_group_id = private_boundary.process_group_id
+        elif private_boundary is not None and record.session_id == record.process_group_id:
+            # A descendant may have called setsid() and then exited after
+            # forking.  The remaining members keep the orphaned session's
+            # original leader as both SID and PGID, which is still a verified
+            # private group boundary when the caller is outside it.
+            process_group_id = record.process_group_id
+        else:
+            return False
+    elif record.pid == record.session_id == record.process_group_id:
+        # A session leader that owns its own session and process group is a
+        # private boundary established by the child-side setsid handshake.
+        process_group_id = record.process_group_id
+    else:
+        return False
+    try:
+        os.killpg(process_group_id, signal_number)
+    except (AttributeError, NotImplementedError, OSError, TypeError, ValueError):
+        return False
+    return True
+
+
+def _health_signal_process_identity(
+    pid: int,
+    expected_start: int | None,
+    signal_number: int,
+    *,
+    private_boundary: _HealthWorkerIdentity | None = None,
+    allow_private_group_fallback: bool = True,
+) -> bool:
     """Atomically bind a signal to the PID identity observed by Doctor."""
 
     before = _read_health_process_record(pid)
@@ -487,37 +581,96 @@ def _health_signal_process_identity(pid: int, expected_start: int | None, signal
         return False
     descriptor = _health_pidfd_open(pid)
     if descriptor is None:
-        return False
+        if not allow_private_group_fallback:
+            return False
+        return _health_signal_verified_private_group(
+            before,
+            expected_start,
+            signal_number,
+            private_boundary,
+        )
     try:
         after = _read_health_process_record(pid)
         if after is None or after.state == "Z" or after.start_time != expected_start:
             return False
-        return _health_pidfd_send_signal(descriptor, signal_number)
+        if _health_pidfd_send_signal(descriptor, signal_number):
+            return True
     finally:
         try:
             os.close(descriptor)
-        except (OSError, TypeError, ValueError):
+        except (NotImplementedError, OSError, TypeError, ValueError):
             pass
+    # A pidfd can exist while its signal operation is unavailable (for
+    # example, an older libc wrapper or a transient kernel error).  Re-check
+    # the same start-time identity and use only the already verified private
+    # group/session boundary; never fall back to a bare PID signal.
+    if not allow_private_group_fallback:
+        return False
+    fallback_record = _read_health_process_record(pid)
+    if (
+        fallback_record is None
+        or fallback_record.state == "Z"
+        or fallback_record.start_time != expected_start
+    ):
+        return False
+    return _health_signal_verified_private_group(
+        fallback_record,
+        expected_start,
+        signal_number,
+        private_boundary,
+    )
 
 
-def _health_launch_gate_preexec(deadline: float, gate_descriptor: int) -> None:
-    """Reject a forked child that reaches exec after its operation deadline."""
+def _health_launch_gate_allowed(
+    deadline: float,
+    gate_descriptor: int,
+    *,
+    final_check: Callable[[], bool] | None = None,
+    wait_for_permit: bool = False,
+) -> bool:
+    """Check a child-side launch permit immediately before exec."""
 
     if time.monotonic() >= deadline:
-        os._exit(125)
+        return False
     try:
-        os.set_blocking(gate_descriptor, False)
-        cancelled = bool(os.read(gate_descriptor, 1))
+        os.set_blocking(gate_descriptor, wait_for_permit)
+        permit = os.read(gate_descriptor, 1)
     except (BlockingIOError, InterruptedError):
-        cancelled = False
-    except OSError:
-        cancelled = True
+        permit = b""
+    except (NotImplementedError, OSError):
+        permit = b""
+    if wait_for_permit and permit != b"P":
+        return False
+    if not wait_for_permit and permit not in {b"", b"P"}:
+        return False
+    if time.monotonic() >= deadline:
+        return False
+    if final_check is not None and not final_check():
+        return False
+    return time.monotonic() < deadline
+
+
+def _health_launch_gate_preexec(
+    deadline: float,
+    gate_descriptor: int,
+    *,
+    final_check: Callable[[], bool] | None = None,
+) -> None:
+    """Reject a forked child unless its parent grants a live launch permit."""
+
+    try:
+        allowed = _health_launch_gate_allowed(
+            deadline,
+            gate_descriptor,
+            final_check=final_check,
+            wait_for_permit=True,
+        )
     finally:
         try:
             os.close(gate_descriptor)
-        except OSError:
+        except (NotImplementedError, OSError, TypeError, ValueError):
             pass
-    if cancelled or time.monotonic() >= deadline:
+    if not allowed:
         os._exit(125)
 
 
@@ -550,31 +703,45 @@ def _read_health_process_record(pid: int) -> _HealthProcessRecord | None:
 
 
 def _snapshot_health_processes() -> dict[int, _HealthProcessRecord] | None:
-    """Take one bounded best-effort snapshot of the local process table."""
+    """Take one bounded complete snapshot of the local process table."""
 
-    records: dict[int, _HealthProcessRecord] = {}
-    try:
-        with os.scandir("/proc") as entries:
-            for entry in entries:
-                if len(records) >= _HEALTH_PROC_SCAN_LIMIT:
-                    break
-                if not entry.name.isdecimal():
-                    continue
-                record = _read_health_process_record(int(entry.name))
-                if record is not None:
+    # /proc is inherently racy: a process can exit between scandir() and its
+    # stat read.  Retry the complete scan a small bounded number of times so a
+    # transient exit does not turn an otherwise provable cleanup into a false
+    # failure.  Every attempt is still all-or-nothing; a persistently partial
+    # or truncated table remains an explicit failure.
+    for _attempt in range(3):
+        records: dict[int, _HealthProcessRecord] = {}
+        numeric_entries = 0
+        try:
+            with os.scandir("/proc") as entries:
+                for entry in entries:
+                    if not entry.name.isdecimal():
+                        continue
+                    numeric_entries += 1
+                    if numeric_entries > _HEALTH_PROC_SCAN_LIMIT:
+                        break
+                    record = _read_health_process_record(int(entry.name))
+                    if record is None or record.pid != int(entry.name):
+                        break
                     records[record.pid] = record
-    except (OSError, TypeError, ValueError):
-        return None
-    return records
+                else:
+                    return records
+        except (OSError, TypeError, ValueError):
+            pass
+    return None
 
 
 def _health_sample_descendants(
     root_pid: int,
     tracked: dict[int, int | None],
+    *,
+    records: dict[int, _HealthProcessRecord] | None = None,
 ) -> tuple[dict[int, _HealthProcessRecord], bool] | None:
     """Track a root's descendants while rejecting PID reuse."""
 
-    records = _snapshot_health_processes()
+    if records is None:
+        records = _snapshot_health_processes()
     if records is None:
         return None
     children: dict[int, list[_HealthProcessRecord]] = {}
@@ -630,10 +797,13 @@ def _health_sample_descendants(
 def _health_track_private_session_members(
     identity: _HealthWorkerIdentity,
     tracked: dict[int, int | None],
+    *,
+    records: dict[int, _HealthProcessRecord] | None = None,
 ) -> tuple[dict[int, _HealthProcessRecord], bool] | None:
     """Record every remaining member of an already-verified private session."""
 
-    records = _snapshot_health_processes()
+    if records is None:
+        records = _snapshot_health_processes()
     if records is None:
         return None
     members: dict[int, _HealthProcessRecord] = {}
@@ -654,13 +824,37 @@ def _health_track_private_session_members(
     return members, True
 
 
+def _health_sample_private_processes(
+    identity: _HealthWorkerIdentity,
+    tracked: dict[int, int | None],
+) -> tuple[
+    tuple[dict[int, _HealthProcessRecord], bool],
+    tuple[dict[int, _HealthProcessRecord], bool],
+] | None:
+    """Take one complete process snapshot for both containment views."""
+
+    records = _snapshot_health_processes()
+    if records is None:
+        return None
+    sampled = _health_sample_descendants(identity.pid, tracked, records=records)
+    members = _health_track_private_session_members(identity, tracked, records=records)
+    if sampled is None or members is None:
+        return None
+    return sampled, members
+
+
 def _health_signal_tracked_descendants(
     tracked: dict[int, int | None],
     signal_number: int,
+    *,
+    private_boundary: _HealthWorkerIdentity | None = None,
+    protected_boundary: _HealthWorkerIdentity | None = None,
 ) -> bool:
     """Signal only descendants whose PID and /proc start time still match."""
 
     successful = True
+    records: dict[int, _HealthProcessRecord] = {}
+    escaped_groups: dict[tuple[int, int], _HealthProcessRecord] = {}
     for pid, expected_start in tuple(tracked.items()):
         record = _read_health_process_record(pid)
         if record is None:
@@ -671,7 +865,66 @@ def _health_signal_tracked_descendants(
         if expected_start is None or expected_start != record.start_time:
             successful = False
             continue
-        if not _health_signal_process_identity(pid, expected_start, signal_number):
+        records[pid] = record
+        if record.session_id == record.process_group_id:
+            matches_private_boundary = (
+                private_boundary is not None
+                and record.session_id == private_boundary.session_id
+                and record.process_group_id == private_boundary.process_group_id
+            )
+            matches_protected_boundary = (
+                protected_boundary is not None
+                and record.session_id == protected_boundary.session_id
+                and record.process_group_id == protected_boundary.process_group_id
+            )
+            if not matches_private_boundary and not matches_protected_boundary:
+                escaped_groups[(record.session_id, record.process_group_id)] = record
+
+    signalled_groups: set[tuple[int, int]] = set()
+    for pid, record in records.items():
+        if private_boundary is not None and (
+            record.session_id == private_boundary.session_id
+            and record.process_group_id == private_boundary.process_group_id
+        ):
+            if not _health_signal_process_identity(
+                pid,
+                record.start_time,
+                signal_number,
+                private_boundary=private_boundary,
+            ):
+                successful = False
+            continue
+        if protected_boundary is not None and (
+            record.session_id == protected_boundary.session_id
+            and record.process_group_id == protected_boundary.process_group_id
+        ):
+            if not _health_signal_process_identity(
+                pid,
+                record.start_time,
+                signal_number,
+            ):
+                successful = False
+            continue
+        group_key = (record.session_id, record.process_group_id)
+        leader = escaped_groups.get(group_key)
+        if leader is not None:
+            if group_key in signalled_groups:
+                continue
+            signalled_groups.add(group_key)
+            if not _health_signal_verified_private_group(
+                leader,
+                leader.start_time,
+                signal_number,
+                private_boundary=private_boundary,
+            ):
+                successful = False
+            continue
+        if not _health_signal_process_identity(
+            pid,
+            record.start_time,
+            signal_number,
+            private_boundary=private_boundary,
+        ):
             successful = False
     return successful
 
@@ -703,7 +956,7 @@ def _health_reap_tracked_children(
     tracked: dict[int, int | None],
     *,
     owner_pid: int | None = None,
-    reaped: set[int] | None = None,
+    reaped: set[tuple[int, int]] | None = None,
     pending: set[int] | None = None,
     failed: set[int] | None = None,
     not_owned: set[int] | None = None,
@@ -715,14 +968,22 @@ def _health_reap_tracked_children(
         if owner_pid is not None:
             record = _read_health_process_record(pid)
             if record is None:
-                if not_owned is not None and pid in not_owned:
-                    continue
+                if not_owned is not None:
+                    not_owned.add(pid)
+                successful = False
+                continue
             elif record.parent_pid != owner_pid:
                 if not_owned is not None:
                     not_owned.add(pid)
                 continue
             elif not_owned is not None:
                 not_owned.discard(pid)
+        expected_start = tracked.get(pid)
+        if type(expected_start) is not int:
+            successful = False
+            if failed is not None:
+                failed.add(pid)
+            continue
         try:
             waited_pid, _status = os.waitpid(pid, os.WNOHANG)
             if waited_pid != pid:
@@ -733,8 +994,8 @@ def _health_reap_tracked_children(
                     failed.add(pid)
             else:
                 if reaped is not None:
-                    reaped.add(pid)
-                _HEALTH_WORKER_REAPED_PROBES.add(pid)
+                    reaped.add((pid, expected_start))
+                _HEALTH_WORKER_REAPED_PROBES.add((pid, expected_start))
                 tracked.pop(pid, None)
         except ChildProcessError:
             successful = False
@@ -751,10 +1012,53 @@ def _health_reap_tracked_children(
     return successful
 
 
+def _health_apply_reap_notifications(
+    tracked: dict[int, int | None],
+    reaped: set[tuple[int, int]],
+    raw: object,
+) -> bool:
+    """Apply only wait-proven reap notifications bound to the tracked identity."""
+
+    if not isinstance(raw, Mapping):
+        return False
+    notifications = raw.get("reaped")
+    if isinstance(notifications, (str, bytes)) or not isinstance(notifications, Sequence):
+        return False
+    valid = True
+    for item in notifications:
+        waited = True
+        if isinstance(item, Mapping):
+            pid = item.get("pid")
+            start_time = item.get("start_time")
+            waited = item.get("waited")
+        elif isinstance(item, Sequence) and not isinstance(item, (str, bytes)) and len(item) == 2:
+            pid, start_time = item
+        else:
+            valid = False
+            continue
+        if (
+            type(pid) is not int
+            or pid <= 0
+            or type(start_time) is not int
+            or waited is not True
+        ):
+            valid = False
+            continue
+        if tracked.get(pid) != start_time:
+            # A reused PID must remain tracked under its newer identity.
+            continue
+        identity = (pid, start_time)
+        reaped.add(identity)
+        tracked.pop(pid, None)
+    return valid
+
+
 def _health_cleanup_boundary(
     identity: _HealthWorkerIdentity,
     tracked: dict[int, int | None],
     timeout: float,
+    *,
+    owner_pid: int | None = None,
 ) -> bool:
     """Boundedly kill and verify all descendants of a private worker session."""
 
@@ -767,24 +1071,25 @@ def _health_cleanup_boundary(
     if not math.isfinite(cleanup_timeout) or cleanup_timeout < 0:
         return False
     deadline = time.monotonic() + min(cleanup_timeout, MAX_WORKER_CLEANUP_SECONDS)
+    reap_owner_pid = identity.pid if owner_pid is None else owner_pid
     successful = True
-    reaped: set[int] = set()
+    reaped: set[tuple[int, int]] = set()
     reap_failures: set[int] = set()
     reap_pending: set[int] = set()
     not_owned: set[int] = set()
 
     while True:
-        sampled = _health_sample_descendants(identity.pid, tracked)
-        members = _health_track_private_session_members(identity, tracked)
-        if sampled is None or members is None:
+        snapshot = _health_sample_private_processes(identity, tracked)
+        if snapshot is None:
             return False
+        sampled, members = snapshot
         descendants, sampled_ok = sampled
         session_members, members_ok = members
         if not sampled_ok or not members_ok:
             successful = False
         all_members = {**descendants, **session_members}
         for pid, record in all_members.items():
-            if record.parent_pid == identity.pid:
+            if record.parent_pid == reap_owner_pid:
                 not_owned.discard(pid)
             else:
                 not_owned.add(pid)
@@ -792,7 +1097,7 @@ def _health_cleanup_boundary(
         if not live:
             _health_reap_tracked_children(
                 tracked,
-                owner_pid=identity.pid,
+                owner_pid=reap_owner_pid,
                 reaped=reaped,
                 pending=reap_pending,
                 failed=reap_failures,
@@ -800,10 +1105,10 @@ def _health_cleanup_boundary(
             )
             if reap_failures:
                 successful = False
-            sampled = _health_sample_descendants(identity.pid, tracked)
-            members = _health_track_private_session_members(identity, tracked)
-            if sampled is None or members is None:
+            snapshot = _health_sample_private_processes(identity, tracked)
+            if snapshot is None:
                 return False
+            sampled, members = snapshot
             descendants, sampled_ok = sampled
             session_members, members_ok = members
             if not sampled_ok or not members_ok:
@@ -815,11 +1120,16 @@ def _health_cleanup_boundary(
             }
             if not live and _health_tracked_processes_absent(tracked):
                 return successful
-        if not _health_signal_tracked_descendants(tracked, signal.SIGKILL):
+        if not _health_signal_tracked_descendants(
+            tracked,
+            signal.SIGKILL,
+            private_boundary=identity if owner_pid is not None else None,
+            protected_boundary=identity if owner_pid is None else None,
+        ):
             successful = False
         _health_reap_tracked_children(
             tracked,
-            owner_pid=identity.pid,
+            owner_pid=reap_owner_pid,
             reaped=reaped,
             pending=reap_pending,
             failed=reap_failures,
@@ -831,10 +1141,10 @@ def _health_cleanup_boundary(
             break
         time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
 
-    sampled = _health_sample_descendants(identity.pid, tracked)
-    members = _health_track_private_session_members(identity, tracked)
-    if sampled is None or members is None:
+    snapshot = _health_sample_private_processes(identity, tracked)
+    if snapshot is None:
         return False
+    sampled, members = snapshot
     descendants, sampled_ok = sampled
     session_members, members_ok = members
     live = {
@@ -852,6 +1162,22 @@ def _health_register_probe(pid: int) -> bool:
     if type(pid) is not int or pid <= 0:
         _HEALTH_WORKER_CONTAINMENT_VALID = False
         return False
+    missing = object()
+    existing_start = _HEALTH_WORKER_TRACKED_DESCENDANTS.get(pid, missing)
+    if existing_start is not missing:
+        if existing_start is None:
+            _HEALTH_WORKER_CONTAINMENT_VALID = False
+            return False
+        record = _read_health_process_record(pid)
+        if record is None:
+            # The probe was observed and identity-bound before it exited.
+            # A post-Popen registration must not turn a normal fast exit into
+            # a containment failure.
+            return True
+        if record.start_time != existing_start:
+            _HEALTH_WORKER_CONTAINMENT_VALID = False
+            return False
+        return True
     record = _read_health_process_record(pid)
     if record is not None:
         _HEALTH_WORKER_TRACKED_DESCENDANTS[pid] = record.start_time
@@ -970,11 +1296,37 @@ def _run_bounded_process(
     error_detail: str | None = None
     gate_read: int | None = None
     gate_write: int | None = None
+    pid_read: int | None = None
+    pid_write: int | None = None
+    launch_pid: int | None = None
+    launch_start: int | None = None
+    launch_gate_failed = [False]
+    launch_signal_failed = [False]
     gate_stop: threading.Event | None = None
     gate_thread: threading.Thread | None = None
 
     def stop_launch_gate() -> None:
-        return None
+        nonlocal gate_read, gate_write, pid_read, pid_write, gate_thread
+        if gate_stop is not None:
+            gate_stop.set()
+        if gate_thread is not None:
+            gate_thread.join(timeout=0.1)
+            gate_thread = None
+        for descriptor in (gate_read, gate_write, pid_read, pid_write):
+            if isinstance(descriptor, int):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        gate_read = gate_write = pid_read = pid_write = None
+
+    if not _health_process_boundary_owned():
+        return CommandObservation(
+            argv,
+            error_code="worker_boundary_required",
+            error_detail="default process operations require an owned Doctor supervisor boundary",
+            duration_ms=(time.monotonic() - started) * 1000.0,
+        )
 
     if _operation_cancelled(operation_deadline, cancellation):
         return CommandObservation(
@@ -986,9 +1338,9 @@ def _run_bounded_process(
         )
 
     try:
-        # Keep this check directly adjacent to Popen.  The descriptor and
-        # snapshot stages use the same absolute deadline, so an expired
-        # operation cannot start a probe after Doctor has timed out.
+        # The child reports its PID before any potentially blocked pre-exec
+        # hook.  The watcher can then use an identity-bound pidfd to stop it
+        # even while Popen is still waiting for exec-error synchronization.
         if _operation_cancelled(operation_deadline, cancellation):
             return CommandObservation(
                 argv,
@@ -999,16 +1351,17 @@ def _run_bounded_process(
             )
         try:
             gate_read, gate_write = os.pipe()
+            pid_read, pid_write = os.pipe()
             os.set_blocking(gate_read, False)
-        except (AttributeError, OSError, TypeError, ValueError) as exc:
-            for descriptor in (gate_read, gate_write):
+            os.set_blocking(pid_read, False)
+        except (AttributeError, NotImplementedError, OSError, TypeError, ValueError) as exc:
+            for descriptor in (gate_read, gate_write, pid_read, pid_write):
                 if isinstance(descriptor, int):
                     try:
                         os.close(descriptor)
                     except OSError:
                         pass
-            gate_read = None
-            gate_write = None
+            gate_read = gate_write = pid_read = pid_write = None
             return CommandObservation(
                 argv,
                 error_code="launch_gate_unavailable",
@@ -1017,48 +1370,124 @@ def _run_bounded_process(
             )
 
         gate_stop = threading.Event()
-        if cancellation is not None:
-            assert gate_write is not None
-            write_descriptor = gate_write
+        assert gate_read is not None
+        assert gate_write is not None
+        assert pid_read is not None
+        assert pid_write is not None
+        write_gate = gate_write
+        read_pid = pid_read
+        write_pid = pid_write
 
-            def watch_launch_gate() -> None:
-                while not gate_stop.is_set():
-                    if cancellation.is_cancelled():
+        def write_gate_token(token: bytes) -> None:
+            try:
+                os.write(write_gate, token)
+            except (BrokenPipeError, OSError):
+                pass
+
+        def watch_launch_gate() -> None:
+            nonlocal launch_pid, launch_start
+            permit_sent = False
+            while not gate_stop.is_set():
+                if launch_pid is None:
+                    try:
+                        raw_pid = os.read(read_pid, 32)
+                    except (BlockingIOError, InterruptedError):
+                        raw_pid = b""
+                    except (NotImplementedError, OSError):
+                        launch_gate_failed[0] = True
+                        raw_pid = b""
+                    if raw_pid:
                         try:
-                            os.write(write_descriptor, b"1")
-                        except OSError:
-                            pass
-                        return
-                    gate_stop.wait(min(0.005, max(0.0, operation_deadline - time.monotonic())))
+                            candidate_pid = int(raw_pid.decode("ascii"))
+                        except (UnicodeError, ValueError):
+                            launch_gate_failed[0] = True
+                        else:
+                            record = _read_health_process_record(candidate_pid)
+                            if record is None:
+                                launch_gate_failed[0] = True
+                            else:
+                                launch_pid = candidate_pid
+                                launch_start = record.start_time
+                                # Establish the identity before releasing the
+                                # child-side gate.  Registration itself is
+                                # repeated after Popen returns so worker-loss
+                                # hooks cannot strand a child between launch
+                                # and tracker ownership, but the gate must not
+                                # depend on a callback that can terminate the
+                                # current worker before Popen completes.
+                                _HEALTH_WORKER_TRACKED_DESCENDANTS[candidate_pid] = record.start_time
+                cancelled = (
+                    cancellation is not None and cancellation.is_cancelled()
+                ) or time.monotonic() >= operation_deadline
+                if launch_gate_failed[0]:
+                    write_gate_token(b"C")
+                    return
+                if cancelled:
+                    write_gate_token(b"C")
+                    if launch_pid is not None and launch_start is not None:
+                        if not _health_signal_process_identity(
+                            launch_pid,
+                            launch_start,
+                            signal.SIGKILL,
+                            allow_private_group_fallback=False,
+                        ):
+                            launch_signal_failed[0] = True
+                    return
+                if launch_pid is not None and not permit_sent:
+                    write_gate_token(b"P")
+                    permit_sent = True
+                gate_stop.wait(min(0.005, max(0.0, operation_deadline - time.monotonic())))
 
-            gate_thread = threading.Thread(
-                target=watch_launch_gate,
-                name="realmheart-doctor-launch-gate",
-                daemon=True,
-            )
-            gate_thread.start()
+        gate_thread = threading.Thread(
+            target=watch_launch_gate,
+            name="realmheart-doctor-launch-gate",
+            daemon=True,
+        )
+        gate_thread.start()
 
         def stop_launch_gate() -> None:
-            nonlocal gate_read, gate_write, gate_thread
+            nonlocal gate_read, gate_write, pid_read, pid_write, gate_thread
             if gate_stop is not None:
                 gate_stop.set()
             if gate_thread is not None:
-                gate_thread.join(timeout=0.01)
+                gate_thread.join(timeout=0.1)
                 gate_thread = None
-            for descriptor in (gate_read, gate_write):
+            for descriptor in (gate_read, gate_write, pid_read, pid_write):
                 if isinstance(descriptor, int):
                     try:
                         os.close(descriptor)
                     except OSError:
                         pass
-            gate_read = None
-            gate_write = None
+            gate_read = gate_write = pid_read = pid_write = None
 
         def launch_gate() -> None:
+            assert gate_read is not None
+            assert pid_write is not None
+            try:
+                os.write(pid_write, str(os.getpid()).encode("ascii"))
+            except (BrokenPipeError, OSError):
+                os._exit(125)
+            finally:
+                try:
+                    os.close(pid_write)
+                except OSError:
+                    pass
+            if cancellation is None:
+                final_check: Callable[[], bool] | None = None
+            else:
+                launch_cancellation = cancellation
+                final_check = lambda: not launch_cancellation.is_cancelled()
+            _health_launch_gate_preexec(
+                operation_deadline,
+                gate_read,
+                final_check=final_check,
+            )
             if _HEALTH_WORKER_GROUP_OWNED:
                 _health_probe_preexec()
-            assert gate_read is not None
-            _health_launch_gate_preexec(operation_deadline, gate_read)
+            if cancellation is not None and cancellation.is_cancelled():
+                os._exit(125)
+            if time.monotonic() >= operation_deadline:
+                os._exit(125)
 
         popen_options: dict[str, Any] = {
             "stdin": subprocess.DEVNULL,
@@ -1072,7 +1501,8 @@ def _run_bounded_process(
         }
         if executable_fd is None:
             assert gate_read is not None
-            popen_options["pass_fds"] = (gate_read,)
+            assert pid_write is not None
+            popen_options["pass_fds"] = (gate_read, pid_write)
             process = cast(subprocess.Popen[bytes], subprocess.Popen(argv, **popen_options))
         else:
             # Python exposes fd-backed exec through ``os.execve`` on some
@@ -1081,7 +1511,8 @@ def _run_bounded_process(
             # opened with O_NOFOLLOW, kept alive with pass_fds, and never
             # resolved through PATH.
             assert gate_read is not None
-            popen_options["pass_fds"] = (executable_fd, gate_read)
+            assert pid_write is not None
+            popen_options["pass_fds"] = (executable_fd, gate_read, pid_write)
             process = cast(
                 subprocess.Popen[bytes],
                 subprocess.Popen(
@@ -1092,8 +1523,38 @@ def _run_bounded_process(
             )
         assert process is not None
         stop_launch_gate()
+        if launch_gate_failed[0]:
+            _terminate_process(process)
+            _wait_process(process, 0.1)
+            return CommandObservation(
+                argv,
+                timed_out=_operation_cancelled(operation_deadline, cancellation),
+                error_code="launch_gate_denied",
+                error_detail="worker identity could not be established before launch",
+                duration_ms=(time.monotonic() - started) * 1000.0,
+            )
+        if launch_signal_failed[0]:
+            _terminate_process(process)
+            _wait_process(process, 0.1)
+            return CommandObservation(
+                argv,
+                timed_out=True,
+                error_code="launch_cleanup_failed",
+                error_detail="worker identity-bound termination failed",
+                duration_ms=(time.monotonic() - started) * 1000.0,
+            )
         if _HEALTH_WORKER_GROUP_OWNED:
             _health_register_probe(process.pid)
+    except subprocess.SubprocessError as exc:
+        stop_launch_gate()
+        cancelled = _operation_cancelled(operation_deadline, cancellation)
+        return CommandObservation(
+            argv,
+            timed_out=cancelled,
+            error_code=("timeout" if cancelled else "launch_gate_denied"),
+            error_detail=type(exc).__name__,
+            duration_ms=(time.monotonic() - started) * 1000.0,
+        )
     except FileNotFoundError:
         stop_launch_gate()
         return CommandObservation(
@@ -1203,8 +1664,9 @@ def _run_bounded_process(
             _terminate_process(process)
             _wait_process(process, MAX_WORKER_CLEANUP_SECONDS)
         if process.returncode is not None and _HEALTH_WORKER_GROUP_OWNED:
-            _HEALTH_WORKER_TRACKED_DESCENDANTS.pop(process.pid, None)
-            _HEALTH_WORKER_REAPED_PROBES.add(process.pid)
+            expected_start = _HEALTH_WORKER_TRACKED_DESCENDANTS.pop(process.pid, None)
+            if type(expected_start) is int:
+                _HEALTH_WORKER_REAPED_PROBES.add((process.pid, expected_start))
         if _HEALTH_WORKER_GROUP_OWNED and _HEALTH_WORKER_IDENTITY is not None:
             if not _health_cleanup_boundary(
                 _HEALTH_WORKER_IDENTITY,
@@ -1325,6 +1787,12 @@ class ReadOnlyHealthOperations:
                 command,
                 error_code="invalid_command",
                 error_detail="executable identity or argument schema is not approved",
+            )
+        if not _health_process_boundary_owned():
+            return CommandObservation(
+                command,
+                error_code="worker_boundary_required",
+                error_detail="default process operations require an owned Doctor supervisor boundary",
             )
         return _run_bounded_descriptor(
             Path(path),
@@ -2716,13 +3184,16 @@ def _establish_health_worker_group() -> bool:
         return False
     if not _health_prctl(_HEALTH_PR_SET_PDEATHSIG, signal.SIGKILL):
         return False
+    child_subreaper = _health_child_subreaper_state()
+    if child_subreaper is not True:
+        return False
     record = _read_health_process_record(pid)
     _HEALTH_WORKER_IDENTITY = _HealthWorkerIdentity(
         pid,
         session_id,
         process_group_id,
         record.start_time if record is not None else None,
-        child_subreaper=True,
+        child_subreaper=child_subreaper,
         verified=record is not None,
     )
     _HEALTH_WORKER_GROUP_OWNED = True
@@ -2746,7 +3217,7 @@ def _health_ready_identity(raw: object) -> tuple[_HealthWorkerIdentity | None, b
     """Decode the readiness proof without treating a bare group bool as proof."""
 
     if raw is None or raw is True:
-        return None, True
+        return None, False
     if raw is False or not isinstance(raw, Mapping):
         return None, False
     pid = raw.get("pid")
@@ -2828,6 +3299,7 @@ def _signal_health_worker(
         worker_identity.pid,
         worker_identity.start_time,
         signal_number,
+        private_boundary=worker_identity,
     )
 
 
@@ -2840,6 +3312,7 @@ def _reap_health_worker(
     tracked_descendants: dict[int, int | None] | None = None,
     shutdown_event: Any = None,
     cleanup_connection: Any = None,
+    fallback_owner_pid: int | None = None,
 ) -> bool:
     """Stop and boundedly reap a worker, its private session, and escaped children."""
 
@@ -2868,6 +3341,19 @@ def _reap_health_worker(
         alive = True
         successful = False
 
+    def request_side_cleanup() -> bool:
+        if worker_identity is None:
+            return False
+        try:
+            return _health_cleanup_boundary(
+                worker_identity,
+                tracked,
+                cleanup_timeout,
+                owner_pid=fallback_owner_pid if fallback_owner_pid is not None else os.getpid(),
+            )
+        except BaseException:
+            return False
+
     if process_group_owned and shutdown_event is not None:
         # The supervisor owns the descendant tree.  Give it a bounded window
         # to perform the identity-bound signal/reap pass and publish proof.
@@ -2887,7 +3373,8 @@ def _reap_health_worker(
                     report = cleanup_connection.recv()
             except (EOFError, OSError, ValueError):
                 report = None
-        if isinstance(report, Mapping):
+        report_received = isinstance(report, Mapping)
+        if report_received:
             confirmed = report.get("confirmed")
             raw_tracked = report.get("tracked")
             if type(confirmed) is not bool:
@@ -2901,7 +3388,13 @@ def _reap_health_worker(
             else:
                 successful = False
         else:
+            # A dead supervisor cannot lend us its in-memory tracker.  The
+            # request process owns a temporary subreaper boundary and keeps a
+            # separately sampled identity map, so perform a bounded fallback
+            # instead of treating the missing report as proof of cleanup.
             successful = False
+            if not alive:
+                return cleanup_valid and request_side_cleanup()
         if alive:
             if not _signal_health_worker(
                 process,
@@ -2919,6 +3412,10 @@ def _reap_health_worker(
             except Exception:
                 alive = True
                 successful = False
+        if not alive and not report_received:
+            return cleanup_valid and request_side_cleanup()
+        if not alive and report_received and not successful:
+            return cleanup_valid and request_side_cleanup()
         return successful and not alive
 
     if not alive:
@@ -2962,14 +3459,7 @@ def _reap_health_worker(
                 successful = False
 
     if process_group_owned:
-        try:
-            boundary_confirmed = _health_cleanup_boundary(
-                worker_identity,
-                tracked,
-                cleanup_timeout,
-            ) if worker_identity is not None else False
-        except Exception:
-            boundary_confirmed = False
+        boundary_confirmed = request_side_cleanup() if worker_identity is not None else False
         if not boundary_confirmed:
             successful = False
     return successful and not alive
@@ -3081,7 +3571,7 @@ def _run_health_supervisor(
 
     supervisor_identity: _HealthWorkerIdentity | None = None
     tracked: dict[int, int | None] = {}
-    worker_reaped: set[int] = set()
+    worker_reaped: set[tuple[int, int]] = set()
     inner_process: Any = None
     inner_result_parent: Any = None
     inner_result_child: Any = None
@@ -3107,12 +3597,15 @@ def _run_health_supervisor(
     def sample_owned_processes() -> None:
         if supervisor_identity is None:
             return
-        sampled = _health_sample_descendants(supervisor_identity.pid, tracked)
-        members = _health_track_private_session_members(supervisor_identity, tracked)
-        if sampled is None or members is None or not sampled[1] or not members[1]:
+        snapshot = _health_sample_private_processes(supervisor_identity, tracked)
+        if snapshot is None:
             return
-        for pid in worker_reaped:
-            tracked.pop(pid, None)
+        sampled, members = snapshot
+        if not sampled[1] or not members[1]:
+            return
+        for pid, start_time in worker_reaped:
+            if tracked.get(pid) == start_time:
+                tracked.pop(pid, None)
 
     try:
         if not _establish_health_worker_group():
@@ -3165,20 +3658,9 @@ def _run_health_supervisor(
         inner_ready_child.close()
         inner_reap_child.close()
         inner_launch_event.set()
-        sample_owned_processes()
+        next_sample_at = time.monotonic() + 0.02
 
         while True:
-            sample_owned_processes()
-            if inner_reap_parent.poll(0):
-                try:
-                    reap_message = inner_reap_parent.recv()
-                except (EOFError, OSError, ValueError):
-                    reap_message = None
-                if isinstance(reap_message, Mapping) and isinstance(reap_message.get("reaped"), Sequence):
-                    for pid in reap_message["reaped"]:
-                        if type(pid) is int and pid > 0:
-                            worker_reaped.add(pid)
-                            tracked.pop(pid, None)
             if inner_result_parent.poll(0.005):
                 try:
                     raw = inner_result_parent.recv()
@@ -3200,9 +3682,17 @@ def _run_health_supervisor(
                 cancellation_event.set()
                 send_payload(_payload(HealthStatus.UNKNOWN, "budget_exhausted", detail="probe worker exceeded the Doctor deadline"))
                 break
+            if inner_reap_parent.poll(0):
+                try:
+                    reap_message = inner_reap_parent.recv()
+                except (EOFError, OSError, ValueError):
+                    reap_message = None
+                _health_apply_reap_notifications(tracked, worker_reaped, reap_message)
+            if time.monotonic() >= next_sample_at:
+                sample_owned_processes()
+                next_sample_at = time.monotonic() + 0.02
 
         while not shutdown_event.is_set() and not completion_event.is_set():
-            sample_owned_processes()
             if time.monotonic() >= deadline:
                 break
             try:
@@ -3210,6 +3700,7 @@ def _run_health_supervisor(
                     break
             except Exception:
                 break
+            sample_owned_processes()
             time.sleep(0.005)
     except BaseException as exc:
         send_payload(_payload(HealthStatus.UNKNOWN, "operation_error", detail=type(exc).__name__))
@@ -3231,11 +3722,7 @@ def _run_health_supervisor(
             try:
                 while inner_reap_parent.poll(0):
                     reap_message = inner_reap_parent.recv()
-                    if isinstance(reap_message, Mapping) and isinstance(reap_message.get("reaped"), Sequence):
-                        for pid in reap_message["reaped"]:
-                            if type(pid) is int and pid > 0:
-                                worker_reaped.add(pid)
-                                tracked.pop(pid, None)
+                    _health_apply_reap_notifications(tracked, worker_reaped, reap_message)
             except (EOFError, OSError, ValueError):
                 pass
         if supervisor_identity is not None:
@@ -3544,6 +4031,8 @@ class HealthCheckExecutor:
         launch_event = context.Event()
         completion_event = context.Event()
         shutdown_event = context.Event()
+        request_subreaper_previous = _health_child_subreaper_state()
+        request_subreaper_changed = False
         process: Any = None
         process_started = False
         process_group_owned = False
@@ -3551,6 +4040,16 @@ class HealthCheckExecutor:
         tracked_descendants: dict[int, int | None] = {}
         cleanup_attempted = False
         cleanup_confirmed = False
+
+        def sample_request_owned_processes() -> None:
+            if not process_group_owned or worker_identity is None:
+                return
+            snapshot = _health_sample_private_processes(worker_identity, tracked_descendants)
+            if snapshot is None:
+                return
+            sampled, members = snapshot
+            if not sampled[1] or not members[1]:
+                return
 
         def cleanup_worker() -> bool:
             nonlocal cleanup_attempted, cleanup_confirmed
@@ -3560,6 +4059,7 @@ class HealthCheckExecutor:
             if not process_started or process is None:
                 cleanup_confirmed = True
                 return True
+            sample_request_owned_processes()
             cancellation_event.set()
             cleanup_confirmed = _reap_health_worker(
                 process,
@@ -3569,10 +4069,32 @@ class HealthCheckExecutor:
                 tracked_descendants=tracked_descendants,
                 shutdown_event=shutdown_event if process_group_owned else None,
                 cleanup_connection=cleanup_parent if process_group_owned else None,
+                fallback_owner_pid=os.getpid(),
             )
             return cleanup_confirmed
 
         try:
+            if os.name == "posix":
+                if request_subreaper_previous is None:
+                    return (
+                        _payload(
+                            HealthStatus.UNKNOWN,
+                            "worker_unavailable",
+                            detail="request child-subreaper state could not be observed",
+                        ),
+                        max(0.0, (self.clock() - started) * 1000.0),
+                    )
+                if not request_subreaper_previous:
+                    if not _health_prctl(_HEALTH_PR_SET_CHILD_SUBREAPER, 1):
+                        return (
+                            _payload(
+                                HealthStatus.UNKNOWN,
+                                "worker_unavailable",
+                                detail="request child-subreaper boundary could not be established",
+                            ),
+                            max(0.0, (self.clock() - started) * 1000.0),
+                        )
+                    request_subreaper_changed = True
             process = context.Process(
                 target=_run_health_supervisor,
                 args=(self, registry, spec),
@@ -3610,16 +4132,36 @@ class HealthCheckExecutor:
             raw: object | None = None
             if process_group_owned and self.clock() < deadline:
                 launch_event.set()
-                remaining = max(0.0, deadline - self.clock())
-                if remaining > 0 and parent_connection.poll(remaining):
+                next_sample_at = self.clock() + 0.02
+                while self.clock() < deadline:
+                    remaining = max(0.0, deadline - self.clock())
+                    if remaining <= 0:
+                        break
+                    if parent_connection.poll(min(remaining, 0.005)):
+                        try:
+                            raw = parent_connection.recv()
+                        except (EOFError, OSError, ValueError):
+                            raw = None
+                        break
                     try:
-                        raw = parent_connection.recv()
-                    except (EOFError, OSError, ValueError):
-                        raw = None
+                        if not process.is_alive():
+                            if parent_connection.poll(0.005):
+                                try:
+                                    raw = parent_connection.recv()
+                                except (EOFError, OSError, ValueError):
+                                    raw = None
+                            break
+                    except Exception:
+                        break
+                    if self.clock() >= next_sample_at:
+                        sample_request_owned_processes()
+                        next_sample_at = self.clock() + 0.02
             if isinstance(raw, _CheckPayload):
                 confirmed = cleanup_worker()
                 expired = self.clock() >= deadline
                 if not process_group_owned or not confirmed:
+                    if isinstance(raw, _CheckPayload) and raw.status is HealthStatus.UNKNOWN:
+                        return raw, max(0.0, (self.clock() - started) * 1000.0)
                     return (
                         _payload(
                             HealthStatus.UNKNOWN,
@@ -3688,6 +4230,11 @@ class HealthCheckExecutor:
                     resource.close()
                 except (OSError, ValueError):
                     pass
+            if request_subreaper_changed:
+                _health_prctl(
+                    _HEALTH_PR_SET_CHILD_SUBREAPER,
+                    1 if request_subreaper_previous else 0,
+                )
 
     def _run_with_worker(
         self,

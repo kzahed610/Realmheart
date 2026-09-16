@@ -599,6 +599,165 @@ class DoctorHealthExecutorTests(unittest.TestCase):
 
         setpgid.assert_not_called()
 
+    def test_process_snapshot_fails_closed_on_stat_loss_and_scan_truncation(self):
+        class Entries:
+            def __init__(self, names):
+                self.names = names
+
+            def __enter__(self):
+                return iter(type("Entry", (), {"name": name})() for name in self.names)
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+        record = health._HealthProcessRecord(1, 0, 1, 1, 11, "S")
+        with patch.object(health.os, "scandir", return_value=Entries(["1"])), patch.object(
+            health, "_read_health_process_record", return_value=None
+        ):
+            self.assertIsNone(health._snapshot_health_processes())
+
+        with patch.object(health.os, "scandir", return_value=Entries(["1", "2"])), patch.object(
+            health, "_read_health_process_record", return_value=record
+        ), patch.object(health, "_HEALTH_PROC_SCAN_LIMIT", 1):
+            self.assertIsNone(health._snapshot_health_processes())
+
+    def test_public_default_process_operations_require_the_supervisor_boundary(self):
+        operations = health.ReadOnlyHealthOperations()
+        with patch("realmheart_doctor.health.subprocess.Popen") as popen:
+            result = operations.run(
+                (APPROVED_TRUE_EXECUTABLE,),
+                timeout=0.1,
+                max_output_bytes=64,
+            )
+
+        self.assertEqual(result.error_code, "worker_boundary_required")
+        popen.assert_not_called()
+
+    def test_supervisor_loss_runs_request_side_identity_bound_cleanup_fallback(self):
+        class DeadSupervisor:
+            pid = 424242
+
+            def is_alive(self):
+                return False
+
+            def join(self, *, timeout=None):
+                self.timeout = timeout
+
+        class EmptyCleanupConnection:
+            def poll(self, timeout):
+                return False
+
+        identity = health._HealthWorkerIdentity(
+            424242,
+            424242,
+            424242,
+            start_time=123,
+            verified=True,
+        )
+        shutdown = threading.Event()
+        with patch.object(health, "_health_cleanup_boundary", return_value=True) as cleanup:
+            result = health._reap_health_worker(
+                DeadSupervisor(),
+                0.01,
+                process_group_owned=True,
+                worker_identity=identity,
+                tracked_descendants={},
+                shutdown_event=shutdown,
+                cleanup_connection=EmptyCleanupConnection(),
+            )
+
+        self.assertTrue(result)
+        cleanup.assert_called_once()
+
+    def test_pidfd_unavailability_uses_only_a_verified_private_process_group(self):
+        record = health._HealthProcessRecord(424242, 1, 424242, 424242, 123, "S")
+        with patch.object(health, "_read_health_process_record", return_value=record), patch.object(
+            health, "_health_pidfd_open", return_value=None
+        ), patch.object(health.os, "killpg") as killpg, patch.object(
+            health.os, "kill", side_effect=AssertionError("raw PID signal is unsafe")
+        ):
+            result = health._health_signal_process_identity(424242, 123, signal.SIGKILL)
+
+        self.assertTrue(result)
+        killpg.assert_called_once_with(424242, signal.SIGKILL)
+
+    def test_pidfd_unavailable_reaps_an_orphaned_private_group_without_raw_pid_signal(self):
+        record = health._HealthProcessRecord(424243, 1, 424242, 424242, 123, "S")
+        boundary = health._HealthWorkerIdentity(
+            424200,
+            424200,
+            424200,
+            start_time=120,
+            verified=True,
+        )
+        with patch.object(health, "_read_health_process_record", return_value=record), patch.object(
+            health, "_health_pidfd_open", return_value=None
+        ), patch.object(health.os, "killpg") as killpg, patch.object(
+            health.os, "kill", side_effect=AssertionError("raw PID signal is unsafe")
+        ):
+            result = health._health_signal_tracked_descendants(
+                {424243: 123},
+                signal.SIGKILL,
+                private_boundary=boundary,
+            )
+
+        self.assertTrue(result)
+        killpg.assert_called_once_with(424242, signal.SIGKILL)
+
+    def test_pidfd_unavailable_never_kills_the_current_worker_group(self):
+        record = health._HealthProcessRecord(424243, 424200, 424200, 424200, 123, "S")
+        boundary = health._HealthWorkerIdentity(
+            424200,
+            424200,
+            424200,
+            start_time=120,
+            verified=True,
+        )
+        with patch.object(health, "_read_health_process_record", return_value=record), patch.object(
+            health, "_health_pidfd_open", return_value=None
+        ), patch.object(health.os, "killpg") as killpg:
+            result = health._health_signal_tracked_descendants(
+                {424243: 123},
+                signal.SIGKILL,
+                protected_boundary=boundary,
+            )
+
+        self.assertFalse(result)
+        killpg.assert_not_called()
+
+    def test_reap_notifications_require_the_matching_process_identity(self):
+        helper = getattr(health, "_health_apply_reap_notifications", None)
+        self.assertTrue(callable(helper))
+        tracked = {424242: 22}
+        reaped = set()
+
+        helper(tracked, reaped, {"reaped": ((424242, 21),)})
+        self.assertEqual(tracked, {424242: 22})
+        self.assertEqual(reaped, set())
+
+        helper(tracked, reaped, {"reaped": ((424242, 22),)})
+        self.assertEqual(tracked, {})
+        self.assertEqual(reaped, {(424242, 22)})
+
+    def test_launch_gate_final_permit_is_rechecked_before_exec(self):
+        helper = getattr(health, "_health_launch_gate_allowed", None)
+        self.assertTrue(callable(helper))
+        read_descriptor, write_descriptor = os.pipe()
+        try:
+            self.assertFalse(
+                helper(
+                    time.monotonic() + 1.0,
+                    read_descriptor,
+                    final_check=lambda: False,
+                )
+            )
+        finally:
+            for descriptor in (read_descriptor, write_descriptor):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
     def test_worker_loss_with_an_escaped_descendant_is_cleaned_before_unknown(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -740,6 +899,42 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                 self.assertTrue(
                     _wait_for_process_exit(escaped_pid),
                     "a setsid/double-fork descendant survived the bounded Doctor cleanup",
+                )
+            finally:
+                if _process_is_live(escaped_pid):
+                    try:
+                        os.kill(escaped_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_session_escape_descendant_is_reaped_without_pidfds(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, executable_path = _manifest(root)
+            _build_session_escape_probe(executable_path)
+            marker = executable_path.with_name(executable_path.name + ".pid")
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                artifact_id="demo.exec",
+                timeout_ms=120,
+                args={"args": []},
+            )
+            registry = replace(registry, health_checks=checks)
+
+            with patch("realmheart_doctor.health._health_pidfd_open", return_value=None):
+                result = HealthCheckExecutor(
+                    max_seconds=0.5,
+                    worker_cleanup_seconds=0.05,
+                ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
+
+            self.assertEqual(result.status, HealthStatus.UNKNOWN)
+            self.assertTrue(marker.exists(), "the probe did not create an escaped descendant")
+            escaped_pid = int(marker.read_text(encoding="ascii"))
+            try:
+                self.assertTrue(
+                    _wait_for_process_exit(escaped_pid),
+                    "an escaped descendant survived cleanup when pidfds were unavailable",
                 )
             finally:
                 if _process_is_live(escaped_pid):
@@ -1372,7 +1567,7 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                         gates.append(gate)
                         current_block[0] = (gate, entered)
                         result = HealthCheckExecutor(
-                            max_seconds=0.03,
+                            max_seconds=0.1,
                             worker_cleanup_seconds=0.01,
                         ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
                         self.assertEqual(result.status, HealthStatus.UNKNOWN)
