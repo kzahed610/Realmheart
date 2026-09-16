@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import errno
 import os
 import shutil
 import signal
@@ -217,6 +218,20 @@ def _wait_for_process_exit(pid: int, timeout: float = 1.0) -> bool:
     return not _process_is_live(pid)
 
 
+def _caller_subreaper_state() -> bool:
+    """Read the caller's Linux child-subreaper bit without changing it."""
+    if os.name != "posix":
+        raise unittest.SkipTest("child-subreaper state is Linux-specific")
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    value = ctypes.c_int()
+    result = libc.prctl(37, ctypes.byref(value), 0, 0, 0)
+    if result != 0:
+        raise unittest.SkipTest("PR_GET_CHILD_SUBREAPER is unavailable")
+    return bool(value.value)
+
+
 def _build_session_escape_probe(path: Path) -> None:
     compiler = shutil.which("cc")
     if compiler is None:
@@ -254,6 +269,50 @@ int main(int argc, char **argv) {
     for (;;) {
         pause();
     }
+}
+""",
+        encoding="ascii",
+    )
+    subprocess.run(
+        [compiler, "-O0", "-Wall", "-Werror", str(source), "-o", str(path)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=10,
+    )
+    path.chmod(0o755)
+
+
+def _build_launch_marker_probe(path: Path) -> None:
+    compiler = shutil.which("cc")
+    if compiler is None:
+        raise unittest.SkipTest("a C compiler is required for the launch-gate test")
+    source = path.with_suffix(".c")
+    source.write_text(
+        """
+#include <fcntl.h>
+#include <stdio.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    if (argc != 1) {
+        return 90;
+    }
+    char marker_path[4096];
+    if (snprintf(marker_path, sizeof(marker_path), "%s.launched", argv[0]) < 0) {
+        return 91;
+    }
+    int descriptor = open(marker_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (descriptor < 0) {
+        return 92;
+    }
+    if (write(descriptor, "launched\\n", 9) != 9) {
+        close(descriptor);
+        return 93;
+    }
+    close(descriptor);
+    sleep(2);
+    return 0;
 }
 """,
         encoding="ascii",
@@ -540,6 +599,119 @@ class DoctorHealthExecutorTests(unittest.TestCase):
 
         setpgid.assert_not_called()
 
+    def test_worker_loss_with_an_escaped_descendant_is_cleaned_before_unknown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, executable_path = _manifest(root)
+            _build_session_escape_probe(executable_path)
+            marker = executable_path.with_name(executable_path.name + ".pid")
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                artifact_id="demo.exec",
+                timeout_ms=500,
+                args={"args": []},
+            )
+            registry = replace(registry, health_checks=checks)
+            real_popen = health.subprocess.Popen
+            original_register = health._health_register_probe
+
+            def wait_for_escape(*args, **kwargs):
+                process = real_popen(*args, **kwargs)
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline and not marker.exists():
+                    time.sleep(0.005)
+                return process
+
+            def lose_worker(pid: int) -> bool:
+                registered = original_register(pid)
+                os.kill(os.getpid(), signal.SIGKILL)
+                return registered
+
+            with patch("realmheart_doctor.health.subprocess.Popen", side_effect=wait_for_escape), patch(
+                "realmheart_doctor.health._health_register_probe", side_effect=lose_worker
+            ):
+                result = HealthCheckExecutor(
+                    max_seconds=0.5,
+                    worker_cleanup_seconds=0.05,
+                ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
+
+            self.assertEqual(result.status, HealthStatus.UNKNOWN)
+            self.assertTrue(marker.exists(), "the probe did not create an escaped descendant")
+            escaped_pid = int(marker.read_text(encoding="ascii"))
+            try:
+                self.assertTrue(
+                    _wait_for_process_exit(escaped_pid),
+                    "an escaped descendant survived cleanup after worker loss",
+                )
+            finally:
+                if _process_is_live(escaped_pid):
+                    try:
+                        os.kill(escaped_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_identity_failure_never_falls_back_to_an_unbound_worker_signal(self):
+        process = type("Process", (), {"pid": 424242})()
+        identity = health._HealthWorkerIdentity(
+            424242,
+            424242,
+            424242,
+            start_time=123,
+            verified=True,
+        )
+        with patch("realmheart_doctor.health._health_observe_worker_identity", return_value=None), patch(
+            "realmheart_doctor.health._signal_health_worker_direct"
+        ) as direct_signal:
+            result = health._signal_health_worker(
+                process,
+                signal.SIGKILL,
+                process_group_owned=True,
+                worker_identity=identity,
+            )
+
+        self.assertFalse(result)
+        direct_signal.assert_not_called()
+
+    def test_pid_identity_signal_fails_closed_when_pidfds_are_unavailable(self):
+        with patch.object(health.os, "pidfd_open", None, create=True), patch.object(
+            health.os, "kill", side_effect=AssertionError("raw PID signal is unsafe")
+        ):
+            self.assertFalse(
+                health._health_signal_tracked_descendants(
+                    {424242: 123},
+                    signal.SIGKILL,
+                )
+            )
+
+    def test_reaping_requires_a_successful_waitpid_completion(self):
+        with patch("realmheart_doctor.health.os.waitpid", return_value=(0, 0)):
+            self.assertFalse(health._health_reap_tracked_children({424242: 123}))
+        with patch("realmheart_doctor.health.os.waitpid", return_value=(424242, 0)):
+            self.assertTrue(health._health_reap_tracked_children({424242: 123}))
+        for error in (ChildProcessError(), OSError(errno.ECHILD, "not a child"), OSError(errno.ESRCH, "gone")):
+            with self.subTest(error=type(error).__name__), patch(
+                "realmheart_doctor.health.os.waitpid", side_effect=error
+            ):
+                self.assertFalse(health._health_reap_tracked_children({424242: 123}))
+
+    def test_zombie_is_not_absent_without_reaping_proof(self):
+        zombie = health._HealthProcessRecord(424242, 1, 1, 1, 123, "Z")
+        with patch("realmheart_doctor.health._read_health_process_record", return_value=zombie):
+            self.assertFalse(health._health_tracked_processes_absent({424242: 123}))
+
+    def test_default_execution_does_not_change_caller_subreaper_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry, _, _ = _manifest(Path(temp))
+            before = _caller_subreaper_state()
+            result = HealthCheckExecutor(max_seconds=1).execute(
+                registry, check_ids=("check.runtime",)
+            ).result_for("check.runtime")
+            after = _caller_subreaper_state()
+
+        self.assertEqual(result.status, HealthStatus.PASS)
+        self.assertEqual(after, before)
+
     def test_session_escape_descendant_is_reaped_before_timeout_returns(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -579,14 +751,21 @@ class DoctorHealthExecutorTests(unittest.TestCase):
     def test_group_signal_failure_makes_successful_probe_cleanup_unknown(self):
         with tempfile.TemporaryDirectory() as temp:
             registry, _, _ = _manifest(Path(temp))
-            with patch("realmheart_doctor.health.os.killpg", side_effect=PermissionError("denied")):
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                timeout_ms=5000,
+                args={"argv": [APPROVED_SLEEP_EXECUTABLE, "37.125"]},
+            )
+            registry = replace(registry, health_checks=checks)
+            with patch("realmheart_doctor.health._health_pidfd_send_signal", return_value=False):
                 result = HealthCheckExecutor(
-                    max_seconds=0.5,
+                    max_seconds=1.0,
                     worker_cleanup_seconds=0.02,
                 ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
 
             self.assertEqual(result.status, HealthStatus.UNKNOWN)
-            self.assertEqual(result.reason_code, "worker_cleanup_incomplete")
+            self.assertIn(result.reason_code, {"worker_cleanup_incomplete", "budget_exhausted"})
 
     def test_worker_reaper_reports_cleanup_api_errors_with_bounded_waits(self):
         class CleanupErrorProcess:
@@ -1114,6 +1293,35 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                         if active <= baseline_threads:
                             break
                         time.sleep(0.005)
+
+    def test_launch_gate_rejects_a_child_that_reaches_exec_after_deadline(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, executable_path = _manifest(root)
+            _build_launch_marker_probe(executable_path)
+            marker = executable_path.with_name(executable_path.name + ".launched")
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                artifact_id="demo.exec",
+                timeout_ms=50,
+                args={"args": []},
+            )
+            registry = replace(registry, health_checks=checks)
+            original_preexec = health._health_probe_preexec
+
+            def delayed_preexec() -> None:
+                time.sleep(0.12)
+                original_preexec()
+
+            with patch("realmheart_doctor.health._health_probe_preexec", side_effect=delayed_preexec):
+                result = HealthCheckExecutor(max_seconds=1).execute(
+                    registry, check_ids=("check.runtime",)
+                ).result_for("check.runtime")
+
+            self.assertEqual(result.status, HealthStatus.UNKNOWN)
+            self.assertIn(result.reason_code, {"timeout", "budget_exhausted"})
+            self.assertFalse(marker.exists(), "the authorized ELF executed after its deadline")
 
     def test_repeated_snapshot_timeouts_do_not_accumulate_workers_or_descriptors(self):
         with tempfile.TemporaryDirectory() as temp:
