@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import sys
 import tempfile
 import threading
@@ -170,6 +171,31 @@ argv = ["{APPROVED_TRUE_EXECUTABLE}"]
 '''
     (components / "demo.toml").write_text(body, encoding="utf-8")
     return load_manifest(components), file_path, executable_path
+
+
+def _active_processes_for_command(argv: tuple[str, ...]) -> set[int]:
+    """Return non-zombie PIDs whose /proc argv exactly matches ``argv``."""
+
+    matches: set[int] = set()
+    try:
+        entries = tuple(Path("/proc").iterdir())
+    except OSError:
+        return matches
+    for entry in entries:
+        if not entry.name.isdecimal():
+            continue
+        try:
+            raw_argv = tuple(
+                item.decode("utf-8", errors="surrogateescape")
+                for item in (entry / "cmdline").read_bytes().split(b"\0")
+                if item
+            )
+            state = (entry / "stat").read_text(encoding="ascii").split(" ")[2]
+        except (OSError, UnicodeError, IndexError):
+            continue
+        if state != "Z" and raw_argv == argv:
+            matches.add(int(entry.name))
+    return matches
 
 
 class DoctorHealthExecutorTests(unittest.TestCase):
@@ -406,6 +432,164 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             self.assertEqual(result.status, HealthStatus.UNKNOWN)
             self.assertIn(result.reason_code, {"timeout", "budget_exhausted"})
             self.assertTrue(report.budget_exhausted)
+
+    def test_worker_reaper_never_uses_unbounded_join(self):
+        class UnconfirmedProcess:
+            def __init__(self) -> None:
+                self.join_timeouts: list[object] = []
+                self.killed = False
+
+            def is_alive(self) -> bool:
+                return True
+
+            def terminate(self) -> None:
+                return None
+
+            def kill(self) -> None:
+                self.killed = True
+
+            def join(self, *, timeout=None) -> None:
+                self.join_timeouts.append(timeout)
+                if timeout is None:
+                    raise AssertionError("worker reaper attempted an unbounded join")
+
+        process = UnconfirmedProcess()
+        reaped = health._reap_health_worker(process, 0.01)
+
+        self.assertFalse(reaped)
+        self.assertTrue(process.killed)
+        self.assertTrue(process.join_timeouts)
+        self.assertTrue(all(timeout is not None for timeout in process.join_timeouts))
+
+    def test_timeout_kills_probe_descendant_started_during_blocked_launch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, _ = _manifest(root)
+            probe_argv = (APPROVED_SLEEP_EXECUTABLE, "37.125")
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                timeout_ms=5000,
+                args={"argv": list(probe_argv)},
+            )
+            registry = replace(registry, health_checks=checks)
+            marker = root / "probe-pid"
+            baseline = _active_processes_for_command(probe_argv)
+            real_popen = health.subprocess.Popen
+
+            def launch_then_block(*args, **kwargs):
+                process = real_popen(*args, **kwargs)
+                marker.write_text(str(process.pid), encoding="ascii")
+                time.sleep(2.0)
+                return process
+
+            try:
+                with patch("realmheart_doctor.health.subprocess.Popen", side_effect=launch_then_block):
+                    started = time.monotonic()
+                    result = HealthCheckExecutor(
+                        max_seconds=0.04,
+                        worker_cleanup_seconds=0.02,
+                    ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
+                    elapsed = time.monotonic() - started
+
+                self.assertLess(elapsed, 1.0)
+                self.assertEqual(result.status, HealthStatus.UNKNOWN)
+                self.assertIn(
+                    result.reason_code,
+                    {"timeout", "budget_exhausted", "worker_cleanup_incomplete"},
+                )
+                self.assertTrue(marker.exists(), "the probe launch race did not execute")
+                launched_pid = int(marker.read_text(encoding="ascii"))
+
+                active: set[int] = set()
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline:
+                    active = _active_processes_for_command(probe_argv) - baseline
+                    if not active:
+                        break
+                    time.sleep(0.01)
+                self.assertNotIn(launched_pid, active)
+                self.assertEqual(active, set())
+            finally:
+                for pid in _active_processes_for_command(probe_argv) - baseline:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_lost_readiness_still_reaps_worker_process_group(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, _ = _manifest(root)
+            probe_argv = (APPROVED_SLEEP_EXECUTABLE, "37.125")
+            marker = root / "probe-pid"
+            baseline = _active_processes_for_command(probe_argv)
+
+            def worker_without_readiness(*args, **kwargs):
+                if not health._establish_health_worker_group():
+                    return
+                process = health.subprocess.Popen(
+                    probe_argv,
+                    stdin=health.subprocess.DEVNULL,
+                    stdout=health.subprocess.DEVNULL,
+                    stderr=health.subprocess.DEVNULL,
+                    shell=False,
+                    close_fds=True,
+                    start_new_session=False,
+                    env=dict(health._SANITIZED_ENVIRONMENT),
+                )
+                marker.write_text(str(process.pid), encoding="ascii")
+                while True:
+                    time.sleep(1.0)
+
+            try:
+                with patch("realmheart_doctor.health._run_health_check_in_process", worker_without_readiness):
+                    started = time.monotonic()
+                    result = HealthCheckExecutor(
+                        max_seconds=0.04,
+                        worker_cleanup_seconds=0.02,
+                    ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
+                    elapsed = time.monotonic() - started
+
+                self.assertLess(elapsed, 1.0)
+                self.assertEqual(result.status, HealthStatus.UNKNOWN)
+                self.assertTrue(marker.exists(), "the lost-readiness worker did not launch its descendant")
+                launched_pid = int(marker.read_text(encoding="ascii"))
+
+                active: set[int] = set()
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline:
+                    active = _active_processes_for_command(probe_argv) - baseline
+                    if not active:
+                        break
+                    time.sleep(0.01)
+                self.assertNotIn(launched_pid, active)
+                self.assertEqual(active, set())
+            finally:
+                for pid in _active_processes_for_command(probe_argv) - baseline:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_abnormal_worker_exit_returns_structured_unknown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry, _, _ = _manifest(Path(temp))
+
+            def crash_worker(*args, **kwargs):
+                os._exit(23)
+
+            with patch("realmheart_doctor.health._run_health_check_in_process", crash_worker):
+                started = time.monotonic()
+                result = HealthCheckExecutor(
+                    max_seconds=0.2,
+                    worker_cleanup_seconds=0.01,
+                ).execute(registry, check_ids=("check.runtime",)).result_for("check.runtime")
+                elapsed = time.monotonic() - started
+
+            self.assertLess(elapsed, 1.0)
+            self.assertEqual(result.status, HealthStatus.UNKNOWN)
+            self.assertIn(result.reason_code, {"operation_error", "budget_exhausted"})
 
     def test_default_filesystem_operations_are_descriptor_bound_and_read_only(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -110,6 +110,10 @@ _SANITIZED_ENVIRONMENT = {
     "PATH": "/usr/bin:/bin",
     "TZ": "UTC",
 }
+# Set only inside the forked Doctor worker after it owns a private process
+# group.  A probe in that group must not kill the worker when it cleans up its
+# own child; the request-side reaper owns group-wide termination.
+_HEALTH_WORKER_GROUP_OWNED = False
 _REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SECRET_REPLACEMENT = "[REDACTED]"
 
@@ -345,15 +349,23 @@ def _normalise_error_code(value: object) -> str | None:
 
 
 def _terminate_process(process: subprocess.Popen[bytes]) -> None:
-    """Kill a bounded process and its same-session descendants."""
+    """Kill a bounded process and descendants without killing its worker."""
 
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except (AttributeError, OSError):
+    # The default direct-operation path owns a fresh session.  A forked
+    # Doctor worker instead owns the process group inherited by its probe; the
+    # request-side worker reaper kills that group because killing it here would
+    # also kill this function's worker.
+    if not _HEALTH_WORKER_GROUP_OWNED:
         try:
-            process.kill()
-        except (OSError, ProcessLookupError):
+            process_group = os.getpgid(process.pid)
+            os.killpg(process_group, signal.SIGKILL)
+            return
+        except (AttributeError, OSError, ProcessLookupError, TypeError, ValueError):
             pass
+    try:
+        process.kill()
+    except (OSError, ProcessLookupError):
+        pass
 
 
 def _wait_process(process: subprocess.Popen[bytes], timeout: float) -> None:
@@ -421,7 +433,7 @@ def _run_bounded_process(
                 stderr=subprocess.PIPE,
                 shell=False,
                 close_fds=True,
-                start_new_session=True,
+                start_new_session=not _HEALTH_WORKER_GROUP_OWNED,
                 env=dict(_SANITIZED_ENVIRONMENT),
             )
         else:
@@ -439,7 +451,7 @@ def _run_bounded_process(
                 shell=False,
                 close_fds=True,
                 pass_fds=(executable_fd,),
-                start_new_session=True,
+                start_new_session=not _HEALTH_WORKER_GROUP_OWNED,
                 env=dict(_SANITIZED_ENVIRONMENT),
             )
     except FileNotFoundError:
@@ -2011,41 +2023,113 @@ def _validate_observed_type(observation: object, artifact: object | None) -> boo
     return expected is None or filesystem_type == expected
 
 
-def _reap_health_worker(process: Any, cleanup_seconds: float) -> None:
-    """Stop and definitively reap a killable health-check process."""
+def _establish_health_worker_group() -> bool:
+    """Give one forked worker an exclusive group for all of its probes."""
 
+    global _HEALTH_WORKER_GROUP_OWNED
     try:
-        if not process.is_alive():
-            process.join(timeout=0)
-            return
-    except (AssertionError, OSError):
-        return
-    try:
-        process.terminate()
-    except (OSError, ProcessLookupError):
+        os.setsid()
+    except (AttributeError, OSError, ProcessLookupError):
+        # The parent may have claimed ``pid`` as a private process group
+        # before this forked worker ran.  ``setsid`` then fails because the
+        # worker is already a group leader, but the existing group is exactly
+        # the ownership boundary we need.
         pass
     try:
-        process.join(timeout=max(0.0, cleanup_seconds))
-    except (AssertionError, OSError):
-        return
+        owned = os.getpgrp() == os.getpid()
+    except (AttributeError, OSError, ProcessLookupError):
+        owned = False
+    _HEALTH_WORKER_GROUP_OWNED = owned
+    return owned
+
+
+def _claim_health_worker_group(process: Any) -> bool:
+    """Claim and verify a worker-owned group before its launch handshake.
+
+    The readiness pipe is an execution gate, not the sole ownership record.
+    If that message is delayed or lost after the child has created its group,
+    the parent still needs a stable group identifier for descendant cleanup.
+    Creating ``pid`` as its own group in the parent closes that ambiguity; if
+    the child won the race and called ``setsid`` first, the verification below
+    observes the same ``pid``-named group.
+    """
+
+    pid = getattr(process, "pid", None)
+    if type(pid) is not int or pid <= 0:
+        return False
     try:
-        still_alive = process.is_alive()
-    except (AssertionError, OSError):
-        return
-    if not still_alive:
-        return
-    kill = getattr(process, "kill", None)
-    if callable(kill):
+        os.setpgid(pid, pid)
+    except (AttributeError, OSError, ProcessLookupError, TypeError, ValueError):
+        pass
+    try:
+        return os.getpgid(pid) == pid
+    except (AttributeError, OSError, ProcessLookupError, TypeError, ValueError):
+        return False
+
+
+def _signal_health_worker(process: Any, signal_number: int, *, process_group_owned: bool) -> None:
+    """Signal the worker, including its probe group when ownership is known."""
+
+    if process_group_owned:
         try:
-            kill()
-        except (OSError, ProcessLookupError):
+            os.killpg(process.pid, signal_number)
+            return
+        except Exception:
             pass
     try:
-        # A killable process boundary is the ownership boundary: do not
-        # return while its descriptor-owning worker is still running.
-        process.join()
-    except (AssertionError, OSError):
+        if signal_number == signal.SIGKILL:
+            kill = getattr(process, "kill", None)
+            if callable(kill):
+                kill()
+        else:
+            process.terminate()
+    except Exception:
         pass
+
+
+def _reap_health_worker(
+    process: Any,
+    cleanup_seconds: float,
+    *,
+    process_group_owned: bool = False,
+) -> bool:
+    """Stop and boundedly reap a health worker and its owned probe group."""
+
+    cleanup_timeout = max(0.0, cleanup_seconds)
+    try:
+        if not process.is_alive():
+            if process_group_owned:
+                _signal_health_worker(process, signal.SIGKILL, process_group_owned=True)
+            process.join(timeout=0)
+            return True
+    except Exception:
+        return False
+
+    _signal_health_worker(process, signal.SIGTERM, process_group_owned=process_group_owned)
+    try:
+        process.join(timeout=cleanup_timeout)
+    except Exception:
+        pass
+    try:
+        if not process.is_alive():
+            if process_group_owned:
+                # The worker may have exited on SIGTERM while a descendant
+                # ignored it.  The process group remains the only ownership
+                # boundary that can still reach that descendant.
+                _signal_health_worker(process, signal.SIGKILL, process_group_owned=True)
+            return True
+    except Exception:
+        return False
+
+    _signal_health_worker(process, signal.SIGKILL, process_group_owned=process_group_owned)
+    try:
+        process.join(timeout=cleanup_timeout)
+    except Exception:
+        return False
+    try:
+        return not process.is_alive()
+    except Exception:
+        return False
 
 
 def _run_health_check_in_process(
@@ -2057,25 +2141,62 @@ def _run_health_check_in_process(
     deadline: float,
     cancellation_event: Any,
     connection: Any,
+    ready_connection: Any,
+    launch_event: Any,
+    completion_event: Any,
 ) -> None:
-    """Run the default read-only check behind a killable POSIX boundary."""
+    """Run one check after a parent-approved, group-owned launch handshake."""
 
-    cancellation = _CancellationToken(deadline, cancellation_event, time.monotonic)
+    group_owned = _establish_health_worker_group()
     try:
-        payload = executor._run_check(
-            registry,
-            spec,
-            timeout_seconds=timeout_seconds,
-            deadline=deadline,
-            cancellation=cancellation,
-        )
-    except BaseException as exc:  # a probe must never kill the Doctor run
-        payload = _operation_failure(exc)
-    try:
-        connection.send(payload)
-    except (BrokenPipeError, OSError, ValueError):
-        pass
+        try:
+            ready_connection.send(group_owned)
+        except (BrokenPipeError, EOFError, OSError, ValueError):
+            return
+        if not group_owned:
+            return
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0 or not launch_event.wait(remaining):
+            return
+        if cancellation_event.is_set() or time.monotonic() >= deadline:
+            return
+
+        cancellation = _CancellationToken(deadline, cancellation_event, time.monotonic)
+        try:
+            payload = executor._run_check(
+                registry,
+                spec,
+                timeout_seconds=timeout_seconds,
+                deadline=deadline,
+                cancellation=cancellation,
+            )
+        except BaseException as exc:  # a probe must never kill the Doctor run
+            payload = _operation_failure(exc)
+        if time.monotonic() >= deadline and payload.status is not HealthStatus.UNKNOWN:
+            payload = _payload(
+                HealthStatus.UNKNOWN,
+                "budget_exhausted",
+                detail="Doctor run budget expired before the observation completed",
+                stdout=payload.stdout,
+                stderr=payload.stderr,
+                output_truncated=payload.output_truncated,
+            )
+        try:
+            connection.send(payload)
+        except (BrokenPipeError, EOFError, OSError, ValueError):
+            return
+        try:
+            # Keep the group alive until the request-side reaper has had a
+            # chance to kill it.  This closes the race where a probe outlives
+            # a worker that already sent its result.
+            completion_event.wait(MAX_WORKER_CLEANUP_SECONDS)
+        except (OSError, RuntimeError, ValueError):
+            pass
     finally:
+        try:
+            ready_connection.close()
+        except (OSError, ValueError):
+            pass
         try:
             connection.close()
         except (OSError, ValueError):
@@ -2340,9 +2461,31 @@ class HealthCheckExecutor:
             )
 
         parent_connection, child_connection = context.Pipe(duplex=False)
+        ready_parent, ready_child = context.Pipe(duplex=False)
         cancellation_event = context.Event()
+        launch_event = context.Event()
+        completion_event = context.Event()
         process: Any = None
         process_started = False
+        process_group_owned = False
+        cleanup_attempted = False
+        cleanup_confirmed = False
+
+        def cleanup_worker() -> bool:
+            nonlocal cleanup_attempted, cleanup_confirmed
+            if cleanup_attempted:
+                return cleanup_confirmed
+            cleanup_attempted = True
+            if not process_started or process is None:
+                cleanup_confirmed = True
+                return True
+            cleanup_confirmed = _reap_health_worker(
+                process,
+                self.worker_cleanup_seconds,
+                process_group_owned=process_group_owned,
+            )
+            return cleanup_confirmed
+
         try:
             process = context.Process(
                 target=_run_health_check_in_process,
@@ -2352,45 +2495,101 @@ class HealthCheckExecutor:
                     "deadline": deadline,
                     "cancellation_event": cancellation_event,
                     "connection": child_connection,
+                    "ready_connection": ready_child,
+                    "launch_event": launch_event,
+                    "completion_event": completion_event,
                 },
             )
             process.daemon = False
             process.start()
             process_started = True
+            process_group_owned = _claim_health_worker_group(process)
             child_connection.close()
+            ready_child.close()
 
             remaining = max(0.0, deadline - self.clock())
-            raw: object | None = None
-            if remaining > 0 and parent_connection.poll(remaining):
+            raw_ready: object | None = None
+            if remaining > 0 and ready_parent.poll(remaining):
                 try:
-                    raw = parent_connection.recv()
+                    raw_ready = ready_parent.recv()
                 except (EOFError, OSError, ValueError):
-                    raw = None
+                    raw_ready = None
+            process_group_owned = process_group_owned or raw_ready is True
+
+            raw: object | None = None
+            if process_group_owned and self.clock() < deadline:
+                launch_event.set()
+                remaining = max(0.0, deadline - self.clock())
+                if remaining > 0 and parent_connection.poll(remaining):
+                    try:
+                        raw = parent_connection.recv()
+                    except (EOFError, OSError, ValueError):
+                        raw = None
             if isinstance(raw, _CheckPayload):
-                _reap_health_worker(process, self.worker_cleanup_seconds)
+                confirmed = cleanup_worker()
+                expired = self.clock() >= deadline
+                if not confirmed:
+                    code = "budget_exhausted" if expired else "worker_cleanup_incomplete"
+                    return (
+                        _payload(
+                            HealthStatus.UNKNOWN,
+                            code,
+                            detail="default health worker cleanup could not be confirmed within its bounded envelope",
+                        ),
+                        max(0.0, (self.clock() - started) * 1000.0),
+                    )
+                if expired:
+                    return (
+                        _payload(
+                            HealthStatus.UNKNOWN,
+                            "budget_exhausted",
+                            detail="Doctor run budget expired before the observation completed",
+                            stdout=raw.stdout,
+                            stderr=raw.stderr,
+                            output_truncated=raw.output_truncated,
+                        ),
+                        max(0.0, (self.clock() - started) * 1000.0),
+                    )
                 return raw, max(0.0, (self.clock() - started) * 1000.0)
 
             expired = self.clock() >= deadline
             cancellation_event.set()
-            _reap_health_worker(process, self.worker_cleanup_seconds)
-            code = "budget_exhausted" if expired else "operation_error"
+            confirmed = cleanup_worker()
+            if not confirmed:
+                code = "budget_exhausted" if expired else "worker_cleanup_incomplete"
+                detail = "default health worker cleanup could not be confirmed within its bounded envelope"
+            elif expired:
+                code = "budget_exhausted"
+                detail = "bounded default health worker returned no result before the Doctor deadline"
+            elif raw_ready is False:
+                code = "worker_unavailable"
+                detail = "default health worker could not establish a private process group"
+            else:
+                code = "operation_error"
+                detail = "bounded default health worker returned no result"
             return (
                 _payload(
                     HealthStatus.UNKNOWN,
                     code,
-                    detail="bounded default health worker returned no result",
+                    detail=detail,
                 ),
                 max(0.0, (self.clock() - started) * 1000.0),
             )
-        except (OSError, RuntimeError, ValueError) as exc:
+        except (EOFError, OSError, RuntimeError, ValueError) as exc:
             cancellation_event.set()
-            if process_started:
-                _reap_health_worker(process, self.worker_cleanup_seconds)
+            confirmed = cleanup_worker()
+            expired = self.clock() >= deadline
+            if not confirmed:
+                error_code = "budget_exhausted" if expired else "worker_cleanup_incomplete"
+                detail = "default health worker cleanup could not be confirmed within its bounded envelope"
+            else:
+                error_code = "operation_error"
+                detail = f"default health worker failed: {type(exc).__name__}"
             return (
                 _payload(
                     HealthStatus.UNKNOWN,
-                    "operation_error",
-                    detail=f"default health worker failed: {type(exc).__name__}",
+                    error_code,
+                    detail=detail,
                 ),
                 max(0.0, (self.clock() - started) * 1000.0),
             )
@@ -2400,11 +2599,18 @@ class HealthCheckExecutor:
             except (OSError, ValueError):
                 pass
             try:
+                ready_child.close()
+            except (OSError, ValueError):
+                pass
+            try:
                 parent_connection.close()
             except (OSError, ValueError):
                 pass
-            if process_started:
-                _reap_health_worker(process, self.worker_cleanup_seconds)
+            try:
+                ready_parent.close()
+            except (OSError, ValueError):
+                pass
+            cleanup_worker()
 
     def _run_with_worker(
         self,
