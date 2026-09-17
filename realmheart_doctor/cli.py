@@ -62,6 +62,12 @@ def _parser(*, manual: bool = False) -> argparse.ArgumentParser:
     parser = parser_type(prog="realmheart-doctor", description="Realmheart read-only health diagnosis and acceptance")
     parser.add_argument("--version", action="version", version=f"realmheart-doctor {RELEASE_VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
+    incident = sub.add_parser("incident", help="preview or export a saved incident without new probes")
+    incident.add_argument("incident_id")
+    incident.add_argument("--report", action="store_true")
+    incident.add_argument("--state-dir", type=Path, required=True)
+    incident.add_argument("--json", action="store_true")
+    incident.add_argument("--preview", action="store_true")
     assess = sub.add_parser("assess-install", help="independently assess a candidate Realmheart installation")
     assess.add_argument("--candidate", type=Path, required=True)
     assess.add_argument("--manifest-dir", type=Path, default=Path(os.environ.get("REALMHEART_DOCTOR_MANIFEST_DIR", "components")))
@@ -74,6 +80,9 @@ def _parser(*, manual: bool = False) -> argparse.ArgumentParser:
         if name == "doctor":
             command.add_argument("component", nargs="?")
             command.add_argument("--verbose", action="store_true")
+            command.add_argument("--report", action="store_true")
+            command.add_argument("--preview", action="store_true")
+
             command.add_argument("--state-dir", type=Path, help="explicit local directory for snapshots and incidents (no persistence by default)")
             command.add_argument("--prefix", type=_absolute_path, help="explicit installation prefix for canonical artifact paths")
             command.add_argument("--libexec", type=_absolute_path, help="explicit libexec directory")
@@ -93,13 +102,38 @@ def _render_expected_error(args: argparse.Namespace, exc: Exception) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "--incident":
+        arguments[0] = "incident"
     manual = not arguments or arguments[0] != "assess-install"
     try:
         args = _parser(manual=manual).parse_args(arguments)
+        if args.command == "doctor" and ((args.report and args.state_dir is None)
+                                         or (args.preview and not args.report)):
+            raise _InvalidInvocation("invalid_invocation")
+
     except _InvalidInvocation:
         print(json.dumps({"format_version": 1, "status": "error", "error": "invalid_invocation"})
               if "--json" in arguments else "Invalid invocation; run realmheart-doctor --help")
         return 4
+    if args.command == "incident":
+        from .incident_reports import load_incident, render_incident, write_report
+
+        try:
+            path = None
+            if args.report:
+                path, report = write_report(args.state_dir, args.incident_id)
+            else:
+                report = render_incident(load_incident(args.state_dir, args.incident_id))
+            payload = {"format_version": 1, **report}
+            if path is not None:
+                payload["report_path"] = str(path)
+            print(json.dumps(payload, indent=2, sort_keys=True) if args.json else
+                  report["text"] if args.preview or path is None else str(path))
+            return 0 if report["export_allowed"] else 5
+        except (OSError, ValueError, RecursionError):
+            print(json.dumps({"format_version": 1, "error": "incident_report_failed"}) if args.json
+                  else "Doctor could not read or safely export the incident")
+            return 5
     if args.command != "assess-install":
         return _manual(args)
     try:
@@ -157,6 +191,21 @@ def _manual(args: argparse.Namespace) -> int:
                 return 5
             payload["state"] = {"recovered": list(state.recovered),
                                 "incident_ids": [event.incident_id for event in events if event is not None]}
+            if args.report:
+                from .incident_reports import write_report
+
+                reports = []
+                for event in events:
+                    if event is None:
+                        continue
+                    try:
+                        path, _ = write_report(args.state_dir, event.incident_id)
+                    except (OSError, ValueError, RecursionError):
+                        continue
+                    reports.append(str(path))
+                payload["reports"] = reports
+                if args.preview:
+                    payload["report_text"] = {Path(path).stem: Path(path).read_text(encoding="utf-8") for path in reports}
         print(json.dumps(payload, indent=2, sort_keys=True) if args.json else render_diagnosis(result, verbose=args.verbose))
         return EXIT_CODES[result.overall]
     components = [{"id": key, "name": registry.components[key].name,
