@@ -176,15 +176,27 @@ class _CancellationToken:
     event: Any = field(default_factory=threading.Event)
     clock: Callable[[], float] = time.monotonic
     launch_lock: Any = None
+    wall_deadline: float | None = None
+    wall_clock: Callable[[], float] = time.monotonic
 
     def cancel(self) -> None:
         _health_set_cancellation(self.event, self.launch_lock)
 
     def is_cancelled(self) -> bool:
-        return bool(self.event.is_set()) or self.clock() >= self.deadline
+        return (
+            bool(self.event.is_set())
+            or self.clock() >= self.deadline
+            or (
+                self.wall_deadline is not None
+                and self.wall_clock() >= self.wall_deadline
+            )
+        )
 
     def remaining(self) -> float:
-        return max(0.0, self.deadline - self.clock())
+        remaining = max(0.0, self.deadline - self.clock())
+        if self.wall_deadline is not None:
+            remaining = min(remaining, max(0.0, self.wall_deadline - self.wall_clock()))
+        return remaining
 
 
 class HealthStatus(str, Enum):
@@ -255,17 +267,57 @@ class SocketObservation:
 def _operation_cancelled(
     deadline: float | None,
     cancellation: _CancellationToken | None,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
 ) -> bool:
     if cancellation is not None and cancellation.is_cancelled():
         return True
-    return deadline is not None and time.monotonic() >= deadline
+    return _deadline_expired(deadline, clock=clock, wall_deadline=wall_deadline)
 
 
-def _operation_deadline(timeout: float, deadline: float | None) -> float:
-    local_deadline = time.monotonic() + max(0.0, timeout)
+def _deadline_expired(
+    deadline: float | None,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
+) -> bool:
+    if deadline is not None and clock() >= deadline:
+        return True
+    return wall_deadline is not None and time.monotonic() >= wall_deadline
+
+
+def _deadline_remaining(
+    deadline: float | None,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
+) -> float:
+    remaining = math.inf if deadline is None else max(0.0, deadline - clock())
+    if wall_deadline is not None:
+        remaining = min(remaining, max(0.0, wall_deadline - time.monotonic()))
+    return remaining
+
+
+def _operation_deadline(
+    timeout: float,
+    deadline: float | None,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+) -> float:
+    local_deadline = clock() + max(0.0, timeout)
     if deadline is None:
         return local_deadline
     return min(deadline, local_deadline)
+
+
+def _operation_wall_deadline(timeout: float, wall_deadline: float | None) -> float:
+    """Give every operation a real-time cap even if its injected clock stalls."""
+
+    local_deadline = time.monotonic() + max(0.0, timeout)
+    if wall_deadline is None:
+        return local_deadline
+    return min(wall_deadline, local_deadline)
 
 
 @runtime_checkable
@@ -293,6 +345,8 @@ class HealthOperations(Protocol):
         max_output_bytes: int,
         deadline: float | None = None,
         cancellation: _CancellationToken | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        wall_deadline: float | None = None,
     ) -> CommandObservation:
         ...
 
@@ -305,6 +359,8 @@ class HealthOperations(Protocol):
         max_output_bytes: int,
         deadline: float | None = None,
         cancellation: _CancellationToken | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        wall_deadline: float | None = None,
     ) -> CommandObservation:
         ...
 
@@ -688,10 +744,16 @@ def _health_launch_gate_allowed(
     *,
     final_check: Callable[[], bool] | None = None,
     wait_for_permit: bool = False,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
 ) -> bool:
     """Check a child-side launch permit immediately before exec."""
 
-    if not _health_launch_preflight_allowed(deadline):
+    if not _health_launch_preflight_allowed(
+        deadline,
+        clock=clock,
+        wall_deadline=wall_deadline,
+    ):
         return False
     try:
         os.set_blocking(gate_descriptor, wait_for_permit)
@@ -704,21 +766,28 @@ def _health_launch_gate_allowed(
         return False
     if not wait_for_permit and permit not in {b"", b"P"}:
         return False
-    return _health_launch_preflight_allowed(deadline, final_check=final_check)
+    return _health_launch_preflight_allowed(
+        deadline,
+        final_check=final_check,
+        clock=clock,
+        wall_deadline=wall_deadline,
+    )
 
 
 def _health_launch_preflight_allowed(
     deadline: float,
     *,
     final_check: Callable[[], bool] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
 ) -> bool:
     """Complete child-side checks before the supervisor commits launch authority."""
 
-    if time.monotonic() >= deadline:
+    if _deadline_expired(deadline, clock=clock, wall_deadline=wall_deadline):
         return False
     if final_check is not None and not final_check():
         return False
-    return time.monotonic() < deadline
+    return not _deadline_expired(deadline, clock=clock, wall_deadline=wall_deadline)
 
 
 def _health_prepare_launch_resume_proof() -> _HealthLaunchResumeProof | None:
@@ -777,6 +846,8 @@ def _health_launch_resume_authorized(
     acknowledgement_descriptor: int,
     *,
     final_check: Callable[[], bool] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
 ) -> bool:
     """Accept only the supervisor's SIGCONT and its post-resume exec token."""
 
@@ -787,7 +858,11 @@ def _health_launch_resume_authorized(
     restore_ok = False
     try:
         if callable(waiter) and callable(restore):
-            remaining = max(0.0, deadline - time.monotonic())
+            remaining = _deadline_remaining(
+                deadline,
+                clock=clock,
+                wall_deadline=wall_deadline,
+            )
             if remaining > 0:
                 info = waiter({signal.SIGCONT}, remaining)
                 sender_pid = getattr(info, "si_pid", None) if info is not None else None
@@ -808,14 +883,29 @@ def _health_launch_resume_authorized(
                         # A second pending SIGCONT means the authenticated
                         # wakeup was not the only resume event.  Reject it
                         # before granting the exec capability.
-                        if waiter({signal.SIGCONT}, 0.0) is None and time.monotonic() < deadline:
+                        if (
+                            waiter({signal.SIGCONT}, 0.0) is None
+                            and not _deadline_expired(
+                                deadline,
+                                clock=clock,
+                                wall_deadline=wall_deadline,
+                            )
+                        ):
                             if os.write(acknowledgement_descriptor, b"A\n") == 2:
                                 selector = selectors.DefaultSelector()
                                 selector.register(gate_descriptor, selectors.EVENT_READ)
-                                remaining = max(0.0, deadline - time.monotonic())
+                                remaining = _deadline_remaining(
+                                    deadline,
+                                    clock=clock,
+                                    wall_deadline=wall_deadline,
+                                )
                                 if selector.select(remaining) and os.read(gate_descriptor, 1) == b"E":
                                     authorized = final_check is None or final_check()
-                                    authorized = authorized and time.monotonic() < deadline
+                                    authorized = authorized and not _deadline_expired(
+                                        deadline,
+                                        clock=clock,
+                                        wall_deadline=wall_deadline,
+                                    )
     except (AttributeError, BlockingIOError, InterruptedError, NotImplementedError, OSError, TypeError, ValueError):
         authorized = False
     finally:
@@ -892,6 +982,8 @@ def _health_launch_commit_barrier(
     deadline: float | None = None,
     *,
     final_check: Callable[[], bool] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
 ) -> None:
     """Stop until the supervisor's resume; authenticate it before native exec."""
 
@@ -900,7 +992,7 @@ def _health_launch_commit_barrier(
     except (AttributeError, OSError, TypeError, ValueError):
         os._exit(125)
     try:
-        if deadline is not None and time.monotonic() >= deadline:
+        if _deadline_expired(deadline, clock=clock, wall_deadline=wall_deadline):
             os._exit(125)
         if final_check is not None and not final_check():
             os._exit(125)
@@ -914,12 +1006,19 @@ def _health_launch_gate_preexec(
     *,
     final_check: Callable[[], bool] | None = None,
     acknowledgement_descriptor: int | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
 ) -> None:
     """Authenticate the supervisor resume before allowing native exec."""
 
     allowed = False
     try:
-        if _health_launch_preflight_allowed(deadline, final_check=final_check):
+        if _health_launch_preflight_allowed(
+            deadline,
+            final_check=final_check,
+            clock=clock,
+            wall_deadline=wall_deadline,
+        ):
             os.set_blocking(gate_descriptor, True)
             if os.read(gate_descriptor, 1) == b"P" and acknowledgement_descriptor is not None:
                 proof = _health_prepare_launch_resume_proof()
@@ -928,13 +1027,20 @@ def _health_launch_gate_preexec(
                     # and race harnesses still observe the same SIGSTOP/SIGCONT
                     # barrier, while the authenticated proof is completed
                     # immediately after it returns.
-                    _health_launch_commit_barrier(deadline, final_check=final_check)
+                    _health_launch_commit_barrier(
+                        deadline,
+                        final_check=final_check,
+                        clock=clock,
+                        wall_deadline=wall_deadline,
+                    )
                     allowed = _health_launch_resume_authorized(
                         proof,
                         deadline,
                         gate_descriptor,
                         acknowledgement_descriptor,
                         final_check=final_check,
+                        clock=clock,
+                        wall_deadline=wall_deadline,
                     )
     except (BlockingIOError, InterruptedError, NotImplementedError, OSError, TypeError, ValueError):
         allowed = False
@@ -1941,11 +2047,29 @@ def _run_bounded_process(
     executable_fd: int | None = None,
     deadline: float | None = None,
     cancellation: _CancellationToken | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
 ) -> CommandObservation:
     """Run argv without a shell while bounding time, output, and cleanup."""
 
     started = time.monotonic()
-    operation_deadline = _operation_deadline(timeout, deadline)
+    operation_deadline = _operation_deadline(timeout, deadline, clock=clock)
+    operation_wall_deadline = _operation_wall_deadline(timeout, wall_deadline)
+
+    def operation_cancelled() -> bool:
+        return _operation_cancelled(
+            operation_deadline,
+            cancellation,
+            clock=clock,
+            wall_deadline=operation_wall_deadline,
+        )
+
+    def operation_remaining() -> float:
+        return _deadline_remaining(
+            operation_deadline,
+            clock=clock,
+            wall_deadline=operation_wall_deadline,
+        )
     process: subprocess.Popen[bytes] | None = None
     selector: selectors.BaseSelector | None = None
     stdout = bytearray()
@@ -2021,7 +2145,7 @@ def _run_bounded_process(
             duration_ms=(time.monotonic() - started) * 1000.0,
         )
 
-    if _operation_cancelled(operation_deadline, cancellation):
+    if operation_cancelled():
         return CommandObservation(
             argv,
             timed_out=True,
@@ -2041,7 +2165,7 @@ def _run_bounded_process(
         # The child reports its PID before any potentially blocked pre-exec
         # hook.  The watcher can then use an identity-bound pidfd to stop it
         # even while Popen is still waiting for exec-error synchronization.
-        if _operation_cancelled(operation_deadline, cancellation):
+        if operation_cancelled():
             return CommandObservation(
                 argv,
                 timed_out=True,
@@ -2157,9 +2281,7 @@ def _run_bounded_process(
                             resume_authenticated = True
                         else:
                             launch_gate_failed[0] = True
-                cancelled = (
-                    cancellation is not None and cancellation.is_cancelled()
-                ) or time.monotonic() >= operation_deadline
+                cancelled = operation_cancelled()
                 if launch_gate_failed[0]:
                     write_gate_token(b"C")
                     if launch_pidfd is not None:
@@ -2174,7 +2296,7 @@ def _run_bounded_process(
                         launch_signal_failed[0] = True
                     return
                 if ready_announced and launch_pid is not None and not permit_sent:
-                    lock_timeout = max(0.0, operation_deadline - time.monotonic())
+                    lock_timeout = operation_remaining()
                     if not _health_acquire_launch_lock(launch_authority_lock, lock_timeout):
                         launch_gate_failed[0] = True
                         write_gate_token(b"C")
@@ -2182,15 +2304,7 @@ def _run_bounded_process(
                             kill_launch()
                         return
                     try:
-                        if cancellation is not None and cancellation.is_cancelled():
-                            launch_authority_revoked[0] = True
-                            write_gate_token(b"C")
-                            if launch_pidfd is not None:
-                                kill_launch()
-                            else:
-                                launch_signal_failed[0] = True
-                            return
-                        if time.monotonic() >= operation_deadline:
+                        if operation_cancelled():
                             launch_authority_revoked[0] = True
                             write_gate_token(b"C")
                             if launch_pidfd is not None:
@@ -2234,20 +2348,16 @@ def _run_bounded_process(
                         # token into its self-stop.  Keep waiting; the child
                         # independently rejects any SIGCONT whose kernel
                         # siginfo is not owned by this supervisor.
-                        gate_stop.wait(min(0.005, max(0.0, operation_deadline - time.monotonic())))
+                        gate_stop.wait(min(0.005, operation_remaining()))
                         continue
-                    lock_timeout = max(0.0, operation_deadline - time.monotonic())
+                    lock_timeout = operation_remaining()
                     if not _health_acquire_launch_lock(launch_authority_lock, lock_timeout):
                         launch_gate_failed[0] = True
                         if launch_pidfd is not None:
                             kill_launch()
                         return
                     try:
-                        if cancellation is not None and cancellation.is_cancelled():
-                            launch_authority_revoked[0] = True
-                            kill_launch()
-                            return
-                        if time.monotonic() >= operation_deadline:
+                        if operation_cancelled():
                             launch_authority_revoked[0] = True
                             kill_launch()
                             return
@@ -2260,11 +2370,7 @@ def _run_bounded_process(
                             launch_gate_failed[0] = True
                             kill_launch()
                             return
-                        if cancellation is not None and cancellation.is_cancelled():
-                            launch_authority_revoked[0] = True
-                            kill_launch()
-                            return
-                        if time.monotonic() >= operation_deadline:
+                        if operation_cancelled():
                             launch_authority_revoked[0] = True
                             kill_launch()
                             return
@@ -2284,18 +2390,13 @@ def _run_bounded_process(
                                 kill_launch()
                     continue
                 if resume_signal_sent and resume_authenticated and not exec_permit_sent:
-                    lock_timeout = max(0.0, operation_deadline - time.monotonic())
+                    lock_timeout = operation_remaining()
                     if not _health_acquire_launch_lock(launch_authority_lock, lock_timeout):
                         launch_gate_failed[0] = True
                         kill_launch()
                         return
                     try:
-                        if cancellation is not None and cancellation.is_cancelled():
-                            launch_authority_revoked[0] = True
-                            write_gate_token(b"C")
-                            kill_launch()
-                            return
-                        if time.monotonic() >= operation_deadline:
+                        if operation_cancelled():
                             launch_authority_revoked[0] = True
                             write_gate_token(b"C")
                             kill_launch()
@@ -2327,7 +2428,7 @@ def _run_bounded_process(
                         launch_gate_failed[0] = True
                         kill_launch()
                         return
-                gate_stop.wait(min(0.005, max(0.0, operation_deadline - time.monotonic())))
+                gate_stop.wait(min(0.005, operation_remaining()))
 
         gate_thread = threading.Thread(
             target=watch_launch_gate,
@@ -2350,6 +2451,8 @@ def _run_bounded_process(
                 if not _health_launch_preflight_allowed(
                     operation_deadline,
                     final_check=final_check,
+                    clock=clock,
+                    wall_deadline=operation_wall_deadline,
                 ):
                     os._exit(125)
                 if _HEALTH_WORKER_GROUP_OWNED:
@@ -2357,9 +2460,7 @@ def _run_bounded_process(
                 # This is deliberately the last child-side cancellation check.
                 # The child reports readiness only after it returns, and the
                 # supervisor owns the cancellation/commit decision from there.
-                if cancellation is not None and cancellation.is_cancelled():
-                    os._exit(125)
-                if time.monotonic() >= operation_deadline:
+                if operation_cancelled():
                     os._exit(125)
                 os.write(pid_write, b"R\n")
                 _health_launch_gate_preexec(
@@ -2367,6 +2468,8 @@ def _run_bounded_process(
                     gate_read,
                     final_check=final_check,
                     acknowledgement_descriptor=pid_write,
+                    clock=clock,
+                    wall_deadline=operation_wall_deadline,
                 )
             except (BrokenPipeError, OSError, TypeError, ValueError):
                 os._exit(125)
@@ -2410,10 +2513,7 @@ def _run_bounded_process(
             )
         assert process is not None
         stop_launch_gate()
-        launch_revoked = launch_authority_revoked[0] or _operation_cancelled(
-            operation_deadline,
-            cancellation,
-        )
+        launch_revoked = launch_authority_revoked[0] or operation_cancelled()
         if (
             launch_gate_failed[0]
             or launch_signal_failed[0]
@@ -2448,7 +2548,7 @@ def _run_bounded_process(
     except subprocess.SubprocessError as exc:
         stop_launch_gate()
         close_launch_authority()
-        cancelled = _operation_cancelled(operation_deadline, cancellation)
+        cancelled = operation_cancelled()
         return CommandObservation(
             argv,
             timed_out=cancelled,
@@ -2492,8 +2592,8 @@ def _run_bounded_process(
             selector.register(process.stderr, selectors.EVENT_READ, "stderr")
 
         while selector.get_map():
-            remaining_time = operation_deadline - time.monotonic()
-            if remaining_time <= 0 or _operation_cancelled(operation_deadline, cancellation):
+            remaining_time = operation_remaining()
+            if remaining_time <= 0 or operation_cancelled():
                 timed_out = True
                 terminate_launched_process()
                 break
@@ -2501,7 +2601,7 @@ def _run_bounded_process(
             if not events:
                 continue
             for key, _ in events:
-                if _operation_cancelled(operation_deadline, cancellation):
+                if operation_cancelled():
                     timed_out = True
                     terminate_launched_process()
                     break
@@ -2540,7 +2640,7 @@ def _run_bounded_process(
             # Streams can be closed by a still-running child.  Wait for the
             # declared deadline instead of turning that case into a synthetic
             # non-zero failure.
-            remaining = max(0.0, operation_deadline - time.monotonic())
+            remaining = operation_remaining()
             try:
                 process.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
@@ -2595,7 +2695,7 @@ def _run_bounded_process(
                 error_detail = "pipe_close_error"
         close_launch_authority()
 
-    if launch_authority_revoked[0] or _operation_cancelled(operation_deadline, cancellation):
+    if launch_authority_revoked[0] or operation_cancelled():
         timed_out = True
         if error_code is None:
             error_code = "timeout"
@@ -2643,6 +2743,8 @@ class ReadOnlyHealthOperations:
         max_output_bytes: int,
         deadline: float | None = None,
         cancellation: _CancellationToken | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        wall_deadline: float | None = None,
     ) -> CommandObservation:
         command = tuple(argv)
         if not command or not _trusted_absolute_executable(command[0]):
@@ -2664,6 +2766,8 @@ class ReadOnlyHealthOperations:
             max_output_bytes=max_output_bytes,
             deadline=deadline,
             cancellation=cancellation,
+            clock=clock,
+            wall_deadline=wall_deadline,
         )
 
     def run_descriptor(
@@ -2675,6 +2779,8 @@ class ReadOnlyHealthOperations:
         max_output_bytes: int,
         deadline: float | None = None,
         cancellation: _CancellationToken | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        wall_deadline: float | None = None,
     ) -> CommandObservation:
         command = tuple(argv)
         if not command or command[0] != os.fspath(path):
@@ -2712,6 +2818,8 @@ class ReadOnlyHealthOperations:
             max_output_bytes=max_output_bytes,
             deadline=deadline,
             cancellation=cancellation,
+            clock=clock,
+            wall_deadline=wall_deadline,
         )
 
     def socket_reachable(self, endpoint: SocketEndpoint, timeout: float) -> SocketObservation:
@@ -3121,11 +3229,18 @@ def _relocate_descriptor(
     *,
     deadline: float | None = None,
     cancellation: _CancellationToken | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
 ) -> tuple[int | None, str | None]:
     """Move a passed executable descriptor out of the stdio range."""
 
     if descriptor >= MIN_PASSTHROUGH_FD:
-        if _operation_cancelled(deadline, cancellation):
+        if _operation_cancelled(
+            deadline,
+            cancellation,
+            clock=clock,
+            wall_deadline=wall_deadline,
+        ):
             try:
                 os.close(descriptor)
             except OSError:
@@ -3141,7 +3256,12 @@ def _relocate_descriptor(
         except OSError:
             return descriptor, "descriptor_relocation_unavailable"
         return None, "descriptor_relocation_unavailable"
-    if _operation_cancelled(deadline, cancellation):
+    if _operation_cancelled(
+        deadline,
+        cancellation,
+        clock=clock,
+        wall_deadline=wall_deadline,
+    ):
         try:
             os.close(descriptor)
         except OSError:
@@ -3155,7 +3275,12 @@ def _relocate_descriptor(
         except OSError:
             return descriptor, "descriptor_relocation_failed"
         return None, "descriptor_relocation_failed"
-    if _operation_cancelled(deadline, cancellation):
+    if _operation_cancelled(
+        deadline,
+        cancellation,
+        clock=clock,
+        wall_deadline=wall_deadline,
+    ):
         try:
             os.close(descriptor)
         except OSError:
@@ -3186,6 +3311,8 @@ def _authorise_executable_descriptor(
     *,
     deadline: float | None = None,
     cancellation: _CancellationToken | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
 ) -> str | None:
     """Authorize a descriptor by mode and executable file format.
 
@@ -3201,13 +3328,23 @@ def _authorise_executable_descriptor(
         return "artifact_not_readable"
     if metadata.st_mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX):
         return "special_mode_forbidden"
-    if _operation_cancelled(deadline, cancellation):
+    if _operation_cancelled(
+        deadline,
+        cancellation,
+        clock=clock,
+        wall_deadline=wall_deadline,
+    ):
         return "timeout"
     try:
         header = os.pread(descriptor, EXECUTABLE_HEADER_BYTES, 0)
     except (AttributeError, OSError):
         return "artifact_not_readable"
-    if _operation_cancelled(deadline, cancellation):
+    if _operation_cancelled(
+        deadline,
+        cancellation,
+        clock=clock,
+        wall_deadline=wall_deadline,
+    ):
         return "timeout"
     if header.startswith(b"#!"):
         return "unsupported_executable"
@@ -3221,6 +3358,8 @@ def _read_descriptor_content(
     *,
     deadline: float | None = None,
     cancellation: _CancellationToken | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
 ) -> tuple[bytes | None, str | None]:
     """Read one bounded descriptor snapshot without following its path."""
 
@@ -3231,12 +3370,22 @@ def _read_descriptor_content(
     offset = 0
     try:
         while True:
-            if _operation_cancelled(deadline, cancellation):
+            if _operation_cancelled(
+                deadline,
+                cancellation,
+                clock=clock,
+                wall_deadline=wall_deadline,
+            ):
                 return None, "timeout"
             chunk = pread(descriptor, EXECUTABLE_SNAPSHOT_CHUNK_BYTES, offset)
             if not isinstance(chunk, bytes):
                 return None, "immutable_snapshot_unavailable"
-            if _operation_cancelled(deadline, cancellation):
+            if _operation_cancelled(
+                deadline,
+                cancellation,
+                clock=clock,
+                wall_deadline=wall_deadline,
+            ):
                 return None, "timeout"
             if not chunk:
                 return bytes(content), None
@@ -3267,15 +3416,24 @@ def _snapshot_executable_descriptor(
     *,
     deadline: float | None = None,
     cancellation: _CancellationToken | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
 ) -> tuple[int | None, str | None]:
     """Create a private immutable/read-only copy, re-authorize, and relocate it."""
 
-    if _operation_cancelled(deadline, cancellation):
+    if _operation_cancelled(
+        deadline,
+        cancellation,
+        clock=clock,
+        wall_deadline=wall_deadline,
+    ):
         return None, "timeout"
     first_content, error_code = _read_descriptor_content(
         descriptor,
         deadline=deadline,
         cancellation=cancellation,
+        clock=clock,
+        wall_deadline=wall_deadline,
     )
     if error_code is not None or first_content is None:
         return None, error_code or "immutable_snapshot_unavailable"
@@ -3283,16 +3441,28 @@ def _snapshot_executable_descriptor(
         descriptor,
         deadline=deadline,
         cancellation=cancellation,
+        clock=clock,
+        wall_deadline=wall_deadline,
     )
     if error_code is not None or second_content is None:
         return None, error_code or "immutable_snapshot_unavailable"
-    if _operation_cancelled(deadline, cancellation):
+    if _operation_cancelled(
+        deadline,
+        cancellation,
+        clock=clock,
+        wall_deadline=wall_deadline,
+    ):
         return None, "timeout"
     try:
         current_metadata = os.fstat(descriptor)
     except (AttributeError, OSError):
         return None, "immutable_snapshot_unavailable"
-    if _operation_cancelled(deadline, cancellation):
+    if _operation_cancelled(
+        deadline,
+        cancellation,
+        clock=clock,
+        wall_deadline=wall_deadline,
+    ):
         return None, "timeout"
     if (
         first_content != second_content
@@ -3331,122 +3501,253 @@ def _snapshot_executable_descriptor(
     tmpfile_flag_value = cast(int, tmpfile_flag)
     tmpfile_close_on_exec_value = cast(int, tmpfile_close_on_exec)
     memfd_create_function = cast(Callable[[str, int], int], memfd_create) if use_memfd else None
-    snapshot_descriptor: int | None = None
-    keep_open = False
-    try:
-        if _operation_cancelled(deadline, cancellation):
-            return None, "timeout"
-        if memfd_create_function is not None:
-            snapshot_descriptor = memfd_create_function(
+    normalized_mode = stat.S_IMODE(metadata.st_mode) & ~(
+        stat.S_IWUSR
+        | stat.S_IWGRP
+        | stat.S_IWOTH
+        | stat.S_ISUID
+        | stat.S_ISGID
+        | stat.S_ISVTX
+    )
+
+    def close_descriptor(descriptor_to_close: object) -> None:
+        if type(descriptor_to_close) is int and descriptor_to_close >= 0:
+            try:
+                os.close(descriptor_to_close)
+            except OSError:
+                pass
+
+    def usable_descriptor(candidate: object) -> int | None:
+        if type(candidate) is not int or candidate < 0:
+            close_descriptor(candidate)
+            return None
+        try:
+            os.fstat(candidate)
+        except (AttributeError, OSError, TypeError, ValueError):
+            close_descriptor(candidate)
+            return None
+        return candidate
+
+    def finalise_snapshot(candidate: int, *, sealed: bool) -> tuple[int | None, str | None]:
+        descriptor: int | None = candidate
+        keep_open = False
+        try:
+            if _operation_cancelled(
+                deadline,
+                cancellation,
+                clock=clock,
+                wall_deadline=wall_deadline,
+            ):
+                return None, "timeout"
+            write_offset = 0
+            while write_offset < len(first_content):
+                if _operation_cancelled(
+                    deadline,
+                    cancellation,
+                    clock=clock,
+                    wall_deadline=wall_deadline,
+                ):
+                    return None, "timeout"
+                written = os.write(
+                    candidate,
+                    first_content[write_offset : write_offset + EXECUTABLE_SNAPSHOT_CHUNK_BYTES],
+                )
+                if type(written) is not int or written <= 0:
+                    return None, "immutable_snapshot_unavailable"
+                write_offset += written
+                if _operation_cancelled(
+                    deadline,
+                    cancellation,
+                    clock=clock,
+                    wall_deadline=wall_deadline,
+                ):
+                    return None, "timeout"
+            if _operation_cancelled(
+                deadline,
+                cancellation,
+                clock=clock,
+                wall_deadline=wall_deadline,
+            ):
+                return None, "timeout"
+            os.fchmod(candidate, normalized_mode)
+            if _operation_cancelled(
+                deadline,
+                cancellation,
+                clock=clock,
+                wall_deadline=wall_deadline,
+            ):
+                return None, "timeout"
+            if sealed:
+                seal_mask = 0
+                for value in seal_values:
+                    seal_mask |= value
+                if _operation_cancelled(
+                    deadline,
+                    cancellation,
+                    clock=clock,
+                    wall_deadline=wall_deadline,
+                ):
+                    return None, "timeout"
+                fcntl.fcntl(candidate, add_seals_value, seal_mask)
+                if _operation_cancelled(
+                    deadline,
+                    cancellation,
+                    clock=clock,
+                    wall_deadline=wall_deadline,
+                ):
+                    return None, "timeout"
+                observed_seals = fcntl.fcntl(candidate, get_seals_value)
+                if type(observed_seals) is not int or observed_seals & seal_mask != seal_mask:
+                    return None, "immutable_snapshot_unavailable"
+                if _operation_cancelled(
+                    deadline,
+                    cancellation,
+                    clock=clock,
+                    wall_deadline=wall_deadline,
+                ):
+                    return None, "timeout"
+            else:
+                readonly_descriptor: int | None = None
+                try:
+                    if _operation_cancelled(
+                        deadline,
+                        cancellation,
+                        clock=clock,
+                        wall_deadline=wall_deadline,
+                    ):
+                        return None, "timeout"
+                    readonly_descriptor = os.open(
+                        f"/proc/self/fd/{candidate}",
+                        os.O_RDONLY | tmpfile_close_on_exec_value,
+                    )
+                    if _operation_cancelled(
+                        deadline,
+                        cancellation,
+                        clock=clock,
+                        wall_deadline=wall_deadline,
+                    ):
+                        return None, "timeout"
+                    os.close(candidate)
+                    descriptor = None
+                    candidate = readonly_descriptor
+                    descriptor = candidate
+                    readonly_descriptor = None
+                except (AttributeError, OSError, TypeError, ValueError):
+                    if readonly_descriptor is not None:
+                        close_descriptor(readonly_descriptor)
+                    raise
+            if _operation_cancelled(
+                deadline,
+                cancellation,
+                clock=clock,
+                wall_deadline=wall_deadline,
+            ):
+                return None, "timeout"
+            assert descriptor is not None
+            snapshot_metadata = os.fstat(descriptor)
+            if _operation_cancelled(
+                deadline,
+                cancellation,
+                clock=clock,
+                wall_deadline=wall_deadline,
+            ):
+                return None, "timeout"
+            error_code = _authorise_executable_descriptor(
+                descriptor,
+                snapshot_metadata,
+                deadline=deadline,
+                cancellation=cancellation,
+                clock=clock,
+                wall_deadline=wall_deadline,
+            )
+            if error_code is not None:
+                return None, error_code
+            if _operation_cancelled(
+                deadline,
+                cancellation,
+                clock=clock,
+                wall_deadline=wall_deadline,
+            ):
+                return None, "timeout"
+            relocated, error_code = _relocate_descriptor(
+                descriptor,
+                deadline=deadline,
+                cancellation=cancellation,
+                clock=clock,
+                wall_deadline=wall_deadline,
+            )
+            descriptor = relocated if type(relocated) is int else None
+            if error_code is not None or descriptor is None:
+                return None, error_code or "descriptor_relocation_failed"
+            keep_open = True
+            return descriptor, None
+        except (AttributeError, OSError, PermissionError, TypeError, ValueError):
+            return None, "immutable_snapshot_unavailable"
+        finally:
+            if not keep_open:
+                close_descriptor(descriptor)
+
+    tmpfile_directories = iter(("/tmp", "/var/tmp", "/dev/shm"))
+
+    def create_tmpfile() -> tuple[int | None, str | None]:
+        for directory in tmpfile_directories:
+            if _operation_cancelled(
+                deadline,
+                cancellation,
+                clock=clock,
+                wall_deadline=wall_deadline,
+            ):
+                return None, "timeout"
+            try:
+                candidate = os.open(
+                    directory,
+                    tmpfile_flag_value | os.O_RDWR | tmpfile_close_on_exec_value,
+                    0o700,
+                )
+            except (AttributeError, OSError, TypeError, ValueError):
+                continue
+            usable = usable_descriptor(candidate)
+            if usable is not None:
+                return usable, None
+        return None, None
+
+    if _operation_cancelled(
+        deadline,
+        cancellation,
+        clock=clock,
+        wall_deadline=wall_deadline,
+    ):
+        return None, "timeout"
+    if memfd_create_function is not None:
+        candidate: object = None
+        try:
+            candidate = memfd_create_function(
                 "realmheart-doctor-executable",
                 allow_sealing_value | close_on_exec_value,
             )
-        else:
-            for directory in ("/tmp", "/var/tmp", "/dev/shm"):
-                if _operation_cancelled(deadline, cancellation):
-                    return None, "timeout"
-                try:
-                    snapshot_descriptor = os.open(
-                        directory,
-                        tmpfile_flag_value | os.O_RDWR | tmpfile_close_on_exec_value,
-                        0o700,
-                    )
-                    break
-                except OSError:
-                    continue
-        if type(snapshot_descriptor) is not int:
-            return None, "immutable_snapshot_unavailable"
-        if _operation_cancelled(deadline, cancellation):
-            return None, "timeout"
-        write_offset = 0
-        while write_offset < len(first_content):
-            if _operation_cancelled(deadline, cancellation):
-                return None, "timeout"
-            written = os.write(
-                snapshot_descriptor,
-                first_content[write_offset : write_offset + EXECUTABLE_SNAPSHOT_CHUNK_BYTES],
-            )
-            if type(written) is not int or written <= 0:
-                return None, "immutable_snapshot_unavailable"
-            write_offset += written
-            if _operation_cancelled(deadline, cancellation):
-                return None, "timeout"
-        if _operation_cancelled(deadline, cancellation):
-            return None, "timeout"
-        os.fchmod(snapshot_descriptor, stat.S_IMODE(metadata.st_mode))
-        if _operation_cancelled(deadline, cancellation):
-            return None, "timeout"
-        if memfd_create_function is not None:
-            seal_mask = 0
-            for value in seal_values:
-                seal_mask |= value
-            if _operation_cancelled(deadline, cancellation):
-                return None, "timeout"
-            fcntl.fcntl(snapshot_descriptor, add_seals_value, seal_mask)
-            if _operation_cancelled(deadline, cancellation):
-                return None, "timeout"
-            observed_seals = fcntl.fcntl(snapshot_descriptor, get_seals_value)
-            if type(observed_seals) is not int or observed_seals & seal_mask != seal_mask:
-                return None, "immutable_snapshot_unavailable"
-            if _operation_cancelled(deadline, cancellation):
-                return None, "timeout"
-        else:
-            readonly_descriptor: int | None = None
-            try:
-                if _operation_cancelled(deadline, cancellation):
-                    return None, "timeout"
-                readonly_descriptor = os.open(
-                    f"/proc/self/fd/{snapshot_descriptor}",
-                    os.O_RDONLY | tmpfile_close_on_exec_value,
-                )
-                if _operation_cancelled(deadline, cancellation):
-                    try:
-                        os.close(readonly_descriptor)
-                    except OSError:
-                        pass
-                    readonly_descriptor = None
-                    return None, "timeout"
-                os.close(snapshot_descriptor)
-            except OSError:
-                if readonly_descriptor is not None:
-                    try:
-                        os.close(readonly_descriptor)
-                    except OSError:
-                        pass
-                raise
-            snapshot_descriptor = readonly_descriptor
-        if _operation_cancelled(deadline, cancellation):
-            return None, "timeout"
-        snapshot_metadata = os.fstat(snapshot_descriptor)
-        if _operation_cancelled(deadline, cancellation):
-            return None, "timeout"
-        error_code = _authorise_executable_descriptor(
-            snapshot_descriptor,
-            snapshot_metadata,
-            deadline=deadline,
-            cancellation=cancellation,
-        )
-        if error_code is not None:
-            return None, error_code
-        if _operation_cancelled(deadline, cancellation):
-            return None, "timeout"
-        snapshot_descriptor, error_code = _relocate_descriptor(
-            snapshot_descriptor,
-            deadline=deadline,
-            cancellation=cancellation,
-        )
-        if error_code is not None or snapshot_descriptor is None:
-            return None, error_code or "descriptor_relocation_failed"
-        keep_open = True
-        return snapshot_descriptor, None
-    except (AttributeError, OSError, PermissionError, TypeError, ValueError):
-        return None, "immutable_snapshot_unavailable"
-    finally:
-        if not keep_open and snapshot_descriptor is not None:
-            try:
-                os.close(snapshot_descriptor)
-            except OSError:
-                pass
+        except Exception:
+            candidate = None
+        usable = usable_descriptor(candidate)
+        if usable is not None:
+            snapshot_descriptor, error_code = finalise_snapshot(usable, sealed=True)
+            if snapshot_descriptor is not None:
+                return snapshot_descriptor, None
+            if error_code != "immutable_snapshot_unavailable":
+                return None, error_code or "immutable_snapshot_unavailable"
+
+    if use_tmpfile:
+        while True:
+            snapshot_descriptor, creation_error = create_tmpfile()
+            if creation_error is not None:
+                return None, creation_error
+            if snapshot_descriptor is None:
+                break
+            snapshot_descriptor, error_code = finalise_snapshot(snapshot_descriptor, sealed=False)
+            if snapshot_descriptor is not None:
+                return snapshot_descriptor, None
+            if error_code != "immutable_snapshot_unavailable":
+                return None, error_code or "immutable_snapshot_unavailable"
+    return None, "immutable_snapshot_unavailable"
 
 
 def _open_executable_descriptor(
@@ -3454,11 +3755,22 @@ def _open_executable_descriptor(
     *,
     deadline: float | None = None,
     cancellation: _CancellationToken | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
 ) -> tuple[int | None, str | None]:
     """Open and authorize one regular ELF executable without symlink follows."""
 
     path_text = os.fspath(path)
-    if _operation_cancelled(deadline, cancellation):
+
+    def operation_cancelled() -> bool:
+        return _operation_cancelled(
+            deadline,
+            cancellation,
+            clock=clock,
+            wall_deadline=wall_deadline,
+        )
+
+    if operation_cancelled():
         return None, "timeout"
     if not _trusted_absolute_executable(path_text):
         return None, "invalid_executable"
@@ -3482,14 +3794,14 @@ def _open_executable_descriptor(
     parent_descriptor: int | None = None
     descriptor: int | None = None
     try:
-        if _operation_cancelled(deadline, cancellation):
+        if operation_cancelled():
             return None, "timeout"
         parent_descriptor = os.open("/", common_flags)
         for component in components[:-1]:
-            if _operation_cancelled(deadline, cancellation):
+            if operation_cancelled():
                 return None, "timeout"
             child_descriptor = os.open(component, common_flags, dir_fd=parent_descriptor)
-            if _operation_cancelled(deadline, cancellation):
+            if operation_cancelled():
                 os.close(child_descriptor)
                 return None, "timeout"
             try:
@@ -3498,10 +3810,10 @@ def _open_executable_descriptor(
                 os.close(child_descriptor)
                 raise
             parent_descriptor = child_descriptor
-        if _operation_cancelled(deadline, cancellation):
+        if operation_cancelled():
             return None, "timeout"
         descriptor = os.open(components[-1], file_flags, dir_fd=parent_descriptor)
-        if _operation_cancelled(deadline, cancellation):
+        if operation_cancelled():
             return None, "timeout"
     except FileNotFoundError:
         error_code = "executable_missing"
@@ -3528,26 +3840,30 @@ def _open_executable_descriptor(
         return None, error_code or "descriptor_open_failed"
 
     try:
-        if _operation_cancelled(deadline, cancellation):
+        if operation_cancelled():
             return None, "timeout"
         metadata = os.fstat(descriptor)
-        if _operation_cancelled(deadline, cancellation):
+        if operation_cancelled():
             return None, "timeout"
         error_code = _authorise_executable_descriptor(
             descriptor,
             metadata,
             deadline=deadline,
             cancellation=cancellation,
+            clock=clock,
+            wall_deadline=wall_deadline,
         )
         if error_code is not None:
             return None, error_code
-        if _operation_cancelled(deadline, cancellation):
+        if operation_cancelled():
             return None, "timeout"
         snapshot_descriptor, error_code = _snapshot_executable_descriptor(
             descriptor,
             metadata,
             deadline=deadline,
             cancellation=cancellation,
+            clock=clock,
+            wall_deadline=wall_deadline,
         )
         if error_code is not None or snapshot_descriptor is None:
             return None, error_code or "immutable_snapshot_unavailable"
@@ -3571,12 +3887,24 @@ def _run_bounded_descriptor(
     max_output_bytes: int,
     deadline: float | None = None,
     cancellation: _CancellationToken | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    wall_deadline: float | None = None,
 ) -> CommandObservation:
     """Run one executable through a descriptor-bound process seam."""
 
     started = time.monotonic()
-    operation_deadline = _operation_deadline(timeout, deadline)
-    if _operation_cancelled(operation_deadline, cancellation):
+    operation_deadline = _operation_deadline(timeout, deadline, clock=clock)
+    operation_wall_deadline = _operation_wall_deadline(timeout, wall_deadline)
+
+    def operation_cancelled() -> bool:
+        return _operation_cancelled(
+            operation_deadline,
+            cancellation,
+            clock=clock,
+            wall_deadline=operation_wall_deadline,
+        )
+
+    if operation_cancelled():
         return CommandObservation(
             argv,
             timed_out=True,
@@ -3588,6 +3916,8 @@ def _run_bounded_descriptor(
         path,
         deadline=operation_deadline,
         cancellation=cancellation,
+        clock=clock,
+        wall_deadline=operation_wall_deadline,
     )
     if error_code is not None or descriptor is None:
         return CommandObservation(
@@ -3597,7 +3927,7 @@ def _run_bounded_descriptor(
             duration_ms=(time.monotonic() - started) * 1000.0,
         )
     try:
-        if _operation_cancelled(operation_deadline, cancellation):
+        if operation_cancelled():
             return CommandObservation(
                 argv,
                 timed_out=True,
@@ -3612,6 +3942,8 @@ def _run_bounded_descriptor(
             executable_fd=descriptor,
             deadline=operation_deadline,
             cancellation=cancellation,
+            clock=clock,
+            wall_deadline=operation_wall_deadline,
         )
     finally:
         os.close(descriptor)
@@ -4458,6 +4790,7 @@ def _run_health_check_in_process(
     *,
     timeout_seconds: float,
     deadline: float,
+    wall_deadline: float | None = None,
     cancellation_event: Any,
     connection: Any,
     ready_connection: Any,
@@ -4468,6 +4801,22 @@ def _run_health_check_in_process(
 ) -> None:
     """Run one check after a parent-approved, private-session handshake."""
 
+    clock = executor.clock
+
+    def operation_expired() -> bool:
+        return _deadline_expired(
+            deadline,
+            clock=clock,
+            wall_deadline=wall_deadline,
+        )
+
+    def operation_remaining() -> float:
+        return _deadline_remaining(
+            deadline,
+            clock=clock,
+            wall_deadline=wall_deadline,
+        )
+
     group_owned = _establish_health_worker_group()
     try:
         try:
@@ -4476,17 +4825,18 @@ def _run_health_check_in_process(
             return
         if not group_owned:
             return
-        remaining = max(0.0, deadline - time.monotonic())
+        remaining = operation_remaining()
         if remaining <= 0 or not launch_event.wait(remaining):
             return
-        if cancellation_event.is_set() or time.monotonic() >= deadline:
+        if cancellation_event.is_set() or operation_expired():
             return
 
         cancellation = _CancellationToken(
             deadline,
             cancellation_event,
-            time.monotonic,
+            clock,
             cancellation_lock,
+            wall_deadline=wall_deadline,
         )
         try:
             payload = executor._run_check(
@@ -4498,7 +4848,7 @@ def _run_health_check_in_process(
             )
         except BaseException as exc:  # a probe must never kill the Doctor run
             payload = _operation_failure(exc)
-        if time.monotonic() >= deadline and payload.status is not HealthStatus.UNKNOWN:
+        if operation_expired() and payload.status is not HealthStatus.UNKNOWN:
             payload = _payload(
                 HealthStatus.UNKNOWN,
                 "budget_exhausted",
@@ -4545,6 +4895,7 @@ def _run_health_supervisor(
     *,
     timeout_seconds: float,
     deadline: float,
+    wall_deadline: float | None = None,
     cancellation_event: Any,
     connection: Any,
     ready_connection: Any,
@@ -4561,6 +4912,22 @@ def _run_health_supervisor(
     this subreaper remains alive long enough to adopt, signal, and reap that
     descendant before reporting cleanup to the request-side caller.
     """
+
+    clock = executor.clock
+
+    def operation_expired() -> bool:
+        return _deadline_expired(
+            deadline,
+            clock=clock,
+            wall_deadline=wall_deadline,
+        )
+
+    def operation_remaining() -> float:
+        return _deadline_remaining(
+            deadline,
+            clock=clock,
+            wall_deadline=wall_deadline,
+        )
 
     supervisor_identity: _HealthWorkerIdentity | None = None
     tracked: dict[int, int | None] = {}
@@ -4617,11 +4984,11 @@ def _run_health_supervisor(
             send_payload(_payload(HealthStatus.UNKNOWN, "worker_unavailable", detail="supervisor identity unavailable"))
             return
 
-        remaining = max(0.0, deadline - time.monotonic())
+        remaining = operation_remaining()
         if remaining <= 0 or not launch_event.wait(remaining):
             send_payload(_payload(HealthStatus.UNKNOWN, "budget_exhausted", detail="launch was cancelled before the deadline"))
             return
-        if shutdown_event.is_set() or cancellation_event.is_set() or time.monotonic() >= deadline:
+        if shutdown_event.is_set() or cancellation_event.is_set() or operation_expired():
             send_payload(_payload(HealthStatus.UNKNOWN, "budget_exhausted", detail="launch was cancelled before the deadline"))
             return
 
@@ -4637,6 +5004,7 @@ def _run_health_supervisor(
             kwargs={
                 "timeout_seconds": timeout_seconds,
                 "deadline": deadline,
+                "wall_deadline": wall_deadline,
                 "cancellation_event": cancellation_event,
                 "connection": inner_result_child,
                 "ready_connection": inner_ready_child,
@@ -4656,7 +5024,7 @@ def _run_health_supervisor(
         # handoff is the authoritative fallback, but this closes the normal
         # worker-loss window whenever the supervisor remains alive.
         sample_owned_processes()
-        next_sample_at = time.monotonic() + 0.005
+        next_sample_at = clock() + 0.005
 
         while True:
             if inner_result_parent.poll(0.005):
@@ -4676,7 +5044,7 @@ def _run_health_supervisor(
             if not inner_alive:
                 send_payload(_payload(HealthStatus.UNKNOWN, "operation_error", detail="probe worker exited before returning a result"))
                 break
-            if shutdown_event.is_set() or cancellation_event.is_set() or time.monotonic() >= deadline:
+            if shutdown_event.is_set() or cancellation_event.is_set() or operation_expired():
                 _health_set_cancellation(cancellation_event, cancellation_lock)
                 send_payload(_payload(HealthStatus.UNKNOWN, "budget_exhausted", detail="probe worker exceeded the Doctor deadline"))
                 break
@@ -4686,12 +5054,12 @@ def _run_health_supervisor(
                 except (EOFError, OSError, ValueError):
                     reap_message = None
                 _health_apply_reap_notifications(tracked, worker_reaped, reap_message)
-            if time.monotonic() >= next_sample_at:
+            if clock() >= next_sample_at:
                 sample_owned_processes()
-                next_sample_at = time.monotonic() + 0.005
+                next_sample_at = clock() + 0.005
 
         while not shutdown_event.is_set() and not completion_event.is_set():
-            if time.monotonic() >= deadline:
+            if operation_expired():
                 break
             try:
                 if not inner_process.is_alive():
@@ -4824,6 +5192,7 @@ class HealthCheckExecutor:
 
         started = self.clock()
         deadline = started + self.max_seconds
+        wall_deadline = _operation_wall_deadline(self.max_seconds, None)
         results: list[HealthCheckResult] = []
         cache: dict[str, HealthCheckResult] = {}
         attempted = 0
@@ -4879,8 +5248,12 @@ class HealthCheckExecutor:
                 cache[key] = result
                 continue
 
-            now = self.clock()
-            if attempted >= self.max_checks or now >= deadline:
+            remaining = _deadline_remaining(
+                deadline,
+                clock=self.clock,
+                wall_deadline=wall_deadline,
+            )
+            if attempted >= self.max_checks or remaining <= 0:
                 budget_exhausted = True
                 result = HealthCheckResult(
                     check_id,
@@ -4893,7 +5266,7 @@ class HealthCheckExecutor:
                 results.append(result)
                 continue
 
-            timeout_seconds = self._check_timeout(spec, deadline - now)
+            timeout_seconds = self._check_timeout(spec, remaining)
             if timeout_seconds is None:
                 result = HealthCheckResult(
                     check_id,
@@ -4924,8 +5297,13 @@ class HealthCheckExecutor:
                 spec,
                 timeout_seconds=timeout_seconds,
                 deadline=deadline,
+                wall_deadline=wall_deadline,
             )
-            if self.clock() >= deadline:
+            if _deadline_expired(
+                deadline,
+                clock=self.clock,
+                wall_deadline=wall_deadline,
+            ):
                 budget_exhausted = True
                 if payload.status is not HealthStatus.UNKNOWN:
                     payload = _payload(
@@ -5006,6 +5384,7 @@ class HealthCheckExecutor:
         *,
         timeout_seconds: float,
         deadline: float,
+        wall_deadline: float | None = None,
     ) -> tuple[_CheckPayload, float]:
         """Run default operations while restoring the caller's subreaper bit."""
 
@@ -5016,6 +5395,7 @@ class HealthCheckExecutor:
                 spec,
                 timeout_seconds=timeout_seconds,
                 deadline=deadline,
+                wall_deadline=wall_deadline,
             )
         try:
             request_subreaper_previous = _health_child_subreaper_state()
@@ -5057,6 +5437,7 @@ class HealthCheckExecutor:
                     spec,
                     timeout_seconds=timeout_seconds,
                     deadline=deadline,
+                    wall_deadline=wall_deadline,
                 )
         except BaseException as exc:
             result = (
@@ -5090,10 +5471,28 @@ class HealthCheckExecutor:
         *,
         timeout_seconds: float,
         deadline: float,
+        wall_deadline: float | None = None,
     ) -> tuple[_CheckPayload, float]:
         """Run default operations in a killable process with one deadline."""
 
         started = self.clock()
+        if wall_deadline is None:
+            wall_deadline = _operation_wall_deadline(timeout_seconds, None)
+
+        def operation_expired() -> bool:
+            return _deadline_expired(
+                deadline,
+                clock=self.clock,
+                wall_deadline=wall_deadline,
+            )
+
+        def operation_remaining() -> float:
+            return _deadline_remaining(
+                deadline,
+                clock=self.clock,
+                wall_deadline=wall_deadline,
+            )
+
         try:
             context = multiprocessing.get_context("fork")
         except (AttributeError, ValueError):
@@ -5188,6 +5587,7 @@ class HealthCheckExecutor:
                 kwargs={
                     "timeout_seconds": timeout_seconds,
                     "deadline": deadline,
+                    "wall_deadline": wall_deadline,
                     "cancellation_event": cancellation_event,
                     "connection": child_connection,
                     "ready_connection": ready_child,
@@ -5205,7 +5605,7 @@ class HealthCheckExecutor:
             ready_child.close()
             cleanup_child.close()
 
-            remaining = max(0.0, deadline - self.clock())
+            remaining = operation_remaining()
             raw_ready: object | None = None
             if remaining > 0 and ready_parent.poll(remaining):
                 try:
@@ -5218,12 +5618,12 @@ class HealthCheckExecutor:
                 process_group_owned = worker_identity is not None
 
             raw: object | None = None
-            if process_group_owned and self.clock() < deadline:
+            if process_group_owned and not operation_expired():
                 launch_event.set()
                 sample_request_owned_processes()
                 next_sample_at = self.clock() + 0.005
-                while self.clock() < deadline:
-                    remaining = max(0.0, deadline - self.clock())
+                while not operation_expired():
+                    remaining = operation_remaining()
                     if remaining <= 0:
                         break
                     if parent_connection.poll(min(remaining, 0.005)):
@@ -5249,7 +5649,7 @@ class HealthCheckExecutor:
                 confirmed = cleanup_worker(
                     require_final_request_proof=raw.status is HealthStatus.PASS,
                 )
-                expired = self.clock() >= deadline
+                expired = operation_expired()
                 if not process_group_owned or not confirmed:
                     if isinstance(raw, _CheckPayload) and raw.status is HealthStatus.UNKNOWN:
                         return raw, max(0.0, (self.clock() - started) * 1000.0)
@@ -5275,7 +5675,7 @@ class HealthCheckExecutor:
                     )
                 return raw, max(0.0, (self.clock() - started) * 1000.0)
 
-            expired = self.clock() >= deadline
+            expired = operation_expired()
             _health_set_cancellation(cancellation_event, cancellation_lock)
             confirmed = cleanup_worker()
             if not confirmed:
@@ -5330,6 +5730,7 @@ class HealthCheckExecutor:
         *,
         timeout_seconds: float,
         deadline: float,
+        wall_deadline: float | None = None,
     ) -> tuple[_CheckPayload, float]:
         if isinstance(self.operations, ReadOnlyHealthOperations):
             return self._run_with_process(
@@ -5337,11 +5738,35 @@ class HealthCheckExecutor:
                 spec,
                 timeout_seconds=timeout_seconds,
                 deadline=deadline,
+                wall_deadline=wall_deadline,
             )
 
         started = self.clock()
         holder: list[_CheckPayload] = []
-        cancellation = _CancellationToken(deadline, clock=self.clock)
+        operation_wall_deadline = (
+            wall_deadline
+            if wall_deadline is not None
+            else _operation_wall_deadline(timeout_seconds, None)
+        )
+        cancellation = _CancellationToken(
+            deadline,
+            clock=self.clock,
+            wall_deadline=operation_wall_deadline,
+        )
+
+        def operation_expired() -> bool:
+            return _deadline_expired(
+                deadline,
+                clock=self.clock,
+                wall_deadline=operation_wall_deadline,
+            )
+
+        def operation_remaining() -> float:
+            return _deadline_remaining(
+                deadline,
+                clock=self.clock,
+                wall_deadline=operation_wall_deadline,
+            )
 
         def worker() -> None:
             try:
@@ -5359,9 +5784,9 @@ class HealthCheckExecutor:
 
         thread = threading.Thread(target=worker, name="realmheart-doctor-probe", daemon=True)
         thread.start()
-        thread.join(min(timeout_seconds, max(0.0, deadline - self.clock())))
+        thread.join(min(timeout_seconds, operation_remaining()))
         if thread.is_alive():
-            expired = self.clock() >= deadline
+            expired = operation_expired()
             cancellation.cancel()
             thread.join(self.worker_cleanup_seconds)
             code = "budget_exhausted" if expired else "timeout"
@@ -5777,6 +6202,8 @@ class HealthCheckExecutor:
                     max_output_bytes=self.max_output_bytes,
                     deadline=deadline,
                     cancellation=cancellation,
+                    clock=self.clock,
+                    wall_deadline=(getattr(cancellation, "wall_deadline", None) if cancellation is not None else None),
                 )
             else:
                 raw = self._call_operation(
@@ -5786,6 +6213,8 @@ class HealthCheckExecutor:
                     max_output_bytes=self.max_output_bytes,
                     deadline=deadline,
                     cancellation=cancellation,
+                    clock=self.clock,
+                    wall_deadline=(getattr(cancellation, "wall_deadline", None) if cancellation is not None else None),
                 )
             observation = _coerce_command_observation(raw, argv)
         except BaseException as exc:

@@ -8,6 +8,7 @@ import multiprocessing
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -2219,6 +2220,291 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             self.assertEqual(result.status, HealthStatus.UNKNOWN)
             self.assertEqual(result.reason_code, "artifact_snapshot_unstable")
             run.assert_not_called()
+
+    def test_memfd_snapshot_failure_falls_back_to_otmpfile(self):
+        tmpfile_flag = getattr(os, "O_TMPFILE", None)
+        if not isinstance(tmpfile_flag, int):
+            self.skipTest("O_TMPFILE is unavailable")
+        probe_fd: int | None = None
+        try:
+            probe_fd = os.open(
+                "/tmp",
+                tmpfile_flag | os.O_RDWR | getattr(os, "O_CLOEXEC", 0),
+                0o700,
+            )
+        except OSError as exc:
+            self.skipTest(f"O_TMPFILE is unavailable on the test filesystem: {exc}")
+        finally:
+            if probe_fd is not None:
+                os.close(probe_fd)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _, _, executable_path = _manifest(root)
+            executable_path.write_bytes(Path(APPROVED_TRUE_EXECUTABLE).read_bytes())
+            executable_path.chmod(0o755)
+            source_descriptor = os.open(executable_path, os.O_RDONLY)
+            try:
+                metadata = os.fstat(source_descriptor)
+                for failure in ("exception", "invalid_descriptor"):
+                    with self.subTest(failure=failure):
+                        memfd_patch = patch.object(
+                            health.os,
+                            "memfd_create",
+                            side_effect=OSError(errno.ENOSYS, "memfd unavailable")
+                            if failure == "exception"
+                            else None,
+                            return_value=-1 if failure == "invalid_descriptor" else None,
+                            create=True,
+                        )
+                        with memfd_patch, patch.object(
+                            health.os,
+                            "MFD_ALLOW_SEALING",
+                            1,
+                            create=True,
+                        ), patch.object(
+                            health.os,
+                            "MFD_CLOEXEC",
+                            2,
+                            create=True,
+                        ), patch.object(
+                            health.fcntl,
+                            "F_ADD_SEALS",
+                            1,
+                            create=True,
+                        ), patch.object(
+                            health.fcntl,
+                            "F_GET_SEALS",
+                            2,
+                            create=True,
+                        ), patch.object(
+                            health.fcntl,
+                            "F_SEAL_SEAL",
+                            1,
+                            create=True,
+                        ), patch.object(
+                            health.fcntl,
+                            "F_SEAL_SHRINK",
+                            2,
+                            create=True,
+                        ), patch.object(
+                            health.fcntl,
+                            "F_SEAL_GROW",
+                            4,
+                            create=True,
+                        ), patch.object(
+                            health.fcntl,
+                            "F_SEAL_WRITE",
+                            8,
+                            create=True,
+                        ):
+                            snapshot, error_code = health._snapshot_executable_descriptor(
+                                source_descriptor,
+                                metadata,
+                            )
+                        self.assertIsNone(error_code)
+                        self.assertIsNotNone(snapshot)
+                        assert snapshot is not None
+                        try:
+                            self.assertEqual(os.pread(snapshot, 4, 0), b"\x7fELF")
+                        finally:
+                            os.close(snapshot)
+            finally:
+                os.close(source_descriptor)
+
+    def test_snapshot_reports_unavailable_after_all_immutable_strategies_fail(self):
+        tmpfile_flag = getattr(os, "O_TMPFILE", None)
+        if not isinstance(tmpfile_flag, int):
+            self.skipTest("O_TMPFILE is unavailable")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _, _, executable_path = _manifest(root)
+            executable_path.write_bytes(Path(APPROVED_TRUE_EXECUTABLE).read_bytes())
+            executable_path.chmod(0o755)
+            source_descriptor = os.open(executable_path, os.O_RDONLY)
+            tmpfile_attempts: list[str] = []
+            real_open = health.os.open
+
+            def fail_tmpfile(path, flags, mode=0o777, *, dir_fd=None):
+                if flags & tmpfile_flag:
+                    tmpfile_attempts.append(os.fspath(path))
+                    raise OSError(errno.EOPNOTSUPP, "anonymous files unavailable")
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            try:
+                with patch.object(health.os, "memfd_create", return_value=-1, create=True), patch.object(
+                    health.os,
+                    "MFD_ALLOW_SEALING",
+                    1,
+                    create=True,
+                ), patch.object(
+                    health.os,
+                    "MFD_CLOEXEC",
+                    2,
+                    create=True,
+                ), patch.object(
+                    health.fcntl,
+                    "F_ADD_SEALS",
+                    1,
+                    create=True,
+                ), patch.object(
+                    health.fcntl,
+                    "F_GET_SEALS",
+                    2,
+                    create=True,
+                ), patch.object(
+                    health.fcntl,
+                    "F_SEAL_SEAL",
+                    1,
+                    create=True,
+                ), patch.object(
+                    health.fcntl,
+                    "F_SEAL_SHRINK",
+                    2,
+                    create=True,
+                ), patch.object(
+                    health.fcntl,
+                    "F_SEAL_GROW",
+                    4,
+                    create=True,
+                ), patch.object(
+                    health.fcntl,
+                    "F_SEAL_WRITE",
+                    8,
+                    create=True,
+                ), patch.object(
+                    health.os,
+                    "open",
+                    side_effect=fail_tmpfile,
+                ):
+                    snapshot, error_code = health._snapshot_executable_descriptor(
+                        source_descriptor,
+                        os.fstat(source_descriptor),
+                    )
+            finally:
+                os.close(source_descriptor)
+
+            self.assertIsNone(snapshot)
+            self.assertEqual(error_code, "immutable_snapshot_unavailable")
+            self.assertTrue(tmpfile_attempts)
+
+    def test_otmpfile_snapshot_is_read_only_and_survives_source_mutation(self):
+        if os.geteuid() == 0:
+            self.skipTest("root can reopen read-only fallback inodes for writing")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _, _, executable_path = _manifest(root)
+            executable_path.write_bytes(Path(APPROVED_TRUE_EXECUTABLE).read_bytes())
+            executable_path.chmod(0o777)
+            source_descriptor = os.open(executable_path, os.O_RDONLY)
+            try:
+                with patch.object(health.os, "memfd_create", None, create=True):
+                    snapshot, error_code = health._snapshot_executable_descriptor(
+                        source_descriptor,
+                        os.fstat(source_descriptor),
+                    )
+                self.assertIsNone(error_code)
+                self.assertIsNotNone(snapshot)
+                assert snapshot is not None
+                try:
+                    self.assertEqual(stat.S_IMODE(os.fstat(snapshot).st_mode), 0o555)
+                    with self.assertRaises(OSError):
+                        os.open(f"/proc/self/fd/{snapshot}", os.O_RDWR)
+                finally:
+                    os.close(snapshot)
+            finally:
+                os.close(source_descriptor)
+
+            _build_launch_marker_probe(executable_path)
+            executable_path.chmod(0o777)
+            marker = executable_path.with_name(executable_path.name + ".launched")
+            mutation_marker = root / "source-mutated"
+            checks = dict(load_manifest(root / "components").health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                artifact_id="demo.exec",
+                timeout_ms=3000,
+                args={"args": []},
+            )
+            registry = replace(load_manifest(root / "components"), health_checks=checks)
+            real_fchmod = health.os.fchmod
+            mutated = False
+
+            def mutate_source_after_copy(descriptor, mode):
+                nonlocal mutated
+                result = real_fchmod(descriptor, mode)
+                if not mutated:
+                    mutated = True
+                    executable_path.write_bytes(b"not an ELF executable")
+                    mutation_marker.write_text("mutated", encoding="ascii")
+                return result
+
+            with patch.object(health.os, "memfd_create", None, create=True), patch.object(
+                health.os,
+                "fchmod",
+                side_effect=mutate_source_after_copy,
+            ):
+                result = HealthCheckExecutor(max_seconds=4).execute(
+                    registry,
+                    check_ids=("check.runtime",),
+                ).result_for("check.runtime")
+
+            self.assertTrue(mutation_marker.exists())
+            self.assertEqual(result.status, HealthStatus.PASS)
+            self.assertTrue(marker.exists(), "the immutable snapshot did not execute")
+
+    def test_custom_clock_epoch_and_rate_are_used_by_process_children(self):
+        class ScaledClock:
+            def __init__(self, rate: float) -> None:
+                self.origin = time.monotonic()
+                self.rate = rate
+
+            def __call__(self) -> float:
+                return (time.monotonic() - self.origin) * self.rate
+
+        for rate in (0.5, 1.0, 2.0):
+            with self.subTest(rate=rate), tempfile.TemporaryDirectory() as temp:
+                registry, _, _ = _manifest(Path(temp))
+                result = HealthCheckExecutor(
+                    max_seconds=1.0,
+                    clock=ScaledClock(rate),
+                ).execute(
+                    registry,
+                    check_ids=("check.runtime",),
+                ).result_for("check.runtime")
+
+                self.assertEqual(result.status, HealthStatus.PASS)
+
+    def test_frozen_custom_clock_still_honors_wall_budget(self):
+        class FrozenClock:
+            def __init__(self, value: float) -> None:
+                self.value = value
+
+            def __call__(self) -> float:
+                return self.value
+
+        with tempfile.TemporaryDirectory() as temp:
+            registry, _, _ = _manifest(Path(temp))
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                timeout_ms=500,
+                args={"argv": [APPROVED_SLEEP_EXECUTABLE, "0.2"]},
+            )
+            registry = replace(registry, health_checks=checks)
+            started = time.monotonic()
+            result = HealthCheckExecutor(
+                max_seconds=0.05,
+                clock=FrozenClock(10_000_000_000.0),
+            ).execute(
+                registry,
+                check_ids=("check.runtime",),
+            ).result_for("check.runtime")
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(result.status, HealthStatus.UNKNOWN)
+            self.assertIn(result.reason_code, {"timeout", "budget_exhausted", "worker_cleanup_incomplete"})
+            self.assertLess(elapsed, 1.0)
 
     def test_blocked_snapshot_cannot_launch_after_timeout(self):
         with tempfile.TemporaryDirectory() as temp:
