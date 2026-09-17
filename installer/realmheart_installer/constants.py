@@ -5,7 +5,9 @@ from __future__ import annotations
 # Realmheart ships the installer as part of the Realmheart release.  Keep the
 # persisted installer provenance aligned with the product release; the version
 # contract test guards this against future CMake/installer drift.
-INSTALLER_VERSION = "0.7.8"
+from realmheart_maintenance.version import RELEASE_VERSION
+
+INSTALLER_VERSION = RELEASE_VERSION
 STATE_SCHEMA_VERSION = 1
 JOURNAL_SCHEMA_VERSION = 1
 INSTALLED_STATE_SCHEMA_VERSION = 2
