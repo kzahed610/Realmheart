@@ -1284,6 +1284,45 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                             except ProcessLookupError:
                                 pass
 
+    def test_launch_authority_early_return_closes_popen_stream_wrappers(self):
+        class TrackingStream:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class FakePopen:
+            def __init__(self) -> None:
+                self.pid = 424242
+                self.returncode = None
+                self.stdout = TrackingStream()
+                self.stderr = TrackingStream()
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.returncode = 125
+                return self.returncode
+
+        process = FakePopen()
+        with patch.object(health, "_health_process_boundary_owned", return_value=True), patch.object(
+            health, "_health_launch_authority_available", return_value=True
+        ), patch.object(health.subprocess, "Popen", return_value=process):
+            result = health._run_bounded_process(
+                (APPROVED_TRUE_EXECUTABLE,),
+                timeout=0.2,
+                max_output_bytes=64,
+            )
+
+        self.assertIn(
+            result.error_code,
+            {"launch_cleanup_failed", "launch_authority_uncommitted", "pidfd_unavailable"},
+        )
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+
     def test_public_default_process_operations_require_the_supervisor_boundary(self):
         operations = health.ReadOnlyHealthOperations()
         with patch("realmheart_doctor.health.subprocess.Popen") as popen:
@@ -2664,6 +2703,16 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             self.assertIn(result.reason_code, {"timeout", "budget_exhausted", "worker_cleanup_incomplete"})
             self.assertLess(elapsed, 0.1)
 
+    def test_opaque_clock_positive_rate_keeps_wait_quantum(self):
+        state = {"logical": 0.0, "wall": 0.0}
+        with patch.object(health.time, "monotonic", side_effect=lambda: state["wall"]):
+            clock = health._ClockDomain(lambda: state["logical"])
+            clock()
+            state["wall"] = 0.001
+            self.assertLessEqual(clock.wait_remaining(1.0, 10.0), health._CLOCK_WAIT_QUANTUM_SECONDS)
+            state.update(wall=0.002, logical=0.000001)
+            self.assertLessEqual(clock.wait_remaining(1.0, 10.0), health._CLOCK_WAIT_QUANTUM_SECONDS)
+
     def test_custom_clock_epoch_and_rate_are_used_by_process_children(self):
         class ScaledClock:
             def __init__(self, rate: float) -> None:
@@ -3430,6 +3479,26 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                             break
                         time.sleep(0.005)
 
+    def test_nested_descriptor_walk_does_not_retry_parent_close_after_close_error(self):
+        opened = iter((10, 11))
+        close_calls: list[int] = []
+
+        def fake_open(path, flags, mode=0o777, *, dir_fd=None):
+            return next(opened)
+
+        def fake_close(descriptor):
+            close_calls.append(descriptor)
+            if descriptor == 10:
+                raise OSError(errno.EIO, "simulated close failure")
+
+        with patch("realmheart_doctor.health.os.open", side_effect=fake_open), patch(
+            "realmheart_doctor.health.os.close", side_effect=fake_close
+        ):
+            result = health._open_executable_descriptor(Path("/parent/executable"))
+
+        self.assertEqual(result, (None, "descriptor_open_failed"))
+        self.assertEqual(close_calls, [10, 11])
+
     def test_descriptor_relocation_closes_original_when_duplication_is_unavailable(self):
         with patch("realmheart_doctor.health.fcntl.F_DUPFD_CLOEXEC", None), patch(
             "realmheart_doctor.health.fcntl.F_DUPFD", None
@@ -3447,6 +3516,22 @@ class DoctorHealthExecutorTests(unittest.TestCase):
 
         self.assertEqual(result, (None, "descriptor_relocation_failed"))
         close.assert_called_once_with(2)
+
+    def test_descriptor_relocation_relinquishes_both_fds_after_original_close_error(self):
+        close_calls: list[int] = []
+
+        def fake_close(descriptor):
+            close_calls.append(descriptor)
+            if descriptor == 2:
+                raise OSError(errno.EIO, "simulated close failure")
+
+        with patch("realmheart_doctor.health.fcntl.fcntl", return_value=9), patch(
+            "realmheart_doctor.health.os.close", side_effect=fake_close
+        ):
+            result = _relocate_descriptor(2)
+
+        self.assertEqual(result, (None, "descriptor_relocation_failed"))
+        self.assertEqual(close_calls, [2, 9])
 
     def test_shell_shebang_artifact_is_rejected_before_execution(self):
         with tempfile.TemporaryDirectory() as temp:

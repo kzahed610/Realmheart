@@ -263,6 +263,10 @@ class _ClockDomain:
             wait_timeout = min(remaining, _CLOCK_WAIT_QUANTUM_SECONDS)
         else:
             wait_timeout = remaining / rate
+            if self.rate_hint is None:
+                # An inferred rate describes the past, not a stable clock
+                # contract. Keep rechecking when an opaque clock accelerates.
+                wait_timeout = min(wait_timeout, _CLOCK_WAIT_QUANTUM_SECONDS)
         if wall_deadline is not None:
             wait_timeout = min(wait_timeout, max(0.0, wall_deadline - real_now))
         return max(0.0, wait_timeout)
@@ -2261,6 +2265,20 @@ def _wait_process(process: subprocess.Popen[bytes], timeout: float) -> None:
             pass
 
 
+def _close_popen_streams(process: subprocess.Popen[bytes]) -> bool:
+    """Close Popen-owned pipe wrappers independently and report cleanup success."""
+
+    closed_cleanly = True
+    for stream in (process.stdout, process.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except (OSError, ValueError):
+            closed_cleanly = False
+    return closed_cleanly
+
+
 def _run_bounded_process(
     argv: tuple[str, ...],
     *,
@@ -2757,6 +2775,7 @@ def _run_bounded_process(
         ):
             terminate_launched_process()
             wait_launched_process(0.1)
+            _close_popen_streams(process)
             close_launch_authority()
             return CommandObservation(
                 argv,
@@ -2922,15 +2941,9 @@ def _run_bounded_process(
                 selector.close()
             except (OSError, ValueError):
                 pass
-        try:
-            if process.stdout is not None:
-                process.stdout.close()
-            if process.stderr is not None:
-                process.stderr.close()
-        except (OSError, ValueError):
-            if error_code is None:
-                error_code = "operation_error"
-                error_detail = "pipe_close_error"
+        if not _close_popen_streams(process) and error_code is None:
+            error_code = "operation_error"
+            error_detail = "pipe_close_error"
         close_launch_authority()
 
     if launch_authority_revoked[0] or operation_cancelled():
@@ -3470,7 +3483,20 @@ def _relocate_descriptor(
     clock: Callable[[], float] = time.monotonic,
     wall_deadline: float | None = None,
 ) -> tuple[int | None, str | None]:
-    """Move a passed executable descriptor out of the stdio range."""
+    """Move a passed executable descriptor out of the stdio range.
+
+    Descriptor ownership is relinquished after the first close attempt, even
+    when close(2) reports an error.  Retrying the same fd number is unsafe
+    because the kernel may already have released it for reuse.  Accordingly,
+    every error path returns ``None`` rather than handing an ambiguously-owned
+    descriptor back to the caller.
+    """
+
+    def close_once(descriptor_to_close: int) -> None:
+        try:
+            os.close(descriptor_to_close)
+        except OSError:
+            pass
 
     if descriptor >= MIN_PASSTHROUGH_FD:
         if _operation_cancelled(
@@ -3479,20 +3505,14 @@ def _relocate_descriptor(
             clock=clock,
             wall_deadline=wall_deadline,
         ):
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
+            close_once(descriptor)
             return None, "timeout"
         return descriptor, None
     duplicate_function = getattr(fcntl, "F_DUPFD_CLOEXEC", None)
     if duplicate_function is None:
         duplicate_function = getattr(fcntl, "F_DUPFD", None)
     if duplicate_function is None:
-        try:
-            os.close(descriptor)
-        except OSError:
-            return descriptor, "descriptor_relocation_unavailable"
+        close_once(descriptor)
         return None, "descriptor_relocation_unavailable"
     if _operation_cancelled(
         deadline,
@@ -3500,18 +3520,12 @@ def _relocate_descriptor(
         clock=clock,
         wall_deadline=wall_deadline,
     ):
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
+        close_once(descriptor)
         return None, "timeout"
     try:
         relocated = fcntl.fcntl(descriptor, duplicate_function, MIN_PASSTHROUGH_FD)
     except (OSError, ValueError, TypeError):
-        try:
-            os.close(descriptor)
-        except OSError:
-            return descriptor, "descriptor_relocation_failed"
+        close_once(descriptor)
         return None, "descriptor_relocation_failed"
     if _operation_cancelled(
         deadline,
@@ -3519,27 +3533,17 @@ def _relocate_descriptor(
         clock=clock,
         wall_deadline=wall_deadline,
     ):
-        try:
-            os.close(descriptor)
-        except OSError:
-            try:
-                os.close(relocated)
-            except OSError:
-                pass
-            return relocated, "timeout"
-        try:
-            os.close(relocated)
-        except OSError:
-            return relocated, "timeout"
+        close_once(descriptor)
+        close_once(relocated)
         return None, "timeout"
     try:
         os.close(descriptor)
     except OSError:
-        try:
-            os.close(relocated)
-        except OSError:
-            pass
-        return descriptor, "descriptor_relocation_failed"
+        # The original fd is no longer ours after the close attempt.  Dispose
+        # of the duplicate once and fail closed rather than returning either
+        # ambiguous descriptor to the caller.
+        close_once(relocated)
+        return None, "descriptor_relocation_failed"
     return relocated, None
 
 
@@ -4050,12 +4054,17 @@ def _open_executable_descriptor(
             if operation_cancelled():
                 os.close(child_descriptor)
                 return None, "timeout"
-            try:
-                os.close(parent_descriptor)
-            except OSError:
-                os.close(child_descriptor)
-                raise
+            previous_parent_descriptor = parent_descriptor
             parent_descriptor = child_descriptor
+            try:
+                os.close(previous_parent_descriptor)
+            except OSError:
+                # Ownership of the old parent fd is relinquished after one
+                # close attempt.  Retrying close(2) is unsafe because the fd
+                # number may already have been released and reused.  The new
+                # child remains owned by parent_descriptor and is cleaned up
+                # by the outer finally block.
+                raise
         if operation_cancelled():
             return None, "timeout"
         descriptor = os.open(components[-1], file_flags, dir_fd=parent_descriptor)
