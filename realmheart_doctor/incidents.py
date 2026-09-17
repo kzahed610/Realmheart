@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .state import STATE_FORMAT_VERSION, _atomic_write_json
+from .changes import changes_since_healthy
 
 _UNRESOLVED = "unresolved"
 _RESOLVED = "resolved"
@@ -140,7 +141,7 @@ def record_component_failure(
         "expected": "component passes its canonical health checks",
         "observed": (failed[0].get("detail") if failed else None) or "health check reported failure",
         "last_known_good": _read_lkg_summary(root, component_id),
-        "relevant_changes": [],
+        "relevant_changes": changes_since_healthy(current, _read_lkg_summary(root, component_id)),
         "checks": failed or checks,
         "repair_attempts": [],
         "resolution_state": _UNRESOLVED,
