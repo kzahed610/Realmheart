@@ -35,14 +35,31 @@ def run_boot(
     executor=None,
     notifier,
     now: datetime | None = None,
+    lock_timeout: float = 0.0,
 ) -> BootOutcome:
     """Run the automatic one-shot health check for this session."""
+
+    from .locking import acquire_state_lock
 
     if now is None:
         now = datetime.now(timezone.utc)
     state_root = Path(state_root)
     sessions_dir = state_root / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
+    marker = sessions_dir / _session_marker_name(session_key)
+    if marker.is_file():
+        return BootOutcome("already_ran")
+    try:
+        with acquire_state_lock(state_root, timeout=lock_timeout):
+            return _run_locked(registry, state_root, session_key, marker,
+                               executor=executor, notifier=notifier, now=now)
+    except TimeoutError:
+        return BootOutcome("deferred_lock")
+
+
+def _run_locked(registry, state_root: Path, session_key: str, marker: Path,
+                *, executor, notifier, now: datetime) -> BootOutcome:
+    sessions_dir = state_root / "sessions"
     marker = sessions_dir / _session_marker_name(session_key)
     if marker.is_file():
         return BootOutcome("already_ran")
