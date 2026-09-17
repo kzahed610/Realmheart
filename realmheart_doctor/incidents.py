@@ -15,6 +15,8 @@ from pathlib import Path
 
 from .state import STATE_FORMAT_VERSION, _atomic_write_json
 from .changes import changes_since_healthy
+from .classification import classify_failure
+from .health import HealthCheckResult, HealthStatus
 
 _UNRESOLVED = "unresolved"
 _RESOLVED = "resolved"
@@ -113,6 +115,14 @@ def record_component_failure(
     checks = [item for item in record.get("checks", []) if isinstance(item, dict)]
     failed = [item for item in checks if item.get("status") == "fail"]
     fingerprint = _incident_fingerprint(component_id, failed, record.get("uncertainties", []))
+    classification = classify_failure(tuple(
+        HealthCheckResult(
+            check_id=str(item.get("check_id")), component_id=component_id, check=item.get("check"),
+            status=HealthStatus(item.get("status") or "unknown"), reason_code=str(item.get("reason_code")),
+            detail=item.get("detail"),
+        )
+        for item in failed
+    ))
 
     existing, incidents_dir = _find_open_incident(root, component_id, fingerprint)
     timestamp = now.isoformat()
@@ -135,8 +145,8 @@ def record_component_failure(
         "created_at": timestamp,
         "updated_at": timestamp,
         "health_state": "failed",
-        "failure_class": "COMPONENT_FAILED",
-        "confidence": "HIGH",
+        "failure_class": classification.failure_class,
+        "confidence": classification.confidence,
         "symptoms": [f"{item.get('check_id')}: {item.get('reason_code')}" for item in failed],
         "expected": "component passes its canonical health checks",
         "observed": (failed[0].get("detail") if failed else None) or "health check reported failure",

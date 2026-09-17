@@ -62,10 +62,34 @@ class DoctorIncidentTests(unittest.TestCase):
             self.assertRegex(event.incident_id, r"^RH-20260917-\d{3}$")
             self.assertEqual(incident["format_version"], 1)
             self.assertEqual(incident["component_id"], "demo")
-            self.assertEqual(incident["failure_class"], "COMPONENT_FAILED")
+            self.assertEqual(incident["failure_class"], "COMPONENT_ARTIFACT_MISSING")
+            self.assertEqual(incident["confidence"], "HIGH")
             self.assertEqual(incident["resolution_state"], "unresolved")
             self.assertEqual(len(incident["timeline"]), 1)
             self.assertEqual(incident["timeline"][0]["event_type"], "HEALTH_CHECK_FAILED")
+
+    def test_incident_failure_class_follows_observed_evidence(self):
+        from realmheart_doctor.diagnosis import ComponentDiagnosis, Diagnosis
+        from realmheart_doctor.health import HealthCheckResult, HealthStatus
+        check = HealthCheckResult("check.version", "demo", "version_probe",
+                                  HealthStatus.FAIL, "version_mismatch")
+        diagnosis = Diagnosis(
+            release_version="0.7.8",
+            manifest_digest="a" * 64,
+            overall=ComponentHealth.FAILED,
+            components=(ComponentDiagnosis("demo", "Demo", "core",
+                                           ComponentHealth.FAILED, (check,)),),
+            budget_exhausted=False,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            record_diagnosis(root, diagnosis)
+            event = record_component_failure(root, "demo")
+            assert event is not None
+            incident = json.loads((root / "incidents" / f"{event.incident_id}.json").read_text())
+            self.assertEqual(incident["failure_class"], "DEPENDENCY_VERSION_MISMATCH")
+            self.assertEqual(incident["confidence"], "HIGH")
+            self.assertEqual(incident["checks"][0]["check_id"], "check.version")
 
     def test_repeat_failure_appends_observation_instead_of_new_incident(self):
         with tempfile.TemporaryDirectory() as temp:
