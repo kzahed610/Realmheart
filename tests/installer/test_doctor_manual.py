@@ -1,6 +1,8 @@
 """Public manual Doctor contract, separate from install acceptance."""
 from __future__ import annotations
 
+from dataclasses import replace
+
 import contextlib
 import io
 import json
@@ -154,6 +156,91 @@ contexts = ["doctor_manual"]
                          ["realmheart-core", "realmheart-fx", "lockscreen-auth"])
         self.assertEqual(result.overall.value, "unknown")
         self.assertEqual(executor.execute.call_args.kwargs["context"], "doctor_manual")
+
+    def test_runtime_capability_observation_replaces_placeholder_uncertainty(self):
+        from unittest.mock import Mock
+        from realmheart_maintenance.manifest import load_manifest
+        from realmheart_doctor.diagnosis import diagnose
+        from realmheart_doctor.health import HealthCheckReport, HealthCheckResult, HealthStatus
+        from realmheart_maintenance.forensics import CapabilityObservation
+        registry = load_manifest(Path("components"))
+        component = replace(registry.components["realmheart-core"], realmheart_dependencies=())
+        definition = registry.health_checks["check.core.binary.exists"]
+        assert definition.artifact_id is not None
+        artifact = registry.artifacts[definition.artifact_id]
+        registry = replace(
+            registry,
+            components={component.id: component},
+            component_order=(component.id,),
+            artifacts={artifact.id: artifact},
+            health_checks={definition.id: definition},
+        )
+        executor = Mock()
+        executor.execute.return_value = HealthCheckReport((HealthCheckResult(
+            definition.id, component.id, definition.check, HealthStatus.PASS, "observed"),), 0)
+        prober = Mock(return_value=CapabilityObservation("runtime.python3", "pass", detail="python3 available"))
+        result = diagnose(registry, executor=executor, capability_prober=prober)
+        self.assertNotIn("runtime_capability_observation_pending", result.components[0].uncertainties)
+        self.assertEqual(result.overall.value, "healthy")
+        self.assertEqual(prober.call_args.kwargs["registry"], registry)
+
+    def test_missing_required_runtime_capability_degrades_component(self):
+        from unittest.mock import Mock
+        from realmheart_maintenance.manifest import load_manifest
+        from realmheart_doctor.diagnosis import diagnose
+        from realmheart_doctor.health import HealthCheckReport, HealthCheckResult, HealthStatus
+        from realmheart_maintenance.forensics import CapabilityObservation
+        registry = load_manifest(Path("components"))
+        component = replace(registry.components["realmheart-core"], realmheart_dependencies=())
+        definition = registry.health_checks["check.core.binary.exists"]
+        capability = next(item for item in registry.capabilities.values()
+                          if item.component_id == component.id and "runtime" in item.lifecycle)
+        assert definition.artifact_id is not None
+        artifact = registry.artifacts[definition.artifact_id]
+        registry = replace(
+            registry,
+            components={component.id: component},
+            component_order=(component.id,),
+            capabilities={capability.id: capability},
+            artifacts={artifact.id: artifact},
+            health_checks={definition.id: definition},
+        )
+        executor = Mock()
+        executor.execute.return_value = HealthCheckReport((HealthCheckResult(
+            definition.id, component.id, definition.check, HealthStatus.PASS, "observed"),), 0)
+        prober = Mock(return_value=CapabilityObservation(capability.id, "missing", detail="probe unavailable"))
+        result = diagnose(registry, executor=executor, capability_prober=prober)
+        self.assertEqual(result.components[0].status.value, "failed")
+        self.assertIn("required_runtime_capability_missing", result.components[0].uncertainties)
+
+    def test_unavailable_capability_probe_stays_unknown(self):
+        from unittest.mock import Mock
+        from realmheart_maintenance.manifest import load_manifest
+        from realmheart_doctor.diagnosis import diagnose
+        from realmheart_doctor.health import HealthCheckReport, HealthCheckResult, HealthStatus
+        from realmheart_maintenance.forensics import CapabilityObservation
+        registry = load_manifest(Path("components"))
+        component = replace(registry.components["realmheart-core"], realmheart_dependencies=())
+        definition = registry.health_checks["check.core.binary.exists"]
+        capability = next(item for item in registry.capabilities.values()
+                          if item.component_id == component.id and "runtime" in item.lifecycle)
+        assert definition.artifact_id is not None
+        artifact = registry.artifacts[definition.artifact_id]
+        registry = replace(
+            registry,
+            components={component.id: component},
+            component_order=(component.id,),
+            capabilities={capability.id: capability},
+            artifacts={artifact.id: artifact},
+            health_checks={definition.id: definition},
+        )
+        executor = Mock()
+        executor.execute.return_value = HealthCheckReport((HealthCheckResult(
+            definition.id, component.id, definition.check, HealthStatus.PASS, "observed"),), 0)
+        prober = Mock(return_value=CapabilityObservation(capability.id, "unknown", detail="probe result was not available"))
+        result = diagnose(registry, executor=executor, capability_prober=prober)
+        self.assertEqual(result.components[0].status.value, "unknown")
+        self.assertIn("runtime_capability_unknown", result.components[0].uncertainties)
 
     def test_empty_check_set_cannot_report_healthy(self):
         with tempfile.TemporaryDirectory() as temp:

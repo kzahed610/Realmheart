@@ -10,6 +10,11 @@ from enum import Enum
 
 from realmheart_maintenance.manifest import ManifestRegistry
 from realmheart_maintenance.version import RELEASE_VERSION
+from realmheart_maintenance.forensics import (
+    CapabilityObservation,
+    capability_requires_success,
+    capability_state_satisfied,
+)
 
 from .health import HealthCheckExecutor, HealthCheckResult, HealthStatus
 
@@ -59,7 +64,8 @@ class Diagnosis:
 
 
 def diagnose(registry: ManifestRegistry, component: str | None = None, *,
-             executor: HealthCheckExecutor | None = None) -> Diagnosis:
+             executor: HealthCheckExecutor | None = None,
+             capability_prober=None) -> Diagnosis:
     if component is not None and component not in registry.components:
         raise ValueError("unknown component")
     selected = {component} if component is not None else set(registry.components)
@@ -74,6 +80,12 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
     run = (executor or HealthCheckExecutor()).execute(
         registry, context="doctor_manual", max_cost="normal", check_ids=ids,
     )
+    if capability_prober is None:
+        # Reuse the shared read-only capability prober instead of inventing a
+        # second probe implementation; the seam keeps unit tests hermetic.
+        from .acceptance import _probe_capability
+
+        capability_prober = _probe_capability
     results: dict[str, ComponentDiagnosis] = {}
     for key in registry.component_order:
         if key not in selected:
@@ -83,6 +95,7 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
         required = []
         optional = []
         uncertainties = []
+        capability_failed = False
         for item in checks:
             definition = registry.health_checks[item.check_id]
             artifact = registry.artifacts.get(definition.artifact_id) if definition.artifact_id else None
@@ -93,12 +106,31 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
             uncertainties.append("required_artifact_coverage_missing")
         if not checks:
             uncertainties.append("no_declared_health_checks")
-        capabilities = [item for item in registry.capabilities.values()
-                        if item.component_id in (None, key) and "runtime" in item.lifecycle]
-        if capabilities:
-            uncertainties.append("runtime_capability_observation_pending")
+        for capability in registry.capabilities.values():
+            if capability.component_id not in (None, key) or "runtime" not in capability.lifecycle:
+                continue
+            observation = capability_prober(capability, registry=registry)
+            if capability_state_satisfied(registry, capability, observation.state):
+                continue
+            if observation.state == "not_applicable":
+                uncertainties.append("runtime_capability_not_applicable")
+                continue
+            if observation.state == "unknown":
+                uncertainties.append("runtime_capability_unknown")
+                continue
+            if capability_requires_success(registry, capability):
+                uncertainties.append("required_runtime_capability_missing")
+                capability_failed = True
+                status = ComponentHealth.FAILED
+            elif registry.components[capability.component_id or key].category in CRITICAL_CATEGORIES:
+                uncertainties.append("required_runtime_capability_missing")
+                capability_failed = True
+                status = ComponentHealth.FAILED
+            else:
+                uncertainties.append("noncritical_runtime_capability_missing")
+                status = ComponentHealth.DEGRADED
         upstream = [results[item.id].status for item in spec.realmheart_dependencies if item.required]
-        if HealthStatus.FAIL in required or ComponentHealth.FAILED in upstream:
+        if capability_failed or HealthStatus.FAIL in required or ComponentHealth.FAILED in upstream:
             status = ComponentHealth.FAILED
         elif (uncertainties or any(item in {HealthStatus.UNKNOWN, HealthStatus.NOT_APPLICABLE}
                                    for item in required) or ComponentHealth.UNKNOWN in upstream):
