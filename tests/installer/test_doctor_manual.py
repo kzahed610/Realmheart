@@ -242,6 +242,119 @@ contexts = ["doctor_manual"]
         self.assertEqual(result.components[0].status.value, "unknown")
         self.assertIn("runtime_capability_unknown", result.components[0].uncertainties)
 
+    def _generated_receipt(self, root: Path):
+        import os
+        from . import _bootstrap
+        from realmheart_installer.finalization import build_installed_state_receipt
+        from tests.installer.test_verification_engine import Phase13VerificationTests
+
+        helper = Phase13VerificationTests()
+        helper.setUp()
+        fixture_root = root / "fixture"
+        paths, runner, plan, build = helper._fixture(fixture_root)
+        environment = {
+            "HOME": str(fixture_root / "home"),
+            "XDG_CONFIG_HOME": str(fixture_root / "cfg"),
+            "XDG_STATE_HOME": str(fixture_root / "state"),
+            "PREFIX": str(fixture_root / "prefix"),
+            "LIBEXEC": str(fixture_root / "prefix" / "libexec"),
+            "SYSCONF": str(fixture_root / "etc"),
+        }
+        previous = {key: os.environ.get(key) for key in environment}
+        os.environ.update(environment)
+        try:
+            report = helper._engine(paths, runner, plan, build).run()
+            payload = build_installed_state_receipt(plan, report)
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        path = root / "installed-state.json"
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return path, payload
+
+    def test_receipt_digest_mismatch_is_not_endorsement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            receipt_path, payload = self._generated_receipt(Path(temp))
+            payload["manifest_set_sha256"] = "0" * 64
+            receipt_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            from realmheart_maintenance.forensics import load_installed_receipt
+            receipt = load_installed_receipt(receipt_path)
+        from unittest.mock import Mock
+        from realmheart_maintenance.manifest import load_manifest
+        from realmheart_doctor.diagnosis import diagnose
+        from realmheart_doctor.health import HealthCheckReport, HealthCheckResult, HealthStatus
+        registry = load_manifest(Path("components"))
+        component = replace(registry.components["realmheart-core"], realmheart_dependencies=())
+        definition = registry.health_checks["check.core.binary.exists"]
+        assert definition.artifact_id is not None
+        artifact = registry.artifacts[definition.artifact_id]
+        registry = replace(registry, components={component.id: component}, component_order=(component.id,),
+                           capabilities={}, artifacts={artifact.id: artifact},
+                           health_checks={definition.id: definition})
+        executor = Mock()
+        executor.execute.return_value = HealthCheckReport((HealthCheckResult(
+            definition.id, component.id, definition.check, HealthStatus.PASS, "observed"),), 0)
+        result = diagnose(registry, executor=executor, receipt=receipt)
+        self.assertFalse(result.receipt["digest_matches"])
+        self.assertNotEqual(result.overall.value, "healthy")
+
+    def test_receipt_alignment_endorses_current_diagnosis(self):
+        from unittest.mock import Mock
+        from realmheart_maintenance.manifest import load_manifest
+        from realmheart_maintenance.forensics import load_installed_receipt
+        from realmheart_doctor.diagnosis import diagnose
+        from realmheart_doctor.health import HealthCheckReport, HealthCheckResult, HealthStatus
+        with tempfile.TemporaryDirectory() as temp:
+            receipt_path, _ = self._generated_receipt(Path(temp))
+            receipt = load_installed_receipt(receipt_path)
+        registry = load_manifest(Path("components"))
+        component = replace(registry.components["realmheart-core"], realmheart_dependencies=())
+        definition = registry.health_checks["check.core.binary.exists"]
+        assert definition.artifact_id is not None
+        artifact = registry.artifacts[definition.artifact_id]
+        registry = replace(registry, components={component.id: component}, component_order=(component.id,),
+                           capabilities={}, artifacts={artifact.id: artifact},
+                           health_checks={definition.id: definition})
+        executor = Mock()
+        executor.execute.return_value = HealthCheckReport((HealthCheckResult(
+            definition.id, component.id, definition.check, HealthStatus.PASS, "observed"),), 0)
+        result = diagnose(registry, executor=executor, receipt=receipt)
+        self.assertTrue(result.receipt["digest_matches"])
+        self.assertTrue(result.receipt["transaction_id"])
+        self.assertEqual(result.components[0].status.value, "healthy")
+
+    def test_receipt_failed_component_is_not_silently_healthy(self):
+        from unittest.mock import Mock
+        from dataclasses import replace as _replace
+        from realmheart_maintenance.manifest import load_manifest
+        from realmheart_maintenance.forensics import load_installed_receipt
+        from realmheart_doctor.diagnosis import diagnose
+        from realmheart_doctor.health import HealthCheckReport, HealthCheckResult, HealthStatus
+        with tempfile.TemporaryDirectory() as temp:
+            receipt_path, _ = self._generated_receipt(Path(temp))
+            receipt = load_installed_receipt(receipt_path)
+        registry = load_manifest(Path("components"))
+        component = replace(registry.components["realmheart-core"], realmheart_dependencies=())
+        definition = registry.health_checks["check.core.binary.exists"]
+        assert definition.artifact_id is not None
+        artifact = registry.artifacts[definition.artifact_id]
+        registry = replace(registry, components={component.id: component}, component_order=(component.id,),
+                           capabilities={}, artifacts={artifact.id: artifact},
+                           health_checks={definition.id: definition})
+        receipt = _replace(receipt, components={
+            **receipt.components,
+            component.id: _replace(receipt.components[component.id], health="failed"),
+        })
+        executor = Mock()
+        executor.execute.return_value = HealthCheckReport((HealthCheckResult(
+            definition.id, component.id, definition.check, HealthStatus.PASS, "observed"),), 0)
+        result = diagnose(registry, executor=executor, receipt=receipt)
+        self.assertEqual(result.components[0].status.value, "failed")
+        self.assertIn("receipt_component_failed", result.components[0].uncertainties)
+
     def test_empty_check_set_cannot_report_healthy(self):
         with tempfile.TemporaryDirectory() as temp:
             Path(temp, "manifest.toml").write_text('''schema_version = 1

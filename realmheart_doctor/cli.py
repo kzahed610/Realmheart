@@ -11,6 +11,7 @@ from typing import NoReturn
 
 from realmheart_maintenance.forensics import ForensicContractError
 from realmheart_maintenance.manifest import ManifestError, load_manifest
+from realmheart_maintenance.forensics import load_installed_receipt
 from realmheart_maintenance.version import RELEASE_VERSION
 
 from .acceptance import DoctorAcceptanceError, assess_candidate_install, load_candidate_bundle
@@ -20,6 +21,13 @@ def _absolute_path(value: str) -> str:
     if not Path(value).is_absolute() or "\x00" in value or "$" in value or ".." in Path(value).parts:
         raise argparse.ArgumentTypeError("expected an absolute installation directory")
     return value
+
+
+def _receipt_path(value: str) -> Path:
+    path = Path(value)
+    if not path.is_file():
+        raise argparse.ArgumentTypeError("receipt must be an existing installed-state.json file")
+    return path
 
 
 @contextmanager
@@ -62,6 +70,7 @@ def _parser(*, manual: bool = False) -> argparse.ArgumentParser:
         command = sub.add_parser(name)
         command.add_argument("--manifest-dir", type=Path, default=Path(os.environ.get("REALMHEART_DOCTOR_MANIFEST_DIR", "components")))
         command.add_argument("--json", action="store_true")
+        command.add_argument("--receipt", type=_receipt_path, help="installed-state.json receipt for provenance alignment")
         if name == "doctor":
             command.add_argument("component", nargs="?")
             command.add_argument("--verbose", action="store_true")
@@ -114,7 +123,7 @@ def _manual(args: argparse.Namespace) -> int:
 
     try:
         registry = load_manifest(args.manifest_dir)
-    except (ManifestError, OSError):
+    except (ManifestError, OSError, ForensicContractError) as exc:
         payload = {"format_version": 1, "status": "error", "error": "manifest_configuration_error"}
         print(json.dumps(payload, sort_keys=True) if args.json else "Doctor manifest configuration error")
         return 5
@@ -124,7 +133,8 @@ def _manual(args: argparse.Namespace) -> int:
             print(json.dumps(payload) if args.json else "Unknown component; run realmheart-doctor components")
             return 4
         with _installation_environment(args):
-            result = diagnose(registry, args.component)
+            receipt = load_installed_receipt(args.receipt) if args.receipt else None
+            result = diagnose(registry, args.component, receipt=receipt)
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True) if args.json else render_diagnosis(result, verbose=args.verbose))
         return EXIT_CODES[result.overall]
     components = [{"id": key, "name": registry.components[key].name,

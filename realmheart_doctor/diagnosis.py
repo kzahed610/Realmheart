@@ -54,18 +54,20 @@ class Diagnosis:
     overall: ComponentHealth
     components: tuple[ComponentDiagnosis, ...]
     budget_exhausted: bool
+    receipt: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {"format_version": 1, "doctor_version": RELEASE_VERSION, "release_version": self.release_version,
                 "manifest_digest": self.manifest_digest,
                 "overall": self.overall.value,
                 "budget_exhausted": self.budget_exhausted,
+                "receipt": self.receipt,
                 "components": [item.to_dict() for item in self.components]}
 
 
 def diagnose(registry: ManifestRegistry, component: str | None = None, *,
              executor: HealthCheckExecutor | None = None,
-             capability_prober=None) -> Diagnosis:
+             capability_prober=None, receipt=None) -> Diagnosis:
     if component is not None and component not in registry.components:
         raise ValueError("unknown component")
     selected = {component} if component is not None else set(registry.components)
@@ -80,12 +82,30 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
     run = (executor or HealthCheckExecutor()).execute(
         registry, context="doctor_manual", max_cost="normal", check_ids=ids,
     )
+    uncertainties_by_component: dict[str, list[str]] = {}
     if capability_prober is None:
         # Reuse the shared read-only capability prober instead of inventing a
         # second probe implementation; the seam keeps unit tests hermetic.
         from .acceptance import _probe_capability
 
         capability_prober = _probe_capability
+    if receipt is not None:
+        receipt_aligned = receipt.manifest_digest == registry.digest
+        accepted = receipt.components.get(component) if component is not None else None
+        if accepted is None and component is None:
+            for key in registry.component_order:
+                accepted_component = receipt.components.get(key)
+                if accepted_component is not None and accepted_component.health in {"failed", "blocked"}:
+                    uncertainties_by_component.setdefault(key, []).append("receipt_component_failed")
+                elif accepted_component is not None and accepted_component.health in {"degraded", "warning", "unknown", "pending", "running", "skipped", "not_applicable", "pending_activation"}:
+                    uncertainties_by_component.setdefault(key, []).append("receipt_component_uncertain")
+        elif accepted is not None and accepted.health in {"failed", "blocked"}:
+            uncertainties_by_component.setdefault(component, []).append("receipt_component_failed")
+        elif accepted is not None and accepted.health in {"degraded", "warning", "unknown", "pending", "running", "skipped", "not_applicable", "pending_activation"}:
+            uncertainties_by_component.setdefault(component, []).append("receipt_component_uncertain")
+        if not receipt_aligned:
+            for key in registry.component_order:
+                uncertainties_by_component.setdefault(key, []).append("receipt_manifest_identity_drift")
     results: dict[str, ComponentDiagnosis] = {}
     for key in registry.component_order:
         if key not in selected:
@@ -130,7 +150,10 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
                 uncertainties.append("noncritical_runtime_capability_missing")
                 status = ComponentHealth.DEGRADED
         upstream = [results[item.id].status for item in spec.realmheart_dependencies if item.required]
-        if capability_failed or HealthStatus.FAIL in required or ComponentHealth.FAILED in upstream:
+        component_uncertainties = uncertainties_by_component.get(key, [])
+        uncertainties.extend(component_uncertainties)
+        receipt_failed = "receipt_component_failed" in component_uncertainties
+        if receipt_failed or capability_failed or HealthStatus.FAIL in required or ComponentHealth.FAILED in upstream:
             status = ComponentHealth.FAILED
         elif (uncertainties or any(item in {HealthStatus.UNKNOWN, HealthStatus.NOT_APPLICABLE}
                                    for item in required) or ComponentHealth.UNKNOWN in upstream):
@@ -151,7 +174,20 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
         overall = ComponentHealth.DEGRADED
     else:
         overall = ComponentHealth.HEALTHY
-    return Diagnosis(registry.release_version, registry.digest, overall, values, run.budget_exhausted)
+    return Diagnosis(
+        registry.release_version,
+        registry.digest,
+        overall,
+        values,
+        run.budget_exhausted,
+        receipt={
+            "digest_matches": receipt is not None and receipt.manifest_digest == registry.digest,
+            "schema_version": receipt.schema_version if receipt is not None else None,
+            "installer_version": receipt.installer_version if receipt is not None else None,
+            "transaction_id": receipt.transaction_id if receipt is not None else None,
+            "install_health": receipt.install_health if receipt is not None else None,
+        },
+    )
 
 
 def render_diagnosis(result: Diagnosis, *, verbose: bool = False) -> str:
