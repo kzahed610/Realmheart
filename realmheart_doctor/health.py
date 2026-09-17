@@ -81,6 +81,8 @@ MIN_PASSTHROUGH_FD = 3
 EXECUTABLE_HEADER_BYTES = 4
 EXECUTABLE_SNAPSHOT_CHUNK_BYTES = 1024 * 1024
 MAX_EXECUTABLE_SNAPSHOT_BYTES = MAX_FILE_BYTES
+_CLOCK_WAIT_QUANTUM_SECONDS = 0.001
+_CLOCK_CALIBRATION_MIN_SECONDS = 0.0005
 
 _VERSION_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9])v?(\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?)(?![A-Za-z0-9])"
@@ -168,6 +170,101 @@ class _HealthLaunchResumeProof:
     previous_signal_mask: Any
 
 
+def _clock_rate_hint(clock: Callable[[], float]) -> float | None:
+    """Read an optional logical-clock rate without requiring one."""
+
+    if clock is time.monotonic:
+        return 1.0
+    try:
+        raw_rate = getattr(clock, "rate", None)
+        if raw_rate is None:
+            raw_rate = getattr(clock, "clock_rate", None)
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return None
+    if isinstance(raw_rate, bool) or not isinstance(raw_rate, (int, float)):
+        return None
+    try:
+        rate = float(raw_rate)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(rate) or rate < 0:
+        return None
+    return rate
+
+
+class _ClockDomain:
+    """Keep logical deadline checks and real wait durations in one domain."""
+
+    def __init__(self, source: Callable[[], float]) -> None:
+        self.source = source
+        self.clock_origin: float | None = None
+        self.real_origin: float | None = None
+        self.rate_hint = _clock_rate_hint(source)
+
+    def __call__(self) -> float:
+        value = self.source()
+        if self.clock_origin is None:
+            self.clock_origin = value
+            self.real_origin = time.monotonic()
+        return value
+
+    def _rate(self, now: float, real_now: float) -> float | None:
+        if self.rate_hint is not None:
+            return self.rate_hint
+        if self.clock_origin is None or self.real_origin is None:
+            return None
+        try:
+            real_elapsed = real_now - self.real_origin
+            clock_elapsed = now - self.clock_origin
+        except TypeError:
+            return None
+        if real_elapsed < _CLOCK_CALIBRATION_MIN_SECONDS:
+            return None
+        if clock_elapsed == 0:
+            return 0.0
+        if clock_elapsed < 0:
+            return None
+        rate = clock_elapsed / real_elapsed
+        if not math.isfinite(rate) or rate <= 0:
+            return None
+        return rate
+
+    def wait_remaining(self, deadline: float | None, wall_deadline: float | None) -> float:
+        """Return a timeout suitable for real-time wait APIs."""
+
+        now = self()
+        real_now = time.monotonic()
+        if deadline is None:
+            return (
+                math.inf
+                if wall_deadline is None
+                else max(0.0, wall_deadline - real_now)
+            )
+        else:
+            remaining = max(0.0, deadline - now)
+        if remaining <= 0:
+            return 0.0
+
+        rate = self._rate(now, real_now)
+        if rate is None:
+            # An opaque or frozen clock cannot safely be converted.  Poll in
+            # a small real-time quantum and re-check its logical deadline.
+            wait_timeout = min(remaining, _CLOCK_WAIT_QUANTUM_SECONDS)
+        elif rate == 0:
+            # The independent wall deadline is the only progressing bound for
+            # a frozen logical clock.
+            wait_timeout = (
+                math.inf
+                if wall_deadline is not None
+                else min(remaining, _CLOCK_WAIT_QUANTUM_SECONDS)
+            )
+        else:
+            wait_timeout = remaining / rate
+        if wall_deadline is not None:
+            wait_timeout = min(wait_timeout, max(0.0, wall_deadline - real_now))
+        return max(0.0, wait_timeout)
+
+
 @dataclass
 class _CancellationToken:
     """Carry one absolute operation deadline and cooperative cancellation."""
@@ -193,7 +290,11 @@ class _CancellationToken:
         )
 
     def remaining(self) -> float:
-        remaining = max(0.0, self.deadline - self.clock())
+        remaining = _deadline_remaining(
+            self.deadline,
+            clock=self.clock,
+            wall_deadline=self.wall_deadline,
+        )
         if self.wall_deadline is not None:
             remaining = min(remaining, max(0.0, self.wall_deadline - self.wall_clock()))
         return remaining
@@ -287,16 +388,51 @@ def _deadline_expired(
     return wall_deadline is not None and time.monotonic() >= wall_deadline
 
 
+def _logical_deadline_remaining(
+    deadline: float | None,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+) -> float:
+    """Return remaining budget in the injected clock's logical units."""
+
+    return math.inf if deadline is None else max(0.0, deadline - clock())
+
+
 def _deadline_remaining(
     deadline: float | None,
     *,
     clock: Callable[[], float] = time.monotonic,
     wall_deadline: float | None = None,
 ) -> float:
-    remaining = math.inf if deadline is None else max(0.0, deadline - clock())
+    wait_remaining = getattr(clock, "wait_remaining", None)
+    if callable(wait_remaining):
+        wait_remaining_function = cast(Callable[[float | None, float | None], float], wait_remaining)
+        return wait_remaining_function(deadline, wall_deadline)
+
+    now = clock()
+    if deadline is None:
+        return (
+            math.inf
+            if wall_deadline is None
+            else max(0.0, wall_deadline - time.monotonic())
+        )
+    remaining = max(0.0, deadline - now)
+    if remaining <= 0:
+        return 0.0
+    rate = _clock_rate_hint(clock)
+    if rate is None:
+        remaining = min(remaining, _CLOCK_WAIT_QUANTUM_SECONDS)
+    elif rate == 0:
+        remaining = (
+            math.inf
+            if wall_deadline is not None
+            else min(remaining, _CLOCK_WAIT_QUANTUM_SECONDS)
+        )
+    else:
+        remaining /= rate
     if wall_deadline is not None:
         remaining = min(remaining, max(0.0, wall_deadline - time.monotonic()))
-    return remaining
+    return max(0.0, remaining)
 
 
 def _operation_deadline(
@@ -3509,6 +3645,14 @@ def _snapshot_executable_descriptor(
         | stat.S_ISGID
         | stat.S_ISVTX
     )
+    # O_TMPFILE creates an inode owned by this process.  Materialize the
+    # source's readable/executable authorization in its owner class so a
+    # group/other-only source remains reopenable and executable, while the
+    # original group/other execute bits are preserved above.
+    if metadata.st_mode & (stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH):
+        normalized_mode |= stat.S_IRUSR
+    if metadata.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+        normalized_mode |= stat.S_IXUSR
 
     def close_descriptor(descriptor_to_close: object) -> None:
         if type(descriptor_to_close) is int and descriptor_to_close >= 0:
@@ -5155,7 +5299,9 @@ class HealthCheckExecutor:
         self.worker_cleanup_seconds = _finite_nonnegative(
             "worker_cleanup_seconds", worker_cleanup_seconds, MAX_WORKER_CLEANUP_SECONDS
         )
-        self.clock = clock
+        self.clock: Callable[[], float] = (
+            clock if isinstance(clock, _ClockDomain) else _ClockDomain(clock)
+        )
 
     def execute(
         self,
@@ -5248,11 +5394,13 @@ class HealthCheckExecutor:
                 cache[key] = result
                 continue
 
-            remaining = _deadline_remaining(
+            remaining = _logical_deadline_remaining(deadline, clock=self.clock)
+            if _deadline_expired(
                 deadline,
                 clock=self.clock,
                 wall_deadline=wall_deadline,
-            )
+            ):
+                remaining = 0.0
             if attempted >= self.max_checks or remaining <= 0:
                 budget_exhausted = True
                 result = HealthCheckResult(

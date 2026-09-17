@@ -378,6 +378,31 @@ int main(int argc, char **argv) {
     path.chmod(0o755)
 
 
+def _run_snapshot_descriptor_probe(
+    descriptor: int,
+    argv0: str,
+    connection,
+) -> None:
+    """Execute a prebuilt snapshot through the real process boundary."""
+
+    command = (argv0,)
+    try:
+        if not health._establish_health_worker_group():
+            connection.send(CommandObservation(command, error_code="worker_unavailable"))
+            return
+        connection.send(
+            health._run_bounded_process(
+                command,
+                timeout=1.0,
+                max_output_bytes=1024,
+                executable_fd=descriptor,
+                deadline=time.monotonic() + 1.0,
+            )
+        )
+    finally:
+        connection.close()
+
+
 class DoctorHealthExecutorTests(unittest.TestCase):
     def test_artifact_exists_and_executable_are_observed(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -2453,7 +2478,94 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             self.assertEqual(result.status, HealthStatus.PASS)
             self.assertTrue(marker.exists(), "the immutable snapshot did not execute")
 
-    def test_custom_clock_epoch_and_rate_are_used_by_process_children(self):
+    def test_otmpfile_snapshot_preserves_group_other_authorization_for_owner(self):
+        tmpfile_flag = getattr(os, "O_TMPFILE", None)
+        if not isinstance(tmpfile_flag, int):
+            self.skipTest("O_TMPFILE is unavailable")
+        with tempfile.TemporaryDirectory() as temp:
+            executable_path = Path(temp) / "group-other-authorized"
+            executable_path.write_bytes(Path(APPROVED_TRUE_EXECUTABLE).read_bytes())
+            executable_path.chmod(0o755)
+            source_descriptor = os.open(executable_path, os.O_RDONLY)
+            try:
+                executable_path.chmod(0o155)
+                metadata = os.fstat(source_descriptor)
+                with patch.object(health.os, "memfd_create", None, create=True):
+                    snapshot, error_code = health._snapshot_executable_descriptor(
+                        source_descriptor,
+                        metadata,
+                    )
+                self.assertIsNone(error_code)
+                self.assertIsNotNone(snapshot)
+                assert snapshot is not None
+                try:
+                    self.assertEqual(stat.S_IMODE(os.fstat(snapshot).st_mode), 0o555)
+                    self.assertEqual(os.pread(snapshot, 4, 0), b"\x7fELF")
+
+                    context = multiprocessing.get_context("fork")
+                    result_parent, result_child = context.Pipe(duplex=False)
+                    process = context.Process(
+                        target=_run_snapshot_descriptor_probe,
+                        args=(snapshot, str(executable_path), result_child),
+                    )
+                    process.daemon = False
+                    process_started = False
+                    try:
+                        process.start()
+                        process_started = True
+                        result_child.close()
+                        self.assertTrue(result_parent.poll(2.0))
+                        observation = result_parent.recv()
+                        process.join(2.0)
+                        self.assertFalse(process.is_alive())
+                    finally:
+                        if process_started and process.is_alive():
+                            process.terminate()
+                            process.join(1.0)
+                        result_parent.close()
+                        result_child.close()
+                    self.assertIsInstance(observation, CommandObservation)
+                    assert isinstance(observation, CommandObservation)
+                    self.assertEqual(observation.returncode, 0)
+                    self.assertFalse(observation.timed_out)
+                finally:
+                    os.close(snapshot)
+            finally:
+                os.close(source_descriptor)
+
+    def test_otmpfile_snapshot_strips_writable_and_special_mode_bits(self):
+        tmpfile_flag = getattr(os, "O_TMPFILE", None)
+        if not isinstance(tmpfile_flag, int):
+            self.skipTest("O_TMPFILE is unavailable")
+        with tempfile.TemporaryDirectory() as temp:
+            executable_path = Path(temp) / "mode-normalization"
+            executable_path.write_bytes(Path(APPROVED_TRUE_EXECUTABLE).read_bytes())
+            executable_path.chmod(0o755)
+            source_descriptor = os.open(executable_path, os.O_RDONLY)
+            try:
+                for source_mode in (0o155, 0o1755, 0o2755, 0o4777):
+                    with self.subTest(source_mode=oct(source_mode)):
+                        os.fchmod(source_descriptor, source_mode)
+                        with patch.object(health.os, "memfd_create", None, create=True):
+                            snapshot, error_code = health._snapshot_executable_descriptor(
+                                source_descriptor,
+                                os.fstat(source_descriptor),
+                            )
+                        self.assertIsNone(error_code)
+                        self.assertIsNotNone(snapshot)
+                        assert snapshot is not None
+                        try:
+                            mode = stat.S_IMODE(os.fstat(snapshot).st_mode)
+                            self.assertEqual(mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH), 0)
+                            self.assertEqual(mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX), 0)
+                            self.assertEqual(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH), 0o111)
+                            self.assertEqual(os.pread(snapshot, 4, 0), b"\x7fELF")
+                        finally:
+                            os.close(snapshot)
+            finally:
+                os.close(source_descriptor)
+
+    def test_rate_scaled_clock_enforces_injected_deadline_before_probe_finishes(self):
         class ScaledClock:
             def __init__(self, rate: float) -> None:
                 self.origin = time.monotonic()
@@ -2461,6 +2573,44 @@ class DoctorHealthExecutorTests(unittest.TestCase):
 
             def __call__(self) -> float:
                 return (time.monotonic() - self.origin) * self.rate
+
+        clock = ScaledClock(100.0)
+        executor = HealthCheckExecutor(max_seconds=0.2, clock=clock)
+        clock_started = executor.clock()
+        time.sleep(0.001)
+        remaining_wait = health._deadline_remaining(clock_started + 0.2, clock=executor.clock)
+        self.assertGreater(remaining_wait, 0.0)
+        self.assertLess(remaining_wait, 0.01)
+
+        with tempfile.TemporaryDirectory() as temp:
+            registry, _, _ = _manifest(Path(temp))
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                timeout_ms=500,
+                args={"argv": [APPROVED_SLEEP_EXECUTABLE, "0.5"]},
+            )
+            registry = replace(registry, health_checks=checks)
+            started = time.monotonic()
+            result = executor.execute(
+                registry,
+                check_ids=("check.runtime",),
+            ).result_for("check.runtime")
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(result.status, HealthStatus.UNKNOWN)
+            self.assertIn(result.reason_code, {"timeout", "budget_exhausted", "worker_cleanup_incomplete"})
+            self.assertLess(elapsed, 0.1)
+
+    def test_custom_clock_epoch_and_rate_are_used_by_process_children(self):
+        class ScaledClock:
+            def __init__(self, rate: float) -> None:
+                self.origin = time.monotonic()
+                self.epoch = 10_000_000_000.0
+                self.rate = rate
+
+            def __call__(self) -> float:
+                return self.epoch + (time.monotonic() - self.origin) * self.rate
 
         for rate in (0.5, 1.0, 2.0):
             with self.subTest(rate=rate), tempfile.TemporaryDirectory() as temp:
