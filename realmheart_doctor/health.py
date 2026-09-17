@@ -124,6 +124,11 @@ _HEALTH_PR_SET_CHILD_SUBREAPER = 36
 _HEALTH_PR_GET_CHILD_SUBREAPER = 37
 _HEALTH_PIDFD_SEND_SIGNAL = 424
 _HEALTH_PIDFD_OPEN = 434
+# ``pidfd_send_signal(..., info=NULL)`` follows the kernel's kill-style
+# delivery path and reports SI_USER (0) to sigtimedwait().  SI_QUEUE (-1),
+# emitted by rt_sigqueueinfo(), is caller-controlled and is never accepted as
+# launch authority.
+_HEALTH_KERNEL_SI_USER = 0
 _HEALTH_PROC_SCAN_LIMIT = 65536
 _REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SECRET_REPLACEMENT = "[REDACTED]"
@@ -757,6 +762,14 @@ def _health_prepare_launch_resume_proof() -> _HealthLaunchResumeProof | None:
         return None
 
 
+def _health_launch_resume_signal_code_valid(info: Any) -> bool:
+    """Require the kernel-generated kill-style sender code for pidfd resume."""
+
+    sender_code = getattr(info, "si_code", None) if info is not None else None
+    expected_code = getattr(signal, "SI_USER", _HEALTH_KERNEL_SI_USER)
+    return type(sender_code) is int and type(expected_code) is int and sender_code == expected_code
+
+
 def _health_launch_resume_authorized(
     proof: _HealthLaunchResumeProof,
     deadline: float,
@@ -779,7 +792,11 @@ def _health_launch_resume_authorized(
                 info = waiter({signal.SIGCONT}, remaining)
                 sender_pid = getattr(info, "si_pid", None) if info is not None else None
                 sender_uid = getattr(info, "si_uid", None) if info is not None else None
-                if sender_pid == proof.supervisor_pid and sender_uid == proof.supervisor_uid:
+                if (
+                    _health_launch_resume_signal_code_valid(info)
+                    and sender_pid == proof.supervisor_pid
+                    and sender_uid == proof.supervisor_uid
+                ):
                     supervisor_record = _read_health_process_record(proof.supervisor_pid)
                     identity_valid = (
                         os.getppid() == proof.supervisor_pid

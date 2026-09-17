@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import errno
@@ -34,6 +35,51 @@ PYTHON_EXECUTABLE = str(Path(sys.executable).resolve())
 APPROVED_TRUE_EXECUTABLE = "/usr/bin/true"
 APPROVED_PRINTF_EXECUTABLE = "/usr/bin/printf"
 APPROVED_SLEEP_EXECUTABLE = "/usr/bin/sleep"
+
+
+def _send_forged_rt_sigqueueinfo(
+    target_pid: int,
+    signal_number: int,
+    *,
+    sender_pid: int,
+    sender_uid: int,
+) -> None:
+    """Queue SI_QUEUE with forged sender metadata for the launch regression."""
+
+    if os.name != "posix" or not sys.platform.startswith("linux"):
+        raise unittest.SkipTest("Linux rt_sigqueueinfo is required for the launch-authentication test")
+    syscall_number = {
+        "x86_64": 129,
+        "amd64": 129,
+        "aarch64": 138,
+        "riscv64": 138,
+    }.get(os.uname().machine)
+    if syscall_number is None:
+        raise unittest.SkipTest("rt_sigqueueinfo syscall number is unavailable on this architecture")
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        syscall = getattr(libc, "syscall")
+    except (AttributeError, OSError) as exc:
+        raise unittest.SkipTest("libc syscall is unavailable") from exc
+    syscall.restype = ctypes.c_long
+    # Linux siginfo_t stores si_code at byte offset 8, then si_pid/si_uid at
+    # offsets 16/20 for SI_QUEUE.  The kernel only reads the first 128 bytes.
+    siginfo = (ctypes.c_int * 32)()
+    siginfo[0] = signal_number
+    siginfo[2] = -1  # SI_QUEUE
+    siginfo[4] = sender_pid
+    siginfo[5] = sender_uid
+    result = int(
+        syscall(
+            syscall_number,
+            ctypes.c_int(target_pid),
+            ctypes.c_int(signal_number),
+            ctypes.byref(siginfo),
+            ctypes.c_size_t(8),
+        )
+    )
+    if result != 0:
+        raise OSError(ctypes.get_errno(), "rt_sigqueueinfo")
 
 
 class FakeOperations:
@@ -2597,6 +2643,108 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             self.assertTrue(observation.timed_out or observation.error_code is not None)
             self.assertIn(observation.error_code, {"launch_authority_uncommitted", "launch_cleanup_failed"})
             self.assertFalse(marker.exists(), "an unsolicited SIGCONT crossed into native exec")
+
+    def test_launch_resume_requires_kernel_sender_code(self):
+        info = type("Siginfo", (), {"si_code": health._HEALTH_KERNEL_SI_USER})()
+        self.assertTrue(health._health_launch_resume_signal_code_valid(info))
+
+        queued = type("Siginfo", (), {"si_code": -1})()
+        missing = type("Siginfo", (), {})()
+        self.assertFalse(health._health_launch_resume_signal_code_valid(queued))
+        self.assertFalse(health._health_launch_resume_signal_code_valid(missing))
+
+    def test_forged_rt_sigqueueinfo_resume_never_reaches_exec(self):
+        if os.name != "posix" or not sys.platform.startswith("linux"):
+            self.skipTest("Linux launch-authentication process boundary is POSIX-specific")
+        with tempfile.TemporaryDirectory() as temp:
+            marker = Path(temp) / "launched"
+            record = health._read_health_process_record(os.getpid())
+            self.assertIsNotNone(record)
+            assert record is not None
+
+            previous_group_owned = health._HEALTH_WORKER_GROUP_OWNED
+            previous_identity = health._HEALTH_WORKER_IDENTITY
+            previous_containment_valid = health._HEALTH_WORKER_CONTAINMENT_VALID
+            previous_tracked = dict(health._HEALTH_WORKER_TRACKED_DESCENDANTS)
+            previous_reaped = set(health._HEALTH_WORKER_REAPED_PROBES)
+            health._HEALTH_WORKER_GROUP_OWNED = True
+            health._HEALTH_WORKER_CONTAINMENT_VALID = True
+            health._HEALTH_WORKER_IDENTITY = health._HealthWorkerIdentity(
+                os.getpid(),
+                record.session_id,
+                record.process_group_id,
+                record.start_time,
+                child_subreaper=True,
+                verified=True,
+            )
+            health._HEALTH_WORKER_TRACKED_DESCENDANTS.clear()
+            health._HEALTH_WORKER_REAPED_PROBES.clear()
+
+            child_pid: list[int | None] = [None]
+            forged_attempted = False
+            forged_success = False
+            supervisor_pid = os.getpid()
+            supervisor_uid = os.getuid()
+            original_open = health._health_pidfd_open
+            original_signal = health._health_pidfd_send_signal
+
+            def remember_child(pid: int) -> int | None:
+                descriptor = original_open(pid)
+                if pid != supervisor_pid:
+                    child_pid[0] = pid
+                return descriptor
+
+            def send_forged_resume(descriptor: int, signal_number: int) -> bool:
+                nonlocal forged_attempted, forged_success
+                if (
+                    signal_number == 0
+                    and not forged_attempted
+                    and threading.current_thread().name == "realmheart-doctor-launch-gate"
+                ):
+                    pid = child_pid[0]
+                    child_record = health._read_health_process_record(pid) if pid is not None else None
+                    if child_record is not None and child_record.state in {"T", "t"}:
+                        assert pid is not None
+                        forged_attempted = True
+                        attacker = os.fork()
+                        if attacker == 0:
+                            try:
+                                _send_forged_rt_sigqueueinfo(
+                                    pid,
+                                    signal.SIGCONT,
+                                    sender_pid=supervisor_pid,
+                                    sender_uid=supervisor_uid,
+                                )
+                            except BaseException:
+                                os._exit(97)
+                            os._exit(0)
+                        _, status = os.waitpid(attacker, 0)
+                        forged_success = os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+                return original_signal(descriptor, signal_number)
+
+            try:
+                with patch.object(health, "_health_pidfd_open", side_effect=remember_child), patch.object(
+                    health, "_health_pidfd_send_signal", side_effect=send_forged_resume
+                ):
+                    observation = health._run_bounded_process(
+                        ("/usr/bin/touch", str(marker)),
+                        timeout=1.0,
+                        max_output_bytes=1024,
+                        deadline=time.monotonic() + 1.0,
+                    )
+            finally:
+                health._HEALTH_WORKER_GROUP_OWNED = previous_group_owned
+                health._HEALTH_WORKER_IDENTITY = previous_identity
+                health._HEALTH_WORKER_CONTAINMENT_VALID = previous_containment_valid
+                health._HEALTH_WORKER_TRACKED_DESCENDANTS.clear()
+                health._HEALTH_WORKER_TRACKED_DESCENDANTS.update(previous_tracked)
+                health._HEALTH_WORKER_REAPED_PROBES.clear()
+                health._HEALTH_WORKER_REAPED_PROBES.update(previous_reaped)
+
+            self.assertTrue(forged_attempted, "the direct SI_QUEUE attack was not delivered during the stopped window")
+            self.assertTrue(forged_success, "rt_sigqueueinfo did not accept the forged live supervisor metadata")
+            self.assertFalse(observation.ok, "forged SI_QUEUE metadata crossed into native exec")
+            self.assertFalse(marker.exists(), "forged SI_QUEUE metadata crossed into native exec")
 
     def test_authenticated_supervisor_resume_executes_before_pass(self):
         with tempfile.TemporaryDirectory() as temp:
