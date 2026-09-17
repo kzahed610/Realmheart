@@ -28,6 +28,15 @@ def _diagnosis(status: ComponentHealth, *, component_id: str = "demo") -> Diagno
 
 
 class DoctorStateTests(unittest.TestCase):
+    def test_directory_sync_io_failure_is_not_reported_as_success(self):
+        import errno
+        from unittest.mock import patch
+        from realmheart_doctor.state import _atomic_write_json
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("realmheart_doctor.state.os.fsync", side_effect=[None, OSError(errno.EIO, "sync failed")]):
+                with self.assertRaises(OSError):
+                    _atomic_write_json(Path(temp) / "state.json", {"format_version": 1})
+
     def test_healthy_result_updates_last_known_good(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

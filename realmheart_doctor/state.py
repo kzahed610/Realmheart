@@ -41,18 +41,15 @@ def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+    descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
-        descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(descriptor)
-        except OSError as exc:
-            if exc.errno not in (errno.EINVAL, getattr(errno, "ENOTSUP", errno.EINVAL),
-                                 getattr(errno, "EOPNOTSUPP", errno.EINVAL)):
-                raise
-        finally:
-            os.close(descriptor)
-    except OSError:
-        pass
+        os.fsync(descriptor)
+    except OSError as exc:
+        if exc.errno not in (errno.EINVAL, getattr(errno, "ENOTSUP", errno.EINVAL),
+                             getattr(errno, "EOPNOTSUPP", errno.EINVAL)):
+            raise
+    finally:
+        os.close(descriptor)
 
 
 def _load_json(path: Path) -> tuple[object | None, bool]:
@@ -116,5 +113,8 @@ def record_diagnosis(root: Path, diagnosis: Diagnosis, *, now: datetime | None =
             "checks": [item.to_dict() for item in component.checks],
         }
         _atomic_write_json(lkg_path, lkg)
+        from .incidents import record_component_recovery
+
+        record_component_recovery(root, component.id, now=now)
 
     return StateRecord(recovered=tuple(recovered))
