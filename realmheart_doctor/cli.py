@@ -68,6 +68,12 @@ def _parser(*, manual: bool = False) -> argparse.ArgumentParser:
     incident.add_argument("--state-dir", type=Path, required=True)
     incident.add_argument("--json", action="store_true")
     incident.add_argument("--preview", action="store_true")
+    boot = sub.add_parser("boot", help="noninteractive one-shot health check per session")
+    boot.add_argument("--state-dir", type=Path, required=True)
+    boot.add_argument("--session-key", default=os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
+    boot.add_argument("--manifest-dir", type=Path, default=Path(os.environ.get("REALMHEART_DOCTOR_MANIFEST_DIR", "components")))
+    boot.add_argument("--no-notify", action="store_true")
+    boot.add_argument("--json", action="store_true")
     assess = sub.add_parser("assess-install", help="independently assess a candidate Realmheart installation")
     assess.add_argument("--candidate", type=Path, required=True)
     assess.add_argument("--manifest-dir", type=Path, default=Path(os.environ.get("REALMHEART_DOCTOR_MANIFEST_DIR", "components")))
@@ -115,6 +121,35 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"format_version": 1, "status": "error", "error": "invalid_invocation"})
               if "--json" in arguments else "Invalid invocation; run realmheart-doctor --help")
         return 4
+    if args.command == "boot":
+        from .boot import run_boot
+        from .notify_backends import deliver
+
+        try:
+            registry = load_manifest(args.manifest_dir)
+        except (ManifestError, OSError, ForensicContractError):
+            payload = {"format_version": 1, "status": "error", "error": "manifest_configuration_error"}
+            print(json.dumps(payload, sort_keys=True) if args.json else "Doctor manifest configuration error")
+            return 5
+        if not args.session_key:
+            print(json.dumps({"format_version": 1, "status": "error", "error": "session_key_unavailable"}) if args.json
+                  else "Boot mode needs a session key; pass --session-key")
+            return 4
+        notified = 0
+
+        def _notifier(title: str, body: str) -> None:
+            # A suppressed or failed delivery must stay retry-eligible: raising
+            # keeps dispatch from recording last_notified_state.
+            nonlocal notified
+            if not deliver(title, body):
+                raise RuntimeError("notification delivery failed")
+            notified += 1
+
+        outcome = run_boot(registry, args.state_dir, session_key=args.session_key,
+                           notifier=None if args.no_notify else _notifier)
+        payload = {"format_version": 1, "mode": outcome.mode, "notifications": notified}
+        print(json.dumps(payload, sort_keys=True) if args.json else f"boot: {outcome.mode}")
+        return 0
     if args.command == "incident":
         from .incident_reports import load_incident, render_incident, write_report
 
