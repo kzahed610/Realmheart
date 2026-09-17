@@ -63,6 +63,33 @@ class DoctorStateTests(unittest.TestCase):
                 self.assertEqual(lkg["status"], "healthy")
                 self.assertEqual(lkg["captured_at"], first.isoformat())
 
+    def test_identical_global_snapshots_compact_instead_of_accumulating(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = datetime(2026, 9, 17, 12, 0, 0, tzinfo=timezone.utc)
+            later = datetime(2026, 9, 17, 13, 0, 0, tzinfo=timezone.utc)
+            record_diagnosis(root, _diagnosis(ComponentHealth.HEALTHY), now=first)
+            history = root / "history"
+            first_snapshots = sorted(history.glob("snap-*.json"))
+            record_diagnosis(root, _diagnosis(ComponentHealth.HEALTHY), now=later)
+            second_snapshots = sorted(history.glob("snap-*.json"))
+            self.assertEqual(len(second_snapshots), 1,
+                             "identical state must update last_seen, not add files")
+            self.assertEqual(second_snapshots, first_snapshots)
+            payload = json.loads(second_snapshots[0].read_text())
+            self.assertEqual(payload["last_seen"], "20260917T130000000000")
+            self.assertNotEqual(payload["captured_at"], payload["last_seen"])
+
+    def test_changed_global_state_starts_a_new_history_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            record_diagnosis(root, _diagnosis(ComponentHealth.HEALTHY),
+                             now=datetime(2026, 9, 17, 12, 0, 0, tzinfo=timezone.utc))
+            record_diagnosis(root, _diagnosis(ComponentHealth.FAILED),
+                             now=datetime(2026, 9, 17, 13, 0, 0, tzinfo=timezone.utc))
+            history = sorted(p.name for p in (root / "history").glob("snap-*.json"))
+            self.assertEqual(len(history), 2)
+
     def test_corrupt_current_state_is_isolated_not_fatal(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

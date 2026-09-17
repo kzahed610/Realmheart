@@ -95,6 +95,39 @@ def record_diagnosis(root: Path, diagnosis: Diagnosis, *, now: datetime | None =
     }
     _atomic_write_json(root / "current.json", current)
 
+    history_dir = root / "history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_payload = {
+        "format_version": STATE_FORMAT_VERSION,
+        "captured_at": now.isoformat(),
+        "overall": diagnosis.overall.value,
+        "release_version": diagnosis.release_version,
+        "manifest_digest": diagnosis.manifest_digest,
+        "components": current["components"],
+    }
+    comparison = dict(snapshot_payload)
+    comparison.pop("captured_at", None)
+    latest_history: tuple[Path, dict] | None = None
+    for path in sorted(history_dir.glob("snap-*.json")):
+        payload, corrupt = _load_json(path)
+        if corrupt or not isinstance(payload, dict):
+            stamp = now.strftime("%Y%m%dT%H%M%S%f")
+            os.replace(path, root / "corrupt" / f"snap-{stamp}-{path.name}")
+            continue
+        candidate = dict(payload)
+        candidate.pop("last_seen", None)
+        candidate.pop("captured_at", None)
+        if candidate == comparison:
+            latest_history = (path, payload)
+    if latest_history is not None:
+        path, payload = latest_history
+        payload["last_seen"] = now.strftime("%Y%m%dT%H%M%S%f")
+        _atomic_write_json(path, payload)
+    else:
+        _atomic_write_json(
+            history_dir / f"snap-{now.strftime('%Y%m%dT%H%M%S%f')}.json", snapshot_payload
+        )
+
     for component in diagnosis.components:
         if component.status is not ComponentHealth.HEALTHY:
             continue
