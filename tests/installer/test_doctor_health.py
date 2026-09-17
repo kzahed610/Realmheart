@@ -378,6 +378,68 @@ int main(int argc, char **argv) {
     path.chmod(0o755)
 
 
+def _build_gated_launch_marker_probe(path: Path) -> None:
+    compiler = shutil.which("cc")
+    if compiler is None:
+        raise unittest.SkipTest("a C compiler is required for the clock-domain launch test")
+    source = path.with_suffix(".c")
+    source.write_text(
+        """
+#define _GNU_SOURCE
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+static int write_marker(const char *path, const char *contents) {
+    int descriptor = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (descriptor < 0) {
+        return 1;
+    }
+    size_t length = strlen(contents);
+    ssize_t written = write(descriptor, contents, length);
+    int close_result = close(descriptor);
+    return written != (ssize_t)length || close_result != 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 1) {
+        return 90;
+    }
+    char marker_path[4096];
+    if (snprintf(marker_path, sizeof(marker_path), "%s.armed", argv[0]) < 0) {
+        return 91;
+    }
+    if (write_marker(marker_path, "armed\\n") != 0) {
+        return 92;
+    }
+    if (snprintf(marker_path, sizeof(marker_path), "%s.release", argv[0]) < 0) {
+        return 93;
+    }
+    for (;;) {
+        if (access(marker_path, F_OK) == 0) {
+            break;
+        }
+        usleep(1000);
+    }
+    if (snprintf(marker_path, sizeof(marker_path), "%s.launched", argv[0]) < 0) {
+        return 94;
+    }
+    return write_marker(marker_path, "launched\\n") == 0 ? 0 : 95;
+}
+""",
+        encoding="ascii",
+    )
+    subprocess.run(
+        [compiler, "-O0", "-Wall", "-Werror", str(source), "-o", str(path)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        timeout=10,
+    )
+    path.chmod(0o755)
+
+
 def _run_snapshot_descriptor_probe(
     descriptor: int,
     argv0: str,
@@ -2655,6 +2717,75 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             self.assertEqual(result.status, HealthStatus.UNKNOWN)
             self.assertIn(result.reason_code, {"timeout", "budget_exhausted", "worker_cleanup_incomplete"})
             self.assertLess(elapsed, 1.0)
+
+    def test_paused_then_advancing_clock_rejects_late_process_launch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry, _, executable_path = _manifest(root)
+            _build_gated_launch_marker_probe(executable_path)
+            armed_marker = executable_path.with_name(executable_path.name + ".armed")
+            release_marker = executable_path.with_name(executable_path.name + ".release")
+            launch_marker = executable_path.with_name(executable_path.name + ".launched")
+            checks = dict(registry.health_checks)
+            checks["check.runtime"] = replace(
+                checks["check.runtime"],
+                artifact_id="demo.exec",
+                timeout_ms=1000,
+                args={"args": []},
+            )
+            registry = replace(registry, health_checks=checks)
+
+            class PausedThenAdvancingClock:
+                def __init__(self) -> None:
+                    self.epoch = 10_000_000_000.0
+                    self.pause_seconds = 0.01
+                    self.advance_rate = 100.0
+                    self.logical_budget = 1.0
+                    self.release_grace_seconds = 0.02
+                    self.advance_origin = multiprocessing.Value("d", 0.0)
+                    self.armed_path = armed_marker
+                    self.release_path = release_marker
+
+                def __call__(self) -> float:
+                    real_now = time.monotonic()
+                    if not self.armed_path.exists():
+                        return self.epoch
+                    with self.advance_origin.get_lock():
+                        if self.advance_origin.value == 0.0:
+                            self.advance_origin.value = real_now
+                        advance_origin = self.advance_origin.value
+                    elapsed = real_now - advance_origin
+                    if elapsed < self.pause_seconds:
+                        return self.epoch
+                    logical = self.epoch + (elapsed - self.pause_seconds) * self.advance_rate
+                    release_at = (
+                        advance_origin
+                        + self.pause_seconds
+                        + self.logical_budget / self.advance_rate
+                        + self.release_grace_seconds
+                    )
+                    if real_now >= release_at:
+                        try:
+                            self.release_path.touch(exist_ok=True)
+                        except OSError:
+                            pass
+                    return logical
+
+            clock = PausedThenAdvancingClock()
+            result = HealthCheckExecutor(max_seconds=10.0, clock=clock).execute(
+                registry,
+                check_ids=("check.runtime",),
+            ).result_for("check.runtime")
+
+            self.assertTrue(armed_marker.exists(), "the process-backed probe never reached its launch wait")
+            with clock.advance_origin.get_lock():
+                self.assertGreater(clock.advance_origin.value, 0.0, "the paused clock never started advancing")
+            self.assertEqual(result.status, HealthStatus.UNKNOWN)
+            self.assertIn(result.reason_code, {"timeout", "budget_exhausted", "worker_cleanup_incomplete"})
+            self.assertFalse(
+                launch_marker.exists(),
+                "the process executed after the paused clock advanced past its deadline",
+            )
 
     def test_blocked_snapshot_cannot_launch_after_timeout(self):
         with tempfile.TemporaryDirectory() as temp:

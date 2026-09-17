@@ -221,6 +221,12 @@ class _ClockDomain:
         if real_elapsed < _CLOCK_CALIBRATION_MIN_SECONDS:
             return None
         if clock_elapsed == 0:
+            # Start a fresh calibration window at the frozen observation.  If
+            # the source resumes later, including the earlier frozen interval
+            # in the rate would under-estimate its real wait conversion and
+            # could hide the next logical deadline behind a long sleep.
+            self.clock_origin = now
+            self.real_origin = real_now
             return 0.0
         if clock_elapsed < 0:
             return None
@@ -251,13 +257,10 @@ class _ClockDomain:
             # a small real-time quantum and re-check its logical deadline.
             wait_timeout = min(remaining, _CLOCK_WAIT_QUANTUM_SECONDS)
         elif rate == 0:
-            # The independent wall deadline is the only progressing bound for
-            # a frozen logical clock.
-            wait_timeout = (
-                math.inf
-                if wall_deadline is not None
-                else min(remaining, _CLOCK_WAIT_QUANTUM_SECONDS)
-            )
+            # A frozen clock may resume and advance before the wall deadline.
+            # Keep polling so a later logical-deadline transition cannot be
+            # hidden behind one long real-time wait.
+            wait_timeout = min(remaining, _CLOCK_WAIT_QUANTUM_SECONDS)
         else:
             wait_timeout = remaining / rate
         if wall_deadline is not None:
@@ -423,16 +426,58 @@ def _deadline_remaining(
     if rate is None:
         remaining = min(remaining, _CLOCK_WAIT_QUANTUM_SECONDS)
     elif rate == 0:
-        remaining = (
-            math.inf
-            if wall_deadline is not None
-            else min(remaining, _CLOCK_WAIT_QUANTUM_SECONDS)
-        )
+        # A zero-rate observation is not proof that the injected clock will
+        # remain frozen.  Bound the real wait and re-check its deadline.
+        remaining = min(remaining, _CLOCK_WAIT_QUANTUM_SECONDS)
     else:
         remaining /= rate
     if wall_deadline is not None:
         remaining = min(remaining, max(0.0, wall_deadline - time.monotonic()))
     return max(0.0, remaining)
+
+
+def _wait_event_until(
+    event: Any,
+    deadline: float | None,
+    *,
+    clock: Callable[[], float],
+    wall_deadline: float | None,
+) -> bool:
+    """Wait for an event while allowing a frozen logical clock to resume."""
+
+    while not _deadline_expired(deadline, clock=clock, wall_deadline=wall_deadline):
+        remaining = _deadline_remaining(
+            deadline,
+            clock=clock,
+            wall_deadline=wall_deadline,
+        )
+        if remaining <= 0:
+            break
+        if event.wait(remaining):
+            return True
+    return False
+
+
+def _poll_until(
+    connection: Any,
+    deadline: float | None,
+    *,
+    clock: Callable[[], float],
+    wall_deadline: float | None,
+) -> bool:
+    """Poll a connection through bounded clock-domain wait quanta."""
+
+    while not _deadline_expired(deadline, clock=clock, wall_deadline=wall_deadline):
+        remaining = _deadline_remaining(
+            deadline,
+            clock=clock,
+            wall_deadline=wall_deadline,
+        )
+        if remaining <= 0:
+            break
+        if connection.poll(remaining):
+            return True
+    return False
 
 
 def _operation_deadline(
@@ -994,13 +1039,19 @@ def _health_launch_resume_authorized(
     restore_ok = False
     try:
         if callable(waiter) and callable(restore):
-            remaining = _deadline_remaining(
-                deadline,
-                clock=clock,
-                wall_deadline=wall_deadline,
-            )
-            if remaining > 0:
+            info = None
+            while not _deadline_expired(deadline, clock=clock, wall_deadline=wall_deadline):
+                remaining = _deadline_remaining(
+                    deadline,
+                    clock=clock,
+                    wall_deadline=wall_deadline,
+                )
+                if remaining <= 0:
+                    break
                 info = waiter({signal.SIGCONT}, remaining)
+                if info is not None:
+                    break
+            if info is not None:
                 sender_pid = getattr(info, "si_pid", None) if info is not None else None
                 sender_uid = getattr(info, "si_uid", None) if info is not None else None
                 if (
@@ -1030,12 +1081,23 @@ def _health_launch_resume_authorized(
                             if os.write(acknowledgement_descriptor, b"A\n") == 2:
                                 selector = selectors.DefaultSelector()
                                 selector.register(gate_descriptor, selectors.EVENT_READ)
-                                remaining = _deadline_remaining(
+                                gate_authorized = False
+                                while not _deadline_expired(
                                     deadline,
                                     clock=clock,
                                     wall_deadline=wall_deadline,
-                                )
-                                if selector.select(remaining) and os.read(gate_descriptor, 1) == b"E":
+                                ):
+                                    remaining = _deadline_remaining(
+                                        deadline,
+                                        clock=clock,
+                                        wall_deadline=wall_deadline,
+                                    )
+                                    if remaining <= 0:
+                                        break
+                                    if selector.select(remaining):
+                                        gate_authorized = os.read(gate_descriptor, 1) == b"E"
+                                        break
+                                if gate_authorized:
                                     authorized = final_check is None or final_check()
                                     authorized = authorized and not _deadline_expired(
                                         deadline,
@@ -1071,6 +1133,30 @@ def _health_acquire_launch_lock(lock: Any, timeout: float) -> bool:
         return bool(acquire(timeout=max(0.0, timeout)))
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
         return False
+
+
+def _health_acquire_launch_lock_until(
+    lock: Any,
+    deadline: float | None,
+    *,
+    clock: Callable[[], float],
+    wall_deadline: float | None,
+) -> bool:
+    """Acquire launch authority across bounded clock-domain wait quanta."""
+
+    if lock is None:
+        return True
+    while not _deadline_expired(deadline, clock=clock, wall_deadline=wall_deadline):
+        remaining = _deadline_remaining(
+            deadline,
+            clock=clock,
+            wall_deadline=wall_deadline,
+        )
+        if remaining <= 0:
+            break
+        if _health_acquire_launch_lock(lock, remaining):
+            return True
+    return False
 
 
 def _health_release_launch_lock(lock: Any) -> bool:
@@ -2432,8 +2518,12 @@ def _run_bounded_process(
                         launch_signal_failed[0] = True
                     return
                 if ready_announced and launch_pid is not None and not permit_sent:
-                    lock_timeout = operation_remaining()
-                    if not _health_acquire_launch_lock(launch_authority_lock, lock_timeout):
+                    if not _health_acquire_launch_lock_until(
+                        launch_authority_lock,
+                        operation_deadline,
+                        clock=clock,
+                        wall_deadline=operation_wall_deadline,
+                    ):
                         launch_gate_failed[0] = True
                         write_gate_token(b"C")
                         if launch_pidfd is not None:
@@ -2486,8 +2576,12 @@ def _run_bounded_process(
                         # siginfo is not owned by this supervisor.
                         gate_stop.wait(min(0.005, operation_remaining()))
                         continue
-                    lock_timeout = operation_remaining()
-                    if not _health_acquire_launch_lock(launch_authority_lock, lock_timeout):
+                    if not _health_acquire_launch_lock_until(
+                        launch_authority_lock,
+                        operation_deadline,
+                        clock=clock,
+                        wall_deadline=operation_wall_deadline,
+                    ):
                         launch_gate_failed[0] = True
                         if launch_pidfd is not None:
                             kill_launch()
@@ -2526,8 +2620,12 @@ def _run_bounded_process(
                                 kill_launch()
                     continue
                 if resume_signal_sent and resume_authenticated and not exec_permit_sent:
-                    lock_timeout = operation_remaining()
-                    if not _health_acquire_launch_lock(launch_authority_lock, lock_timeout):
+                    if not _health_acquire_launch_lock_until(
+                        launch_authority_lock,
+                        operation_deadline,
+                        clock=clock,
+                        wall_deadline=operation_wall_deadline,
+                    ):
                         launch_gate_failed[0] = True
                         kill_launch()
                         return
@@ -2774,15 +2872,19 @@ def _run_bounded_process(
             wait_launched_process(0.1)
         elif process.poll() is None:
             # Streams can be closed by a still-running child.  Wait for the
-            # declared deadline instead of turning that case into a synthetic
-            # non-zero failure.
-            remaining = operation_remaining()
-            try:
-                process.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                terminate_launched_process()
-                wait_launched_process(0.1)
+            # declared deadline instead of turning one frozen-clock polling
+            # quantum into a synthetic timeout.
+            while process.poll() is None:
+                remaining = operation_remaining()
+                if remaining <= 0 or operation_cancelled():
+                    timed_out = True
+                    terminate_launched_process()
+                    wait_launched_process(0.1)
+                    break
+                try:
+                    process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    continue
     except BaseException as exc:
         # An unexpected selector/pipe failure must not leave a child alive
         # after the bounded operation has been reported to Doctor.
@@ -4954,13 +5056,6 @@ def _run_health_check_in_process(
             wall_deadline=wall_deadline,
         )
 
-    def operation_remaining() -> float:
-        return _deadline_remaining(
-            deadline,
-            clock=clock,
-            wall_deadline=wall_deadline,
-        )
-
     group_owned = _establish_health_worker_group()
     try:
         try:
@@ -4969,8 +5064,12 @@ def _run_health_check_in_process(
             return
         if not group_owned:
             return
-        remaining = operation_remaining()
-        if remaining <= 0 or not launch_event.wait(remaining):
+        if not _wait_event_until(
+            launch_event,
+            deadline,
+            clock=clock,
+            wall_deadline=wall_deadline,
+        ):
             return
         if cancellation_event.is_set() or operation_expired():
             return
@@ -5066,13 +5165,6 @@ def _run_health_supervisor(
             wall_deadline=wall_deadline,
         )
 
-    def operation_remaining() -> float:
-        return _deadline_remaining(
-            deadline,
-            clock=clock,
-            wall_deadline=wall_deadline,
-        )
-
     supervisor_identity: _HealthWorkerIdentity | None = None
     tracked: dict[int, int | None] = {}
     worker_reaped: set[tuple[int, int]] = set()
@@ -5128,8 +5220,12 @@ def _run_health_supervisor(
             send_payload(_payload(HealthStatus.UNKNOWN, "worker_unavailable", detail="supervisor identity unavailable"))
             return
 
-        remaining = operation_remaining()
-        if remaining <= 0 or not launch_event.wait(remaining):
+        if not _wait_event_until(
+            launch_event,
+            deadline,
+            clock=clock,
+            wall_deadline=wall_deadline,
+        ):
             send_payload(_payload(HealthStatus.UNKNOWN, "budget_exhausted", detail="launch was cancelled before the deadline"))
             return
         if shutdown_event.is_set() or cancellation_event.is_set() or operation_expired():
@@ -5753,9 +5849,13 @@ class HealthCheckExecutor:
             ready_child.close()
             cleanup_child.close()
 
-            remaining = operation_remaining()
             raw_ready: object | None = None
-            if remaining > 0 and ready_parent.poll(remaining):
+            if _poll_until(
+                ready_parent,
+                deadline,
+                clock=self.clock,
+                wall_deadline=wall_deadline,
+            ):
                 try:
                     raw_ready = ready_parent.recv()
                 except (EOFError, OSError, ValueError):
@@ -5932,7 +6032,13 @@ class HealthCheckExecutor:
 
         thread = threading.Thread(target=worker, name="realmheart-doctor-probe", daemon=True)
         thread.start()
-        thread.join(min(timeout_seconds, operation_remaining()))
+        while thread.is_alive():
+            if operation_expired():
+                break
+            remaining = operation_remaining()
+            if remaining <= 0:
+                break
+            thread.join(min(timeout_seconds, remaining))
         if thread.is_alive():
             expired = operation_expired()
             cancellation.cancel()
