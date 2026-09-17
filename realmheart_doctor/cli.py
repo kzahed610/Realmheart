@@ -74,6 +74,7 @@ def _parser(*, manual: bool = False) -> argparse.ArgumentParser:
         if name == "doctor":
             command.add_argument("component", nargs="?")
             command.add_argument("--verbose", action="store_true")
+            command.add_argument("--state-dir", type=Path, help="explicit local directory for snapshots and incidents (no persistence by default)")
             command.add_argument("--prefix", type=_absolute_path, help="explicit installation prefix for canonical artifact paths")
             command.add_argument("--libexec", type=_absolute_path, help="explicit libexec directory")
             command.add_argument("--sysconf", type=_absolute_path, help="explicit system configuration directory")
@@ -132,10 +133,31 @@ def _manual(args: argparse.Namespace) -> int:
             payload = {"format_version": 1, "status": "error", "error": "unknown component"}
             print(json.dumps(payload) if args.json else "Unknown component; run realmheart-doctor components")
             return 4
-        with _installation_environment(args):
+        try:
             receipt = load_installed_receipt(args.receipt) if args.receipt else None
+        except (ForensicContractError, OSError):
+            payload = {"format_version": 1, "status": "error", "error": "receipt_configuration_error"}
+            print(json.dumps(payload) if args.json else "Doctor receipt configuration error")
+            return 5
+        with _installation_environment(args):
             result = diagnose(registry, args.component, receipt=receipt)
-        print(json.dumps(result.to_dict(), indent=2, sort_keys=True) if args.json else render_diagnosis(result, verbose=args.verbose))
+        payload = result.to_dict()
+        if args.state_dir is not None:
+            from .state import record_diagnosis
+            from .incidents import record_component_failure
+
+            try:
+                state = record_diagnosis(args.state_dir, result)
+                events = [record_component_failure(args.state_dir, component.id)
+                          for component in result.components]
+            except OSError:
+                payload["state"] = {"error": "state_persistence_failed"}
+                print(json.dumps(payload, indent=2, sort_keys=True) if args.json else
+                      render_diagnosis(result, verbose=args.verbose) + "\nDoctor state persistence failed")
+                return 5
+            payload["state"] = {"recovered": list(state.recovered),
+                                "incident_ids": [event.incident_id for event in events if event is not None]}
+        print(json.dumps(payload, indent=2, sort_keys=True) if args.json else render_diagnosis(result, verbose=args.verbose))
         return EXIT_CODES[result.overall]
     components = [{"id": key, "name": registry.components[key].name,
                    "category": registry.components[key].category} for key in registry.component_order]

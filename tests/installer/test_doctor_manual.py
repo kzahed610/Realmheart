@@ -32,6 +32,42 @@ class DoctorManualTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(result.stdout)["doctor_version"], "0.7.8")
 
+    def test_explicit_state_directory_records_diagnosis_and_incident(self):
+        from unittest.mock import patch
+        from .test_doctor_incidents import _diagnosis
+        from realmheart_doctor.diagnosis import ComponentHealth
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "state"
+            with patch("realmheart_doctor.diagnosis.diagnose", return_value=_diagnosis(ComponentHealth.FAILED)):
+                code, payload = self.invoke("doctor", "--state-dir", str(root), "--json")
+            self.assertEqual(code, 2)
+            self.assertEqual(json.loads((root / "current.json").read_text())["overall"], "failed")
+            self.assertEqual(len(payload["state"]["incident_ids"]), 1)
+            incident_id = payload["state"]["incident_ids"][0]
+            self.assertEqual(json.loads((root / "incidents" / f"{incident_id}.json").read_text())["component_id"], "demo")
+
+    def test_state_write_failure_keeps_diagnosis_in_clean_json(self):
+        from unittest.mock import patch
+        from .test_doctor_incidents import _diagnosis
+        from realmheart_doctor.diagnosis import ComponentHealth
+        with tempfile.TemporaryDirectory() as temp:
+            blocked = Path(temp) / "file"
+            blocked.write_text("preserve")
+            with patch("realmheart_doctor.diagnosis.diagnose", return_value=_diagnosis(ComponentHealth.FAILED)):
+                code, payload = self.invoke("doctor", "--state-dir", str(blocked), "--json")
+            self.assertEqual(code, 5)
+            self.assertEqual(payload["overall"], "failed")
+            self.assertEqual(payload["state"]["error"], "state_persistence_failed")
+            self.assertEqual(blocked.read_text(), "preserve")
+
+    def test_invalid_receipt_has_clean_json_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            receipt = Path(temp) / "receipt.json"
+            receipt.write_text("{invalid")
+            code, payload = self.invoke("doctor", "--receipt", str(receipt), "--json")
+            self.assertEqual(code, 5)
+            self.assertEqual(payload["error"], "receipt_configuration_error")
+
     def test_components_discovers_canonical_registry(self):
         code, payload = self.invoke("components", "--manifest-dir", "components", "--json")
         self.assertEqual(code, 0)
