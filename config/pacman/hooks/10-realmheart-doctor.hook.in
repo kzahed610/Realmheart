@@ -1,0 +1,11 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = *
+
+[Action]
+Description = Noting package changes for Realmheart Doctor
+When = PostTransaction
+Exec = @REALMHEART_MARKER_EXECUTABLE@

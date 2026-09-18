@@ -1,6 +1,7 @@
 """Boot Doctor: one-shot per session, non-interactive, failure-isolated."""
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -57,6 +58,23 @@ class DoctorBootTests(unittest.TestCase):
         _, kwargs = executor.execute.call_args
         self.assertEqual(kwargs.get("context"), "doctor_background")
         self.assertEqual(kwargs.get("max_cost"), "cheap")
+
+    def test_boot_consumes_a_pending_package_update_marker(self):
+        executor = _executor(HealthStatus.PASS)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state = root / "state"
+            marker = root / "post-update.pending"
+            marker.write_text("")
+            log = root / "pacman.log"
+            log.write_text("", encoding="utf-8")
+            run_boot(_registry(), state_root=state, session_key="sess-update", executor=executor,
+                     notifier=lambda title, body: None, marker_path=marker, log_path=log)
+            session = next((state / "sessions").glob("*.json"))
+            payload = json.loads(session.read_text(encoding="utf-8"))
+            self.assertIsNotNone(payload["package_updates"])
+            self.assertTrue(payload["package_updates"]["marker_consumed"])
+            self.assertTrue((state / "post-update.json").is_file())
 
     def test_boot_failure_creates_one_incident_and_notifies_once(self):
         executor = _executor(HealthStatus.FAIL)

@@ -74,6 +74,12 @@ def _parser(*, manual: bool = False) -> argparse.ArgumentParser:
     boot.add_argument("--manifest-dir", type=Path, default=Path(os.environ.get("REALMHEART_DOCTOR_MANIFEST_DIR", "components")))
     boot.add_argument("--no-notify", action="store_true")
     boot.add_argument("--json", action="store_true")
+    post_update = sub.add_parser("post-update", help="correlate relevant package transactions after a system update")
+    post_update.add_argument("--state-dir", type=Path, required=True)
+    post_update.add_argument("--manifest-dir", type=Path, default=Path(os.environ.get("REALMHEART_DOCTOR_MANIFEST_DIR", "components")))
+    post_update.add_argument("--since", help="ISO-8601 timestamp overriding the pacman-hook marker")
+    post_update.add_argument("--no-notify", action="store_true")
+    post_update.add_argument("--json", action="store_true")
     assess = sub.add_parser("assess-install", help="independently assess a candidate Realmheart installation")
     assess.add_argument("--candidate", type=Path, required=True)
     assess.add_argument("--manifest-dir", type=Path, default=Path(os.environ.get("REALMHEART_DOCTOR_MANIFEST_DIR", "components")))
@@ -167,6 +173,48 @@ def main(argv: list[str] | None = None) -> int:
                            notifier=None if args.no_notify else _notifier)
         payload = {"format_version": 1, "mode": outcome.mode, "notifications": notified}
         print(json.dumps(payload, sort_keys=True) if args.json else f"boot: {outcome.mode}")
+        return 0
+    if args.command == "post-update":
+        from datetime import datetime, timezone
+
+        from .post_update import run_post_update
+
+        try:
+            registry = load_manifest(args.manifest_dir)
+        except (ManifestError, OSError, ForensicContractError):
+            payload = {"format_version": 1, "status": "error", "error": "manifest_configuration_error"}
+            print(json.dumps(payload, sort_keys=True) if args.json else "Doctor manifest configuration error")
+            return 5
+        since = None
+        if args.since:
+            try:
+                since = datetime.fromisoformat(args.since)
+            except ValueError:
+                payload = {"format_version": 1, "status": "error", "error": "invalid_invocation"}
+                print(json.dumps(payload, sort_keys=True) if args.json else
+                      "Invalid --since timestamp; expected ISO-8601")
+                return 4
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=timezone.utc)
+        notifier = None
+        if not args.no_notify:
+            from .notify_backends import deliver
+
+            def notifier(title: str, body: str) -> None:
+                if not deliver(title, body):
+                    raise RuntimeError("notification delivery failed")
+
+        outcome = run_post_update(registry, args.state_dir, notifier=notifier, since=since)
+        payload = outcome.to_dict()
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"post-update: {outcome.mode}")
+            if outcome.report is not None:
+                for component in outcome.report.affected_components:
+                    print(f"  affected: {component}")
+                for transaction in outcome.report.transactions:
+                    print(f"  {transaction.get('package')}: {transaction.get('previous')} -> {transaction.get('current')}")
         return 0
     if args.command == "incident":
         from .incident_reports import load_incident, render_incident, write_report

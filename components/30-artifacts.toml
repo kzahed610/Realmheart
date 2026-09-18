@@ -925,3 +925,56 @@ cost = "cheap"
 side_effects = "none"
 timeout_ms = 500
 contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+# Post-transaction integration: the pacman hook only records that packages
+# changed; the Doctor correlates the change afterwards.
+[[artifacts]]
+id = "doctor.pacman-hook"
+component_id = "realmheart-core"
+path = "$SYSCONF/pacman.d/hooks/10-realmheart-doctor.hook"
+type = "config"
+required = true
+ownership = "system"
+managed = true
+source = "config/pacman/hooks/10-realmheart-doctor.hook.in"
+
+[[artifacts]]
+id = "doctor.update-marker"
+component_id = "realmheart-core"
+path = "$LIBEXEC/realmheart/realmheart-post-update-marker"
+type = "executable"
+required = true
+ownership = "system"
+managed = true
+source = "config/pacman/realmheart-post-update-marker.sh"
+mode = "0755"
+
+[[health_checks]]
+id = "check.doctor.pacman-hook.exists"
+component_id = "realmheart-core"
+check = "artifact_exists"
+artifact_id = "doctor.pacman-hook"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.doctor.update-marker.exists"
+component_id = "realmheart-core"
+check = "artifact_exists"
+artifact_id = "doctor.update-marker"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.doctor.update-marker.executable"
+component_id = "realmheart-core"
+check = "artifact_executable"
+artifact_id = "doctor.update-marker"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]

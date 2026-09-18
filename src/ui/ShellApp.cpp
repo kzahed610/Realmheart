@@ -1,6 +1,7 @@
 #include "ui/ShellApp.hpp"
 
 #include "core/ShellControl.hpp"
+#include "core/DoctorBoot.hpp"
 #include "core/RestartHandshake.hpp"
 #include "core/TaskExecutor.hpp"
 #include "effects/core/EffectRegistry.hpp"
@@ -619,6 +620,12 @@ public:
 
     void activate() {
         ensure_core_initialized();
+        if (!doctor_boot_spawned_) {
+            doctor_boot_spawned_ = true;
+            // Best-effort detached one-shot; the Doctor dedupes per compositor
+            // session and shell startup never waits on it.
+            static_cast<void>(core::spawn_doctor_boot(core::current_executable_directory()));
+        }
         state_.show_bar();
         apply_bar_visibility();
         schedule_workspace_overview_prewarm();
@@ -3773,6 +3780,7 @@ private:
         std::make_shared<NowPlayingAsyncState>();
     std::shared_ptr<RuntimeAsyncState> runtime_async_state_ =
         std::make_shared<RuntimeAsyncState>();
+    bool doctor_boot_spawned_ = false;
     bool now_playing_monitor_started_ = false;
     guint now_playing_monitor_retry_id_ = 0;
     unsigned int now_playing_monitor_retry_attempts_ = 0;

@@ -77,6 +77,7 @@ set(REALMHEART_WARNING_FLAGS
 set(REALMHEART_RUNTIME_SOURCES
     src/core/Command.cpp
     src/core/Diagnostics.cpp
+    src/core/DoctorBoot.cpp
     src/core/ModuleRegistry.cpp
     src/core/ShellCommand.cpp
     src/core/ShellControl.cpp
@@ -752,6 +753,25 @@ endif()
 # PAM service for the lockscreen (requires root at install time).
 install(FILES config/pam/realmheart-lockscreen DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/pam.d COMPONENT lockscreen-auth)
 
+# Optional post-transaction integration: the pacman hook only records that
+# packages changed; the Doctor correlates the change afterwards. Installed
+# system-side by the installer and removed again on uninstall.
+install(
+    PROGRAMS config/pacman/realmheart-post-update-marker.sh
+    DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/realmheart
+    RENAME realmheart-post-update-marker
+    COMPONENT realmheart-core
+)
+configure_file(
+    "${CMAKE_SOURCE_DIR}/cmake/RealmheartInstallPostUpdateHook.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/cmake/RealmheartInstallPostUpdateHook.cmake"
+    @ONLY
+)
+install(
+    SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/cmake/RealmheartInstallPostUpdateHook.cmake"
+    COMPONENT realmheart-core
+)
+
 # Realmheart Doctor Acceptance MVP and shared maintenance contract. These are
 # pure-Python/read-only at runtime and deliberately ship with Realmheart so the
 # installer can obtain an independent post-install acceptance verdict without
@@ -877,6 +897,14 @@ if(BUILD_TESTING)
 
     add_executable(realmheart_command_tests tests/CommandTests.cpp src/core/Command.cpp)
     realmheart_register_test(realmheart_command_tests)
+
+    add_executable(
+        realmheart_doctor_boot_tests
+        tests/DoctorBootTests.cpp
+        src/core/DoctorBoot.cpp
+        src/core/Command.cpp
+    )
+    realmheart_register_test(realmheart_doctor_boot_tests)
 
     if(REALMHEART_ENABLE_SCREENSHOT)
         add_executable(
