@@ -646,7 +646,7 @@ if(REALMHEART_NATIVE_WALLPAPER_BUILT)
 endif()
 
 if(TARGET realmheart_fx)
-    install(TARGETS realmheart_fx LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/realmheart)
+    install(TARGETS realmheart_fx LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/realmheart COMPONENT realmheart-fx)
     set(REALMHEART_PLUGIN_RELATIVE_DIR "../${CMAKE_INSTALL_LIBDIR}/realmheart")
     configure_file(
         "${CMAKE_SOURCE_DIR}/config/bin/realmheart-fx-load"
@@ -656,17 +656,20 @@ if(TARGET realmheart_fx)
     install(
         PROGRAMS "${CMAKE_CURRENT_BINARY_DIR}/realmheart-fx-load"
         DESTINATION ${CMAKE_INSTALL_BINDIR}
+        COMPONENT realmheart-fx
     )
 endif()
 
-install(TARGETS realmheart realmheart_power_menu_renderer realmheart_eventd realmheart_event_cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS realmheart realmheart_power_menu_renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT realmheart-core)
+install(TARGETS realmheart_eventd realmheart_event_cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT event-surface)
 if(REALMHEART_ENABLE_SCREENSHOT)
-    install(TARGETS realmheart_screenshot RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-    install(TARGETS realmheart_screenshot_regions RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(TARGETS realmheart_screenshot RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT screenshot)
+    install(TARGETS realmheart_screenshot_regions RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT screenshot)
 endif()
 install(TARGETS realmheart_auth_helper
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/realmheart
     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE SETUID
+    COMPONENT lockscreen-auth
 )
 # The helper must be root-owned as well as setuid. A normal unprivileged build
 # must never produce a seemingly usable helper that AuthPam would execute.
@@ -731,22 +734,23 @@ string(REPLACE
     _realmheart_auth_helper_install_code
     "${_realmheart_auth_helper_install_code}"
 )
-install(CODE "${_realmheart_auth_helper_install_code}")
+install(CODE "${_realmheart_auth_helper_install_code}" COMPONENT lockscreen-auth)
 unset(_realmheart_auth_helper_install_code)
 if(REALMHEART_NATIVE_WALLPAPER_BUILT)
-    install(TARGETS realmheart-wallpaper-renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(TARGETS realmheart-wallpaper-renderer RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT wallpaper-native)
 endif()
-install(DIRECTORY assets/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/assets)
-install(DIRECTORY styles/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/styles)
-install(DIRECTORY effects/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/effects)
+install(DIRECTORY assets/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/assets COMPONENT realmheart-core)
+install(DIRECTORY styles/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/styles COMPONENT realmheart-core)
+install(DIRECTORY effects/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/effects COMPONENT realmheart-core)
 get_property(REALMHEART_BUILD_FINGERPRINT_FILES GLOBAL PROPERTY REALMHEART_BUILD_FINGERPRINT_FILES)
 if(REALMHEART_BUILD_FINGERPRINT_FILES)
     install(DIRECTORY "${CMAKE_BINARY_DIR}/build-fingerprints/"
             DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/build-fingerprints
+            COMPONENT realmheart-core
             FILES_MATCHING PATTERN "*.json")
 endif()
 # PAM service for the lockscreen (requires root at install time).
-install(FILES config/pam/realmheart-lockscreen DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/pam.d)
+install(FILES config/pam/realmheart-lockscreen DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/pam.d COMPONENT lockscreen-auth)
 
 # Realmheart Doctor Acceptance MVP and shared maintenance contract. These are
 # pure-Python/read-only at runtime and deliberately ship with Realmheart so the
@@ -756,15 +760,18 @@ install(
     PROGRAMS tools/realmheart-doctor.py
     DESTINATION ${CMAKE_INSTALL_BINDIR}
     RENAME realmheart-doctor
+    COMPONENT realmheart-core
 )
 install(
     DIRECTORY realmheart_doctor realmheart_maintenance
     DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/python
+    COMPONENT realmheart-core
     FILES_MATCHING PATTERN "*.py"
 )
 install(
     DIRECTORY components/
     DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/components
+    COMPONENT realmheart-core
     FILES_MATCHING PATTERN "*.toml"
 )
 

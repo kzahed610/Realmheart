@@ -32,8 +32,8 @@ def _receipt_path(value: str) -> Path:
 
 @contextmanager
 def _installation_environment(args: argparse.Namespace):
-    overrides = {name.upper(): getattr(args, name) for name in ("prefix", "libexec", "sysconf")
-                 if getattr(args, name) is not None}
+    overrides = {name.upper(): getattr(args, name, None) for name in ("prefix", "libexec", "sysconf")
+                 if getattr(args, name, None) is not None}
     if "PREFIX" in overrides and "LIBEXEC" not in overrides:
         overrides["LIBEXEC"] = str(Path(overrides["PREFIX"]) / "libexec")
     previous = {name: os.environ.get(name) for name in overrides}
@@ -78,6 +78,18 @@ def _parser(*, manual: bool = False) -> argparse.ArgumentParser:
     assess.add_argument("--candidate", type=Path, required=True)
     assess.add_argument("--manifest-dir", type=Path, default=Path(os.environ.get("REALMHEART_DOCTOR_MANIFEST_DIR", "components")))
     assess.add_argument("--json", action="store_true")
+    repair = sub.add_parser("repair", help="consent-gated repair of one component (dry run unless --apply)")
+    repair.add_argument("component")
+    repair.add_argument("--apply", action="store_true", help="execute the plan instead of printing it")
+    repair.add_argument("--yes", action="store_true", help="answer yes to CONFIRM actions")
+    repair.add_argument("--allow-privileged", action="store_true",
+                        help="allow PRIVILEGED_CONFIRM actions after consent")
+    repair.add_argument("--build-dir", type=_absolute_path, help="explicit build directory for targeted rebuilds")
+    repair.add_argument("--prefix", type=_absolute_path, help="explicit installation prefix for targeted installs")
+    repair.add_argument("--manifest-dir", type=Path, default=Path(os.environ.get("REALMHEART_DOCTOR_MANIFEST_DIR", "components")))
+    repair.add_argument("--receipt", type=_receipt_path, help="installed-state.json receipt (build provenance)")
+    repair.add_argument("--state-dir", type=Path, help="explicit local directory for repair records")
+    repair.add_argument("--json", action="store_true")
     for name in ("doctor", "components", "validate-manifests"):
         command = sub.add_parser(name)
         command.add_argument("--manifest-dir", type=Path, default=Path(os.environ.get("REALMHEART_DOCTOR_MANIFEST_DIR", "components")))
@@ -194,6 +206,142 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _consent_callback(args):
+    """Interactive consent for non-SAFE actions; never granted implicitly."""
+
+    def consent(action) -> bool:
+        privileged = action.risk == "PRIVILEGED_CONFIRM"
+        if privileged and not args.allow_privileged:
+            print("Doctor will not run privileged repairs without --allow-privileged", file=sys.stderr)
+            return False
+        if not sys.stdin.isatty():
+            return bool(args.yes)
+        print(f"Doctor wants to perform: {action.description}", file=sys.stderr)
+        try:
+            answer = input().strip().lower()
+        except EOFError:
+            return False
+        return answer in {"y", "yes"}
+
+    return consent
+
+
+def _repair_exit_code(report) -> int:
+    if report.verified:
+        return 0
+    succeeded = any(item.status == "succeeded" for item in report.executions)
+    refused = any(item.status == "skipped_no_consent" for item in report.executions)
+    if refused and not succeeded:
+        return 4
+    if report.component_status == "failed":
+        return 2
+    return 3
+
+
+def _repair(args: argparse.Namespace, registry) -> int:
+    from .classification import classify_failure
+    from .diagnosis import diagnose
+    from .incidents import record_component_recovery, record_repair_attempt, recorded_attempt_fingerprints
+    from .repair import RepairContext, assess_repair_evidence, plan_repairs
+    from .repair_runners import default_repair_runners, render_repair_plan, render_repair_report, run_repair_plan
+
+    if args.component not in registry.components:
+        payload = {"format_version": 1, "status": "error", "error": "unknown component"}
+        print(json.dumps(payload) if args.json else "Unknown component; run realmheart-doctor components")
+        return 4
+    try:
+        receipt = load_installed_receipt(args.receipt) if args.receipt else None
+    except (ForensicContractError, OSError):
+        payload = {"format_version": 1, "status": "error", "error": "receipt_configuration_error"}
+        print(json.dumps(payload) if args.json else "Doctor receipt configuration error")
+        return 5
+
+    def _diagnose():
+        with _installation_environment(args):
+            return diagnose(registry, args.component, receipt=receipt)
+
+    diagnosis = _diagnose()
+    component = next(item for item in diagnosis.components if item.id == args.component)
+    evidence = assess_repair_evidence(registry, args.component)
+    classification = classify_failure(
+        component.checks,
+        missing_capabilities=evidence.missing_capability_ids,
+        failed_capabilities=evidence.failed_capability_ids,
+    )
+    spec = registry.components[args.component]
+    plan = plan_repairs(args.component, classification, context=RepairContext(
+        component_id=args.component,
+        strategy_ids=spec.repair_strategy_ids,
+        packages=evidence.packages,
+        gated_packages=evidence.gated_packages,
+        build_targets=evidence.build_targets,
+        service_units=evidence.service_units,
+        installer_bound=spec.requires_installer_binding,
+        notes=evidence.notes,
+    ))
+    if plan is None:
+        payload = {
+            "format_version": 1, "mode": "no_plan", "component": args.component,
+            "status": component.status.value, "failure_class": classification.failure_class,
+            "notes": list(evidence.notes),
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        elif component.status.value == "healthy":
+            print(f"{args.component} is healthy; no repair was planned")
+        else:
+            print(f"No executable repair is available for {args.component} "
+                  f"({classification.failure_class}).")
+            for note in evidence.notes:
+                print(f"  note: {note}")
+        return 0 if component.status.value == "healthy" else 3
+    if not args.apply:
+        payload = {"format_version": 1, "mode": "dry_run", "plan": plan.to_dict()}
+        print(json.dumps(payload, indent=2, sort_keys=True) if args.json else render_repair_plan(plan))
+        return 0
+
+    provenance = receipt.build_provenance if receipt is not None else None
+    build_dir = args.build_dir or (provenance.cmake_binary_dir if provenance is not None else None)
+    prefix = args.prefix or (provenance.cmake_install_prefix if provenance is not None else None)
+    runners = default_repair_runners(
+        component_id=args.component, build_dir=build_dir, prefix=prefix,
+        installer_bound=spec.requires_installer_binding,
+    )
+    attempted = recorded_attempt_fingerprints(args.state_dir, args.component) if args.state_dir else ()
+
+    def verifier():
+        post = _diagnose()
+        entry = next(item for item in post.components if item.id == args.component)
+        if args.state_dir is not None:
+            from .state import record_diagnosis
+
+            try:
+                record_diagnosis(args.state_dir, post)
+            except OSError:
+                pass
+        detail = ", ".join(entry.uncertainties) or f"{len(entry.checks)} checks re-run"
+        return entry.status.value, detail
+
+    report = run_repair_plan(plan, consent=_consent_callback(args), runners=runners,
+                             verifier=verifier, attempted=attempted)
+    if args.state_dir is not None:
+        try:
+            record_repair_attempt(args.state_dir, args.component,
+                                  tuple(item.to_dict() for item in report.executions),
+                                  outcome=report.component_status or "unknown")
+            if report.verified:
+                record_component_recovery(args.state_dir, args.component)
+        except OSError:
+            payload = {"format_version": 1, "status": "error", "error": "state_persistence_failed",
+                       "plan": plan.to_dict(), "report": report.to_dict()}
+            print(json.dumps(payload, indent=2, sort_keys=True) if args.json else
+                  render_repair_report(report) + "\nDoctor state persistence failed")
+            return 5
+    payload = {"format_version": 1, "mode": "applied", "plan": plan.to_dict(), "report": report.to_dict()}
+    print(json.dumps(payload, indent=2, sort_keys=True) if args.json else render_repair_report(report))
+    return _repair_exit_code(report)
+
+
 def _manual(args: argparse.Namespace) -> int:
     from .diagnosis import EXIT_CODES, diagnose, render_diagnosis
 
@@ -203,6 +351,8 @@ def _manual(args: argparse.Namespace) -> int:
         payload = {"format_version": 1, "status": "error", "error": "manifest_configuration_error"}
         print(json.dumps(payload, sort_keys=True) if args.json else "Doctor manifest configuration error")
         return 5
+    if args.command == "repair":
+        return _repair(args, registry)
     if args.command == "doctor":
         if args.component is not None and args.component not in registry.components:
             payload = {"format_version": 1, "status": "error", "error": "unknown component"}

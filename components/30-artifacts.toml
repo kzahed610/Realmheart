@@ -907,6 +907,16 @@ timeout_ms = 500
 contexts = ["install_verify", "doctor_background", "doctor_manual"]
 
 [[health_checks]]
+id = "check.doctor.python-runtime.exists"
+component_id = "realmheart-core"
+check = "artifact_exists"
+artifact_id = "doctor.python-runtime"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
 id = "check.doctor.manifests.exists"
 component_id = "realmheart-core"
 check = "artifact_exists"

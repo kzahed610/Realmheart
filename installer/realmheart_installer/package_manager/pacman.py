@@ -13,6 +13,7 @@ import re
 from typing import Iterable, Mapping
 
 from realmheart_maintenance.manifest import ManifestRegistry, load_manifest
+from realmheart_maintenance.packages import PACMAN_DEPENDENCY_PROVIDERS, PacmanProvider
 
 from ..environment.capabilities import CapabilityResult, RequirementLevel
 from ..environment.command import CommandRunner
@@ -28,87 +29,11 @@ from .base import (
 
 
 @dataclass(frozen=True)
-class PacmanProvider:
-    packages: tuple[str, ...]
-    automatic: bool = True
-    note: str | None = None
-
-
-@dataclass(frozen=True)
 class PacmanUpgradeCheck:
     ok: bool
     pending: tuple[str, ...]
     error: str | None = None
 
-
-# Verified Arch/CachyOS provider mapping keyed by logical dependency ID.
-# Capability ownership and lifecycle live in components/*.toml; the adapter only
-# knows how Arch spells providers for those logical dependencies.
-PACMAN_DEPENDENCY_PROVIDERS: Mapping[str, PacmanProvider] = {
-    'dep.build.cmake': PacmanProvider(('cmake',)),
-    'dep.build.ninja': PacmanProvider(('ninja',)),
-    'dep.build.pkg-config': PacmanProvider(('pkgconf',)),
-    'dep.runtime.python3': PacmanProvider(('python',)),
-    'dep.runtime.bash': PacmanProvider(('bash',)),
-    'dep.runtime.hyprctl': PacmanProvider(('hyprland',), automatic=False, note='Realmheart does not install or replace Hyprland'),
-    'dep.runtime.systemctl': PacmanProvider(('systemd',), automatic=False, note='Realmheart requires an already usable systemd user session'),
-    'dep.runtime.systemd-inhibit': PacmanProvider(('systemd',), automatic=False, note='requires the host systemd stack'),
-    'dep.runtime.loginctl': PacmanProvider(('systemd',), automatic=False, note='requires the host systemd/logind stack'),
-    'dep.runtime.wpctl': PacmanProvider(('wireplumber',)),
-    'dep.runtime.pactl': PacmanProvider(('libpulse',)),
-    'dep.runtime.brightnessctl': PacmanProvider(('brightnessctl',)),
-    'dep.runtime.hypridle': PacmanProvider(('hypridle',)),
-    'dep.runtime.hyprsunset': PacmanProvider(('hyprsunset',)),
-    'dep.runtime.hyprlock': PacmanProvider(('hyprlock',)),
-    'dep.runtime.matugen': PacmanProvider(('matugen',)),
-    'dep.wl-clipboard': PacmanProvider(('wl-clipboard',)),
-    'dep.runtime.cliphist': PacmanProvider(('cliphist',)),
-    'dep.runtime.tesseract': PacmanProvider(('tesseract',)),
-    'dep.runtime.wf-recorder': PacmanProvider(('wf-recorder',)),
-    'dep.runtime.grim': PacmanProvider(('grim',)),
-    'dep.runtime.slurp': PacmanProvider(('slurp',)),
-    'dep.runtime.curl': PacmanProvider(('curl',)),
-    'dep.runtime.notify-send': PacmanProvider(('libnotify',)),
-    'dep.runtime.kitty': PacmanProvider(('kitty',)),
-    'dep.runtime.fish': PacmanProvider(('fish',)),
-    'dep.runtime.starship': PacmanProvider(('starship',)),
-    'dep.runtime.xdg-user-dir': PacmanProvider(('xdg-user-dirs',)),
-    'dep.runtime.pidof': PacmanProvider(('procps-ng',)),
-    'dep.runtime.playerctl': PacmanProvider(('playerctl',)),
-    'dep.runtime.bc': PacmanProvider(('bc',)),
-    'dep.runtime.find': PacmanProvider(('findutils',)),
-    'dep.runtime.shuf': PacmanProvider(('coreutils',)),
-    'dep.runtime.xargs': PacmanProvider(('findutils',)),
-    'dep.dbus': PacmanProvider(('dbus',)),
-    'dep.lib.gio': PacmanProvider(('glib2',)),
-    'dep.lib.gtk4': PacmanProvider(('gtk4',)),
-    'dep.lib.gtk4-layer-shell': PacmanProvider(('gtk4-layer-shell',)),
-    'dep.lib.epoxy': PacmanProvider(('libepoxy',)),
-    'dep.lib.gdk-pixbuf': PacmanProvider(('gdk-pixbuf2',)),
-    'dep.lib.jpeg': PacmanProvider(('libjpeg-turbo',)),
-    'dep.lib.sqlite3': PacmanProvider(('sqlite',)),
-    'dep.hyprland.devel': PacmanProvider(('hyprland',), automatic=False, note="Realmheart does not install or replace Hyprland; the development API must match the user's compositor"),
-    'dep.lib.glesv2': PacmanProvider(('libglvnd',)),
-    'dep.wayland.client': PacmanProvider(('wayland',)),
-    'dep.wayland.wlr-protocols': PacmanProvider(('wlr-protocols',)),
-    'dep.wallpaper.wayland-egl': PacmanProvider(('wayland',)),
-    'dep.wallpaper.egl': PacmanProvider(('libglvnd',)),
-    'dep.wallpaper.wayland-protocols': PacmanProvider(('wayland-protocols',)),
-    'dep.wayland.scanner': PacmanProvider(('wayland',)),
-    'dep.build.cxx26': PacmanProvider(('gcc',)),
-    'dep.opencv.ximgproc': PacmanProvider(('opencv',)),
-    'dep.pam.devel': PacmanProvider(('pam',)),
-    'dep.verification.gtest': PacmanProvider(('gtest',)),
-    'dep.tesseract.lang.eng': PacmanProvider(('tesseract-data-eng',)),
-    'dep.runtime.nmcli': PacmanProvider(('networkmanager',), note="package install does not enable or replace the user's networking backend"),
-    'dep.runtime.bluetoothctl': PacmanProvider(('bluez', 'bluez-utils'), note='package install does not synthesize Bluetooth hardware'),
-    'dep.runtime.powerprofilesctl': PacmanProvider(('power-profiles-daemon',)),
-    'dep.runtime.systemd-user': PacmanProvider(('systemd',), automatic=False, note='Realmheart will not replace the host init/session stack'),
-    'dep.runtime.portal-hyprland': PacmanProvider(('xdg-desktop-portal-hyprland',)),
-    'dep.runtime.lens-url-opener': PacmanProvider(('xdg-utils',)),
-    'dep.runtime.fx-loader-tools': PacmanProvider(('grep', 'coreutils')),
-    'dep.install.privileged-file-tools': PacmanProvider(('coreutils',)),
-}
 
 
 def _repo_root() -> Path:

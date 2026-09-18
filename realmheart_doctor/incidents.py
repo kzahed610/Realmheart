@@ -187,7 +187,6 @@ def record_component_recovery(
     now: datetime | None = None,
 ) -> IncidentEvent | None:
     """Resolve open incidents only when current evidence verifies recovery."""
-
     if now is None:
         now = datetime.now(timezone.utc)
     root = Path(root)
@@ -214,3 +213,94 @@ def record_component_recovery(
         _atomic_write_json(incident_path, payload)
         result = IncidentEvent(incident_path.stem)
     return result
+
+
+def recorded_attempt_fingerprints(root: Path, component_id: str) -> tuple[str, ...]:
+    """Return repair-action fingerprints already attempted for this component.
+
+    Only unresolved incidents count: after a verified recovery the same repair
+    is allowed again if the condition ever returns.
+    """
+
+    root = Path(root)
+    fingerprints: set[str] = set()
+    for path in sorted(_incidents_dir(root).glob("RH-*.json")):
+        payload = _read_payload(path)
+        if (payload is None or payload.get("component_id") != component_id
+                or payload.get("resolution_state") != _UNRESOLVED):
+            continue
+        attempts = payload.get("repair_attempts")
+        if not isinstance(attempts, list):
+            continue
+        for item in attempts:
+            if isinstance(item, dict) and isinstance(item.get("fingerprint"), str):
+                fingerprints.add(item["fingerprint"])
+    return tuple(sorted(fingerprints))
+
+
+def record_repair_attempt(
+    root: Path,
+    component_id: str,
+    executions: tuple[dict[str, object], ...],
+    *,
+    outcome: str,
+    now: datetime | None = None,
+) -> IncidentEvent | None:
+    """Record manual repair attempts and their verification on the incident.
+
+    A repair may target a degraded component that never raised an incident;
+    the attempt is still recorded, in a fresh incident, because a failed
+    repair must never disappear from the record.
+    """
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+    root = Path(root)
+    existing, incidents_dir = _find_open_incident(root, component_id)
+    timestamp = now.isoformat()
+    if existing is None:
+        incident_id = _next_incident_id(incidents_dir, now)
+        payload: dict = {
+            "format_version": STATE_FORMAT_VERSION,
+            "id": incident_id,
+            "component_id": component_id,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "health_state": "repair",
+            "failure_class": "REPAIR_ATTEMPT",
+            "confidence": "MEDIUM",
+            "symptoms": ["a manual repair attempt was recorded"],
+            "expected": "component passes its canonical health checks",
+            "observed": "manual repair executed",
+            "last_known_good": _read_lkg_summary(root, component_id),
+            "relevant_changes": [],
+            "checks": [],
+            "repair_attempts": [],
+            "resolution_state": _UNRESOLVED,
+            "failure_fingerprint": hashlib.sha256(
+                f"repair:{component_id}:{timestamp}".encode()
+            ).hexdigest(),
+            "timeline": [],
+        }
+    else:
+        incident_id = existing
+        payload = _read_payload(incidents_dir / f"{existing}.json")
+        if payload is None or not isinstance(payload.get("timeline"), list):
+            return None
+    attempts = payload.get("repair_attempts")
+    if not isinstance(attempts, list):
+        attempts = []
+        payload["repair_attempts"] = attempts
+    for execution in executions:
+        entry = dict(execution)
+        entry.setdefault("timestamp", timestamp)
+        attempts.append(entry)
+    payload["timeline"].append({
+        "timestamp": timestamp,
+        "event_type": "REPAIR_ATTEMPTED",
+        "summary": f"{len(executions)} repair step(s) recorded; outcome {outcome}",
+        "details": {"statuses": [str(item.get("status")) for item in executions]},
+    })
+    payload["updated_at"] = timestamp
+    _atomic_write_json(incidents_dir / f"{incident_id}.json", payload)
+    return IncidentEvent(incident_id)

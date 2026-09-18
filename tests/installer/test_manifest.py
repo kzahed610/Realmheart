@@ -47,7 +47,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(len(registry.dependencies), 63)
         self.assertEqual(len(registry.capabilities), 65)
         self.assertEqual(len(registry.artifacts), 35)
-        self.assertEqual(len(registry.health_checks), 54)
+        self.assertEqual(len(registry.health_checks), 55)
         self.assertEqual(len(registry.build_units), 9)
         self.assertEqual(registry.artifacts["terminal.generator"].mode, "0755")
         self.assertEqual(registry.artifacts["auth.helper"].mode, "4755")

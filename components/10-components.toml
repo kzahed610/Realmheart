@@ -8,6 +8,7 @@ component_version = "release"
 category = "core"
 stage = "core_shell"
 description = "Main native shell and shared release resources."
+repair_strategy_ids = ["rebuild_component", "install_missing_package", "restart_service"]
 build_units = ["realmheart-shell", "power-menu-renderer"]
 
 [[components]]
@@ -18,7 +19,7 @@ category = "fx"
 stage = "core_shell"
 description = "Required Hyprland compositor-side rendering plugin."
 build_units = ["realmheart-fx"]
-repair_strategy_ids = ["rebuild_component"]
+repair_strategy_ids = ["rebuild_component", "install_missing_package"]
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true
@@ -30,6 +31,7 @@ component_version = "release"
 category = "essential"
 stage = "services"
 description = "Structured Realmheart event daemon and producer CLI."
+repair_strategy_ids = ["rebuild_component", "install_missing_package", "restart_service"]
 build_units = ["eventd", "event-cli"]
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
@@ -43,7 +45,7 @@ category = "essential"
 stage = "desktop"
 description = "Native Wayland screenshot and semantic region pipeline."
 build_units = ["screenshot", "screenshot-regions"]
-repair_strategy_ids = ["rebuild_component"]
+repair_strategy_ids = ["rebuild_component", "install_missing_package"]
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true
@@ -55,6 +57,7 @@ component_version = "release"
 category = "qol"
 stage = "desktop"
 description = "OCR extension for screenshot selections."
+repair_strategy_ids = ["install_missing_package"]
 [[components.realmheart_dependencies]]
 id = "screenshot"
 required = true
@@ -68,7 +71,7 @@ stage = "core_shell"
 description = "PAM-backed privileged authentication helper and lock integration."
 build_units = ["lockscreen-auth"]
 requires_installer_binding = true
-repair_strategy_ids = ["rebuild_component"]
+repair_strategy_ids = ["rebuild_component", "install_missing_package"]
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true
@@ -84,7 +87,7 @@ category = "essential"
 stage = "desktop"
 description = "Native Wayland/EGL wallpaper renderer and wallpaper integration."
 build_units = ["wallpaper-native"]
-repair_strategy_ids = ["rebuild_component"]
+repair_strategy_ids = ["rebuild_component", "install_missing_package"]
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true
@@ -96,6 +99,7 @@ component_version = "release"
 category = "qol"
 stage = "terminal"
 description = "Kitty/Fish/Starship theme integration and generator."
+repair_strategy_ids = ["install_missing_package", "restart_service"]
 requires_installer_binding = true
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
@@ -111,6 +115,7 @@ component_version = "release"
 category = "qol"
 stage = "services"
 description = "Text/image clipboard history watcher services and launcher integration."
+repair_strategy_ids = ["install_missing_package", "restart_service"]
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true
@@ -122,6 +127,7 @@ component_version = "release"
 category = "essential"
 stage = "integration"
 description = "Idle/session controls and keep-awake integration."
+repair_strategy_ids = ["install_missing_package"]
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true
@@ -136,6 +142,7 @@ component_version = "release"
 category = "essential"
 stage = "integration"
 description = "Audio, brightness, network, Bluetooth, power profiles, and media key integrations."
+repair_strategy_ids = ["install_missing_package"]
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true
@@ -147,6 +154,7 @@ component_version = "release"
 category = "essential"
 stage = "integration"
 description = "Wallpaper-derived Matugen palette generation."
+repair_strategy_ids = ["install_missing_package"]
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true
@@ -158,6 +166,7 @@ component_version = "release"
 category = "qol"
 stage = "integration"
 description = "Hyprsunset-backed Night Light integration."
+repair_strategy_ids = ["install_missing_package"]
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true
@@ -169,6 +178,7 @@ component_version = "release"
 category = "qol"
 stage = "desktop"
 description = "wf-recorder-backed screen recording."
+repair_strategy_ids = ["install_missing_package"]
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true
@@ -180,6 +190,7 @@ component_version = "release"
 category = "qol"
 stage = "desktop"
 description = "Region capture/upload/open workflow."
+repair_strategy_ids = ["install_missing_package"]
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true
@@ -194,6 +205,7 @@ component_version = "release"
 category = "essential"
 stage = "integration"
 description = "Hyprland XDG desktop portal integration."
+repair_strategy_ids = ["install_missing_package"]
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true

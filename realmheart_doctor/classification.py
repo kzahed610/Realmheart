@@ -26,13 +26,32 @@ _RULES = (
 )
 
 
-def classify_failure(checks: tuple[HealthCheckResult, ...]) -> FailureClassification:
+def classify_failure(
+    checks: tuple[HealthCheckResult, ...],
+    *,
+    missing_capabilities: tuple[str, ...] = (),
+    failed_capabilities: tuple[str, ...] = (),
+) -> FailureClassification:
+    """Classify one component's observed failures.
+
+    Capability evidence participates only when it was actually observed
+    missing or failed; an unobserved capability never becomes a failure class.
+    """
+
     observed = tuple(item for item in checks if item.status is HealthStatus.FAIL)
-    if not observed:
-        return FailureClassification("UNKNOWN", "LOW", ())
     ordered = tuple(sorted(observed, key=lambda item: item.check_id))
     for rule_reason, failure_class, confidence in _RULES:
         matching = tuple(item for item in ordered if item.reason_code == rule_reason)
         if matching:
             return FailureClassification(failure_class, confidence, tuple(item.check_id for item in matching))
+    if missing_capabilities:
+        return FailureClassification(
+            "DEPENDENCY_MISSING", "HIGH", tuple(sorted(missing_capabilities))
+        )
+    if failed_capabilities:
+        return FailureClassification(
+            "DEPENDENCY_VERSION_MISMATCH", "MEDIUM", tuple(sorted(failed_capabilities))
+        )
+    if not ordered:
+        return FailureClassification("UNKNOWN", "LOW", ())
     return FailureClassification("OBSERVED_FAILURE", "MEDIUM", tuple(item.check_id for item in ordered))
