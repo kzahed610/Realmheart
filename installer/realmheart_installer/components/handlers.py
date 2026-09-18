@@ -86,7 +86,16 @@ def resolve_component_handler_specs(
             service_action_ids=tuple(item.id for item in service_actions),
             services=tuple(item.service for item in service_actions),
             build_unit_ids=component.build_units,
-            health_check_ids=tuple(item.id for item in health_checks),
+            # The installation plan carries only checks selected for the
+            # install_verify context.  Keep the complete manifest footprint
+            # visible here as well so Doctor-only checks remain part of the
+            # component's declared ownership without being executed by the
+            # Installer verifier.
+            health_check_ids=tuple(
+                item.id
+                for item in manifest.health_checks.values()
+                if item.component_id == component_id
+            ),
             privileged_targets=privileged_targets,
             rollback_requirements=rollback,
         )

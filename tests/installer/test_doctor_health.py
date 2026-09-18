@@ -500,6 +500,21 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                 self.assertEqual(result.status, HealthStatus.FAIL)
                 self.assertEqual(result.reason_code, reason_code)
 
+    def test_artifact_executable_accepts_declared_secure_special_mode(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry, _, executable_path = _manifest(Path(temp))
+            artifacts = dict(registry.artifacts)
+            artifacts["demo.exec"] = replace(artifacts["demo.exec"], mode="4755")
+            registry = replace(registry, artifacts=artifacts)
+            ops = FakeOperations()
+            ops.paths[executable_path] = PathObservation(True, 0o4755, "file")
+
+            result = HealthCheckExecutor(ops).execute(
+                registry, check_ids=("check.executable",)
+            ).result_for("check.executable")
+
+            self.assertEqual(result.status, HealthStatus.PASS)
+
     def test_missing_artifact_is_an_observed_failure(self):
         with tempfile.TemporaryDirectory() as temp:
             registry, _, _ = _manifest(Path(temp))
@@ -521,6 +536,37 @@ class DoctorHealthExecutorTests(unittest.TestCase):
 
             self.assertEqual(report.result_for("check.hash").status, HealthStatus.PASS)
             self.assertEqual(report.result_for("check.config").status, HealthStatus.PASS)
+
+    def test_pam_config_check_validates_rules_without_authenticating(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry, file_path, _ = _manifest(Path(temp))
+            pam_content = (
+                b"#%PAM-1.0\n"
+                b"auth [success=1 default=ignore] pam_unix.so\n"
+                b"auth required pam_deny.so\n"
+                b"account required pam_unix.so\n"
+            )
+            checks = dict(registry.health_checks)
+            checks["check.config"] = replace(
+                checks["check.config"], args={"format": "pam"}
+            )
+            registry = replace(registry, health_checks=checks)
+            ops = FakeOperations()
+            ops.paths[file_path] = PathObservation(True, 0o644, "file")
+            ops.files[file_path] = pam_content
+
+            result = HealthCheckExecutor(ops).execute(
+                registry, check_ids=("check.config",)
+            ).result_for("check.config")
+
+            self.assertEqual(result.status, HealthStatus.PASS)
+
+            ops.files[file_path] = b"auth required\n"
+            malformed = HealthCheckExecutor(ops).execute(
+                registry, check_ids=("check.config",)
+            ).result_for("check.config")
+            self.assertEqual(malformed.status, HealthStatus.FAIL)
+            self.assertEqual(malformed.reason_code, "config_malformed")
 
     def test_command_checks_use_structured_argv_and_support_version_runtime(self):
         with tempfile.TemporaryDirectory() as temp:

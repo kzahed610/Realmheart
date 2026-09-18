@@ -120,6 +120,7 @@ type = "executable"
 required = true
 ownership = "system"
 managed = true
+mode = "4755"
 
 [[artifacts]]
 id = "auth.pam"
@@ -312,6 +313,20 @@ timeout_ms = 500
 contexts = ["install_verify", "doctor_background", "doctor_manual"]
 
 [[health_checks]]
+id = "check.core.binary.version"
+component_id = "realmheart-core"
+check = "version_probe"
+artifact_id = "core.binary"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 1000
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+version_argv = ["--version"]
+version_prefix = "realmheart"
+expected_version = "0.7.8"
+
+[[health_checks]]
 id = "check.core.power-menu-renderer.exists"
 component_id = "realmheart-core"
 check = "artifact_exists"
@@ -462,6 +477,20 @@ timeout_ms = 500
 contexts = ["install_verify", "doctor_background", "doctor_manual"]
 
 [[health_checks]]
+id = "check.screenshot.binary.version"
+component_id = "screenshot"
+check = "version_probe"
+artifact_id = "screenshot.binary"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 1000
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+version_argv = ["--version"]
+version_prefix = "realmheart screenshot"
+expected_version = "0.7.8"
+
+[[health_checks]]
 id = "check.screenshot.regions.exists"
 component_id = "screenshot"
 check = "artifact_exists"
@@ -480,6 +509,20 @@ cost = "cheap"
 side_effects = "none"
 timeout_ms = 500
 contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.screenshot.regions.version"
+component_id = "screenshot"
+check = "version_probe"
+artifact_id = "screenshot.regions"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 1000
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+version_argv = ["--version"]
+version_prefix = "realmheart screenshot regions"
+expected_version = "0.7.8"
 
 [[health_checks]]
 id = "check.auth.helper.exists"
@@ -510,6 +553,18 @@ cost = "cheap"
 side_effects = "none"
 timeout_ms = 500
 contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.auth.pam.parse"
+component_id = "lockscreen-auth"
+check = "config_parse"
+artifact_id = "auth.pam"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+format = "pam"
 
 [[health_checks]]
 id = "check.auth.lock-session.exists"

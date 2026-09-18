@@ -403,6 +403,7 @@ target_include_directories(realmheart_screenshot_regions PRIVATE
     ${OpenCV_INCLUDE_DIRS}
 )
 target_compile_options(realmheart_screenshot_regions PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_compile_definitions(realmheart_screenshot_regions PRIVATE REALMHEART_VERSION="${PROJECT_VERSION}")
 target_link_libraries(realmheart_screenshot_regions PRIVATE
     ${OpenCV_LIBS}
 )
@@ -429,6 +430,7 @@ target_include_directories(realmheart_screenshot PRIVATE
     "${REALMHEART_SCREENSHOT_PROTOCOL_DIR}"
 )
 target_compile_options(realmheart_screenshot PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_compile_definitions(realmheart_screenshot PRIVATE REALMHEART_VERSION="${PROJECT_VERSION}")
 target_link_libraries(realmheart_screenshot PRIVATE
     realmheart_ui
     PkgConfig::GTK4

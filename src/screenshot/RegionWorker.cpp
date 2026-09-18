@@ -19,6 +19,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifndef REALMHEART_VERSION
+#define REALMHEART_VERSION "unknown"
+#endif
+
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -1003,6 +1007,11 @@ int parse_frame_fd(int argc, char** argv) {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view{argv[1]} == "--version") {
+        std::cout << "Realmheart Screenshot Regions " << REALMHEART_VERSION << '\n';
+        return 0;
+    }
+
     const auto started = Clock::now();
     const int frame_fd = parse_frame_fd(argc, argv);
     if (frame_fd < 0) {

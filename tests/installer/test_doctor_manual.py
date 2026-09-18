@@ -160,6 +160,7 @@ contexts = ["doctor_manual"]
         from dataclasses import replace
         from unittest.mock import Mock
         from realmheart_maintenance.manifest import load_manifest
+        from realmheart_maintenance.forensics import CapabilityObservation
         from realmheart_doctor.diagnosis import diagnose
         from realmheart_doctor.health import HealthCheckReport, HealthCheckResult, HealthStatus
         registry = load_manifest(Path("components"))
@@ -187,7 +188,15 @@ contexts = ["doctor_manual"]
         registry = load_manifest(Path("components"))
         executor = Mock()
         executor.execute.return_value = HealthCheckReport((), 0)
-        result = diagnose(registry, "lockscreen-auth", executor=executor)
+        capability_prober = Mock(return_value=CapabilityObservation(
+            "fixture", "unknown", detail="capability probe intentionally unavailable"
+        ))
+        result = diagnose(
+            registry,
+            "lockscreen-auth",
+            executor=executor,
+            capability_prober=capability_prober,
+        )
         self.assertEqual([item.id for item in result.components],
                          ["realmheart-core", "realmheart-fx", "lockscreen-auth"])
         self.assertEqual(result.overall.value, "unknown")

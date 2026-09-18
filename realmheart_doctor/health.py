@@ -18,6 +18,7 @@ import multiprocessing
 import os
 import re
 import selectors
+import shlex
 import signal
 import socket
 import stat
@@ -4417,6 +4418,63 @@ def _mode_value(value: object) -> int | None:
     return None
 
 
+_PAM_MODULE_TYPES = frozenset({"auth", "account", "password", "session"})
+_PAM_CONTROL_FLAGS = frozenset({"required", "requisite", "sufficient", "optional", "include", "substack"})
+
+
+def _parse_pam_config(text: str) -> None:
+    """Validate the bounded structural grammar used by a PAM service file.
+
+    This deliberately checks syntax and rule shape only.  Resolving PAM module
+    names or authenticating a user would cross the read-only Doctor boundary.
+    """
+
+    if "\x00" in text:
+        raise ValueError("PAM configuration contains NUL")
+
+    rule_count = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            tokens = shlex.split(stripped, comments=True, posix=True)
+        except ValueError as exc:
+            raise ValueError("PAM configuration has an invalid quoted token") from exc
+        if not tokens:
+            continue
+        if tokens[0] == "@include":
+            if len(tokens) != 2 or not tokens[1]:
+                raise ValueError("PAM include directive is incomplete")
+            rule_count += 1
+            continue
+
+        module_type = tokens[0][1:] if tokens[0].startswith("-") else tokens[0]
+        if module_type not in _PAM_MODULE_TYPES or len(tokens) < 3:
+            raise ValueError("PAM rule has an invalid module type or is incomplete")
+
+        control_index = 1
+        if tokens[control_index].startswith("["):
+            if not tokens[control_index].endswith("]"):
+                control_index += 1
+                while control_index < len(tokens) and not tokens[control_index].endswith("]"):
+                    control_index += 1
+                if control_index >= len(tokens):
+                    raise ValueError("PAM bracketed control field is incomplete")
+            control_index += 1
+        else:
+            if tokens[control_index] not in _PAM_CONTROL_FLAGS:
+                raise ValueError("PAM rule has an invalid control flag")
+            control_index += 1
+
+        if control_index >= len(tokens) or not tokens[control_index]:
+            raise ValueError("PAM rule has no module or included service")
+        rule_count += 1
+
+    if rule_count == 0:
+        raise ValueError("PAM configuration contains no rules")
+
+
 def _normalised_cache_value(
     value: object,
     *,
@@ -6226,11 +6284,13 @@ class HealthCheckExecutor:
                 detail="executable artifact must be readable for format authorization",
             )
         if mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX):
-            return _payload(
-                HealthStatus.FAIL,
-                "special_mode_forbidden",
-                detail="executable artifact has a special permission bit",
-            )
+            declared_mode = _mode_value(getattr(artifact, "mode", None))
+            if declared_mode is None or (mode & 0o7777) != declared_mode:
+                return _payload(
+                    HealthStatus.FAIL,
+                    "special_mode_forbidden",
+                    detail="executable artifact has an undeclared or unexpected special permission bit",
+                )
         return _payload(HealthStatus.PASS, "observed", detail="canonical artifact is executable")
 
     def _file_hash_matches(
@@ -6356,9 +6416,18 @@ class HealthCheckExecutor:
             elif format_name in {"ini", "cfg", "configparser"}:
                 parser = configparser.ConfigParser(interpolation=None)
                 parser.read_string(text)
+            elif format_name in {"pam", "pam.d"}:
+                _parse_pam_config(text)
             else:
                 return _payload(HealthStatus.UNKNOWN, "unsupported_format", detail="config parser is not supported")
-        except (UnicodeError, json.JSONDecodeError, tomllib.TOMLDecodeError, configparser.Error, RecursionError):
+        except (
+            UnicodeError,
+            json.JSONDecodeError,
+            tomllib.TOMLDecodeError,
+            configparser.Error,
+            RecursionError,
+            ValueError,
+        ):
             return _payload(HealthStatus.FAIL, "config_malformed", detail="config content could not be parsed")
         return _payload(HealthStatus.PASS, "observed", detail="config parsed successfully")
 
