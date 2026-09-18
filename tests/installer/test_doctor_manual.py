@@ -402,6 +402,127 @@ contexts = ["doctor_manual"]
         self.assertEqual(result.components[0].status.value, "failed")
         self.assertIn("receipt_component_failed", result.components[0].uncertainties)
 
+    def test_receipt_summary_exposes_provenance_and_fx_identity(self):
+        from unittest.mock import Mock
+        from realmheart_maintenance.forensics import CapabilityObservation
+        from realmheart_maintenance.manifest import load_manifest
+        from realmheart_doctor.diagnosis import diagnose
+        from realmheart_doctor.health import HealthCheckReport
+        with tempfile.TemporaryDirectory() as temp:
+            receipt_path, payload = self._generated_receipt(Path(temp))
+            from realmheart_maintenance.forensics import load_installed_receipt
+            receipt = load_installed_receipt(receipt_path)
+        registry = load_manifest(Path("components"))
+        component = replace(registry.components["realmheart-core"], realmheart_dependencies=())
+        registry = replace(registry, components={component.id: component}, component_order=(component.id,),
+                           capabilities={})
+        executor = Mock()
+        executor.execute.return_value = HealthCheckReport((), 0)
+        result = diagnose(registry, executor=executor, receipt=receipt)
+        summary = result.receipt
+        self.assertEqual(summary["install_mode"], payload["install_mode"])
+        self.assertEqual(
+            summary["build_provenance"]["cmake_version"],
+            payload["build_provenance"]["cmake_version"],
+        )
+        self.assertEqual(
+            summary["build_provenance"]["cmake_binary_dir"],
+            payload["build_provenance"].get("cmake_binary_dir"),
+        )
+        if payload["fx"] is None:
+            self.assertIsNone(summary["fx"])
+        else:
+            self.assertEqual(summary["fx"]["build_id"], payload["fx"]["build_id"])
+
+    def test_fx_compositor_drift_is_explicit_when_receipt_is_supplied(self):
+        from unittest.mock import Mock
+        from realmheart_maintenance.forensics import CapabilityObservation, ReceiptFxIdentity
+        from realmheart_maintenance.manifest import load_manifest
+        from realmheart_doctor.diagnosis import diagnose
+        from realmheart_doctor.health import HealthCheckReport
+        registry = load_manifest(Path("components"))
+        fx = replace(registry.components["realmheart-fx"], realmheart_dependencies=())
+        registry = replace(
+            registry,
+            components={fx.id: fx},
+            component_order=(fx.id,),
+            health_checks={key: value for key, value in registry.health_checks.items()
+                           if value.component_id == fx.id},
+            artifacts={key: value for key, value in registry.artifacts.items()
+                       if value.component_id == fx.id},
+            capabilities={"runtime.hyprctl": registry.capabilities["runtime.hyprctl"]},
+        )
+        executor = Mock()
+        executor.execute.return_value = HealthCheckReport((), 0)
+        prober = Mock(return_value=CapabilityObservation(
+            "runtime.hyprctl", "pass", version="Hyprland 0.56.2 built from branch v0.56.2.", detail="hyprctl available"))
+        identity = ReceiptFxIdentity(
+            required=True, compatibility="compatible", build_id="build-1",
+            plugin_artifact_id=None, loader_artifact_id=None, plugin_sha256=None,
+            hyprland_version="0.50.0", hyprland_commit=None, hyprland_abi_hash=None,
+        )
+        drifted = diagnose(registry, executor=executor, capability_prober=prober,
+                           receipt=Mock(fx=identity, manifest_digest=registry.digest,
+                                        components={}, build_provenance=None))
+        self.assertIn("fx_build_compositor_drift", drifted.components[0].uncertainties)
+        self.assertIn("0.56.2", drifted.receipt["fx"]["current_compositor_version"])
+
+        aligned_identity = replace(identity, hyprland_version="0.56.2")
+        aligned = diagnose(registry, executor=executor, capability_prober=prober,
+                           receipt=Mock(fx=aligned_identity, manifest_digest=registry.digest,
+                                        components={}, build_provenance=None))
+        self.assertNotIn("fx_build_compositor_drift", aligned.components[0].uncertainties)
+
+    def test_build_fingerprint_drift_is_reported_without_failing_the_component(self):
+        import json as json_module
+        import os
+        from unittest.mock import Mock, patch
+        from realmheart_maintenance.forensics import CapabilityObservation
+        from realmheart_maintenance.manifest import load_manifest
+        from realmheart_doctor.diagnosis import diagnose
+        from realmheart_doctor.health import HealthCheckReport, HealthCheckResult, HealthStatus
+        registry = load_manifest(Path("components"))
+        core = replace(registry.components["realmheart-core"], realmheart_dependencies=())
+        capability = registry.capabilities["lib.gtk4"]
+        binary_check = registry.health_checks["check.core.binary.exists"]
+        fingerprint_check = registry.health_checks["check.core.build-fingerprints.exists"]
+        registry = replace(
+            registry,
+            components={core.id: core},
+            component_order=(core.id,),
+            capabilities={capability.id: capability},
+            artifacts={key: value for key, value in registry.artifacts.items()
+                       if key in {"core.binary", "core.build-fingerprints"}},
+            health_checks={binary_check.id: binary_check, fingerprint_check.id: fingerprint_check},
+        )
+        executor = Mock()
+        executor.execute.return_value = HealthCheckReport((
+            HealthCheckResult(binary_check.id, core.id, binary_check.check, HealthStatus.PASS, "observed"),
+            HealthCheckResult(fingerprint_check.id, core.id, fingerprint_check.check, HealthStatus.PASS, "observed"),
+        ), 0)
+        prober = Mock(return_value=CapabilityObservation(capability.id, "pass", version="4.99.0", detail="gtk4 available"))
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp) / "share/realmheart/build-fingerprints"
+            directory.mkdir(parents=True)
+            (directory / "realmheart-core.json").write_text(json_module.dumps({
+                "format_version": 1,
+                "component_id": "realmheart-core",
+                "dependencies": {"dep.lib.gtk4": "4.12.0"},
+            }))
+            with patch.dict(os.environ, {"PREFIX": temp}):
+                result = diagnose(registry, executor=executor, capability_prober=prober)
+                aligned = diagnose(registry, executor=executor, capability_prober=Mock(
+                    return_value=CapabilityObservation(capability.id, "pass", version="4.12.0")))
+        component = result.components[0]
+        self.assertEqual(
+            [(item.dependency_id, item.build_version, item.current_version, item.drift)
+             for item in component.build_fingerprints],
+            [("dep.lib.gtk4", "4.12.0", "4.99.0", True)],
+        )
+        self.assertEqual(component.status.value, "healthy")
+        self.assertTrue(component.to_dict()["build_fingerprints"][0]["drift"])
+        self.assertFalse(aligned.components[0].build_fingerprints[0].drift)
+
     def test_empty_check_set_cannot_report_healthy(self):
         with tempfile.TemporaryDirectory() as temp:
             Path(temp, "manifest.toml").write_text('''schema_version = 1

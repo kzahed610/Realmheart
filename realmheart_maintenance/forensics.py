@@ -117,6 +117,49 @@ class ReceiptArtifact:
 
 
 @dataclass(frozen=True)
+class ReceiptBuildUnit:
+    build_unit_id: str
+    component_ids: tuple[str, ...]
+    health: str
+    artifact_ids: tuple[str, ...]
+    artifact_sha256: Mapping[str, str | None]
+    abi_sensitive_dependencies: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ReceiptBuildProvenance:
+    source_revision: str | None
+    source_dirty: bool | None
+    cmake_version: str | None
+    ninja_version: str | None
+    cxx_compiler: str | None
+    cxx_compiler_version: str | None
+    cmake_generator: str | None
+    cmake_build_type: str | None
+    cmake_install_prefix: str | None
+    cmake_install_sysconfdir: str | None
+    cmake_source_dir: str | None
+    cmake_binary_dir: str | None
+    hyprland_version: str | None
+    hyprland_commit: str | None
+    hyprland_abi_hash: str | None
+    fx_build_id: str | None
+
+
+@dataclass(frozen=True)
+class ReceiptFxIdentity:
+    required: bool | None
+    compatibility: str | None
+    build_id: str | None
+    plugin_artifact_id: str | None
+    loader_artifact_id: str | None
+    plugin_sha256: str | None
+    hyprland_version: str | None
+    hyprland_commit: str | None
+    hyprland_abi_hash: str | None
+
+
+@dataclass(frozen=True)
 class InstalledStateReceipt:
     schema_version: int
     realmheart_version: str
@@ -131,6 +174,13 @@ class InstalledStateReceipt:
     components: Mapping[str, ReceiptComponent]
     capabilities: Mapping[str, ReceiptCapability]
     artifacts: Mapping[str, ReceiptArtifact]
+    install_mode: str | None = None
+    installation_origin: str | None = None
+    verified_at: str | None = None
+    accepted_at: str | None = None
+    build_units: Mapping[str, ReceiptBuildUnit] = MappingProxyType({})
+    fx: ReceiptFxIdentity | None = None
+    build_provenance: ReceiptBuildProvenance | None = None
 
 
 @dataclass(frozen=True)
@@ -504,6 +554,94 @@ def _load_json_file(
     return _expect_mapping(payload, label)
 
 
+def _parse_optional_bool(value: Any, label: str) -> bool | None:
+    if value is None:
+        return None
+    if type(value) is not bool:
+        raise ForensicContractError(f"{label} must be a boolean or null")
+    return value
+
+
+def parse_receipt_build_units(raw: Any) -> Mapping[str, ReceiptBuildUnit]:
+    """Parse the receipt's build-unit evidence, tolerating its absence."""
+
+    if raw is None:
+        return MappingProxyType({})
+    units_raw = _expect_mapping(raw, "installed-state build_units")
+    build_units: dict[str, ReceiptBuildUnit] = {}
+    for raw_id, value in units_raw.items():
+        uid = _expect_id(raw_id, "build unit id")
+        item = _expect_mapping(value, f"build unit {uid}")
+        digests: dict[str, str | None] = {}
+        digests_raw = item.get("artifact_sha256")
+        if digests_raw is not None:
+            for artifact_id, digest in _expect_mapping(digests_raw, f"build unit {uid} artifact_sha256").items():
+                key = _expect_string(artifact_id, f"build unit {uid} artifact id")
+                digests[key] = _optional_digest(digest, f"build unit {uid} artifact_sha256[{key}]")
+        build_units[uid] = ReceiptBuildUnit(
+            build_unit_id=uid,
+            component_ids=_string_tuple(item.get("component_ids", []), f"build unit {uid} component_ids"),
+            health=_expect_string(item.get("health"), f"build unit {uid} health"),
+            artifact_ids=_string_tuple(item.get("artifact_ids", []), f"build unit {uid} artifact_ids"),
+            artifact_sha256=MappingProxyType(digests),
+            abi_sensitive_dependencies=_string_tuple(
+                item.get("abi_sensitive_dependencies", []), f"build unit {uid} abi_sensitive_dependencies"
+            ),
+        )
+    return MappingProxyType(build_units)
+
+
+def parse_receipt_fx(raw: Any) -> ReceiptFxIdentity | None:
+    """Parse the receipt's FX build identity, tolerating its absence."""
+
+    if raw is None:
+        return None
+    item = _expect_mapping(raw, "installed-state fx")
+    return ReceiptFxIdentity(
+        required=_parse_optional_bool(item.get("required"), "installed-state fx.required"),
+        compatibility=_optional_string(item.get("compatibility"), "installed-state fx.compatibility"),
+        build_id=_optional_string(item.get("build_id"), "installed-state fx.build_id"),
+        plugin_artifact_id=_optional_string(item.get("plugin_artifact_id"), "installed-state fx.plugin_artifact_id"),
+        loader_artifact_id=_optional_string(item.get("loader_artifact_id"), "installed-state fx.loader_artifact_id"),
+        plugin_sha256=_optional_digest(item.get("plugin_sha256"), "installed-state fx.plugin_sha256"),
+        hyprland_version=_optional_string(item.get("hyprland_version"), "installed-state fx.hyprland_version"),
+        hyprland_commit=_optional_string(item.get("hyprland_commit"), "installed-state fx.hyprland_commit"),
+        hyprland_abi_hash=_optional_string(item.get("hyprland_abi_hash"), "installed-state fx.hyprland_abi_hash"),
+    )
+
+
+def parse_receipt_build_provenance(raw: Any) -> ReceiptBuildProvenance | None:
+    """Parse the receipt's build provenance, tolerating its absence."""
+
+    if raw is None:
+        return None
+    item = _expect_mapping(raw, "installed-state build_provenance")
+    fields = {
+        name: _optional_string(item.get(name), f"build_provenance.{name}")
+        for name in (
+            "source_revision",
+            "cmake_version",
+            "ninja_version",
+            "cxx_compiler",
+            "cxx_compiler_version",
+            "cmake_generator",
+            "cmake_build_type",
+            "cmake_install_prefix",
+            "cmake_install_sysconfdir",
+            "cmake_source_dir",
+            "cmake_binary_dir",
+            "hyprland_version",
+            "hyprland_commit",
+            "hyprland_abi_hash",
+            "fx_build_id",
+        )
+    }
+    return ReceiptBuildProvenance(
+        source_dirty=_parse_optional_bool(item.get("source_dirty"), "build_provenance.source_dirty"),
+        **fields,
+    )
+
+
 def parse_installed_receipt(payload: Mapping[str, Any]) -> InstalledStateReceipt:
     schema = payload.get("schema_version")
     if not isinstance(schema, int):
@@ -613,6 +751,13 @@ def parse_installed_receipt(payload: Mapping[str, Any]) -> InstalledStateReceipt
         components=MappingProxyType(components),
         capabilities=MappingProxyType(capabilities),
         artifacts=MappingProxyType(artifacts),
+        install_mode=_optional_string(payload.get("install_mode"), "installed-state install_mode"),
+        installation_origin=_optional_string(payload.get("installation_origin"), "installed-state installation_origin"),
+        verified_at=_optional_string(payload.get("verified_at"), "installed-state verified_at"),
+        accepted_at=_optional_string(payload.get("accepted_at"), "installed-state accepted_at"),
+        build_units=parse_receipt_build_units(payload.get("build_units")),
+        fx=parse_receipt_fx(payload.get("fx")),
+        build_provenance=parse_receipt_build_provenance(payload.get("build_provenance")),
     )
 
 

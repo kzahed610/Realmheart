@@ -600,6 +600,51 @@ if(REALMHEART_ENABLE_SCREENSHOT)
         message(STATUS "Realmheart screenshot: tesseract not found; screenshots work, OCR mode will be unavailable")
     endif()
 endif()
+
+# Build fingerprints: the dependency versions each pilot component resolved
+# against at configure time.  Read back by the Doctor for build-versus-current
+# comparisons; installed with the release resources.
+include(cmake/RealmheartBuildFingerprint.cmake)
+realmheart_add_build_fingerprint(realmheart-core
+    DEPENDENCIES
+        dep.lib.gtk4:${GTK4_VERSION}
+        dep.lib.gtk4-layer-shell:${GTK4_LAYER_SHELL_VERSION}
+        dep.lib.gio:${GIO_VERSION}
+        dep.lib.epoxy:${EPOXY_VERSION}
+        dep.lib.gdk-pixbuf:${GDK_PIXBUF_VERSION}
+        dep.lib.jpeg:${JPEG_VERSION}
+        dep.lib.sqlite3:${SQLITE3_VERSION}
+)
+realmheart_add_build_fingerprint(event-surface
+    DEPENDENCIES
+        dep.lib.sqlite3:${SQLITE3_VERSION}
+        dep.lib.gio:${GIO_VERSION}
+)
+realmheart_add_build_fingerprint(lockscreen-auth
+    DEPENDENCIES
+        dep.lib.gtk4:${GTK4_VERSION}
+        dep.lib.gio:${GIO_VERSION}
+)
+if(REALMHEART_ENABLE_SCREENSHOT)
+    realmheart_add_build_fingerprint(screenshot
+        DEPENDENCIES
+            dep.lib.gtk4:${GTK4_VERSION}
+            dep.lib.gtk4-layer-shell:${GTK4_LAYER_SHELL_VERSION}
+            dep.wayland.client:${REALMHEART_SCREENSHOT_WAYLAND_VERSION}
+            dep.opencv.ximgproc:${OpenCV_VERSION}
+    )
+endif()
+if(REALMHEART_NATIVE_WALLPAPER_BUILT)
+    realmheart_add_build_fingerprint(wallpaper-native
+        DEPENDENCIES
+            dep.wayland.client:${WAYLAND_CLIENT_VERSION}
+            dep.wallpaper.wayland-egl:${WAYLAND_EGL_VERSION}
+            dep.wallpaper.egl:${EGL_VERSION}
+            dep.lib.glesv2:${GLESV2_VERSION}
+            dep.lib.gdk-pixbuf:${GDK_PIXBUF_VERSION}
+    )
+endif()
+
 if(TARGET realmheart_fx)
     install(TARGETS realmheart_fx LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/realmheart)
     set(REALMHEART_PLUGIN_RELATIVE_DIR "../${CMAKE_INSTALL_LIBDIR}/realmheart")
@@ -694,6 +739,12 @@ endif()
 install(DIRECTORY assets/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/assets)
 install(DIRECTORY styles/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/styles)
 install(DIRECTORY effects/ DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/effects)
+get_property(REALMHEART_BUILD_FINGERPRINT_FILES GLOBAL PROPERTY REALMHEART_BUILD_FINGERPRINT_FILES)
+if(REALMHEART_BUILD_FINGERPRINT_FILES)
+    install(DIRECTORY "${CMAKE_BINARY_DIR}/build-fingerprints/"
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/realmheart/build-fingerprints
+            FILES_MATCHING PATTERN "*.json")
+endif()
 # PAM service for the lockscreen (requires root at install time).
 install(FILES config/pam/realmheart-lockscreen DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/pam.d)
 

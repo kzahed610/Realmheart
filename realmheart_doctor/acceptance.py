@@ -36,6 +36,9 @@ from realmheart_maintenance.forensics import (
     capability_state_satisfied,
     capability_version_required,
     classify_capability_version,
+    parse_receipt_build_provenance,
+    parse_receipt_build_units,
+    parse_receipt_fx,
     version_evidence_line,
 )
 from realmheart_maintenance.manifest import (
@@ -362,6 +365,12 @@ def _candidate_receipt(payload: Mapping[str, Any], registry: ManifestRegistry) -
         components=MappingProxyType(components),
         capabilities=MappingProxyType(capabilities),
         artifacts=MappingProxyType(artifacts),
+        install_mode=_optional_text(payload.get("install_mode"), "install_mode"),
+        installation_origin=_optional_text(payload.get("installation_origin"), "installation_origin"),
+        verified_at=_optional_text(payload.get("verified_at"), "verified_at"),
+        build_units=parse_receipt_build_units(payload.get("build_units")),
+        fx=parse_receipt_fx(payload.get("fx")),
+        build_provenance=parse_receipt_build_provenance(payload.get("build_provenance")),
     )
 
 

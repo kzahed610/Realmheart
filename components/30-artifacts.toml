@@ -49,6 +49,15 @@ managed = true
 source = "effects"
 
 [[artifacts]]
+id = "core.build-fingerprints"
+component_id = "realmheart-core"
+path = "$PREFIX/share/realmheart/build-fingerprints"
+type = "directory"
+required = true
+ownership = "release"
+managed = true
+
+[[artifacts]]
 id = "fx.plugin"
 component_id = "realmheart-fx"
 path = "$PREFIX/lib/realmheart/realmheart-fx.so"
@@ -385,6 +394,16 @@ id = "check.core.effects.exists"
 component_id = "realmheart-core"
 check = "artifact_exists"
 artifact_id = "core.effects"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.core.build-fingerprints.exists"
+component_id = "realmheart-core"
+check = "artifact_exists"
+artifact_id = "core.build-fingerprints"
 cost = "cheap"
 side_effects = "none"
 timeout_ms = 500

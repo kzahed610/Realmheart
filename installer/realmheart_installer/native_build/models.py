@@ -72,6 +72,8 @@ class BuildProvenance:
     hyprland_commit: str | None
     hyprland_abi_hash: str | None
     fx_build_id: str | None
+    cmake_source_dir: str | None = None
+    cmake_binary_dir: str | None = None
 
 
 @dataclass(frozen=True)

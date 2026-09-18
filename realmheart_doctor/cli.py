@@ -88,6 +88,8 @@ def _parser(*, manual: bool = False) -> argparse.ArgumentParser:
             command.add_argument("--verbose", action="store_true")
             command.add_argument("--report", action="store_true")
             command.add_argument("--preview", action="store_true")
+            command.add_argument("--integrity", action="store_true",
+                                 help="receipt-backed installation integrity view (no new diagnosis)")
 
             command.add_argument("--state-dir", type=Path, help="explicit local directory for snapshots and incidents (no persistence by default)")
             command.add_argument("--prefix", type=_absolute_path, help="explicit installation prefix for canonical artifact paths")
@@ -115,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
         args = _parser(manual=manual).parse_args(arguments)
         if args.command == "doctor" and ((args.report and args.state_dir is None)
                                          or (args.preview and not args.report)):
+            raise _InvalidInvocation("invalid_invocation")
+        if args.command == "doctor" and args.integrity and (
+            args.component is not None or args.report or args.preview
+        ):
             raise _InvalidInvocation("invalid_invocation")
 
     except _InvalidInvocation:
@@ -208,6 +214,18 @@ def _manual(args: argparse.Namespace) -> int:
             payload = {"format_version": 1, "status": "error", "error": "receipt_configuration_error"}
             print(json.dumps(payload) if args.json else "Doctor receipt configuration error")
             return 5
+        if args.integrity:
+            if receipt is None:
+                payload = {"format_version": 1, "status": "error", "error": "integrity_receipt_required"}
+                print(json.dumps(payload) if args.json
+                      else "Integrity mode needs an accepted receipt; pass --receipt")
+                return 3
+            from .integrity import assess_integrity, render_integrity
+
+            with _installation_environment(args):
+                report = assess_integrity(registry, receipt)
+            print(json.dumps(report.to_dict(), indent=2, sort_keys=True) if args.json else render_integrity(report))
+            return {"clean": 0, "attention": 1, "drift": 2}.get(report.status, 3)
         with _installation_environment(args):
             result = diagnose(registry, args.component, receipt=receipt)
         payload = result.to_dict()

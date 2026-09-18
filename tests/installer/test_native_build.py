@@ -226,6 +226,8 @@ class NativeBuildTests(unittest.TestCase):
             self.assertEqual(report.provenance.eventd_autostart, "OFF")
             self.assertEqual(report.provenance.manifest_digest, plan.manifest_digest)
             self.assertEqual(report.provenance.fx_build_id, plan.fx_plan.build_id)
+            self.assertEqual(report.provenance.cmake_source_dir, str(source))
+            self.assertEqual(report.provenance.cmake_binary_dir, plan.build.build_dir)
             self.assertFalse(report.unexpected_stage_paths)
             self.assertTrue(any(path.endswith("bin/realmheart-fx-load") for path in report.accounted_uncommitted_stage_paths))
 

@@ -433,6 +433,8 @@ class NativeBuildExecutor:
             hyprland_commit=self.plan.fx_plan.hyprland_commit,
             hyprland_abi_hash=self.plan.fx_plan.hyprland_abi_hash,
             fx_build_id=self.plan.fx_plan.build_id,
+            cmake_source_dir=cache.get("CMAKE_HOME_DIRECTORY"),
+            cmake_binary_dir=cache.get("CMAKE_CACHEFILE_DIR") or str(self.build_dir),
         )
 
     def _report(
