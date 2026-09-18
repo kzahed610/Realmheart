@@ -15,6 +15,10 @@
 #include <thread>
 #include <vector>
 
+#ifndef REALMHEART_VERSION
+#define REALMHEART_VERSION "unknown"
+#endif
+
 namespace {
 using realmheart::events::Json;
 
@@ -201,6 +205,10 @@ int main(int argc, char** argv) {
     for (int index = 2; index < argc; ++index) args.emplace_back(argv[index]);
     if (command == "--help" || command == "help") {
         usage();
+        return 0;
+    }
+    if (command == "--version") {
+        std::cout << "Realmheart Event CLI " << REALMHEART_VERSION << '\n';
         return 0;
     }
 

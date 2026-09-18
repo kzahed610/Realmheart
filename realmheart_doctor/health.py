@@ -44,6 +44,7 @@ from realmheart_maintenance.forensics import select_health_checks
 from realmheart_maintenance.manifest import (
     ManifestRegistry,
     ParsedVersion,
+    VersionCompatibility,
     VersionSpec,
     classify_version,
     resolve_canonical_artifact_path,
@@ -309,9 +310,15 @@ class _CancellationToken:
 
 
 class HealthStatus(str, Enum):
-    """The four deliberately explicit Doctor observation outcomes."""
+    """Doctor observation outcomes; a warning is evidence, not a pass.
+
+    WARNING marks an observation that satisfies every declared hard
+    constraint but sits outside the versions Realmheart has actually
+    validated.  It never promotes to PASS and never degrades to FAIL.
+    """
 
     PASS = "pass"
+    WARNING = "warning"
     FAIL = "fail"
     UNKNOWN = "unknown"
     NOT_APPLICABLE = "not_applicable"
@@ -6674,6 +6681,18 @@ class HealthCheckExecutor:
                 HealthStatus.FAIL,
                 "version_mismatch",
                 detail="observed version violates the declared compatibility contract",
+                stdout=stdout,
+                stderr=stderr,
+                value=detected,
+            )
+        if (
+            compatibility is VersionCompatibility.SATISFIED_UNTESTED
+            and contract.tested_ranges
+        ):
+            return _payload(
+                HealthStatus.WARNING,
+                "version_untested",
+                detail="observed version satisfies the declared contract but is outside the tested ranges",
                 stdout=stdout,
                 stderr=stderr,
                 value=detected,

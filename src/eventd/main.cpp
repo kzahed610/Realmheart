@@ -5,9 +5,19 @@
 #include <iostream>
 #include <pthread.h>
 #include <string>
+#include <string_view>
 #include <thread>
 
-int main() {
+#ifndef REALMHEART_VERSION
+#define REALMHEART_VERSION "unknown"
+#endif
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--version") {
+        std::cout << "Realmheart Event Daemon " << REALMHEART_VERSION << '\n';
+        return 0;
+    }
+
     sigset_t signals;
     sigemptyset(&signals);
     sigaddset(&signals, SIGINT);

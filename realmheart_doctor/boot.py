@@ -64,7 +64,12 @@ def _run_locked(registry, state_root: Path, session_key: str, marker: Path,
     if marker.is_file():
         return BootOutcome("already_ran")
 
-    diagnosis = diagnose(registry, executor=executor)
+    diagnosis = diagnose(
+        registry,
+        executor=executor,
+        health_context="doctor_background",
+        max_cost="cheap",
+    )
     record = record_diagnosis(state_root, diagnosis, now=now)
     for component in diagnosis.components:
         record_component_failure(state_root, component.id, now=now)

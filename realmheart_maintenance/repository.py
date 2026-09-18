@@ -102,6 +102,16 @@ def validate_repository(root: Path, registry: ManifestRegistry | None = None) ->
             if not source.exists():
                 errors.append(f"artifact {artifact.id} source is missing: {artifact.source}")
 
+    evidence_components = {check.component_id for check in registry.health_checks.values()}
+    evidence_components.update(
+        capability.component_id for capability in registry.capabilities.values() if capability.component_id
+    )
+    for component in registry.components.values():
+        if component.id not in evidence_components:
+            errors.append(
+                f"component {component.id} declares no health check or capability probe evidence"
+            )
+
     declared_service_names = {
         Path(artifact.path).name
         for artifact in registry.artifacts.values()

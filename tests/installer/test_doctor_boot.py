@@ -49,6 +49,15 @@ class DoctorBootTests(unittest.TestCase):
             self.assertTrue((state / "current.json").is_file())
             self.assertEqual(len(list((state / "sessions").glob("*.json"))), 1)
 
+    def test_boot_uses_background_context_with_cheap_checks(self):
+        executor = _executor(HealthStatus.PASS)
+        with tempfile.TemporaryDirectory() as temp:
+            run_boot(_registry(), state_root=Path(temp) / "state", session_key="sess-background",
+                     executor=executor, notifier=lambda title, body: None)
+        _, kwargs = executor.execute.call_args
+        self.assertEqual(kwargs.get("context"), "doctor_background")
+        self.assertEqual(kwargs.get("max_cost"), "cheap")
+
     def test_boot_failure_creates_one_incident_and_notifies_once(self):
         executor = _executor(HealthStatus.FAIL)
         calls: list[tuple[str, str]] = []

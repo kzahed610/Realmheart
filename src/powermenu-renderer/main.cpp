@@ -16,6 +16,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#ifndef REALMHEART_VERSION
+#define REALMHEART_VERSION "unknown"
+#endif
+
 namespace {
 
 struct RendererState {
@@ -209,6 +213,11 @@ void print_usage() {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--version") {
+        std::cout << "Realmheart Power Menu Renderer " << REALMHEART_VERSION << '\n';
+        return 0;
+    }
+
     RendererState state;
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument = argv[index];

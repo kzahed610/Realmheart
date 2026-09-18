@@ -587,6 +587,38 @@ class DoctorHealthExecutorTests(unittest.TestCase):
                 (APPROVED_TRUE_EXECUTABLE,),
             ])
 
+    def test_untested_version_is_a_warning_never_a_pass_or_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            registry, _, _ = _manifest(Path(temp))
+            ops = FakeOperations()
+            ops.commands[(APPROVED_PRINTF_EXECUTABLE, "Demo 1.2.3\n")] = CommandObservation(
+                (APPROVED_PRINTF_EXECUTABLE, "Demo 1.2.3\n"), 0, stdout="Demo 1.2.3\n"
+            )
+            definition = registry.health_checks["check.version"]
+
+            tested = replace(definition, args={**definition.args, "tested_ranges": ["1.2.x"]})
+            registry = replace(registry, health_checks={"check.version": tested})
+            result = HealthCheckExecutor(ops).execute(registry, check_ids=("check.version",)).result_for("check.version")
+            self.assertEqual(result.status, HealthStatus.PASS)
+
+            untested = replace(definition, args={**definition.args, "tested_ranges": ["1.1.x"]})
+            registry = replace(registry, health_checks={"check.version": untested})
+            result = HealthCheckExecutor(ops).execute(registry, check_ids=("check.version",)).result_for("check.version")
+            self.assertEqual(result.status, HealthStatus.WARNING)
+            self.assertEqual(result.reason_code, "version_untested")
+            self.assertEqual(result.value, "1.2.3")
+
+            declared_only = replace(definition, args={**definition.args, "tested_ranges": []})
+            registry = replace(registry, health_checks={"check.version": declared_only})
+            result = HealthCheckExecutor(ops).execute(registry, check_ids=("check.version",)).result_for("check.version")
+            self.assertEqual(result.status, HealthStatus.PASS)
+
+            incompatible = replace(definition, args={**definition.args, "expected_version": "9.9.9"})
+            registry = replace(registry, health_checks={"check.version": incompatible})
+            result = HealthCheckExecutor(ops).execute(registry, check_ids=("check.version",)).result_for("check.version")
+            self.assertEqual(result.status, HealthStatus.FAIL)
+            self.assertEqual(result.reason_code, "version_mismatch")
+
     def test_socket_and_process_smoke_are_bounded_supported_types(self):
         with tempfile.TemporaryDirectory() as temp:
             registry, _, _ = _manifest(Path(temp))

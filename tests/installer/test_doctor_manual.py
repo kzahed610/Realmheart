@@ -172,8 +172,10 @@ contexts = ["doctor_manual"]
                            capabilities={}, artifacts={artifact.id: artifact}, health_checks={check.id: check})
         for category, required, observed, expected in (
             ("core", True, HealthStatus.PASS, "healthy"),
+            ("core", True, HealthStatus.WARNING, "degraded"),
             ("core", True, HealthStatus.FAIL, "failed"),
             ("qol", True, HealthStatus.FAIL, "degraded"),
+            ("qol", True, HealthStatus.WARNING, "degraded"),
             ("core", False, HealthStatus.FAIL, "degraded"),
             ("core", True, HealthStatus.UNKNOWN, "unknown"),
             ("core", True, HealthStatus.NOT_APPLICABLE, "unknown"),

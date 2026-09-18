@@ -105,6 +105,8 @@ component_id = "realmheart-core"
 [capabilities.probe]
 kind = "executable"
 executable = "hyprctl"
+version_argv = ["version"]
+version_prefix = "hyprland"
 
 [[external_dependencies]]
 id = "dep.runtime.systemctl"

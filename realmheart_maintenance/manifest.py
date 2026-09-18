@@ -32,6 +32,7 @@ _ALLOWED_HEALTH_CHECKS = {
 }
 _ALLOWED_COST = {"cheap", "normal", "expensive"}
 _ALLOWED_SIDE_EFFECTS = {"none", "read_only", "starts_component", "other"}
+ALLOWED_HEALTH_CONTEXTS = frozenset({"install_verify", "doctor_manual", "doctor_background"})
 _ALLOWED_PROBES = {
     "executable", "pkg_config", "cxx26", "opencv_cmake", "pam_link", "cmake_gtest",
     "tesseract_language", "networkmanager_backend", "bluetooth_backend",
@@ -517,7 +518,12 @@ def load_manifest(components_dir: Path) -> ManifestRegistry:
             timeout = raw.get("timeout_ms", 1000)
             if not isinstance(timeout, int) or timeout <= 0:
                 raise ManifestError(f"health check {hid}: timeout_ms must be a positive integer")
-            health = HealthCheckSpec(hid, cid, check, raw.get("artifact_id"), cost, side_effects, timeout, _string_tuple(raw.get("contexts"), field=f"health check {hid} contexts"), dict(raw.get("args") or {}))
+            contexts = _string_tuple(raw.get("contexts"), field=f"health check {hid} contexts")
+            if not contexts or any(item not in ALLOWED_HEALTH_CONTEXTS for item in contexts):
+                raise ManifestError(
+                    f"health check {hid}: contexts must declare one or more of {sorted(ALLOWED_HEALTH_CONTEXTS)}"
+                )
+            health = HealthCheckSpec(hid, cid, check, raw.get("artifact_id"), cost, side_effects, timeout, contexts, dict(raw.get("args") or {}))
             _insert_unique(health_checks, hid, health, what="health check")
 
         for raw in doc.get("build_units", []):

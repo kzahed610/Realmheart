@@ -52,6 +52,23 @@ class RepositoryManifestTests(unittest.TestCase):
                 result.errors,
             )
 
+    def test_component_without_any_evidence_source_is_rejected(self) -> None:
+        from dataclasses import replace
+
+        manifest = load_manifest(_bootstrap.REPO_ROOT / "components")
+        capabilities = {key: value for key, value in manifest.capabilities.items()
+                        if value.component_id != "screenshot-ocr"}
+        health_checks = {key: value for key, value in manifest.health_checks.items()
+                         if value.component_id != "screenshot-ocr"}
+        doctored = replace(manifest, capabilities=capabilities, health_checks=health_checks)
+        result = validate_repository(_bootstrap.REPO_ROOT, doctored)
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any("screenshot-ocr" in error and "no health check or capability" in error
+                for error in result.errors),
+            result.errors,
+        )
+
     def test_personal_session_leaks_are_not_in_realmheart_defaults(self) -> None:
         text = (_bootstrap.REPO_ROOT / "config/hypr/hyprland/execs.lua").read_text()
         for token in ("Bibata-Modern-Classic", "easyeffects", "gnome-keyring-daemon", "plasma-polkit-agent", "start_geoclue_agent"):

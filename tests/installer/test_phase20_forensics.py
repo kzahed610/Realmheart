@@ -1039,6 +1039,25 @@ contexts = ["doctor_background"]
         self.assertEqual(len(selected), len(self.registry.health_checks))
         self.assertEqual(set(selected), set(self.registry.health_checks))
 
+    def test_unknown_health_contexts_and_costs_fail_closed(self) -> None:
+        with self.assertRaises(ForensicContractError):
+            select_health_checks(self.registry, context="whenever")
+        with self.assertRaises(ForensicContractError):
+            select_health_checks(self.registry, context="doctor_background", max_cost="enormous")
+
+    def test_capability_version_evidence_honors_declared_prefix(self) -> None:
+        from types import SimpleNamespace
+        from realmheart_maintenance.forensics import version_evidence_line
+
+        output = "Hyprland 0.56.2 built from branch v0.56.2 at commit abc clean.\n"
+        prefixed = SimpleNamespace(probe=SimpleNamespace(
+            args={"executable": "hyprctl", "version_prefix": "hyprland"}))
+        self.assertEqual(version_evidence_line(prefixed, output), output.strip())
+        unprefixed = SimpleNamespace(probe=SimpleNamespace(args={"executable": "hyprctl"}))
+        self.assertIsNone(version_evidence_line(unprefixed, output))
+        by_executable = SimpleNamespace(probe=SimpleNamespace(args={"executable": "fish"}))
+        self.assertEqual(version_evidence_line(by_executable, "fish, version 4.0.2"), "fish, version 4.0.2")
+
     def test_manifest_identity_drift_is_explicit_not_a_parse_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -177,6 +177,7 @@ add_executable(realmheart_eventd
 set_target_properties(realmheart_eventd PROPERTIES OUTPUT_NAME "realmheart-eventd")
 target_include_directories(realmheart_eventd PRIVATE src third_party)
 target_compile_options(realmheart_eventd PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_compile_definitions(realmheart_eventd PRIVATE REALMHEART_VERSION="${PROJECT_VERSION}")
 target_link_libraries(realmheart_eventd PRIVATE realmheart_event_core Threads::Threads)
 
 if(REALMHEART_EVENTD_AUTOSTART)
@@ -201,6 +202,7 @@ add_executable(realmheart_event_cli
 set_target_properties(realmheart_event_cli PROPERTIES OUTPUT_NAME "realmheart-event")
 target_include_directories(realmheart_event_cli PRIVATE src third_party)
 target_compile_options(realmheart_event_cli PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_compile_definitions(realmheart_event_cli PRIVATE REALMHEART_VERSION="${PROJECT_VERSION}")
 target_link_libraries(realmheart_event_cli PRIVATE realmheart_event_core Threads::Threads)
 
 add_executable(realmheart
@@ -454,6 +456,7 @@ set_target_properties(realmheart_power_menu_renderer PROPERTIES
 )
 target_include_directories(realmheart_power_menu_renderer PRIVATE src third_party)
 target_compile_options(realmheart_power_menu_renderer PRIVATE ${REALMHEART_WARNING_FLAGS})
+target_compile_definitions(realmheart_power_menu_renderer PRIVATE REALMHEART_VERSION="${PROJECT_VERSION}")
 target_link_libraries(realmheart_power_menu_renderer PRIVATE
     realmheart_ui
     PkgConfig::GIO
@@ -579,6 +582,7 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
             PkgConfig::GDK_PIXBUF
         )
         target_compile_options(realmheart-wallpaper-renderer PRIVATE ${REALMHEART_WARNING_FLAGS})
+        target_compile_definitions(realmheart-wallpaper-renderer PRIVATE REALMHEART_VERSION="${PROJECT_VERSION}")
         set(REALMHEART_NATIVE_WALLPAPER_BUILT ON)
     else()
         message(STATUS "Native wallpaper renderer disabled: one or more optional Wayland/EGL dependencies are unavailable")

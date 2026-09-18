@@ -47,10 +47,12 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(len(registry.dependencies), 63)
         self.assertEqual(len(registry.capabilities), 65)
         self.assertEqual(len(registry.artifacts), 34)
-        self.assertEqual(len(registry.health_checks), 48)
+        self.assertEqual(len(registry.health_checks), 53)
         self.assertEqual(len(registry.build_units), 9)
         self.assertEqual(registry.artifacts["terminal.generator"].mode, "0755")
         self.assertEqual(registry.artifacts["auth.helper"].mode, "4755")
+        self.assertEqual(registry.capabilities["runtime.hyprctl"].probe.args["version_argv"], ["version"])
+        self.assertEqual(registry.capabilities["runtime.hyprctl"].probe.args["version_prefix"], "hyprland")
         self.assertEqual(registry.artifacts["terminal.generated-starship"].path, "$XDG_STATE_HOME/realmheart/theme/starship.toml")
         self.assertEqual(len(registry.digest), 64)
         self.assertEqual(len(registry.component_order), len(registry.components))
@@ -164,9 +166,40 @@ artifact_id = "missing"
 cost = "cheap"
 side_effects = "none"
 timeout_ms = 100
+contexts = ["doctor_manual"]
 '''
             with self.assertRaisesRegex(ManifestError, "unresolved artifact"):
                 load_manifest(write_manifest(Path(temp), body))
+
+    def test_health_check_contexts_are_declared_and_known(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            body = '''
+[[components]]
+id = "core"
+name = "Core"
+component_version = "release"
+category = "core"
+stage = "foundation"
+[[health_checks]]
+id = "check.bad"
+component_id = "core"
+check = "artifact_exists"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 100
+'''
+            with self.assertRaisesRegex(ManifestError, "contexts must declare"):
+                load_manifest(write_manifest(Path(temp), body))
+
+            unknown = body.replace("timeout_ms = 100", 'timeout_ms = 100\ncontexts = ["whenever"]')
+            with self.assertRaisesRegex(ManifestError, "contexts must declare"):
+                load_manifest(write_manifest(Path(temp) / "unknown", unknown))
+
+            declared = body.replace(
+                "timeout_ms = 100", 'timeout_ms = 100\ncontexts = ["doctor_manual", "doctor_background"]'
+            )
+            registry = load_manifest(write_manifest(Path(temp) / "declared", declared))
+            self.assertEqual(registry.health_checks["check.bad"].contexts, ("doctor_manual", "doctor_background"))
 
     def test_tool_specific_handler_field_is_forbidden(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

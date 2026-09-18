@@ -347,6 +347,20 @@ timeout_ms = 500
 contexts = ["install_verify", "doctor_background", "doctor_manual"]
 
 [[health_checks]]
+id = "check.core.power-menu-renderer.version"
+component_id = "realmheart-core"
+check = "version_probe"
+artifact_id = "core.power-menu-renderer"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 1000
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+version_argv = ["--version"]
+version_prefix = "realmheart power menu renderer"
+expected_version = "0.7.8"
+
+[[health_checks]]
 id = "check.core.assets.exists"
 component_id = "realmheart-core"
 check = "artifact_exists"
@@ -427,6 +441,20 @@ timeout_ms = 500
 contexts = ["install_verify", "doctor_background", "doctor_manual"]
 
 [[health_checks]]
+id = "check.event.daemon.version"
+component_id = "event-surface"
+check = "version_probe"
+artifact_id = "event.daemon"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 1000
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+version_argv = ["--version"]
+version_prefix = "realmheart event daemon"
+expected_version = "0.7.8"
+
+[[health_checks]]
 id = "check.event.cli.exists"
 component_id = "event-surface"
 check = "artifact_exists"
@@ -447,6 +475,20 @@ timeout_ms = 500
 contexts = ["install_verify", "doctor_background", "doctor_manual"]
 
 [[health_checks]]
+id = "check.event.cli.version"
+component_id = "event-surface"
+check = "version_probe"
+artifact_id = "event.cli"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 1000
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+version_argv = ["--version"]
+version_prefix = "realmheart event cli"
+expected_version = "0.7.8"
+
+[[health_checks]]
 id = "check.event.service.exists"
 component_id = "event-surface"
 check = "artifact_exists"
@@ -455,6 +497,17 @@ cost = "cheap"
 side_effects = "none"
 timeout_ms = 500
 contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+[[health_checks]]
+id = "check.event.socket.reachable"
+component_id = "event-surface"
+check = "socket_reachable"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+unix_path = "$XDG_RUNTIME_DIR/realmheart/eventd.sock"
 
 [[health_checks]]
 id = "check.screenshot.binary.exists"
@@ -606,6 +659,23 @@ side_effects = "none"
 timeout_ms = 500
 contexts = ["install_verify", "doctor_background", "doctor_manual"]
 
+[[health_checks]]
+id = "check.wallpaper.renderer.version"
+component_id = "wallpaper-native"
+check = "version_probe"
+artifact_id = "wallpaper.renderer"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 1000
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+version_argv = ["--version"]
+version_prefix = "realmheart wallpaper renderer"
+expected_version = "0.7.8"
+
+# The setuid auth helper and the compositor-coupled FX loader/plugin have no
+# safe version-only probe: the helper must never run outside the PAM path, and
+# the FX loader talks to Hyprland.  Their evidence stays artifact/receipt-based.
 [[health_checks]]
 id = "check.clipboard.text-service.exists"
 component_id = "clipboard-history"

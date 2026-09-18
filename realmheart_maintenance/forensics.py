@@ -18,6 +18,7 @@ from typing import Any, Mapping, Sequence
 
 from .fingerprint import FingerprintLimitExceeded, read_regular_file
 from .manifest import (
+    ALLOWED_HEALTH_CONTEXTS,
     ManifestRegistry,
     ParsedVersion,
     VersionCompatibility,
@@ -405,9 +406,12 @@ def version_evidence_line(capability_spec, detected: str | None) -> str | None:
     if not isinstance(detected, str):
         return None
     args = capability_spec.probe.args
-    identity = str(args.get("executable") or args.get("module") or "")
-    identity = re.sub(r"[^a-z0-9]+", "", Path(identity).name.lower())
-    identity = re.sub(r"\d+$", "", identity)
+    identities: list[str] = []
+    for candidate in (args.get("version_prefix"), args.get("executable"), args.get("module")):
+        normalized = re.sub(r"[^a-z0-9]+", "", Path(str(candidate or "")).name.lower())
+        normalized = re.sub(r"\d+$", "", normalized)
+        if normalized:
+            identities.append(normalized)
     for raw_line in detected.splitlines():
         line = raw_line.strip()
         if not line:
@@ -418,7 +422,7 @@ def version_evidence_line(capability_spec, detected: str | None) -> str | None:
         if match.start() == 0 and not line[match.end():].strip():
             return line
         normalized_prefix = re.sub(r"[^a-z0-9]+", "", line[:match.start()].lower())
-        if identity and normalized_prefix.startswith(identity):
+        if identities and normalized_prefix.startswith(tuple(identities)):
             return line
     return None
 
@@ -733,6 +737,8 @@ def select_health_checks(
 
     if max_cost not in _COST_RANK:
         raise ForensicContractError(f"unknown health-check cost {max_cost!r}")
+    if context not in ALLOWED_HEALTH_CONTEXTS:
+        raise ForensicContractError(f"unknown health-check context {context!r}")
     allowed = set(allowed_side_effects)
     selected: list[str] = []
     for check in registry.health_checks.values():

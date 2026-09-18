@@ -67,7 +67,9 @@ class Diagnosis:
 
 def diagnose(registry: ManifestRegistry, component: str | None = None, *,
              executor: HealthCheckExecutor | None = None,
-             capability_prober=None, receipt=None) -> Diagnosis:
+             capability_prober=None, receipt=None,
+             health_context: str = "doctor_manual",
+             max_cost: str = "normal") -> Diagnosis:
     if component is not None and component not in registry.components:
         raise ValueError("unknown component")
     selected = {component} if component is not None else set(registry.components)
@@ -80,7 +82,7 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
                 pending.append(dependency.id)
     ids = tuple(key for key, spec in registry.health_checks.items() if spec.component_id in selected)
     run = (executor or HealthCheckExecutor()).execute(
-        registry, context="doctor_manual", max_cost="normal", check_ids=ids,
+        registry, context=health_context, max_cost=max_cost, check_ids=ids,
     )
     uncertainties_by_component: dict[str, list[str]] = {}
     if capability_prober is None:
@@ -158,7 +160,9 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
         elif (uncertainties or any(item in {HealthStatus.UNKNOWN, HealthStatus.NOT_APPLICABLE}
                                    for item in required) or ComponentHealth.UNKNOWN in upstream):
             status = ComponentHealth.UNKNOWN
-        elif any(item is not HealthStatus.PASS for item in optional) or ComponentHealth.DEGRADED in upstream:
+        elif (any(item is not HealthStatus.PASS for item in optional)
+              or HealthStatus.WARNING in required
+              or ComponentHealth.DEGRADED in upstream):
             status = ComponentHealth.DEGRADED
         else:
             status = ComponentHealth.HEALTHY
