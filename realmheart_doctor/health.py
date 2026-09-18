@@ -1280,16 +1280,18 @@ def _health_launch_gate_preexec(
         os._exit(125)
 
 
-def _read_health_process_record(pid: int) -> _HealthProcessRecord | None:
-    """Read the identity fields needed to distinguish a reused PID."""
+def _parse_health_process_stat(pid: int, raw: bytes) -> _HealthProcessRecord | None:
+    """Parse identity fields from one raw ``/proc/<pid>/stat`` payload.
 
-    if type(pid) is not int or pid <= 0:
+    The kernel exposes ``comm`` as arbitrary bytes that need not be valid
+    text, so the payload is parsed as bytes and only the numeric fields plus
+    the single-letter ASCII state are interpreted.  A process merely named
+    with a non-ASCII character must never make the process-table view fail.
+    """
+
+    if type(pid) is not int or pid <= 0 or not isinstance(raw, bytes):
         return None
-    try:
-        raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
-    except (OSError, UnicodeError):
-        return None
-    command_end = raw.rfind(")")
+    command_end = raw.rfind(b")")
     if command_end < 0:
         return None
     fields = raw[command_end + 2 :].split()
@@ -1302,10 +1304,22 @@ def _read_health_process_record(pid: int) -> _HealthProcessRecord | None:
             int(fields[2]),
             int(fields[3]),
             int(fields[19]),
-            fields[0],
+            fields[0].decode("ascii"),
         )
-    except (IndexError, TypeError, ValueError):
+    except (IndexError, TypeError, ValueError, UnicodeDecodeError):
         return None
+
+
+def _read_health_process_record(pid: int) -> _HealthProcessRecord | None:
+    """Read the identity fields needed to distinguish a reused PID."""
+
+    if type(pid) is not int or pid <= 0:
+        return None
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_bytes()
+    except OSError:
+        return None
+    return _parse_health_process_stat(pid, raw)
 
 
 def _snapshot_health_processes() -> dict[int, _HealthProcessRecord] | None:

@@ -3810,5 +3810,67 @@ class DoctorHealthExecutorTests(unittest.TestCase):
             self.assertEqual(path_result.reason_code, "observation_unavailable")
 
 
+def _stat_payload(pid: int, comm: bytes, *, start_time: int = 4242) -> bytes:
+    tail = [b"R", b"1", b"1", b"1"] + [b"1"] * 15 + [str(start_time).encode("ascii")]
+    return str(pid).encode("ascii") + b" (" + comm + b") " + b" ".join(tail)
+
+
+class HealthProcessStatParsingTests(unittest.TestCase):
+    """A process name is arbitrary kernel bytes, not a text contract."""
+
+    def test_non_ascii_comm_parses(self):
+        record = health._parse_health_process_stat(4242, _stat_payload(4242, b"r\xc3\xa9alm\xe2\x99\xa5"))
+        self.assertIsNotNone(record)
+        self.assertEqual((record.pid, record.parent_pid, record.start_time, record.state), (4242, 1, 4242, "R"))
+
+    def test_comm_containing_a_parenthesis_parses(self):
+        record = health._parse_health_process_stat(7, _stat_payload(7, b"tricky)name"))
+        self.assertIsNotNone(record)
+        self.assertEqual(record.pid, 7)
+
+    def test_malformed_payloads_are_rejected(self):
+        self.assertIsNone(health._parse_health_process_stat(1, "not-bytes"))
+        self.assertIsNone(health._parse_health_process_stat(1, b"1 (no terminator"))
+        self.assertIsNone(health._parse_health_process_stat(1, b"1 (short) R 1 1"))
+        self.assertIsNone(health._parse_health_process_stat(1, b"1 (bad) R x 1 1 " + b"1 " * 16))
+        self.assertIsNone(health._parse_health_process_stat(0, _stat_payload(0, b"x")))
+
+    def test_live_process_with_non_ascii_comm_is_visible(self):
+        if os.name != "posix" or not sys.platform.startswith("linux"):
+            self.skipTest("Linux /proc is required")
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(read_fd)
+                libc = ctypes.CDLL(None, use_errno=True)
+                libc.prctl(15, b"r\xc3\xa9almheart", 0, 0, 0)
+                os.write(write_fd, b"1")
+                os.close(write_fd)
+                time.sleep(10)
+            finally:
+                os._exit(0)
+        os.close(write_fd)
+        try:
+            self.assertEqual(os.read(read_fd, 1), b"1")
+            os.close(read_fd)
+            deadline = time.monotonic() + 2.0
+            record = None
+            while record is None and time.monotonic() < deadline:
+                record = health._read_health_process_record(pid)
+                if record is None:
+                    time.sleep(0.01)
+            self.assertIsNotNone(record, "a non-ASCII comm made the process invisible")
+            snapshot = health._snapshot_health_processes()
+            self.assertIsNotNone(snapshot, "one odd process name broke the whole table scan")
+            self.assertIn(pid, snapshot)
+        finally:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(pid, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
