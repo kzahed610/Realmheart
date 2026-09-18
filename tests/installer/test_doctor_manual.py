@@ -82,6 +82,70 @@ class DoctorManualTests(unittest.TestCase):
         self.assertEqual(payload["format_version"], 1)
         self.assertEqual(payload["status"], "error")
 
+    def test_validate_manifests_checks_the_repository_when_present(self):
+        code, payload = self.invoke("validate-manifests", "--manifest-dir", "components", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["repository"]["checked"])
+        self.assertEqual(payload["components"], 18)
+        self.assertGreater(payload["health_checks"], 0)
+
+    def test_validate_manifests_accepts_a_standalone_manifest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            Path(temp, "manifest.toml").write_text('''schema_version = 1
+release_version = "0.7.8"
+[[components]]
+id = "demo"
+name = "Demo"
+component_version = "release"
+category = "core"
+stage = "foundation"
+[[health_checks]]
+id = "check.demo"
+component_id = "demo"
+check = "artifact_exists"
+artifact_id = "demo.file"
+contexts = ["doctor_manual"]
+[[artifacts]]
+id = "demo.file"
+component_id = "demo"
+path = "$PREFIX/share/demo"
+type = "file"
+required = true
+ownership = "release"
+managed = true
+''', encoding="utf-8")
+            code, payload = self.invoke("validate-manifests", "--manifest-dir", temp, "--json")
+        self.assertEqual(code, 0)
+        self.assertIsNone(payload["repository"])
+
+    def test_explain_adds_evidence_backed_explanations(self):
+        from unittest.mock import patch
+        from .test_doctor_incidents import _diagnosis
+        from realmheart_doctor.diagnosis import ComponentHealth
+        from realmheart_doctor.explanations import explanation_for
+
+        with patch("realmheart_doctor.diagnosis.diagnose", return_value=_diagnosis(ComponentHealth.FAILED)):
+            code, payload = self.invoke("doctor", "--explain", "--json")
+        self.assertEqual(code, 2)
+        explanation = payload["explanations"][0]
+        self.assertEqual(explanation["component"], "demo")
+        self.assertEqual(explanation["failure_class"], "COMPONENT_ARTIFACT_MISSING")
+        self.assertIn("missing", explanation["explanation"])
+        self.assertIn("check.demo", explanation["explanation"])
+        self.assertIsNone(explanation_for("NO_SUCH_CLASS"))
+        self.assertIn("explicit", explanation_for("UNKNOWN") or "explicit")
+
+    def test_explain_omits_healthy_components(self):
+        from unittest.mock import patch
+        from .test_doctor_incidents import _diagnosis
+        from realmheart_doctor.diagnosis import ComponentHealth
+
+        with patch("realmheart_doctor.diagnosis.diagnose", return_value=_diagnosis(ComponentHealth.HEALTHY)):
+            code, payload = self.invoke("doctor", "--explain", "--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["explanations"], [])
+
     def test_unknown_component_is_invalid_invocation(self):
         code, payload = self.invoke("doctor", "not-a-component", "--manifest-dir", "components", "--json")
         self.assertEqual(code, 4)

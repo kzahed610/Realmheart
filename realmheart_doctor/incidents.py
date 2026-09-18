@@ -126,6 +126,8 @@ def record_component_failure(
 
     existing, incidents_dir = _find_open_incident(root, component_id, fingerprint)
     timestamp = now.isoformat()
+    from .journal import journal
+
     if existing is not None:
         incident_path = incidents_dir / f"{existing}.json"
         _append_timeline(incident_path, {
@@ -134,6 +136,7 @@ def record_component_failure(
             "summary": "the same unresolved failure was observed again",
             "details": {"checks": [item.get("check_id") for item in failed]},
         }, now)
+        journal(root, "observation_appended", incident=existing, component=component_id)
         return IncidentEvent(existing)
 
     incident_id = _next_incident_id(incidents_dir, now)
@@ -166,6 +169,8 @@ def record_component_failure(
     from .state import _atomic_write_json
 
     _atomic_write_json(incidents_dir / f"{incident_id}.json", incident)
+    journal(root, "incident_opened", incident=incident_id, component=component_id,
+            failure_class=classification.failure_class)
     return IncidentEvent(incident_id)
 
 
@@ -211,6 +216,9 @@ def record_component_recovery(
         payload["updated_at"] = now.isoformat()
         payload["resolution_state"] = _RESOLVED
         _atomic_write_json(incident_path, payload)
+        from .journal import journal
+
+        journal(root, "incident_resolved", incident=incident_path.stem, component=component_id)
         result = IncidentEvent(incident_path.stem)
     return result
 
@@ -303,4 +311,7 @@ def record_repair_attempt(
     })
     payload["updated_at"] = timestamp
     _atomic_write_json(incidents_dir / f"{incident_id}.json", payload)
+    from .journal import journal
+
+    journal(root, "repair_recorded", incident=incident_id, component=component_id, outcome=outcome)
     return IncidentEvent(incident_id)

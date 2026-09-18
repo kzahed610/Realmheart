@@ -54,6 +54,10 @@ def dispatch_notifications(
             notified = False
         results.append({"incident_id": incident_id, "component_id": component_id,
                         "notified": notified})
+        from .journal import journal
+
+        journal(root, "notification", incident=incident_id, component=component_id,
+                delivered=notified)
         if notified:
             payload["last_notified_state"] = "unresolved"
             payload["updated_at"] = now.isoformat()

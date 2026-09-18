@@ -108,6 +108,8 @@ def _parser(*, manual: bool = False) -> argparse.ArgumentParser:
             command.add_argument("--preview", action="store_true")
             command.add_argument("--integrity", action="store_true",
                                  help="receipt-backed installation integrity view (no new diagnosis)")
+            command.add_argument("--explain", action="store_true",
+                                 help="add evidence-backed explanations for observed failures")
 
             command.add_argument("--state-dir", type=Path, help="explicit local directory for snapshots and incidents (no persistence by default)")
             command.add_argument("--prefix", type=_absolute_path, help="explicit installation prefix for canonical artifact paths")
@@ -347,6 +349,11 @@ def _repair(args: argparse.Namespace, registry) -> int:
         payload = {"format_version": 1, "mode": "dry_run", "plan": plan.to_dict()}
         print(json.dumps(payload, indent=2, sort_keys=True) if args.json else render_repair_plan(plan))
         return 0
+    if args.state_dir is not None:
+        from .journal import journal
+
+        journal(args.state_dir, "repair_planned", component=args.component,
+                failure_class=classification.failure_class, actions=len(plan.actions))
 
     provenance = receipt.build_provenance if receipt is not None else None
     build_dir = args.build_dir or (provenance.cmake_binary_dir if provenance is not None else None)
@@ -386,6 +393,11 @@ def _repair(args: argparse.Namespace, registry) -> int:
                   render_repair_report(report) + "\nDoctor state persistence failed")
             return 5
     payload = {"format_version": 1, "mode": "applied", "plan": plan.to_dict(), "report": report.to_dict()}
+    if args.state_dir is not None:
+        from .journal import journal
+
+        journal(args.state_dir, "repair_executed", component=args.component, verified=report.verified,
+                statuses=",".join(item.status for item in report.executions))
     print(json.dumps(payload, indent=2, sort_keys=True) if args.json else render_repair_report(report))
     return _repair_exit_code(report)
 
@@ -427,6 +439,25 @@ def _manual(args: argparse.Namespace) -> int:
         with _installation_environment(args):
             result = diagnose(registry, args.component, receipt=receipt)
         payload = result.to_dict()
+        if args.explain:
+            from .classification import classify_failure
+            from .explanations import explanation_for
+
+            explanations = []
+            for component in result.components:
+                if component.status.value == "healthy":
+                    continue
+                classification = classify_failure(component.checks)
+                explanations.append({
+                    "component": component.id,
+                    "status": component.status.value,
+                    "failure_class": classification.failure_class,
+                    "evidence": list(classification.evidence_ids),
+                    "explanation": explanation_for(classification.failure_class,
+                                                   classification.evidence_ids)
+                    or "No explanation template covers this failure yet; the raw evidence stands.",
+                })
+            payload["explanations"] = explanations
         if args.state_dir is not None:
             from .state import record_diagnosis
             from .incidents import record_component_failure
@@ -457,8 +488,57 @@ def _manual(args: argparse.Namespace) -> int:
                 payload["reports"] = reports
                 if args.preview:
                     payload["report_text"] = {Path(path).stem: Path(path).read_text(encoding="utf-8") for path in reports}
-        print(json.dumps(payload, indent=2, sort_keys=True) if args.json else render_diagnosis(result, verbose=args.verbose))
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            text = render_diagnosis(result, verbose=args.verbose)
+            if args.explain and payload.get("explanations"):
+                from .explanations import render_explanations
+
+                text += "\n\n" + render_explanations(tuple(payload["explanations"]))
+            print(text)
         return EXIT_CODES[result.overall]
+    if args.command == "validate-manifests":
+        from realmheart_maintenance.repository import validate_repository
+
+        root = Path(args.manifest_dir).resolve().parent
+        repository_checked = (root / "CMakeLists.txt").is_file()
+        validation = validate_repository(root, registry) if repository_checked else None
+        ok = validation is None or validation.ok
+        payload = {
+            "format_version": 1,
+            "doctor_version": RELEASE_VERSION,
+            "status": "ok" if ok else "error",
+            "release_version": registry.release_version,
+            "manifest_digest": registry.digest,
+            "components": len(registry.components),
+            "dependencies": len(registry.dependencies),
+            "capabilities": len(registry.capabilities),
+            "artifacts": len(registry.artifacts),
+            "health_checks": len(registry.health_checks),
+            "build_units": len(registry.build_units),
+            "repository": None if validation is None else {
+                "checked": True,
+                "ok": validation.ok,
+                "errors": list(validation.errors),
+                "warnings": list(validation.warnings),
+            },
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"Canonical manifest: {'PASS' if ok else 'FAIL'}")
+            print(f"  Release: {registry.release_version}")
+            print(f"  Digest: {registry.digest}")
+            print(f"  Graph: {len(registry.components)} components, {len(registry.dependencies)} dependencies, "
+                  f"{len(registry.capabilities)} capabilities, {len(registry.artifacts)} artifacts, "
+                  f"{len(registry.build_units)} build units, {len(registry.health_checks)} health checks")
+            if validation is not None:
+                if not repository_checked:
+                    print("  repository: not a Realmheart checkout; manifest validated on its own")
+                for error in validation.errors:
+                    print(f"  error: {error}")
+        return 0 if ok else 5
     components = [{"id": key, "name": registry.components[key].name,
                    "category": registry.components[key].category} for key in registry.component_order]
     payload = {"format_version": 1, "doctor_version": RELEASE_VERSION, "status": "ok", "release_version": registry.release_version,

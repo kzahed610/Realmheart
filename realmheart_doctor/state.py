@@ -69,6 +69,16 @@ def record_diagnosis(root: Path, diagnosis: Diagnosis, *, now: datetime | None =
     if now is None:
         now = datetime.now(timezone.utc)
     root = Path(root)
+    from .journal import journal
+
+    journal(
+        root, "state_recorded",
+        overall=diagnosis.overall.value,
+        components=len(diagnosis.components),
+        manifest_digest=diagnosis.manifest_digest,
+        release_version=diagnosis.release_version,
+        budget_exhausted=diagnosis.budget_exhausted,
+    )
     recovered: list[str] = []
     (root / "corrupt").mkdir(parents=True, exist_ok=True)
 
