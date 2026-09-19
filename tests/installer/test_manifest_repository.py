@@ -52,6 +52,29 @@ class RepositoryManifestTests(unittest.TestCase):
                 result.errors,
             )
 
+    def test_component_with_a_build_target_needs_a_build_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            shutil.copytree(
+                _bootstrap.REPO_ROOT,
+                root,
+                ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc", "build*"),
+            )
+            cmake = root / "CMakeLists.txt"
+            text = cmake.read_text()
+            text = text.replace(
+                "    realmheart_add_build_fingerprint(realmheart-fx\n",
+                "    # fingerprint removed for the fixture\n",
+            )
+            cmake.write_text(text)
+            manifest = load_manifest(root / "components")
+            result = validate_repository(root, manifest)
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any("realmheart-fx" in error and "build fingerprint" in error for error in result.errors),
+            result.errors,
+        )
+
     def test_journal_log_source_requires_a_matching_service_artifact(self) -> None:
         from dataclasses import replace
 

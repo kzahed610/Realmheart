@@ -645,6 +645,13 @@ if(REALMHEART_NATIVE_WALLPAPER_BUILT)
             dep.lib.gdk-pixbuf:${GDK_PIXBUF_VERSION}
     )
 endif()
+if(TARGET realmheart_fx)
+    realmheart_add_build_fingerprint(realmheart-fx
+        DEPENDENCIES
+            dep.hyprland.devel:${HYPRLAND_VERSION}
+            dep.lib.glesv2:${GLESV2_VERSION}
+    )
+endif()
 
 if(TARGET realmheart_fx)
     install(TARGETS realmheart_fx LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/realmheart COMPONENT realmheart-fx)
@@ -799,6 +806,18 @@ include(CTest)
 if(BUILD_TESTING)
     find_package(GTest REQUIRED)
     find_program(DBUS_RUN_SESSION_EXECUTABLE dbus-run-session REQUIRED)
+
+    if(GTest_VERSION)
+        realmheart_add_build_fingerprint(native-tests
+            DEPENDENCIES
+                dep.verification.gtest:${GTest_VERSION}
+        )
+    elseif(GTEST_VERSION_STRING)
+        realmheart_add_build_fingerprint(native-tests
+            DEPENDENCIES
+                dep.verification.gtest:${GTEST_VERSION_STRING}
+        )
+    endif()
 
     function(realmheart_configure_test target)
         target_include_directories(${target} PRIVATE src third_party)

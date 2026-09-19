@@ -78,6 +78,9 @@ def validate_repository(root: Path, registry: ManifestRegistry | None = None) ->
     targets = _cmake_targets(cmake_text)
     executable_targets = _cmake_executable_targets(cmake_text)
     output_names = _cmake_output_names(cmake_text)
+    fingerprint_components = set(
+        re.findall(r"realmheart_add_build_fingerprint\s*\(\s*([A-Za-z0-9_.+-]+)", cmake_text)
+    )
     for unit in registry.build_units.values():
         if unit.cmake_target and unit.cmake_target not in targets:
             errors.append(f"manifest build unit {unit.id} references missing CMake target {unit.cmake_target}")
@@ -111,6 +114,11 @@ def validate_repository(root: Path, registry: ManifestRegistry | None = None) ->
             errors.append(
                 f"component {component.id} declares no health check or capability probe evidence"
             )
+        if any(unit.cmake_target for unit in registry.build_units.values() if component.id in unit.component_ids):
+            if component.id not in fingerprint_components:
+                errors.append(
+                    f"component {component.id} builds a target but declares no build fingerprint"
+                )
         service_units = {
             Path(artifact.path).name
             for artifact in registry.artifacts.values()
