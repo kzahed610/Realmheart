@@ -21,7 +21,7 @@ _SECTIONS = (
     ("Realmheart changes", "realmheart_changes"), ("Configuration changes", "configuration_changes"),
     ("Repair attempts", "repair_attempts"), ("Repair results", "repair_results"),
     ("Final conclusion", "resolution_state"), ("Realmheart/system metadata", "metadata"),
-    ("Relevant sanitized logs", "timeline"),
+    ("Component logs", "raw_logs"), ("Relevant sanitized logs", "timeline"),
 )
 
 

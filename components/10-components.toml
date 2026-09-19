@@ -10,6 +10,9 @@ stage = "core_shell"
 description = "Main native shell and shared release resources."
 repair_strategy_ids = ["rebuild_component", "install_missing_package", "restart_service"]
 build_units = ["realmheart-shell", "power-menu-renderer"]
+[[components.log_sources]]
+kind = "journal"
+target = "realmheart.service"
 
 [[components]]
 id = "realmheart-fx"
@@ -33,6 +36,9 @@ stage = "services"
 description = "Structured Realmheart event daemon and producer CLI."
 repair_strategy_ids = ["rebuild_component", "install_missing_package", "restart_service"]
 build_units = ["eventd", "event-cli"]
+[[components.log_sources]]
+kind = "journal"
+target = "realmheart-eventd.service"
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true
@@ -101,6 +107,9 @@ stage = "terminal"
 description = "Kitty/Fish/Starship theme integration and generator."
 repair_strategy_ids = ["install_missing_package", "restart_service"]
 requires_installer_binding = true
+[[components.log_sources]]
+kind = "journal"
+target = "realmheart-terminal-theme.service"
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true
@@ -116,6 +125,12 @@ category = "qol"
 stage = "services"
 description = "Text/image clipboard history watcher services and launcher integration."
 repair_strategy_ids = ["install_missing_package", "restart_service"]
+[[components.log_sources]]
+kind = "journal"
+target = "realmheart-cliphist-text.service"
+[[components.log_sources]]
+kind = "journal"
+target = "realmheart-cliphist-image.service"
 [[components.realmheart_dependencies]]
 id = "realmheart-core"
 required = true

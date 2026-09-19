@@ -100,6 +100,20 @@ _REDACTED = {
         "helper failed for uid 1000 at /home/somebody/.local/bin/realmheart-auth-helper; "
         "network peer 10.0.0.17; token=ghp_AAAABBBBCCCCDDDDEEEEFFFF000011112222"
     ),
+    "raw_logs": {
+        "collected_at": "2026-09-18T12:00:00+00:00",
+        "sources": [
+            {
+                "kind": "journal",
+                "target": "realmheart-cliphist-text.service",
+                "lines": [
+                    "authentication failed for user somebody with password=hunter2",
+                    "peer 10.0.0.17 rejected the connection",
+                ],
+                "sanitized": True,
+            },
+        ],
+    },
     "resolution_state": "unresolved",
     "timeline": [
         {
@@ -132,6 +146,8 @@ class MarkdownGoldenTests(unittest.TestCase):
         self.assertIn("[REDACTED]", text)
         self.assertNotIn("ghp_", text)
         self.assertNotIn("10.0.0.17", text)
+        self.assertNotIn("hunter2", text)
+        self.assertIn("## Component logs", text)
 
 
 if __name__ == "__main__":

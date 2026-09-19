@@ -24,6 +24,23 @@
 
     unresolved
 
+## Component logs
+
+    {
+      "collected_at": "2026-09-18T12:00:00+00:00",
+      "sources": [
+        {
+          "kind": "journal",
+          "lines": [
+            "authentication failed for user somebody with password=[REDACTED]",
+            "peer [REDACTED] rejected the connection"
+          ],
+          "sanitized": true,
+          "target": "realmheart-cliphist-text.service"
+        }
+      ]
+    }
+
 ## Relevant sanitized logs
 
     [

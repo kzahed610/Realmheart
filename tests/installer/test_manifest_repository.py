@@ -52,6 +52,28 @@ class RepositoryManifestTests(unittest.TestCase):
                 result.errors,
             )
 
+    def test_journal_log_source_requires_a_matching_service_artifact(self) -> None:
+        from dataclasses import replace
+
+        from realmheart_maintenance.manifest import LogSourceSpec
+
+        manifest = load_manifest(_bootstrap.REPO_ROOT / "components")
+        core = manifest.components["realmheart-core"]
+        doctored = replace(
+            manifest,
+            components={
+                **manifest.components,
+                core.id: replace(core, log_sources=(LogSourceSpec("journal", "not-declared.service"),)),
+            },
+        )
+        result = validate_repository(_bootstrap.REPO_ROOT, doctored)
+        self.assertFalse(result.ok)
+        self.assertTrue(
+            any("not-declared.service" in error and "without a matching service artifact" in error
+                for error in result.errors),
+            result.errors,
+        )
+
     def test_component_without_any_evidence_source_is_rejected(self) -> None:
         from dataclasses import replace
 

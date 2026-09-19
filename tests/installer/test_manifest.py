@@ -201,6 +201,41 @@ timeout_ms = 100
             registry = load_manifest(write_manifest(Path(temp) / "declared", declared))
             self.assertEqual(registry.health_checks["check.bad"].contexts, ("doctor_manual", "doctor_background"))
 
+    def test_component_log_sources_are_typed_and_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            body = '''
+[[components]]
+id = "core"
+name = "Core"
+component_version = "release"
+category = "core"
+stage = "foundation"
+[[components.log_sources]]
+kind = "journal"
+target = "realmheart.service"
+[[components.log_sources]]
+kind = "file"
+target = "$XDG_STATE_HOME/realmheart/doctor/core.log"
+'''
+            registry = load_manifest(write_manifest(Path(temp), body))
+            sources = registry.components["core"].log_sources
+            self.assertEqual([(item.kind, item.target) for item in sources],
+                             [("journal", "realmheart.service"),
+                              ("file", "$XDG_STATE_HOME/realmheart/doctor/core.log")])
+
+            bad_kind = body.replace('kind = "journal"', 'kind = "carrier-pigeon"')
+            with self.assertRaisesRegex(ManifestError, "unsupported log source kind"):
+                load_manifest(write_manifest(Path(temp) / "bad-kind", bad_kind))
+
+            bad_unit = body.replace('target = "realmheart.service"', 'target = "not a unit"')
+            with self.assertRaisesRegex(ManifestError, "must be a unit name"):
+                load_manifest(write_manifest(Path(temp) / "bad-unit", bad_unit))
+
+            unsafe = body.replace('target = "$XDG_STATE_HOME/realmheart/doctor/core.log"',
+                                  'target = "$XDG_STATE_HOME/../secrets.log"')
+            with self.assertRaisesRegex(ManifestError, "unsafe file log source"):
+                load_manifest(write_manifest(Path(temp) / "unsafe", unsafe))
+
     def test_tool_specific_handler_field_is_forbidden(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             body = '''

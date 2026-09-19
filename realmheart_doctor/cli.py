@@ -464,7 +464,10 @@ def _manual(args: argparse.Namespace) -> int:
 
             try:
                 state = record_diagnosis(args.state_dir, result)
-                events = [record_component_failure(args.state_dir, component.id)
+                from .log_evidence import log_collector_for
+
+                collector = log_collector_for(registry)
+                events = [record_component_failure(args.state_dir, component.id, log_collector=collector)
                           for component in result.components]
             except OSError:
                 payload["state"] = {"error": "state_persistence_failed"}

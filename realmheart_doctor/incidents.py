@@ -92,11 +92,14 @@ def record_component_failure(
     component_id: str,
     *,
     now: datetime | None = None,
+    log_collector=None,
 ) -> IncidentEvent | None:
     """Create or extend the open incident for a failed component.
 
     Returns ``None`` when the component is not currently FAILED (degradation is
     not incident-worthy by itself), so repeated calls never spam history.
+    ``log_collector`` (when provided) is consulted only for a newly created
+    incident, so declared component logs are captured once, near the failure.
     """
 
     if now is None:
@@ -141,6 +144,12 @@ def record_component_failure(
 
     incident_id = _next_incident_id(incidents_dir, now)
     primary = failed[0] if failed else {}
+    log_evidence = None
+    if log_collector is not None:
+        try:
+            log_evidence = log_collector(component_id)
+        except Exception:
+            log_evidence = None
     incident = {
         "format_version": STATE_FORMAT_VERSION,
         "id": incident_id,
@@ -157,6 +166,7 @@ def record_component_failure(
         "relevant_changes": changes_since_healthy(current, _read_lkg_summary(root, component_id)),
         "checks": failed or checks,
         "repair_attempts": [],
+        "raw_logs": log_evidence,
         "resolution_state": _UNRESOLVED,
         "failure_fingerprint": fingerprint,
         "timeline": [{

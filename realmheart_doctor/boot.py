@@ -75,8 +75,11 @@ def _run_locked(registry, state_root: Path, session_key: str, marker: Path,
         max_cost="cheap",
     )
     record = record_diagnosis(state_root, diagnosis, now=now)
+    from .log_evidence import log_collector_for
+
+    collector = log_collector_for(registry)
     for component in diagnosis.components:
-        record_component_failure(state_root, component.id, now=now)
+        record_component_failure(state_root, component.id, now=now, log_collector=collector)
     dispatch_notifications(state_root, notifier, now=now)
     from .post_update import correlate_package_updates, record_package_updates
 

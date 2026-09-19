@@ -33,6 +33,8 @@ _ALLOWED_HEALTH_CHECKS = {
 _ALLOWED_COST = {"cheap", "normal", "expensive"}
 _ALLOWED_SIDE_EFFECTS = {"none", "read_only", "starts_component", "other"}
 ALLOWED_HEALTH_CONTEXTS = frozenset({"install_verify", "doctor_manual", "doctor_background"})
+_ALLOWED_LOG_SOURCES = {"journal", "file"}
+_JOURNAL_UNIT_RE = re.compile(r"^[A-Za-z0-9@._:-]+\.(?:service|socket|path|target|timer)$")
 _ALLOWED_PROBES = {
     "executable", "pkg_config", "cxx26", "opencv_cmake", "pam_link", "cmake_gtest",
     "tesseract_language", "networkmanager_backend", "bluetooth_backend",
@@ -144,6 +146,14 @@ class HealthCheckSpec:
 
 
 @dataclass(frozen=True)
+class LogSourceSpec:
+    """One bounded, read-only log source a component declares for reports."""
+
+    kind: str
+    target: str
+
+
+@dataclass(frozen=True)
 class ComponentSpec:
     id: str
     name: str
@@ -155,6 +165,7 @@ class ComponentSpec:
     build_units: tuple[str, ...]
     repair_strategy_ids: tuple[str, ...]
     requires_installer_binding: bool = False
+    log_sources: tuple[LogSourceSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -436,6 +447,22 @@ def load_manifest(components_dir: Path) -> ManifestRegistry:
                 if minimum_version is not None and ParsedVersion.parse(str(minimum_version)) is None:
                     raise ManifestError(f"component {cid}: invalid dependency minimum_version {minimum_version!r}")
                 deps.append(ComponentDependencySpec(_expect_id(dep.get("id"), what="component dependency"), _bool(dep.get("required"), True), minimum_version))
+            log_sources: list[LogSourceSpec] = []
+            for entry in raw.get("log_sources", []):
+                if not isinstance(entry, dict):
+                    raise ManifestError(f"component {cid}: log source must be a table")
+                kind = entry.get("kind")
+                if kind not in _ALLOWED_LOG_SOURCES:
+                    raise ManifestError(f"component {cid}: unsupported log source kind {kind!r}")
+                target = entry.get("target")
+                if not isinstance(target, str) or not target or "\x00" in target:
+                    raise ManifestError(f"component {cid}: log source target must be a non-empty string")
+                if kind == "journal":
+                    if not _JOURNAL_UNIT_RE.fullmatch(target):
+                        raise ManifestError(f"component {cid}: journal log source target must be a unit name")
+                elif not _safe_artifact_path(target):
+                    raise ManifestError(f"component {cid}: unsafe file log source target {target!r}")
+                log_sources.append(LogSourceSpec(kind, target))
             component = ComponentSpec(
                 id=cid,
                 name=str(raw.get("name") or cid),
@@ -447,6 +474,7 @@ def load_manifest(components_dir: Path) -> ManifestRegistry:
                 build_units=_string_tuple(raw.get("build_units"), field=f"component {cid} build_units"),
                 repair_strategy_ids=_string_tuple(raw.get("repair_strategy_ids"), field=f"component {cid} repair_strategy_ids"),
                 requires_installer_binding=_bool(raw.get("requires_installer_binding"), False),
+                log_sources=tuple(log_sources),
             )
             _insert_unique(components, cid, component, what="component")
 

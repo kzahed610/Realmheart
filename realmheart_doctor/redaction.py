@@ -17,7 +17,7 @@ _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
 _IPV6 = re.compile(r"(?<![\w:])[0-9a-fA-F:.]*:[0-9a-fA-F:.]+(?:%[\w.-]+)?(?![\w:])")
 _AUTH = re.compile(r"(?im)\b(?:authorization|proxy-authorization)\s*:[^\r\n]*")
 _ASSIGNMENT = re.compile(
-    r'''(?ix)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|passwd|secret|ssid)\b["']?\s*[:=]\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s,;}]+)'''
+    r'''(?ix)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|passwd|secret|ssid)\b["']?\s*[:=]\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s,;}"']+)'''
 )
 _TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b")
 _BEARER = re.compile(r"(?i)\bBearer\s+[^\s,;]+")

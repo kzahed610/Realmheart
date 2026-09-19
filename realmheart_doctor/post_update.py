@@ -211,8 +211,11 @@ def run_post_update(
 
     diagnosis = diagnose(registry, executor=executor, health_context="doctor_background", max_cost="cheap")
     record_diagnosis(root, diagnosis, now=now)
+    from .log_evidence import log_collector_for
+
+    collector = log_collector_for(registry)
     for component in diagnosis.components:
-        record_component_failure(root, component.id, now=now)
+        record_component_failure(root, component.id, now=now, log_collector=collector)
     if notifier is not None:
         dispatch_notifications(root, notifier, now=now)
     report = record_package_updates(root, report, marker_path=marker_path)

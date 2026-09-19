@@ -111,6 +111,17 @@ def validate_repository(root: Path, registry: ManifestRegistry | None = None) ->
             errors.append(
                 f"component {component.id} declares no health check or capability probe evidence"
             )
+        service_units = {
+            Path(artifact.path).name
+            for artifact in registry.artifacts.values()
+            if artifact.component_id == component.id and artifact.type == "service"
+        }
+        for source in component.log_sources:
+            if source.kind == "journal" and source.target not in service_units:
+                errors.append(
+                    f"component {component.id} declares journal log source {source.target} "
+                    "without a matching service artifact"
+                )
 
     declared_service_names = {
         Path(artifact.path).name
