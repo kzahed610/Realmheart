@@ -55,6 +55,7 @@ class LogEvidenceTests(unittest.TestCase):
             return _Result(0, "token=ghp_AAAABBBBCCCCDDDDEEEEFFFF000011112222\n" + body)
 
         evidence = collect_log_evidence(self.registry, "event-surface", runner=runner,
+                                        journalctl="/usr/bin/journalctl",
                                         now=datetime(2026, 9, 18, tzinfo=timezone.utc))
         self.assertIsNotNone(evidence)
         self.assertEqual(evidence["collected_at"], "2026-09-18T00:00:00+00:00")
@@ -63,16 +64,22 @@ class LogEvidenceTests(unittest.TestCase):
         self.assertTrue(source["sanitized"])
         self.assertEqual(len(source["lines"]), MAX_LINES)
         self.assertTrue(all("ghp_" not in line for line in source["lines"]))
-        self.assertEqual(calls[0][:3], (calls[0][0], "--user", "-u"))
+        self.assertEqual(calls[0][0], "/usr/bin/journalctl")
+        self.assertEqual(calls[0][1:3], ("--user", "-u"))
         self.assertIn("realmheart-eventd.service", calls[0])
         self.assertIn("--no-pager", calls[0])
 
     def test_journal_failure_or_undeclared_component_yields_no_evidence(self):
         self.assertIsNone(collect_log_evidence(
-            self.registry, "event-surface", runner=lambda argv, timeout: _Result(1, "no logs")))
+            self.registry, "event-surface", runner=lambda argv, timeout: _Result(1, "no logs"),
+            journalctl="/usr/bin/journalctl"))
         self.assertIsNone(collect_log_evidence(
-            self.registry, "screenshot", runner=lambda argv, timeout: _Result(0, "unexpected")))
+            self.registry, "screenshot", runner=lambda argv, timeout: _Result(0, "unexpected"),
+            journalctl="/usr/bin/journalctl"))
         self.assertIsNone(collect_log_evidence(self.registry, "not-a-component"))
+        with patch("realmheart_doctor.log_evidence.shutil.which", return_value=None):
+            self.assertIsNone(collect_log_evidence(
+                self.registry, "event-surface", runner=lambda argv, timeout: _Result(0, "logs")))
 
     def test_file_evidence_is_tail_bounded_and_symlinks_are_refused(self):
         with tempfile.TemporaryDirectory() as temp:

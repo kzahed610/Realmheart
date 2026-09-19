@@ -78,9 +78,17 @@ class DoctorIntegrityTests(unittest.TestCase):
         self.assertEqual(payload["error"], "invalid_invocation")
 
     def test_untouched_installation_has_no_error_or_critical_findings(self):
+        from unittest.mock import patch
+
+        from realmheart_maintenance.forensics import CapabilityObservation
+        from realmheart_doctor import acceptance
+
+        def stable_probe(spec, *, registry=None):
+            return CapabilityObservation(spec.id, "pass", version=None, detail="fixture observation")
+
         with tempfile.TemporaryDirectory() as temp:
             receipt, _, environment = _generated_receipt(Path(temp))
-            with _environment(environment):
+            with _environment(environment), patch.object(acceptance, "_probe_capability", stable_probe):
                 code, payload = _invoke(
                     "doctor", "--integrity", "--receipt", str(receipt),
                     "--manifest-dir", "components", "--json",

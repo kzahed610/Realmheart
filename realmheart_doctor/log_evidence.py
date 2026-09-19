@@ -53,11 +53,11 @@ def _bounded_lines(text: str) -> list[str]:
     return [line[:MAX_LINE_CHARS] for line in lines[-MAX_LINES:]]
 
 
-def _collect_journal(target: str, *, runner) -> dict | None:
-    journalctl = shutil.which("journalctl")
-    if journalctl is None:
+def _collect_journal(target: str, *, runner, journalctl: str | None) -> dict | None:
+    executable = journalctl or shutil.which("journalctl")
+    if executable is None:
         return None
-    argv = (journalctl, "--user", "-u", target, "--no-pager", "-o", "cat", "-n", str(MAX_LINES))
+    argv = (executable, "--user", "-u", target, "--no-pager", "-o", "cat", "-n", str(MAX_LINES))
     try:
         completed = runner(argv, JOURNAL_TIMEOUT_SECONDS)
     except (OSError, subprocess.SubprocessError):
@@ -92,6 +92,7 @@ def collect_log_evidence(
     *,
     runner=None,
     reader=None,
+    journalctl: str | None = None,
     now: datetime | None = None,
 ) -> dict | None:
     """Return sanitized, bounded log evidence for one component, or ``None``."""
@@ -104,7 +105,7 @@ def collect_log_evidence(
     sources: list[dict] = []
     for spec in component.log_sources[:MAX_SOURCES]:
         if spec.kind == "journal":
-            entry = _collect_journal(spec.target, runner=run)
+            entry = _collect_journal(spec.target, runner=run, journalctl=journalctl)
         else:
             entry = _collect_file(spec.target, reader=read)
         if entry is None:
@@ -123,12 +124,13 @@ def collect_log_evidence(
     }
 
 
-def log_collector_for(registry: ManifestRegistry, *, runner=None, reader=None):
+def log_collector_for(registry: ManifestRegistry, *, runner=None, reader=None, journalctl: str | None = None):
     """Return a callable suitable for ``record_component_failure``."""
 
     def collect(component_id: str) -> dict | None:
         try:
-            return collect_log_evidence(registry, component_id, runner=runner, reader=reader)
+            return collect_log_evidence(registry, component_id, runner=runner, reader=reader,
+                                        journalctl=journalctl)
         except Exception:
             # Evidence collection must never break incident creation.
             return None
