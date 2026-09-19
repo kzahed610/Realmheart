@@ -63,7 +63,7 @@ class JournalTests(unittest.TestCase):
             root = Path(temp)
             record_diagnosis(root, _diagnosis(ComponentHealth.FAILED))
             event = record_component_failure(root, "demo")
-            dispatch_notifications(root, lambda title, body: None)
+            dispatch_notifications(root, lambda title, body, severity=None: None)
             record_diagnosis(root, _diagnosis(ComponentHealth.HEALTHY))
             record_component_recovery(root, "demo")
             events = [entry["event"] for entry in read_journal(root)]

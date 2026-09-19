@@ -435,6 +435,12 @@ class InstallationPlanner:
                     ("@WL_PASTE@", self._capability_executable("runtime.wl-paste", "wl-paste")),
                     ("@CLIPHIST@", self._capability_executable("runtime.cliphist", "cliphist")),
                 )
+            elif artifact.id == "doctor.boot-service":
+                render_strategy = "token-substitution-v1"
+                render_values = (
+                    ("@REALMHEART_DOCTOR_BIN@", str(self.prefix / "bin" / "realmheart-doctor")),
+                    ("@REALMHEART_DOCTOR_STATE_DIR@", str(self.paths.state_home / "realmheart" / "doctor")),
+                )
             elif needs_template_render and artifact.id in {"terminal.theme-service", "terminal.theme-path"}:
                 render_strategy = "rewrite-default-xdg-v1"
                 render_values = (
@@ -773,6 +779,9 @@ class InstallationPlanner:
             elif service == "realmheart.service":
                 action = ServiceActionKind.ENABLE_ONLY
                 reason = "enable the shell service but defer starting/restarting it until activation can be proven safe for the current Hyprland/FX session"
+            elif service == "realmheart-doctor-boot.service":
+                action = ServiceActionKind.ENABLE_ONLY
+                reason = "enable the Doctor boot one-shot but defer starting it to the next graphical session, where runtime probes see a real compositor"
             else:
                 action = ServiceActionKind.ENABLE_START
                 reason = "enable and start Realmheart user unit after install verification prerequisites are satisfied"

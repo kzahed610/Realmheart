@@ -318,6 +318,13 @@ class PlanningTests(unittest.TestCase):
             self.assertIn(("@WL_PASTE@", "/opt/bin/wl-paste"), clip.render_values)
             self.assertIn(("@CLIPHIST@", "/opt/bin/cliphist"), clip.render_values)
 
+            boot = by_id["config.artifact.doctor.boot-service"]
+            self.assertEqual(boot.render_strategy, "token-substitution-v1")
+            self.assertIn(("@REALMHEART_DOCTOR_BIN@", str(root / "prefix/bin/realmheart-doctor")),
+                          boot.render_values)
+            self.assertIn(("@REALMHEART_DOCTOR_STATE_DIR@", str(paths.state_home / "realmheart/doctor")),
+                          boot.render_values)
+
     def test_terminal_plan_uses_state_home_generated_outputs_and_resolved_kitty_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -348,6 +355,16 @@ class PlanningTests(unittest.TestCase):
             core = next(item for item in plan.service_actions if item.service == "realmheart.service")
             self.assertEqual(core.action, ServiceActionKind.ENABLE_ONLY)
             self.assertIn("defer", core.reason)
+
+    def test_doctor_boot_service_is_enabled_but_deferred_to_the_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            paths = self._paths(root)
+            plan = self._build(root, self._snapshot(paths))
+            boot = next(item for item in plan.service_actions
+                        if item.service == "realmheart-doctor-boot.service")
+            self.assertEqual(boot.action, ServiceActionKind.ENABLE_ONLY)
+            self.assertIn("graphical session", boot.reason)
 
     def test_target_fingerprint_is_part_of_plan_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

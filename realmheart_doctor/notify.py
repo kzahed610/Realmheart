@@ -47,8 +47,9 @@ def dispatch_notifications(
             f"Incident {incident_id}.\n"
             f"Inspect: realmheart doctor --incident {incident_id}"
         )
+        severity = "critical" if payload.get("health_state") == "failed" else "warning"
         try:
-            notifier(title, body)
+            notifier(title, body, severity)
             notified = True
         except Exception:
             notified = False

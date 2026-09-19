@@ -77,6 +77,30 @@ class BootCLITests(unittest.TestCase):
             for path in incidents:
                 self.assertNotIn("last_notified_state", json.loads(path.read_text()))
 
+    def test_boot_without_a_session_key_falls_back_to_the_machine_boot_id(self):
+        import contextlib
+        import io
+        import json
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from realmheart_doctor.cli import main
+
+        without_signature = {key: value for key, value in os.environ.items()
+                             if key != "HYPRLAND_INSTANCE_SIGNATURE"}
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.dict(os.environ, {**without_signature,
+                                         "REALMHEART_DOCTOR_NOTIFY_BACKEND": "none"}, clear=True), \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                code = main(["boot", "--state-dir", temp, "--json"])
+                second = main(["boot", "--state-dir", temp, "--json"])
+            lines = output.getvalue().splitlines()
+        self.assertEqual(code, 0)
+        self.assertEqual(second, 0)
+        self.assertEqual(json.loads(lines[0])["mode"], "ran")
+        self.assertEqual(json.loads(lines[1])["mode"], "already_ran")
+
     def test_notify_backend_delivers_actionable_title(self):
         import io
         import contextlib
@@ -92,10 +116,12 @@ class BootCLITests(unittest.TestCase):
         calls = []
         with tempfile.TemporaryDirectory() as temp:
             with patch("realmheart_doctor.boot.diagnose", return_value=_diagnosis(ComponentHealth.FAILED)), \
-                 patch("realmheart_doctor.notify_backends._desktop_backend", return_value=lambda title, body: calls.append(title)), \
+                 patch("realmheart_doctor.notify_backends.deliver",
+                       side_effect=lambda title, body, severity="warning": calls.append((title, severity)) or True), \
                  contextlib.redirect_stdout(io.StringIO()) as output:
                 code = main(["boot", "--state-dir", temp, "--session-key", "fixture2", "--json"])
             self.assertEqual(code, 0)
             self.assertEqual(len(calls), 1)
-            self.assertIn("Realmheart", calls[0])
+            self.assertIn("Realmheart", calls[0][0])
+            self.assertEqual(calls[0][1], "critical")
             self.assertEqual(json.loads(output.getvalue())["notifications"], 1)

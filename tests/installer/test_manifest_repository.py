@@ -75,6 +75,18 @@ class RepositoryManifestTests(unittest.TestCase):
             result.errors,
         )
 
+    def test_doctor_boot_unit_template_is_a_session_oneshot(self) -> None:
+        template = (_bootstrap.REPO_ROOT / "config/systemd/user/realmheart-doctor-boot.service.in").read_text(
+            encoding="utf-8"
+        )
+        unit_section, service_section = template.split("[Service]", 1)
+        self.assertIn("Type=oneshot", service_section)
+        self.assertIn("WantedBy=graphical-session.target", service_section)
+        self.assertIn("After=realmheart.service", unit_section)
+        self.assertIn("@REALMHEART_DOCTOR_BIN@ boot --state-dir @REALMHEART_DOCTOR_STATE_DIR@", service_section)
+        self.assertIn("ConditionPathExists=@REALMHEART_DOCTOR_BIN@", unit_section)
+        self.assertNotIn("ConditionPathExists=", service_section)
+
     def test_journal_log_source_requires_a_matching_service_artifact(self) -> None:
         from dataclasses import replace
 

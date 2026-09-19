@@ -21,7 +21,7 @@ class LockingTests(unittest.TestCase):
             state_root = Path(temp) / "state"
             with acquire_state_lock(state_root):
                 outcome = run_boot(registry, state_root, session_key="locked",
-                                   notifier=lambda title, body: None)
+                                   notifier=lambda title, body, severity=None: None)
                 self.assertEqual(outcome.mode, "deferred_lock")
             self.assertFalse((state_root / "current.json").exists(),
                              "deferred boot must not touch state")

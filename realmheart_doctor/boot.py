@@ -7,6 +7,7 @@ incidents, notifications) is reused from the existing modules unchanged.
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,24 @@ class BootOutcome:
 def _session_marker_name(session_key: str) -> str:
     digest = hashlib.sha256(session_key.encode("utf-8")).hexdigest()[:24]
     return f"session-{digest}.json"
+
+
+def default_session_key() -> str | None:
+    """Compositor session signature, else the machine boot id.
+
+    The shell spawn passes the Hyprland signature; a systemd user unit may start
+    before the session environment is imported, so it falls back to one marker
+    per machine boot instead of refusing to run.
+    """
+
+    signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+    if signature:
+        return signature
+    try:
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        return None
+    return f"boot-{boot_id}" if boot_id else None
 
 
 def run_boot(

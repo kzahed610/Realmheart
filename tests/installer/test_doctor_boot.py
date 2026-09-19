@@ -39,10 +39,10 @@ class DoctorBootTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp) / "state"
             first = run_boot(_registry(), state_root=state, session_key="sess-1",
-                             executor=executor, notifier=lambda title, body: None,
+                             executor=executor, notifier=lambda title, body, severity=None: None,
                              now=datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc))
             second = run_boot(_registry(), state_root=state, session_key="sess-1",
-                              executor=executor, notifier=lambda title, body: None,
+                              executor=executor, notifier=lambda title, body, severity=None: None,
                               now=datetime(2026, 9, 17, 13, 0, tzinfo=timezone.utc))
             self.assertEqual(first.mode, "ran")
             self.assertEqual(second.mode, "already_ran")
@@ -54,7 +54,7 @@ class DoctorBootTests(unittest.TestCase):
         executor = _executor(HealthStatus.PASS)
         with tempfile.TemporaryDirectory() as temp:
             run_boot(_registry(), state_root=Path(temp) / "state", session_key="sess-background",
-                     executor=executor, notifier=lambda title, body: None)
+                     executor=executor, notifier=lambda title, body, severity=None: None)
         _, kwargs = executor.execute.call_args
         self.assertEqual(kwargs.get("context"), "doctor_background")
         self.assertEqual(kwargs.get("max_cost"), "cheap")
@@ -69,12 +69,32 @@ class DoctorBootTests(unittest.TestCase):
             log = root / "pacman.log"
             log.write_text("", encoding="utf-8")
             run_boot(_registry(), state_root=state, session_key="sess-update", executor=executor,
-                     notifier=lambda title, body: None, marker_path=marker, log_path=log)
+                     notifier=lambda title, body, severity=None: None, marker_path=marker, log_path=log)
             session = next((state / "sessions").glob("*.json"))
             payload = json.loads(session.read_text(encoding="utf-8"))
             self.assertIsNotNone(payload["package_updates"])
             self.assertTrue(payload["package_updates"]["marker_consumed"])
             self.assertTrue((state / "post-update.json").is_file())
+
+    def test_default_session_key_prefers_the_compositor_then_the_boot_id(self):
+        import os
+        from unittest.mock import patch
+
+        from realmheart_doctor.boot import default_session_key
+
+        with patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": "sig-1"}, clear=False):
+            self.assertEqual(default_session_key(), "sig-1")
+
+        without_signature = {key: value for key, value in os.environ.items()
+                             if key != "HYPRLAND_INSTANCE_SIGNATURE"}
+        with patch.dict(os.environ, without_signature, clear=True):
+            key = default_session_key()
+        self.assertIsNotNone(key)
+        self.assertTrue(key.startswith("boot-"))
+
+        with patch.dict(os.environ, without_signature, clear=True), \
+             patch("realmheart_doctor.boot.Path.read_text", side_effect=OSError("unreadable")):
+            self.assertIsNone(default_session_key())
 
     def test_boot_failure_creates_one_incident_and_notifies_once(self):
         executor = _executor(HealthStatus.FAIL)
@@ -82,7 +102,7 @@ class DoctorBootTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp) / "state"
             outcome = run_boot(_registry(), state_root=state, session_key="s",
-                               executor=executor, notifier=lambda t, b: calls.append((t, b)))
+                               executor=executor, notifier=lambda t, b, severity=None: calls.append((t, b)))
             self.assertEqual(outcome.mode, "ran")
             self.assertEqual(len(calls), 1)
             self.assertIn("RH-", calls[0][1])
@@ -93,7 +113,7 @@ class DoctorBootTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp) / "state"
             run_boot(_registry(), state_root=state, session_key="../../evil",
-                     executor=executor, notifier=lambda title, body: None)
+                     executor=executor, notifier=lambda title, body, severity=None: None)
             sessions = list((state / "sessions").glob("*.json"))
             self.assertEqual(len(sessions := sessions), 1)
             self.assertNotIn("..", sessions[0].name)

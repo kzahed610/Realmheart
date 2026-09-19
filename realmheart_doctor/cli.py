@@ -70,7 +70,8 @@ def _parser(*, manual: bool = False) -> argparse.ArgumentParser:
     incident.add_argument("--preview", action="store_true")
     boot = sub.add_parser("boot", help="noninteractive one-shot health check per session")
     boot.add_argument("--state-dir", type=Path, required=True)
-    boot.add_argument("--session-key", default=os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
+    boot.add_argument("--session-key", default=None,
+                      help="one-shot marker key (defaults to HYPRLAND_INSTANCE_SIGNATURE, then the machine boot id)")
     boot.add_argument("--manifest-dir", type=Path, default=Path(os.environ.get("REALMHEART_DOCTOR_MANIFEST_DIR", "components")))
     boot.add_argument("--no-notify", action="store_true")
     boot.add_argument("--json", action="store_true")
@@ -158,16 +159,20 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(payload, sort_keys=True) if args.json else "Doctor manifest configuration error")
             return 5
         if not args.session_key:
+            from .boot import default_session_key
+
+            args.session_key = default_session_key()
+        if not args.session_key:
             print(json.dumps({"format_version": 1, "status": "error", "error": "session_key_unavailable"}) if args.json
                   else "Boot mode needs a session key; pass --session-key")
             return 4
         notified = 0
 
-        def _notifier(title: str, body: str) -> None:
+        def _notifier(title: str, body: str, severity: str = "warning") -> None:
             # A suppressed or failed delivery must stay retry-eligible: raising
             # keeps dispatch from recording last_notified_state.
             nonlocal notified
-            if not deliver(title, body):
+            if not deliver(title, body, severity=severity):
                 raise RuntimeError("notification delivery failed")
             notified += 1
 
@@ -202,8 +207,8 @@ def main(argv: list[str] | None = None) -> int:
         if not args.no_notify:
             from .notify_backends import deliver
 
-            def notifier(title: str, body: str) -> None:
-                if not deliver(title, body):
+            def notifier(title: str, body: str, severity: str = "warning") -> None:
+                if not deliver(title, body, severity=severity):
                     raise RuntimeError("notification delivery failed")
 
         outcome = run_post_update(registry, args.state_dir, notifier=notifier, since=since)

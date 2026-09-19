@@ -1,0 +1,13 @@
+[Unit]
+Description=Realmheart Doctor startup health check
+After=realmheart.service
+PartOf=graphical-session.target
+ConditionPathExists=@REALMHEART_DOCTOR_BIN@
+
+[Service]
+Type=oneshot
+ExecStart=@REALMHEART_DOCTOR_BIN@ boot --state-dir @REALMHEART_DOCTOR_STATE_DIR@
+Nice=5
+
+[Install]
+WantedBy=graphical-session.target

@@ -110,7 +110,7 @@ class PostUpdateTests(unittest.TestCase):
             executor.execute.return_value = HealthCheckReport((), 0)
             outcome = run_post_update(
                 self.registry, state, executor=executor, marker_path=marker, log_path=log,
-                notifier=lambda title, body: None,
+                notifier=lambda title, body, severity=None: None,
             )
             record = json.loads((state / "post-update.json").read_text(encoding="utf-8"))
         self.assertEqual(outcome.mode, "ran")

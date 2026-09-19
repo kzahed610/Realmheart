@@ -978,3 +978,25 @@ cost = "cheap"
 side_effects = "none"
 timeout_ms = 500
 contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+# Startup integration: the one-shot boot check runs with the graphical session
+# so runtime capability probes see a real compositor, not a bare login.
+[[artifacts]]
+id = "doctor.boot-service"
+component_id = "realmheart-core"
+path = "$XDG_CONFIG_HOME/systemd/user/realmheart-doctor-boot.service"
+type = "service"
+required = true
+ownership = "user"
+managed = true
+source = "config/systemd/user/realmheart-doctor-boot.service.in"
+
+[[health_checks]]
+id = "check.doctor.boot-service.exists"
+component_id = "realmheart-core"
+check = "artifact_exists"
+artifact_id = "doctor.boot-service"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["install_verify", "doctor_background", "doctor_manual"]
