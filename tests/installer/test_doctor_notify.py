@@ -28,7 +28,7 @@ class DoctorNotifyTests(unittest.TestCase):
             dispatch_notifications(root, lambda title, body, severity=None: calls.append((title, body)), now=now)
             self.assertEqual(len(calls), 1)
             self.assertIn(incident_id, calls[0][1])
-            self.assertIn("realmheart doctor --incident", calls[0][1])
+            self.assertIn("realmheart-doctor incident", calls[0][1])
 
     def test_same_unresolved_incident_is_silent_on_repeat(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -63,6 +63,22 @@ class DoctorNotifyTests(unittest.TestCase):
             results = dispatch_notifications(root, lambda title, body, severity=None: calls.append((title, body)),
                                              now=datetime(2026, 9, 17, 13, 0, tzinfo=timezone.utc))
             self.assertEqual(results[0]["notified"], True)
+
+
+    def test_explicit_false_backend_result_remains_retry_eligible(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
+            _failed_incident(root, now)
+            first = dispatch_notifications(root, lambda *_args: False, now=now)
+            self.assertFalse(first[0]["notified"])
+            calls = []
+            second = dispatch_notifications(
+                root, lambda *args: calls.append(args),
+                now=datetime(2026, 9, 17, 13, 0, tzinfo=timezone.utc),
+            )
+            self.assertTrue(second[0]["notified"])
+            self.assertEqual(len(calls), 1)
 
     def test_failed_incidents_are_notified_as_critical(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -107,6 +123,26 @@ class NotifyBackendTests(unittest.TestCase):
         self.assertIn("critical", argv)
         self.assertIn("attention", argv)
         self.assertTrue(argv[argv.index("--id") + 1].startswith("realmheart-doctor-"))
+
+    def test_event_surface_notification_adds_copyable_inspect_action(self):
+        from unittest.mock import patch
+
+        from realmheart_doctor import notify_backends
+
+        calls: list[tuple[str, ...]] = []
+        body = "Component demo is unresolved.\nInspect: realmheart-doctor incident RH-20260920-001"
+        with patch.dict("os.environ", {"REALMHEART_DOCTOR_NOTIFY_BACKEND": "event"}, clear=False), \
+             patch.object(notify_backends.shutil, "which", return_value="/usr/bin/realmheart-event"), \
+             patch.object(notify_backends.subprocess, "run",
+                          side_effect=lambda argv, **kwargs: calls.append(tuple(argv))):
+            self.assertTrue(notify_backends.deliver("Realmheart regression", body, severity="critical"))
+        argv = calls[0]
+        self.assertIn("--action-copy", argv)
+        action = argv[argv.index("--action-copy") + 1]
+        self.assertEqual(
+            action,
+            "inspect|Copy Doctor command|realmheart-doctor incident RH-20260920-001",
+        )
 
     def test_event_ids_are_stable_for_the_same_incident(self):
         from unittest.mock import patch

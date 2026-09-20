@@ -87,8 +87,29 @@ def _run_locked(registry, state_root: Path, session_key: str, marker: Path,
     if marker.is_file():
         return BootOutcome("already_ran")
 
+    from .post_update import (
+        correlate_package_updates, record_package_updates, transactions_for_component,
+    )
+
+    # Correlate package drift *before* choosing checks.  A relevant package
+    # transaction gives boot a safe narrow starting set; ordinary boots still
+    # perform the full cheap snapshot so non-package regressions are observable.
+    package_report = None
+    try:
+        package_report = correlate_package_updates(
+            registry, state_root, marker_path=marker_path, log_path=log_path, now=now,
+        )
+    except (OSError, OverflowError, ValueError):
+        package_report = None
+    targeted = (
+        package_report.affected_components
+        if package_report is not None and package_report.transactions
+        and package_report.affected_components
+        else None
+    )
     diagnosis = diagnose(
         registry,
+        component_ids=targeted,
         executor=executor,
         health_context="doctor_background",
         max_cost="cheap",
@@ -98,25 +119,31 @@ def _run_locked(registry, state_root: Path, session_key: str, marker: Path,
 
     collector = log_collector_for(registry)
     for component in diagnosis.components:
-        record_component_failure(state_root, component.id, now=now, log_collector=collector)
-    dispatch_notifications(state_root, notifier, now=now)
-    from .post_update import correlate_package_updates, record_package_updates
-
-    package_report = None
-    try:
-        package_report = correlate_package_updates(
-            registry, state_root, marker_path=marker_path, log_path=log_path,
+        record_component_failure(
+            state_root, component.id, now=now, log_collector=collector,
+            relevant_changes=(
+                transactions_for_component(registry, package_report, component.id)
+                if package_report is not None else ()
+            ),
         )
-    except (OSError, OverflowError, ValueError):
-        package_report = None
+    if notifier is not None:
+        dispatch_notifications(state_root, notifier, now=now)
     if package_report is not None:
-        package_report = record_package_updates(state_root, package_report)
+        package_report = record_package_updates(
+            state_root, package_report, marker_path=marker_path,
+        )
+    from .retention import apply_retention
+
+    retention = apply_retention(
+        state_root, now_prefix=now.strftime("%Y%m%dT%H%M%S%f"),
+    )
     payload = {
         "format_version": STATE_FORMAT_VERSION,
         "session_key_sha": _session_marker_name(session_key),
         "captured_at": now.isoformat(),
         "recovered": list(record.recovered),
         "package_updates": package_report.to_dict() if package_report is not None else None,
+        "retention": retention,
     }
     _atomic_write_json(marker, payload)
     return BootOutcome("ran")

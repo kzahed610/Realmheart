@@ -119,6 +119,35 @@ class PostUpdateTests(unittest.TestCase):
         self.assertEqual(executor.execute.call_args.kwargs["context"], "doctor_background")
         self.assertEqual(executor.execute.call_args.kwargs["max_cost"], "cheap")
 
+
+    def test_targeted_update_runs_only_affected_component_and_required_upstreams(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state = root / "state"
+            marker = root / "post-update.pending"
+            marker.write_text("")
+            now = datetime.now(timezone.utc)
+            marker_at = now - timedelta(seconds=30)
+            os.utime(marker, (marker_at.timestamp(), marker_at.timestamp()))
+            log = root / "pacman.log"
+            log.write_text(
+                _log_line("tesseract", "5.5.1-1", "5.6.0-1", marker_at + timedelta(seconds=2)) + "\n",
+                encoding="utf-8",
+            )
+            executor = Mock()
+            executor.execute.return_value = HealthCheckReport((), 0)
+            outcome = run_post_update(
+                self.registry, state, executor=executor, marker_path=marker, log_path=log, now=now,
+            )
+        self.assertEqual(outcome.mode, "ran")
+        self.assertEqual(outcome.report.affected_components, ("screenshot-ocr",))
+        check_ids = executor.execute.call_args.kwargs["check_ids"]
+        checked_components = {self.registry.health_checks[item].component_id for item in check_ids}
+        self.assertEqual(checked_components, {"realmheart-core", "screenshot"})
+        self.assertLess(len(check_ids), len(self.registry.health_checks))
+
     def test_irrelevant_update_records_without_re_checking(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -173,6 +202,51 @@ class PostUpdateTests(unittest.TestCase):
             self.assertNotIn("pacman -", code)
             self.assertNotIn("realmheart-doctor", code)
         self.assertIn("post-update.pending", marker)
+
+    def test_post_update_defers_without_consuming_marker_when_state_is_locked(self) -> None:
+        from realmheart_doctor.locking import acquire_state_lock
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state = root / "state"
+            marker, log = _fixture(root)
+            with acquire_state_lock(state):
+                outcome = run_post_update(
+                    self.registry, state, marker_path=marker, log_path=log, lock_timeout=0.0,
+                )
+            self.assertEqual(outcome.mode, "deferred_lock")
+            self.assertFalse((state / "post-update.json").exists())
+            self.assertIsNotNone(pending_window_start(state, marker_path=marker))
+
+    def test_post_update_runs_retention_inside_the_state_transaction(self) -> None:
+        import os
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state = root / "state"
+            incidents = state / "incidents"
+            incidents.mkdir(parents=True)
+            for index in range(21):
+                day = f"202608{index + 1:02d}"
+                (incidents / f"RH-{day}-001.json").write_text(json.dumps({
+                    "format_version": 1, "id": f"RH-{day}-001",
+                    "component_id": "demo", "resolution_state": "resolved", "timeline": [],
+                }))
+            marker = root / "post-update.pending"
+            marker.write_text("")
+            now = datetime.now(timezone.utc)
+            marker_at = now - timedelta(seconds=30)
+            os.utime(marker, (marker_at.timestamp(), marker_at.timestamp()))
+            log = root / "pacman.log"
+            log.write_text(
+                _log_line("unrelated", "1", "2", marker_at + timedelta(seconds=1)) + "\n",
+                encoding="utf-8",
+            )
+            outcome = run_post_update(
+                self.registry, state, marker_path=marker, log_path=log, now=now,
+            )
+            self.assertEqual(outcome.mode, "no_relevant_changes")
+            self.assertEqual(len(list(incidents.glob("RH-*.json"))), 20)
 
     def test_manifest_declares_the_post_update_integration(self) -> None:
         hook = self.registry.artifacts["doctor.pacman-hook"]

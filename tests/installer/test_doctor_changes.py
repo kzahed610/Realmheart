@@ -34,6 +34,48 @@ class DoctorChangeTests(unittest.TestCase):
                 self.assertEqual(changes[0]["current"], "0.7.9")
                 self.assertFalse(changes[0]["proves_causation"])
 
+
+    def test_runtime_capability_change_is_compared_against_lkg(self):
+        from realmheart_doctor.diagnosis import CapabilityEvidence, ComponentDiagnosis, Diagnosis
+
+        good = Diagnosis(
+            release_version="0.7.8", manifest_digest="a" * 64, overall=ComponentHealth.HEALTHY,
+            components=(ComponentDiagnosis(
+                "demo", "Demo", "core", ComponentHealth.HEALTHY, (), (), (),
+                (CapabilityEvidence(
+                    "runtime.demo", "dep.demo", "pass", "1.0.0", "available", "required", False,
+                ),),
+            ),), budget_exhausted=False,
+        )
+        bad = Diagnosis(
+            release_version="0.7.8", manifest_digest="a" * 64, overall=ComponentHealth.FAILED,
+            components=(ComponentDiagnosis(
+                "demo", "Demo", "core", ComponentHealth.FAILED, (),
+                ("required_runtime_capability_missing",), (),
+                (CapabilityEvidence(
+                    "runtime.demo", "dep.demo", "missing", None, "not found", "required", True,
+                ),),
+            ),), budget_exhausted=False,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            record_diagnosis(root, good, now=datetime(2026, 9, 17, tzinfo=timezone.utc))
+            record_diagnosis(root, bad, now=datetime(2026, 9, 17, 1, tzinfo=timezone.utc))
+            event = record_component_failure(root, "demo")
+            assert event is not None
+            incident = json.loads((root / "incidents" / f"{event.incident_id}.json").read_text())
+        self.assertIn(
+            {
+                "type": "CAPABILITY_STATE_CHANGED",
+                "subject": "runtime.demo",
+                "previous": "pass",
+                "current": "missing",
+                "timestamp": datetime(2026, 9, 17, 1, tzinfo=timezone.utc).isoformat(),
+                "proves_causation": False,
+            },
+            incident["relevant_changes"],
+        )
+
     def test_first_failure_has_no_invented_change_history(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

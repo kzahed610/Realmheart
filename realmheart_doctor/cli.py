@@ -65,7 +65,9 @@ def _parser(*, manual: bool = False) -> argparse.ArgumentParser:
     incident = sub.add_parser("incident", help="preview or export a saved incident without new probes")
     incident.add_argument("incident_id")
     incident.add_argument("--report", action="store_true")
-    incident.add_argument("--state-dir", type=Path, required=True)
+    from .state import default_state_root
+
+    incident.add_argument("--state-dir", type=Path, default=default_state_root())
     incident.add_argument("--json", action="store_true")
     incident.add_argument("--preview", action="store_true")
     boot = sub.add_parser("boot", help="noninteractive one-shot health check per session")
@@ -229,7 +231,10 @@ def main(argv: list[str] | None = None) -> int:
         try:
             path = None
             if args.report:
-                path, report = write_report(args.state_dir, args.incident_id)
+                from .locking import acquire_state_lock
+
+                with acquire_state_lock(args.state_dir, timeout=1.0):
+                    path, report = write_report(args.state_dir, args.incident_id)
             else:
                 report = render_incident(load_incident(args.state_dir, args.incident_id))
             payload = {"format_version": 1, **report}
@@ -238,6 +243,10 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(payload, indent=2, sort_keys=True) if args.json else
                   report["text"] if args.preview or path is None else str(path))
             return 0 if report["export_allowed"] else 5
+        except TimeoutError:
+            print(json.dumps({"format_version": 1, "error": "state_busy"}) if args.json
+                  else "Doctor state is busy; another operation is active")
+            return 5
         except (OSError, ValueError, RecursionError):
             print(json.dumps({"format_version": 1, "error": "incident_report_failed"}) if args.json
                   else "Doctor could not read or safely export the incident")
@@ -294,6 +303,28 @@ def _repair_exit_code(report) -> int:
 
 
 def _repair(args: argparse.Namespace, registry) -> int:
+    """Run repair under the Doctor state lock when it can mutate state."""
+
+    if not args.apply or args.state_dir is None:
+        return _repair_transaction(args, registry)
+    from .locking import acquire_state_lock
+
+    try:
+        with acquire_state_lock(args.state_dir, timeout=1.0):
+            return _repair_transaction(args, registry)
+    except TimeoutError:
+        payload = {"format_version": 1, "status": "error", "error": "state_busy"}
+        print(json.dumps(payload, sort_keys=True) if args.json else
+              "Doctor state is busy; another operation is active")
+        return 5
+    except OSError:
+        payload = {"format_version": 1, "status": "error", "error": "state_persistence_failed"}
+        print(json.dumps(payload, sort_keys=True) if args.json else
+              "Doctor state persistence failed")
+        return 5
+
+
+def _repair_transaction(args: argparse.Namespace, registry) -> int:
     from .classification import classify_failure
     from .diagnosis import diagnose
     from .incidents import record_component_recovery, record_repair_attempt, recorded_attempt_fingerprints
@@ -354,11 +385,22 @@ def _repair(args: argparse.Namespace, registry) -> int:
         payload = {"format_version": 1, "mode": "dry_run", "plan": plan.to_dict()}
         print(json.dumps(payload, indent=2, sort_keys=True) if args.json else render_repair_plan(plan))
         return 0
+    repair_incident = None
     if args.state_dir is not None:
+        from .incidents import record_component_failure
         from .journal import journal
+        from .log_evidence import log_collector_for
+        from .state import record_diagnosis
 
+        # Bind the repair to the exact failure snapshot that produced its plan.
+        # This also makes replay protection incident-local instead of component-global.
+        record_diagnosis(args.state_dir, diagnosis)
+        repair_incident = record_component_failure(
+            args.state_dir, args.component, log_collector=log_collector_for(registry),
+        )
         journal(args.state_dir, "repair_planned", component=args.component,
-                failure_class=classification.failure_class, actions=len(plan.actions))
+                failure_class=classification.failure_class, actions=len(plan.actions),
+                incident=(repair_incident.incident_id if repair_incident else None))
 
     provenance = receipt.build_provenance if receipt is not None else None
     build_dir = args.build_dir or (provenance.cmake_binary_dir if provenance is not None else None)
@@ -367,7 +409,13 @@ def _repair(args: argparse.Namespace, registry) -> int:
         component_id=args.component, build_dir=build_dir, prefix=prefix,
         installer_bound=spec.requires_installer_binding,
     )
-    attempted = recorded_attempt_fingerprints(args.state_dir, args.component) if args.state_dir else ()
+    attempted = (
+        recorded_attempt_fingerprints(
+            args.state_dir, args.component,
+            incident_id=repair_incident.incident_id if repair_incident else None,
+        )
+        if args.state_dir and repair_incident is not None else ()
+    )
 
     def verifier():
         post = _diagnose()
@@ -376,7 +424,7 @@ def _repair(args: argparse.Namespace, registry) -> int:
             from .state import record_diagnosis
 
             try:
-                record_diagnosis(args.state_dir, post)
+                record_diagnosis(args.state_dir, post, resolve_incidents=False)
             except OSError:
                 pass
         detail = ", ".join(entry.uncertainties) or f"{len(entry.checks)} checks re-run"
@@ -386,9 +434,12 @@ def _repair(args: argparse.Namespace, registry) -> int:
                              verifier=verifier, attempted=attempted)
     if args.state_dir is not None:
         try:
-            record_repair_attempt(args.state_dir, args.component,
-                                  tuple(item.to_dict() for item in report.executions),
-                                  outcome=report.component_status or "unknown")
+            record_repair_attempt(
+                args.state_dir, args.component,
+                tuple(item.to_dict() for item in report.executions),
+                outcome=report.component_status or "unknown",
+                incident_id=repair_incident.incident_id if repair_incident else None,
+            )
             if report.verified:
                 record_component_recovery(args.state_dir, args.component)
         except OSError:
@@ -403,6 +454,9 @@ def _repair(args: argparse.Namespace, registry) -> int:
 
         journal(args.state_dir, "repair_executed", component=args.component, verified=report.verified,
                 statuses=",".join(item.status for item in report.executions))
+        from .retention import apply_retention
+
+        apply_retention(args.state_dir)
     print(json.dumps(payload, indent=2, sort_keys=True) if args.json else render_repair_report(report))
     return _repair_exit_code(report)
 
@@ -441,61 +495,107 @@ def _manual(args: argparse.Namespace) -> int:
                 report = assess_integrity(registry, receipt)
             print(json.dumps(report.to_dict(), indent=2, sort_keys=True) if args.json else render_integrity(report))
             return {"clean": 0, "attention": 1, "drift": 2}.get(report.status, 3)
-        with _installation_environment(args):
-            result = diagnose(registry, args.component, receipt=receipt)
-        payload = result.to_dict()
-        if args.explain:
-            from .classification import classify_failure
-            from .explanations import explanation_for
+        def _diagnose_manual():
+            with _installation_environment(args):
+                return diagnose(registry, args.component, receipt=receipt)
 
-            explanations = []
-            for component in result.components:
-                if component.status.value == "healthy":
-                    continue
-                classification = classify_failure(component.checks)
-                explanations.append({
-                    "component": component.id,
-                    "status": component.status.value,
-                    "failure_class": classification.failure_class,
-                    "evidence": list(classification.evidence_ids),
-                    "explanation": explanation_for(classification.failure_class,
-                                                   classification.evidence_ids)
-                    or "No explanation template covers this failure yet; the raw evidence stands.",
-                })
-            payload["explanations"] = explanations
-        if args.state_dir is not None:
-            from .state import record_diagnosis
+        def _payload_for(result):
+            payload = result.to_dict()
+            if args.explain:
+                from .classification import classify_component
+                from .explanations import explanation_for
+
+                explanations = []
+                for component in result.components:
+                    if component.status.value == "healthy":
+                        continue
+                    classification = classify_component(component)
+                    explanations.append({
+                        "component": component.id,
+                        "status": component.status.value,
+                        "failure_class": classification.failure_class,
+                        "evidence": list(classification.evidence_ids),
+                        "explanation": explanation_for(classification.failure_class,
+                                                       classification.evidence_ids)
+                        or "No explanation template covers this failure yet; the raw evidence stands.",
+                    })
+                payload["explanations"] = explanations
+            return payload
+
+        if args.state_dir is None:
+            result = _diagnose_manual()
+            payload = _payload_for(result)
+        else:
             from .incidents import record_component_failure
+            from .locking import acquire_state_lock
+            from .state import record_diagnosis
 
+            result = None
+            payload = None
             try:
-                state = record_diagnosis(args.state_dir, result)
-                from .log_evidence import log_collector_for
+                # Keep the diagnosis and every state mutation in one transaction.
+                # Acquiring only around the writes would allow a slow stale probe
+                # to overwrite a newer repair/boot result after that writer exits.
+                with acquire_state_lock(args.state_dir, timeout=1.0):
+                    result = _diagnose_manual()
+                    payload = _payload_for(result)
+                    state = record_diagnosis(args.state_dir, result)
+                    from .log_evidence import log_collector_for
 
-                collector = log_collector_for(registry)
-                events = [record_component_failure(args.state_dir, component.id, log_collector=collector)
-                          for component in result.components]
+                    collector = log_collector_for(registry)
+                    events = [
+                        record_component_failure(
+                            args.state_dir, component.id, log_collector=collector
+                        )
+                        for component in result.components
+                    ]
+                    payload["state"] = {
+                        "recovered": list(state.recovered),
+                        "incident_ids": [
+                            event.incident_id for event in events if event is not None
+                        ],
+                    }
+                    if args.report:
+                        from .incident_reports import write_report
+
+                        reports = []
+                        for event in events:
+                            if event is None:
+                                continue
+                            try:
+                                report_path, _ = write_report(args.state_dir, event.incident_id)
+                            except (OSError, ValueError, RecursionError):
+                                continue
+                            reports.append(str(report_path))
+                        payload["reports"] = reports
+                        if args.preview:
+                            payload["report_text"] = {
+                                Path(report_path).stem: Path(report_path).read_text(encoding="utf-8")
+                                for report_path in reports
+                            }
+                    from .retention import apply_retention
+
+                    payload["state"]["retention"] = apply_retention(args.state_dir)
+            except TimeoutError:
+                payload = {"format_version": 1, "state": {"error": "state_busy"}}
+                print(json.dumps(payload, indent=2, sort_keys=True) if args.json else
+                      "Doctor state is busy; another operation is active")
+                return 5
             except OSError:
+                # Persistence may be unavailable (for example, a path component
+                # is a regular file).  Keep diagnosis useful and read-only even
+                # when the state sink itself is broken.  A lock contention is
+                # different: that path returns above without probing so stale
+                # evidence cannot race a live writer.
+                if result is None:
+                    result = _diagnose_manual()
+                    payload = _payload_for(result)
+                assert payload is not None
                 payload["state"] = {"error": "state_persistence_failed"}
                 print(json.dumps(payload, indent=2, sort_keys=True) if args.json else
-                      render_diagnosis(result, verbose=args.verbose) + "\nDoctor state persistence failed")
+                      render_diagnosis(result, verbose=args.verbose) +
+                      "\nDoctor state persistence failed")
                 return 5
-            payload["state"] = {"recovered": list(state.recovered),
-                                "incident_ids": [event.incident_id for event in events if event is not None]}
-            if args.report:
-                from .incident_reports import write_report
-
-                reports = []
-                for event in events:
-                    if event is None:
-                        continue
-                    try:
-                        path, _ = write_report(args.state_dir, event.incident_id)
-                    except (OSError, ValueError, RecursionError):
-                        continue
-                    reports.append(str(path))
-                payload["reports"] = reports
-                if args.preview:
-                    payload["report_text"] = {Path(path).stem: Path(path).read_text(encoding="utf-8") for path in reports}
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:

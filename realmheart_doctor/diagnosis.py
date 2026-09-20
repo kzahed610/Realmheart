@@ -9,6 +9,7 @@ import json
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from collections.abc import Iterable
 
 from realmheart_maintenance.fingerprint import (
     FingerprintLimitExceeded,
@@ -60,6 +61,36 @@ class BuildFingerprintComparison:
 
 
 @dataclass(frozen=True)
+class CapabilityEvidence:
+    """One runtime capability observation relevant to a component diagnosis.
+
+    ``blocking_failure`` records whether this exact observation contributed to
+    the component becoming FAILED.  Keeping that decision beside the raw probe
+    result lets state/incident/report consumers preserve the actual evidence
+    instead of reconstructing it later from a generic uncertainty string.
+    """
+
+    capability_id: str
+    dependency_id: str
+    state: str
+    version: str | None
+    detail: str | None
+    requirement: str
+    blocking_failure: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "capability_id": self.capability_id,
+            "dependency_id": self.dependency_id,
+            "state": self.state,
+            "version": self.version,
+            "detail": self.detail,
+            "requirement": self.requirement,
+            "blocking_failure": self.blocking_failure,
+        }
+
+
+@dataclass(frozen=True)
 class ComponentDiagnosis:
     id: str
     name: str
@@ -68,13 +99,15 @@ class ComponentDiagnosis:
     checks: tuple[HealthCheckResult, ...]
     uncertainties: tuple[str, ...] = ()
     build_fingerprints: tuple[BuildFingerprintComparison, ...] = ()
+    capabilities: tuple[CapabilityEvidence, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {"id": self.id, "name": self.name, "category": self.category,
                 "status": self.status.value,
                 "checks": [item.to_dict() for item in self.checks],
                 "uncertainties": list(self.uncertainties),
-                "build_fingerprints": [item.to_dict() for item in self.build_fingerprints]}
+                "build_fingerprints": [item.to_dict() for item in self.build_fingerprints],
+                "capabilities": [item.to_dict() for item in self.capabilities]}
 
 
 @dataclass(frozen=True)
@@ -85,24 +118,37 @@ class Diagnosis:
     components: tuple[ComponentDiagnosis, ...]
     budget_exhausted: bool
     receipt: dict[str, object] | None = None
+    complete_snapshot: bool = True
 
     def to_dict(self) -> dict[str, object]:
         return {"format_version": 1, "doctor_version": RELEASE_VERSION, "release_version": self.release_version,
                 "manifest_digest": self.manifest_digest,
                 "overall": self.overall.value,
                 "budget_exhausted": self.budget_exhausted,
+                "complete_snapshot": self.complete_snapshot,
                 "receipt": self.receipt,
                 "components": [item.to_dict() for item in self.components]}
 
 
 def diagnose(registry: ManifestRegistry, component: str | None = None, *,
+             component_ids: Iterable[str] | None = None,
              executor: HealthCheckExecutor | None = None,
              capability_prober=None, receipt=None,
              health_context: str = "doctor_manual",
              max_cost: str = "normal") -> Diagnosis:
-    if component is not None and component not in registry.components:
+    if component is not None and component_ids is not None:
+        raise ValueError("component and component_ids are mutually exclusive")
+    if component is not None:
+        requested = {component}
+    elif component_ids is not None:
+        requested = set(component_ids)
+        if not requested:
+            raise ValueError("component_ids must not be empty")
+    else:
+        requested = set(registry.components)
+    if any(item not in registry.components for item in requested):
         raise ValueError("unknown component")
-    selected = {component} if component is not None else set(registry.components)
+    selected = set(requested)
     # Include required upstream components; preserve canonical topological order.
     pending = list(selected)
     while pending:
@@ -169,6 +215,7 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
         optional = []
         uncertainties = []
         capability_failed = False
+        capability_evidence: list[CapabilityEvidence] = []
         for item in checks:
             definition = registry.health_checks[item.check_id]
             artifact = registry.artifacts.get(definition.artifact_id) if definition.artifact_id else None
@@ -185,7 +232,22 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
             observation = observations.get(capability.id)
             if observation is None:
                 observations[capability.id] = observation = capability_prober(capability, registry=registry)
-            if capability_state_satisfied(registry, capability, observation.state):
+            satisfied = capability_state_satisfied(registry, capability, observation.state)
+            blocking_failure = False
+            if not satisfied and observation.state not in {"not_applicable", "unknown"}:
+                blocking_failure = capability_requires_success(registry, capability) or (
+                    registry.components[capability.component_id or key].category in CRITICAL_CATEGORIES
+                )
+            capability_evidence.append(CapabilityEvidence(
+                capability_id=capability.id,
+                dependency_id=capability.dependency_id,
+                state=observation.state,
+                version=observation.version,
+                detail=observation.detail,
+                requirement=capability.requirement,
+                blocking_failure=blocking_failure,
+            ))
+            if satisfied:
                 continue
             if observation.state == "not_applicable":
                 uncertainties.append("runtime_capability_not_applicable")
@@ -193,11 +255,7 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
             if observation.state == "unknown":
                 uncertainties.append("runtime_capability_unknown")
                 continue
-            if capability_requires_success(registry, capability):
-                uncertainties.append("required_runtime_capability_missing")
-                capability_failed = True
-                status = ComponentHealth.FAILED
-            elif registry.components[capability.component_id or key].category in CRITICAL_CATEGORIES:
+            if blocking_failure:
                 uncertainties.append("required_runtime_capability_missing")
                 capability_failed = True
                 status = ComponentHealth.FAILED
@@ -227,7 +285,7 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
             status = ComponentHealth.HEALTHY
         results[key] = ComponentDiagnosis(
             key, spec.name, spec.category, status, checks, tuple(uncertainties),
-            fingerprints_by_component.get(key, ()),
+            fingerprints_by_component.get(key, ()), tuple(capability_evidence),
         )
     values = tuple(results.values())
     if component is not None:
@@ -247,6 +305,7 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
         values,
         run.budget_exhausted,
         receipt=_receipt_summary(receipt, registry, current_compositor_version),
+        complete_snapshot=component is None and component_ids is None,
     )
 
 

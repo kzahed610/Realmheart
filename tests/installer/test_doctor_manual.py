@@ -136,6 +136,51 @@ managed = true
         self.assertIsNone(explanation_for("NO_SUCH_CLASS"))
         self.assertIn("explicit", explanation_for("UNKNOWN") or "explicit")
 
+    def test_explain_uses_blocking_runtime_capability_evidence(self):
+        from unittest.mock import patch
+        from realmheart_doctor.diagnosis import (
+            CapabilityEvidence, ComponentDiagnosis, ComponentHealth, Diagnosis,
+        )
+
+        diagnosis = Diagnosis(
+            release_version="0.7.8", manifest_digest="a" * 64,
+            overall=ComponentHealth.FAILED,
+            components=(ComponentDiagnosis(
+                "demo", "Demo", "core", ComponentHealth.FAILED, (),
+                ("required_runtime_capability_missing",), (),
+                (CapabilityEvidence(
+                    "runtime.demo", "dep.demo", "missing", None,
+                    "helper missing", "required", True,
+                ),),
+            ),),
+            budget_exhausted=False,
+        )
+        with patch("realmheart_doctor.diagnosis.diagnose", return_value=diagnosis):
+            code, payload = self.invoke("doctor", "--explain", "--json")
+        self.assertEqual(code, 2)
+        explanation = payload["explanations"][0]
+        self.assertEqual(explanation["failure_class"], "DEPENDENCY_MISSING")
+        self.assertIn("runtime.demo", explanation["evidence"])
+
+    def test_incident_command_uses_default_xdg_state_root(self):
+        import os
+        from unittest.mock import patch
+        from .test_doctor_incidents import _diagnosis
+        from realmheart_doctor.diagnosis import ComponentHealth
+        from realmheart_doctor.incidents import record_component_failure
+        from realmheart_doctor.state import record_diagnosis
+
+        with tempfile.TemporaryDirectory() as temp:
+            xdg = Path(temp) / "xdg-state"
+            root = xdg / "realmheart" / "doctor"
+            record_diagnosis(root, _diagnosis(ComponentHealth.FAILED))
+            event = record_component_failure(root, "demo")
+            assert event is not None
+            with patch.dict(os.environ, {"XDG_STATE_HOME": str(xdg)}, clear=False):
+                code, payload = self.invoke("incident", event.incident_id, "--json")
+        self.assertEqual(code, 0)
+        self.assertIn(event.incident_id, payload["text"])
+
     def test_explain_omits_healthy_components(self):
         from unittest.mock import patch
         from .test_doctor_incidents import _diagnosis

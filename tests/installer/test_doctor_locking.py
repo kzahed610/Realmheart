@@ -43,6 +43,48 @@ class LockingTests(unittest.TestCase):
                 fcntl.flock(held, fcntl.LOCK_UN)
                 os.close(held)
 
+    def test_manual_stateful_doctor_reports_contention_without_mutating_state(self):
+        import contextlib
+        import io
+        from unittest.mock import patch
+
+        from realmheart_doctor.cli import main
+        from realmheart_doctor.diagnosis import ComponentHealth
+        from .test_doctor_incidents import _diagnosis
+
+        with tempfile.TemporaryDirectory() as temp:
+            state_root = Path(temp) / "state"
+            with acquire_state_lock(state_root):
+                output = io.StringIO()
+                with patch("realmheart_doctor.diagnosis.diagnose",
+                           return_value=_diagnosis(ComponentHealth.FAILED)) as diagnose, \
+                     contextlib.redirect_stdout(output):
+                    code = main(["doctor", "--state-dir", str(state_root), "--json"])
+            payload = json.loads(output.getvalue())
+            self.assertEqual(code, 5)
+            self.assertEqual(payload["state"]["error"], "state_busy")
+            diagnose.assert_not_called()
+            self.assertFalse((state_root / "current.json").exists())
+
+    def test_stateful_repair_reports_contention_before_running_repair(self):
+        import contextlib
+        import io
+        from realmheart_doctor.cli import main
+
+        with tempfile.TemporaryDirectory() as temp:
+            state_root = Path(temp) / "state"
+            with acquire_state_lock(state_root):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = main([
+                        "repair", "screenshot", "--apply", "--state-dir", str(state_root),
+                        "--manifest-dir", "components", "--json",
+                    ])
+            payload = json.loads(output.getvalue())
+            self.assertEqual(code, 5)
+            self.assertEqual(payload["error"], "state_busy")
+            self.assertFalse((state_root / "current.json").exists())
+
     def test_lock_is_released_on_context_exit_and_crash_safety(self):
         with tempfile.TemporaryDirectory() as temp:
             state_root = Path(temp) / "state"

@@ -20,6 +20,7 @@ from .health import HealthCheckResult, HealthStatus
 
 _UNRESOLVED = "unresolved"
 _RESOLVED = "resolved"
+_REPLAY_BLOCKING_REPAIR_STATUSES = frozenset({"succeeded", "failed"})
 
 
 @dataclass(frozen=True)
@@ -37,10 +38,33 @@ def _upstream_failures(record: dict) -> tuple[str, ...]:
     return tuple(sorted(set(upstream)))
 
 
-def _incident_fingerprint(component_id: str, failed: list[dict], uncertainties: list) -> str:
+def _blocking_capability_failures(record: dict) -> list[dict]:
+    """Return exact runtime capability evidence that made the component fail."""
+
+    entries = record.get("capabilities")
+    if not isinstance(entries, list):
+        return []
+    return [
+        dict(item)
+        for item in entries
+        if isinstance(item, dict)
+        and item.get("blocking_failure") is True
+        and item.get("state") in {"missing", "failed"}
+        and isinstance(item.get("capability_id"), str)
+    ]
+
+
+def _incident_fingerprint(
+    component_id: str, failed: list[dict], uncertainties: list,
+    capability_failures: list[dict] | None = None,
+) -> str:
     conditions = sorted({(str(item.get("check_id")), str(item.get("reason_code")))
                          for item in failed})
-    identity = [component_id, conditions, sorted(str(item) for item in uncertainties)]
+    capabilities = sorted({
+        (str(item.get("capability_id")), str(item.get("state")), str(item.get("version") or ""))
+        for item in (capability_failures or [])
+    })
+    identity = [component_id, conditions, capabilities, sorted(str(item) for item in uncertainties)]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
@@ -103,6 +127,7 @@ def record_component_failure(
     *,
     now: datetime | None = None,
     log_collector=None,
+    relevant_changes: tuple[dict[str, object], ...] = (),
 ) -> IncidentEvent | None:
     """Create or extend the open incident for a failed component.
 
@@ -127,8 +152,17 @@ def record_component_failure(
         return None
     checks = [item for item in record.get("checks", []) if isinstance(item, dict)]
     failed = [item for item in checks if item.get("status") == "fail"]
+    capability_failures = _blocking_capability_failures(record)
+    missing_capabilities = tuple(sorted(
+        str(item["capability_id"]) for item in capability_failures if item.get("state") == "missing"
+    ))
+    failed_capabilities = tuple(sorted(
+        str(item["capability_id"]) for item in capability_failures if item.get("state") == "failed"
+    ))
     upstream_failed = _upstream_failures(record)
-    fingerprint = _incident_fingerprint(component_id, failed, record.get("uncertainties", []))
+    fingerprint = _incident_fingerprint(
+        component_id, failed, record.get("uncertainties", []), capability_failures
+    )
     classification = classify_failure(
         tuple(
             HealthCheckResult(
@@ -138,6 +172,8 @@ def record_component_failure(
             )
             for item in failed
         ),
+        missing_capabilities=missing_capabilities,
+        failed_capabilities=failed_capabilities,
         failed_upstream=upstream_failed,
     )
 
@@ -159,18 +195,34 @@ def record_component_failure(
     incident_id = _next_incident_id(incidents_dir, now)
     primary = failed[0] if failed else {}
     symptoms = [f"{item.get('check_id')}: {item.get('reason_code')}" for item in failed]
+    if not symptoms and capability_failures:
+        symptoms = [
+            f"runtime capability {item.get('state')}: {item.get('capability_id')}"
+            for item in capability_failures[:3]
+        ]
     if not symptoms:
         symptoms = ([f"required dependency failed: {name}" for name in upstream_failed]
                     or [str(entry) for entry in (record.get("uncertainties") or [])][:3])
-    observed = (failed[0].get("detail") if failed else None) or (
+    capability_detail = next(
+        (str(item.get("detail")) for item in capability_failures if item.get("detail")), None
+    )
+    observed = (failed[0].get("detail") if failed else None) or capability_detail or (
         f"required dependency failed: {', '.join(upstream_failed)}" if upstream_failed
-        else "health check reported failure")
+        else "component failure was observed")
     log_evidence = None
     if log_collector is not None:
         try:
             log_evidence = log_collector(component_id)
         except Exception:
             log_evidence = None
+    last_known_good = _read_lkg_summary(root, component_id)
+    temporal_changes = changes_since_healthy(
+        current, last_known_good, current_component=record
+    )
+    for item in relevant_changes:
+        candidate = dict(item)
+        if candidate not in temporal_changes:
+            temporal_changes.append(candidate)
     incident = {
         "format_version": STATE_FORMAT_VERSION,
         "id": incident_id,
@@ -183,18 +235,26 @@ def record_component_failure(
         "symptoms": symptoms,
         "expected": "component passes its canonical health checks",
         "observed": observed,
-        "last_known_good": _read_lkg_summary(root, component_id),
-        "relevant_changes": changes_since_healthy(current, _read_lkg_summary(root, component_id)),
+        "last_known_good": last_known_good,
+        "relevant_changes": temporal_changes,
         "checks": failed,
+        "capabilities": capability_failures,
         "repair_attempts": [],
         "raw_logs": log_evidence,
         "resolution_state": _UNRESOLVED,
         "failure_fingerprint": fingerprint,
         "timeline": [{
             "timestamp": timestamp,
-            "event_type": "HEALTH_CHECK_FAILED",
+            "event_type": (
+                "HEALTH_CHECK_FAILED" if failed else
+                "CAPABILITY_FAILED" if capability_failures else
+                "COMPONENT_FAILED"
+            ),
             "summary": f"component {component_id} was diagnosed as failed",
-            "details": {"check_id": primary.get("check_id") if failed else None},
+            "details": {
+                "check_id": primary.get("check_id") if failed else None,
+                "capability_ids": [item.get("capability_id") for item in capability_failures],
+            },
         }],
     }
     from .state import _atomic_write_json
@@ -210,9 +270,16 @@ def _read_lkg_summary(root: Path, component_id: str) -> dict | None:
     if payload is None:
         return None
     return {
+        "component_id": payload.get("component_id") or component_id,
         "captured_at": payload.get("captured_at"),
         "release_version": payload.get("release_version"),
         "manifest_digest": payload.get("manifest_digest"),
+        "checks": payload.get("checks") if isinstance(payload.get("checks"), list) else [],
+        "capabilities": payload.get("capabilities") if isinstance(payload.get("capabilities"), list) else [],
+        "build_fingerprints": (
+            payload.get("build_fingerprints")
+            if isinstance(payload.get("build_fingerprints"), list) else []
+        ),
     }
 
 
@@ -254,25 +321,64 @@ def record_component_recovery(
     return result
 
 
-def recorded_attempt_fingerprints(root: Path, component_id: str) -> tuple[str, ...]:
-    """Return repair-action fingerprints already attempted for this component.
+def _target_incident_payload(
+    root: Path, component_id: str, incident_id: str | None,
+) -> tuple[str | None, Path, dict | None]:
+    """Resolve a specific incident when supplied, otherwise the current open one."""
 
-    Only unresolved incidents count: after a verified recovery the same repair
-    is allowed again if the condition ever returns.
+    incidents_dir = _incidents_dir(root)
+    if incident_id is None:
+        existing, incidents_dir = _find_open_incident(root, component_id)
+        if existing is None:
+            return None, incidents_dir, None
+        payload = _read_payload(incidents_dir / f"{existing}.json")
+        return existing, incidents_dir, payload
+    # Incident identifiers are generated internally; reject path-like input even
+    # for this low-level API so a future caller cannot escape the incident dir.
+    if "/" in incident_id or "\\" in incident_id or not incident_id.startswith("RH-"):
+        return None, incidents_dir, None
+    payload = _read_payload(incidents_dir / f"{incident_id}.json")
+    if payload is None or payload.get("component_id") != component_id:
+        return None, incidents_dir, None
+    return incident_id, incidents_dir, payload
+
+
+def recorded_attempt_fingerprints(
+    root: Path, component_id: str, *, incident_id: str | None = None,
+) -> tuple[str, ...]:
+    """Return action fingerprints that should block replay for one failure.
+
+    A declined, unavailable, refused, or skipped action was never actually
+    attempted and therefore must not poison a later repair.  When an incident
+    id is supplied, deduplication is scoped to that exact failure rather than
+    every unresolved incident for the component.
     """
 
     root = Path(root)
     fingerprints: set[str] = set()
-    for path in sorted(_incidents_dir(root).glob("RH-*.json")):
-        payload = _read_payload(path)
-        if (payload is None or payload.get("component_id") != component_id
-                or payload.get("resolution_state") != _UNRESOLVED):
+    if incident_id is not None:
+        resolved_id, incidents_dir, payload = _target_incident_payload(
+            root, component_id, incident_id
+        )
+        candidates = ((resolved_id, payload),) if resolved_id is not None else ()
+    else:
+        incidents_dir = _incidents_dir(root)
+        candidates = []
+        for path in sorted(incidents_dir.glob("RH-*.json")):
+            payload = _read_payload(path)
+            if (payload is not None and payload.get("component_id") == component_id
+                    and payload.get("resolution_state") == _UNRESOLVED):
+                candidates.append((path.stem, payload))
+    for _, payload in candidates:
+        if not isinstance(payload, dict):
             continue
         attempts = payload.get("repair_attempts")
         if not isinstance(attempts, list):
             continue
         for item in attempts:
-            if isinstance(item, dict) and isinstance(item.get("fingerprint"), str):
+            if (isinstance(item, dict)
+                    and isinstance(item.get("fingerprint"), str)
+                    and item.get("status") in _REPLAY_BLOCKING_REPAIR_STATUSES):
                 fingerprints.add(item["fingerprint"])
     return tuple(sorted(fingerprints))
 
@@ -284,22 +390,29 @@ def record_repair_attempt(
     *,
     outcome: str,
     now: datetime | None = None,
+    incident_id: str | None = None,
 ) -> IncidentEvent | None:
     """Record manual repair attempts and their verification on the incident.
 
-    A repair may target a degraded component that never raised an incident;
-    the attempt is still recorded, in a fresh incident, because a failed
-    repair must never disappear from the record.
+    ``incident_id`` binds a stateful repair to the failure it was planned for.
+    Without one, the legacy behavior is preserved: use the current unresolved
+    incident or create a repair-only incident for a degraded component.
     """
 
     if now is None:
         now = datetime.now(timezone.utc)
     root = Path(root)
-    existing, incidents_dir = _find_open_incident(root, component_id)
+    existing, incidents_dir, payload = _target_incident_payload(
+        root, component_id, incident_id
+    )
     timestamp = now.isoformat()
+    if incident_id is not None and existing is None:
+        # A caller explicitly bound the repair to an incident.  Do not silently
+        # invent another record if that target disappeared or mismatched.
+        return None
     if existing is None:
         incident_id = _next_incident_id(incidents_dir, now)
-        payload: dict = {
+        payload = {
             "format_version": STATE_FORMAT_VERSION,
             "id": incident_id,
             "component_id": component_id,
@@ -314,6 +427,7 @@ def record_repair_attempt(
             "last_known_good": _read_lkg_summary(root, component_id),
             "relevant_changes": [],
             "checks": [],
+            "capabilities": [],
             "repair_attempts": [],
             "resolution_state": _UNRESOLVED,
             "failure_fingerprint": hashlib.sha256(
@@ -323,7 +437,6 @@ def record_repair_attempt(
         }
     else:
         incident_id = existing
-        payload = _read_payload(incidents_dir / f"{existing}.json")
         if payload is None or not isinstance(payload.get("timeline"), list):
             return None
     attempts = payload.get("repair_attempts")

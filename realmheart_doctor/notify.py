@@ -7,6 +7,7 @@ backend never breaks health logic, and delivery is retried on the next run.
 from __future__ import annotations
 
 import json
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,15 +43,26 @@ def dispatch_notifications(
         if notified_state == "unresolved":
             continue
         title = "Realmheart health regression detected"
+        from .state import default_state_root
+
+        inspect = f"realmheart-doctor incident {incident_id}"
+        try:
+            if root.resolve(strict=False) != default_state_root().resolve(strict=False):
+                inspect += " --state-dir " + shlex.quote(str(root))
+        except OSError:
+            inspect += " --state-dir " + shlex.quote(str(root))
         body = (
             f"Component {component_id} is unresolved ({failure_class}).\n"
             f"Incident {incident_id}.\n"
-            f"Inspect: realmheart doctor --incident {incident_id}"
+            f"Inspect: {inspect}"
         )
         severity = "critical" if payload.get("health_state") == "failed" else "warning"
         try:
-            notifier(title, body, severity)
-            notified = True
+            delivery_result = notifier(title, body, severity)
+            # Backends commonly return False for a suppressed/failed delivery.
+            # Treat only explicit False as failure; legacy callbacks returning
+            # None remain successful.
+            notified = delivery_result is not False
         except Exception:
             notified = False
         results.append({"incident_id": incident_id, "component_id": component_id,

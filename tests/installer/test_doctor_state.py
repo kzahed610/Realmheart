@@ -51,6 +51,37 @@ class DoctorStateTests(unittest.TestCase):
             self.assertEqual(lkg["captured_at"], now.isoformat())
             self.assertEqual(record.recovered, ())
 
+
+    def test_targeted_diagnosis_merges_with_matching_previous_snapshot(self):
+        from dataclasses import replace
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            demo = _diagnosis(ComponentHealth.HEALTHY).components[0]
+            other = replace(demo, id="other", name="Other")
+            full = Diagnosis(
+                release_version="0.7.8", manifest_digest="a" * 64,
+                overall=ComponentHealth.HEALTHY, components=(demo, other),
+                budget_exhausted=False,
+            )
+            record_diagnosis(root, full)
+            failed_demo = replace(
+                _diagnosis(ComponentHealth.FAILED).components[0],
+                category="utility",
+            )
+            targeted = Diagnosis(
+                release_version="0.7.8", manifest_digest="a" * 64,
+                overall=ComponentHealth.FAILED, components=(failed_demo,),
+                budget_exhausted=False, complete_snapshot=False,
+            )
+            record_diagnosis(root, targeted)
+            current = json.loads((root / "current.json").read_text())
+        self.assertEqual(set(current["components"]), {"demo", "other"})
+        self.assertEqual(current["components"]["demo"]["status"], "failed")
+        self.assertEqual(current["components"]["other"]["status"], "healthy")
+        self.assertEqual(current["overall"], "degraded")
+        self.assertFalse(current["last_diagnosis_complete"])
+
     def test_non_healthy_results_never_overwrite_last_known_good(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -866,6 +866,79 @@ class DoctorAcceptanceTests(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertEqual(result.stdout.strip(),"realmheart-doctor 0.7.8")
 
+    def test_installed_wrapper_exports_canonical_install_roots(self):
+        import contextlib
+        import io
+        import runpy
+        import shutil
+        import sys
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temp:
+            prefix = Path(temp) / "prefix"
+            (prefix / "bin").mkdir(parents=True)
+            runtime = prefix / "share/realmheart/python"
+            runtime.mkdir(parents=True)
+            manifests = prefix / "share/realmheart/components"
+            shutil.copytree(_bootstrap.REPO_ROOT / "realmheart_doctor", runtime / "realmheart_doctor",
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            shutil.copytree(_bootstrap.REPO_ROOT / "realmheart_maintenance", runtime / "realmheart_maintenance",
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            shutil.copytree(_bootstrap.REPO_ROOT / "components", manifests)
+            wrapper = prefix / "bin/realmheart-doctor"
+            shutil.copy2(_bootstrap.REPO_ROOT / "tools/realmheart-doctor.py", wrapper)
+            wrapper.chmod(0o755)
+
+            environment = {key: value for key, value in os.environ.items()
+                           if key not in {"PREFIX", "LIBEXEC", "SYSCONF", "REALMHEART_DOCTOR_MANIFEST_DIR"}}
+            with patch.dict(os.environ, environment, clear=True), \
+                 patch.object(sys, "argv", [str(wrapper), "--version"]), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    runpy.run_path(str(wrapper), run_name="__main__")
+                self.assertEqual(stopped.exception.code, 0)
+                self.assertEqual(os.environ["PREFIX"], str(prefix))
+                self.assertEqual(os.environ["LIBEXEC"], str(prefix / "libexec"))
+                self.assertEqual(os.environ["SYSCONF"], "/etc")
+                self.assertEqual(os.environ["REALMHEART_DOCTOR_MANIFEST_DIR"], str(manifests))
+
+    def test_installed_wrapper_preserves_explicit_install_root_overrides(self):
+        import contextlib
+        import io
+        import runpy
+        import shutil
+        import sys
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temp:
+            prefix = Path(temp) / "prefix"
+            (prefix / "bin").mkdir(parents=True)
+            runtime = prefix / "share/realmheart/python"
+            runtime.mkdir(parents=True)
+            manifests = prefix / "share/realmheart/components"
+            shutil.copytree(_bootstrap.REPO_ROOT / "realmheart_doctor", runtime / "realmheart_doctor",
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            shutil.copytree(_bootstrap.REPO_ROOT / "realmheart_maintenance", runtime / "realmheart_maintenance",
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            shutil.copytree(_bootstrap.REPO_ROOT / "components", manifests)
+            wrapper = prefix / "bin/realmheart-doctor"
+            shutil.copy2(_bootstrap.REPO_ROOT / "tools/realmheart-doctor.py", wrapper)
+            wrapper.chmod(0o755)
+
+            explicit = {
+                "PREFIX": "/explicit/prefix",
+                "LIBEXEC": "/explicit/libexec",
+                "SYSCONF": "/explicit/etc",
+            }
+            with patch.dict(os.environ, explicit, clear=False), \
+                 patch.object(sys, "argv", [str(wrapper), "--version"]), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as stopped:
+                    runpy.run_path(str(wrapper), run_name="__main__")
+                self.assertEqual(stopped.exception.code, 0)
+                for key, value in explicit.items():
+                    self.assertEqual(os.environ[key], value)
+
     def test_doctor_package_does_not_import_installer(self):
         import subprocess, sys
         code='import sys, realmheart_doctor; print(any(x == "realmheart_installer" or x.startswith("realmheart_installer.") for x in sys.modules))'

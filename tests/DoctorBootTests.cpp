@@ -80,6 +80,12 @@ void test_sibling_and_disabled_paths() {
     set_environment("REALMHEART_DOCTOR_BIN", nullptr);
     set_environment("XDG_STATE_HOME", (scratch.path / "state").c_str());
 
+    const char* inherited_path = std::getenv("PATH");
+    const bool had_path = inherited_path != nullptr;
+    const std::string saved_path = had_path ? inherited_path : "";
+    const std::string isolated_path = (scratch.path / "isolated-path").string();
+    set_environment("PATH", isolated_path.c_str());
+
     const auto missing = realmheart::core::doctor_boot_command(scratch.path.string());
     require(missing.empty(), "an unresolvable executable must produce no command");
 
@@ -91,6 +97,29 @@ void test_sibling_and_disabled_paths() {
     require(realmheart::core::doctor_boot_command(scratch.path.string()).empty(),
             "kill switch must suppress the command");
     set_environment("REALMHEART_DOCTOR_BOOT", nullptr);
+    set_environment("XDG_STATE_HOME", nullptr);
+    set_environment("PATH", had_path ? saved_path.c_str() : nullptr);
+}
+
+void test_path_fallback_builds_the_boot_command() {
+    ScratchDirectory scratch;
+    set_environment("REALMHEART_DOCTOR_BIN", nullptr);
+    set_environment("REALMHEART_DOCTOR_BOOT", nullptr);
+    set_environment("XDG_STATE_HOME", (scratch.path / "state").c_str());
+
+    const char* inherited_path = std::getenv("PATH");
+    const bool had_path = inherited_path != nullptr;
+    const std::string saved_path = had_path ? inherited_path : "";
+    const auto path_bin = scratch.path / "path-bin";
+    const std::string executable = write_executable(path_bin / "realmheart-doctor");
+    const std::string isolated_path = path_bin.string();
+    set_environment("PATH", isolated_path.c_str());
+
+    const auto argv = realmheart::core::doctor_boot_command((scratch.path / "no-sibling").string());
+    require(argv.size() == 4 && argv[0] == executable,
+            "PATH fallback executable must be resolved when no sibling exists");
+
+    set_environment("PATH", had_path ? saved_path.c_str() : nullptr);
     set_environment("XDG_STATE_HOME", nullptr);
 }
 
@@ -120,6 +149,7 @@ int main() {
     test_kill_switch_parsing();
     test_env_override_builds_the_boot_command();
     test_sibling_and_disabled_paths();
+    test_path_fallback_builds_the_boot_command();
     test_missing_state_home_suppresses_the_spawn();
     test_spawn_is_best_effort_and_detached();
     std::cout << "realmheart doctor boot tests passed\n";

@@ -60,3 +60,31 @@ def classify_failure(
     if not ordered:
         return FailureClassification("UNKNOWN", "LOW", ())
     return FailureClassification("OBSERVED_FAILURE", "MEDIUM", tuple(item.check_id for item in ordered))
+
+def classify_component(component) -> FailureClassification:
+    """Classify a live ``ComponentDiagnosis`` without discarding evidence.
+
+    The helper intentionally uses the diagnosis object's public evidence fields
+    rather than probing again, so ``doctor --explain`` and persisted incidents
+    describe the same observation that produced the health state.
+    """
+
+    capabilities = tuple(getattr(component, "capabilities", ()) or ())
+    missing = tuple(sorted(
+        item.capability_id for item in capabilities
+        if getattr(item, "blocking_failure", False) and getattr(item, "state", None) == "missing"
+    ))
+    failed = tuple(sorted(
+        item.capability_id for item in capabilities
+        if getattr(item, "blocking_failure", False) and getattr(item, "state", None) == "failed"
+    ))
+    upstream: set[str] = set()
+    for entry in tuple(getattr(component, "uncertainties", ()) or ()):
+        if isinstance(entry, str) and entry.startswith("upstream_component_failed:"):
+            upstream.update(part for part in entry.split(":", 1)[1].split(",") if part)
+    return classify_failure(
+        tuple(getattr(component, "checks", ()) or ()),
+        missing_capabilities=missing,
+        failed_capabilities=failed,
+        failed_upstream=tuple(sorted(upstream)),
+    )

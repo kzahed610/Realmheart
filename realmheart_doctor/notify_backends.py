@@ -30,6 +30,16 @@ def _event_binary() -> str | None:
     return shutil.which("realmheart-event")
 
 
+def _inspect_command(body: str) -> str | None:
+    """Extract Doctor's explicit inspect command for an Event Surface copy action."""
+
+    for line in body.splitlines():
+        if line.startswith("Inspect: "):
+            command = line[len("Inspect: "):].strip()
+            return command or None
+    return None
+
+
 def _event_surface(title: str, body: str, severity: str) -> None:
     binary = _event_binary()
     if binary is None:
@@ -38,12 +48,17 @@ def _event_surface(title: str, body: str, severity: str) -> None:
         body.encode("utf-8", "surrogateescape")
     ).hexdigest()[:16]
     summary = " ".join(body.split())
-    argv = (
+    argv = [
         binary, "send", "--id", event_id, "--source", _EVENT_SOURCE,
         "--title", title, "--summary", summary[:400],
         "--severity", severity, "--presentation", "attention",
-    )
-    subprocess.run(argv, timeout=_BACKEND_TIMEOUT, check=True,
+    ]
+    inspect = _inspect_command(body)
+    if inspect is not None:
+        argv.extend((
+            "--action-copy", f"inspect|Copy Doctor command|{inspect}",
+        ))
+    subprocess.run(tuple(argv), timeout=_BACKEND_TIMEOUT, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 

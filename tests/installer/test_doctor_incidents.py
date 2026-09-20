@@ -10,7 +10,10 @@ from pathlib import Path
 from realmheart_doctor.diagnosis import ComponentDiagnosis, ComponentHealth, Diagnosis
 from realmheart_doctor.health import HealthCheckResult, HealthStatus
 from realmheart_doctor.state import record_diagnosis
-from realmheart_doctor.incidents import record_component_failure, record_component_recovery
+from realmheart_doctor.incidents import (
+    record_component_failure, record_component_recovery, record_repair_attempt,
+    recorded_attempt_fingerprints,
+)
 
 
 def _diagnosis(status: ComponentHealth, *, component_id: str = "demo") -> Diagnosis:
@@ -48,6 +51,59 @@ class DoctorIncidentTests(unittest.TestCase):
         self.assertEqual(payload["checks"], [])
         self.assertEqual(payload["symptoms"], ["required dependency failed: realmheart-core"])
         self.assertIn("realmheart-core", payload["observed"])
+
+
+    def test_capability_only_failure_keeps_exact_evidence_and_classifies_dependency(self):
+        from realmheart_doctor.diagnosis import CapabilityEvidence
+
+        diagnosis = Diagnosis(
+            release_version="0.7.8", manifest_digest="a" * 64, overall=ComponentHealth.FAILED,
+            components=(ComponentDiagnosis(
+                "demo", "Demo", "core", ComponentHealth.FAILED, (),
+                ("required_runtime_capability_missing",), (),
+                (CapabilityEvidence(
+                    "runtime.demo", "dep.demo", "missing", None,
+                    "demo helper not found", "required", True,
+                ),),
+            ),),
+            budget_exhausted=False,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            record_diagnosis(root, diagnosis)
+            event = record_component_failure(root, "demo")
+            assert event is not None
+            incident = json.loads((root / "incidents" / f"{event.incident_id}.json").read_text())
+        self.assertEqual(incident["failure_class"], "DEPENDENCY_MISSING")
+        self.assertEqual(incident["confidence"], "HIGH")
+        self.assertEqual(incident["capabilities"][0]["capability_id"], "runtime.demo")
+        self.assertEqual(incident["timeline"][0]["event_type"], "CAPABILITY_FAILED")
+        self.assertIn("runtime.demo", incident["symptoms"][0])
+
+    def test_distinct_capability_failures_have_distinct_incident_identity(self):
+        from realmheart_doctor.diagnosis import CapabilityEvidence
+
+        def capability_failure(capability_id: str) -> Diagnosis:
+            return Diagnosis(
+                release_version="0.7.8", manifest_digest="a" * 64, overall=ComponentHealth.FAILED,
+                components=(ComponentDiagnosis(
+                    "demo", "Demo", "core", ComponentHealth.FAILED, (),
+                    ("required_runtime_capability_missing",), (),
+                    (CapabilityEvidence(
+                        capability_id, "dep.demo", "missing", None, "missing", "required", True,
+                    ),),
+                ),),
+                budget_exhausted=False,
+            )
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            record_diagnosis(root, capability_failure("runtime.one"))
+            first = record_component_failure(root, "demo")
+            record_diagnosis(root, capability_failure("runtime.two"))
+            second = record_component_failure(root, "demo")
+            assert first is not None and second is not None
+            self.assertNotEqual(first.incident_id, second.incident_id)
 
     def test_recovery_requires_current_healthy_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -141,6 +197,41 @@ class DoctorIncidentTests(unittest.TestCase):
             incident = json.loads((root / "incidents" / "RH-20260917-001.json").read_text())
             self.assertEqual(incident["resolution_state"], "resolved")
             self.assertEqual(incident["timeline"][-1]["event_type"], "INCIDENT_RESOLVED")
+
+    def test_declined_or_unavailable_repair_does_not_poison_later_retry(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            record_diagnosis(root, _diagnosis(ComponentHealth.FAILED))
+            event = record_component_failure(root, "demo")
+            assert event is not None
+            executions = (
+                {"fingerprint": "declined", "status": "skipped_no_consent"},
+                {"fingerprint": "missing-runner", "status": "unavailable"},
+                {"fingerprint": "refused", "status": "refused"},
+                {"fingerprint": "ran-ok", "status": "succeeded"},
+                {"fingerprint": "ran-failed", "status": "failed"},
+            )
+            record_repair_attempt(
+                root, "demo", executions, outcome="failed", incident_id=event.incident_id,
+            )
+            attempted = recorded_attempt_fingerprints(
+                root, "demo", incident_id=event.incident_id,
+            )
+        self.assertEqual(attempted, ("ran-failed", "ran-ok"))
+
+    def test_repair_attempt_can_be_bound_to_exact_incident(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            record_diagnosis(root, _diagnosis(ComponentHealth.FAILED))
+            event = record_component_failure(root, "demo")
+            assert event is not None
+            repair = record_repair_attempt(
+                root, "demo", ({"fingerprint": "fp", "status": "failed"},),
+                outcome="failed", incident_id=event.incident_id,
+            )
+            self.assertEqual(repair.incident_id, event.incident_id)
+            files = list((root / "incidents").glob("RH-*.json"))
+            self.assertEqual(len(files), 1)
 
     def test_degraded_component_does_not_create_incident_spam(self):
         with tempfile.TemporaryDirectory() as temp:

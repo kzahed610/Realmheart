@@ -25,6 +25,25 @@ class StateRecord:
     recovered: tuple[str, ...]
 
 
+
+
+def default_state_root(*, environ: dict[str, str] | None = None, home: Path | None = None) -> Path:
+    """Return the canonical per-user Doctor state directory.
+
+    Installer-generated services pass this path explicitly, while interactive
+    incident inspection can derive it from XDG_STATE_HOME (or the standard
+    ~/.local/state fallback).  Relative XDG values are ignored as invalid.
+    """
+
+    environment = os.environ if environ is None else environ
+    configured = environment.get("XDG_STATE_HOME")
+    if configured:
+        candidate = Path(configured).expanduser()
+        if candidate.is_absolute():
+            return candidate / "realmheart" / "doctor"
+    base_home = Path.home() if home is None else Path(home)
+    return base_home / ".local" / "state" / "realmheart" / "doctor"
+
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -63,8 +82,39 @@ def _load_json(path: Path) -> tuple[object | None, bool]:
         return None, True
 
 
-def record_diagnosis(root: Path, diagnosis: Diagnosis, *, now: datetime | None = None) -> StateRecord:
-    """Persist one diagnosis as current state and update per-component LKG."""
+
+
+def _aggregate_component_state(components: dict[str, object]) -> str:
+    """Aggregate a merged persisted snapshot using Doctor's health precedence."""
+
+    records = [item for item in components.values() if isinstance(item, dict)]
+    if not records:
+        return ComponentHealth.UNKNOWN.value
+    for item in records:
+        if item.get("status") != ComponentHealth.FAILED.value:
+            continue
+        category = item.get("category")
+        # Older state files did not persist category.  Treat an unknown failed
+        # category conservatively rather than silently downgrading it.
+        if category in {"core", "fx", "essential", None}:
+            return ComponentHealth.FAILED.value
+    if any(item.get("status") == ComponentHealth.UNKNOWN.value for item in records):
+        return ComponentHealth.UNKNOWN.value
+    if any(item.get("status") != ComponentHealth.HEALTHY.value for item in records):
+        return ComponentHealth.DEGRADED.value
+    return ComponentHealth.HEALTHY.value
+
+def record_diagnosis(
+    root: Path, diagnosis: Diagnosis, *, now: datetime | None = None,
+    resolve_incidents: bool = True,
+) -> StateRecord:
+    """Persist one diagnosis as current state and update per-component LKG.
+
+    ``resolve_incidents=False`` is used by the repair verifier so the repair
+    attempt can be attached to the incident it addressed before recovery closes
+    that incident.  Callers that are not inside a repair transaction should use
+    the default.
+    """
 
     if now is None:
         now = datetime.now(timezone.utc)
@@ -91,17 +141,38 @@ def record_diagnosis(root: Path, diagnosis: Diagnosis, *, now: datetime | None =
     def component_payload(component) -> dict[str, object]:
         return {
             "status": component.status.value,
+            "category": component.category,
             "uncertainties": list(component.uncertainties),
             "checks": [item.to_dict() for item in component.checks],
+            "capabilities": [item.to_dict() for item in component.capabilities],
+            "build_fingerprints": [item.to_dict() for item in component.build_fingerprints],
         }
 
+    diagnosed_components = {item.id: component_payload(item) for item in diagnosis.components}
+    current_components: dict[str, object] = dict(diagnosed_components)
+    merged_previous = False
+    if (
+        not diagnosis.complete_snapshot
+        and isinstance(previous_payload, dict)
+        and previous_payload.get("release_version") == diagnosis.release_version
+        and previous_payload.get("manifest_digest") == diagnosis.manifest_digest
+        and isinstance(previous_payload.get("components"), dict)
+    ):
+        current_components = dict(previous_payload["components"])
+        current_components.update(diagnosed_components)
+        merged_previous = True
     current = {
         "format_version": STATE_FORMAT_VERSION,
         "captured_at": now.isoformat(),
         "release_version": diagnosis.release_version,
         "manifest_digest": diagnosis.manifest_digest,
-        "overall": diagnosis.overall.value,
-        "components": {item.id: component_payload(item) for item in diagnosis.components},
+        "overall": (
+            _aggregate_component_state(current_components)
+            if merged_previous else diagnosis.overall.value
+        ),
+        "components": current_components,
+        "last_diagnosis_complete": diagnosis.complete_snapshot,
+        "last_diagnosed_components": sorted(diagnosed_components),
     }
     _atomic_write_json(root / "current.json", current)
 
@@ -110,7 +181,7 @@ def record_diagnosis(root: Path, diagnosis: Diagnosis, *, now: datetime | None =
     snapshot_payload = {
         "format_version": STATE_FORMAT_VERSION,
         "captured_at": now.isoformat(),
-        "overall": diagnosis.overall.value,
+        "overall": current["overall"],
         "release_version": diagnosis.release_version,
         "manifest_digest": diagnosis.manifest_digest,
         "components": current["components"],
@@ -149,15 +220,19 @@ def record_diagnosis(root: Path, diagnosis: Diagnosis, *, now: datetime | None =
             os.replace(lkg_path, root / "corrupt" / f"last-healthy-{component.id}-{stamp}.json")
         lkg = {
             "format_version": STATE_FORMAT_VERSION,
+            "component_id": component.id,
             "captured_at": now.isoformat(),
             "status": component.status.value,
             "release_version": diagnosis.release_version,
             "manifest_digest": diagnosis.manifest_digest,
             "checks": [item.to_dict() for item in component.checks],
+            "capabilities": [item.to_dict() for item in component.capabilities],
+            "build_fingerprints": [item.to_dict() for item in component.build_fingerprints],
         }
         _atomic_write_json(lkg_path, lkg)
-        from .incidents import record_component_recovery
+        if resolve_incidents:
+            from .incidents import record_component_recovery
 
-        record_component_recovery(root, component.id, now=now)
+            record_component_recovery(root, component.id, now=now)
 
     return StateRecord(recovered=tuple(recovered))

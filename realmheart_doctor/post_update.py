@@ -49,7 +49,7 @@ class PackageUpdateReport:
 
 @dataclass(frozen=True)
 class PostUpdateOutcome:
-    mode: str  # ran | no_update_marker | no_relevant_changes | log_unavailable
+    mode: str  # ran | no_update_marker | no_relevant_changes | log_unavailable | deferred_lock
     report: PackageUpdateReport | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -114,6 +114,25 @@ def relevant_packages(registry: ManifestRegistry) -> dict[str, tuple[str, ...]]:
     return {package: tuple(sorted(components)) for package, components in sorted(mapping.items())}
 
 
+
+
+def affected_component_closure(
+    registry: ManifestRegistry, roots: set[str] | frozenset[str],
+) -> tuple[str, ...]:
+    """Return directly affected components plus required downstream dependents."""
+
+    affected = set(roots)
+    changed = True
+    while changed:
+        changed = False
+        for component in registry.components.values():
+            if component.id in affected:
+                continue
+            if any(dep.required and dep.id in affected for dep in component.realmheart_dependencies):
+                affected.add(component.id)
+                changed = True
+    return tuple(item for item in registry.component_order if item in affected)
+
 def correlate_package_updates(
     registry: ManifestRegistry,
     state_root: Path,
@@ -146,16 +165,17 @@ def correlate_package_updates(
         set(packages),
         window=(int(window_start.timestamp()), int(now.timestamp())),
     )
-    affected = sorted({
+    directly_affected = {
         component
         for item in transactions
         for component in packages.get(str(item.get("package")), ())
-    })
+    }
+    affected = affected_component_closure(registry, directly_affected)
     return PackageUpdateReport(
         window_start=window_start.isoformat(),
         window_end=now.isoformat(),
         transactions=tuple(transactions),
-        affected_components=tuple(affected),
+        affected_components=affected,
     )
 
 
@@ -178,7 +198,23 @@ def record_package_updates(
     return replace(report, marker_consumed=True)
 
 
-def run_post_update(
+
+
+def transactions_for_component(
+    registry: ManifestRegistry, report: PackageUpdateReport, component_id: str,
+) -> tuple[dict[str, object], ...]:
+    """Return only package transactions whose dependency closure reaches a component."""
+
+    package_map = relevant_packages(registry)
+    selected: list[dict[str, object]] = []
+    for transaction in report.transactions:
+        package = str(transaction.get("package") or "")
+        roots = set(package_map.get(package, ()))
+        if component_id in affected_component_closure(registry, roots):
+            selected.append(dict(transaction))
+    return tuple(selected)
+
+def _run_post_update_locked(
     registry: ManifestRegistry,
     state_root: Path,
     *,
@@ -201,22 +237,69 @@ def run_post_update(
         if since is None and pending_window_start(root, marker_path=marker_path) is None:
             return PostUpdateOutcome("no_update_marker")
         return PostUpdateOutcome("log_unavailable")
-    if not report.transactions:
-        record_package_updates(root, report, marker_path=marker_path)
+    if not report.transactions or not report.affected_components:
+        report = record_package_updates(root, report, marker_path=marker_path)
+        from .retention import apply_retention
+
+        apply_retention(root, now_prefix=now.strftime("%Y%m%dT%H%M%S%f"))
         return PostUpdateOutcome("no_relevant_changes", report)
     from .diagnosis import diagnose
     from .incidents import record_component_failure
     from .notify import dispatch_notifications
     from .state import record_diagnosis
 
-    diagnosis = diagnose(registry, executor=executor, health_context="doctor_background", max_cost="cheap")
+    diagnosis = diagnose(
+        registry, component_ids=report.affected_components, executor=executor,
+        health_context="doctor_background", max_cost="cheap",
+    )
     record_diagnosis(root, diagnosis, now=now)
     from .log_evidence import log_collector_for
 
     collector = log_collector_for(registry)
     for component in diagnosis.components:
-        record_component_failure(root, component.id, now=now, log_collector=collector)
+        record_component_failure(
+            root, component.id, now=now, log_collector=collector,
+            relevant_changes=transactions_for_component(registry, report, component.id),
+        )
     if notifier is not None:
         dispatch_notifications(root, notifier, now=now)
     report = record_package_updates(root, report, marker_path=marker_path)
+    from .retention import apply_retention
+
+    apply_retention(root, now_prefix=now.strftime("%Y%m%dT%H%M%S%f"))
     return PostUpdateOutcome("ran", report)
+
+
+def run_post_update(
+    registry: ManifestRegistry,
+    state_root: Path,
+    *,
+    executor=None,
+    notifier=None,
+    now: datetime | None = None,
+    since: datetime | None = None,
+    marker_path: Path | None = None,
+    log_path: Path | None = None,
+    lock_timeout: float = 0.0,
+) -> PostUpdateOutcome:
+    """Serialize package correlation and every state mutation as one transaction.
+
+    Automatic post-update runs never wait by default.  When another Doctor
+    writer owns the state lock the pending marker remains unconsumed, so a
+    later run can retry the same update window safely.
+    """
+
+    root = Path(state_root)
+    marker = Path(marker_path) if marker_path is not None else MARKER_PATH
+    if since is None and pending_window_start(root, marker_path=marker) is None:
+        return PostUpdateOutcome("no_update_marker")
+    from .locking import acquire_state_lock
+
+    try:
+        with acquire_state_lock(root, timeout=lock_timeout):
+            return _run_post_update_locked(
+                registry, root, executor=executor, notifier=notifier, now=now,
+                since=since, marker_path=marker, log_path=log_path,
+            )
+    except TimeoutError:
+        return PostUpdateOutcome("deferred_lock")
