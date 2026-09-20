@@ -63,6 +63,7 @@ private:
     bool replacing_snapshot_ = false;
     EventSurfaceGeometry geometry_{};
     realmheart::events::EventSubscriber subscriber_;
+    realmheart::events::EventActionListener doctor_action_listener_;
     std::shared_ptr<AsyncState> async_state_;
 };
 

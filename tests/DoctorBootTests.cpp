@@ -152,6 +152,6 @@ int main() {
     test_path_fallback_builds_the_boot_command();
     test_missing_state_home_suppresses_the_spawn();
     test_spawn_is_best_effort_and_detached();
-    std::cout << "realmheart doctor boot tests passed\n";
+    std::cout << "Realmheart Doctor boot tests passed\n";
     return 0;
 }

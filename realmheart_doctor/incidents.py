@@ -283,6 +283,23 @@ def _read_lkg_summary(root: Path, component_id: str) -> dict | None:
     }
 
 
+def unresolved_incident_ids(root: Path, component_id: str) -> tuple[str, ...]:
+    """Return persisted unresolved incident ids for one component.
+
+    Recovery can close more than one historical failure fingerprint at once.
+    Callers that mirror Doctor state into another surface (for example eventd)
+    need the complete set, not just the last incident touched.
+    """
+
+    result: list[str] = []
+    for incident_path in sorted(_incidents_dir(Path(root)).glob("RH-*.json")):
+        payload = _read_payload(incident_path)
+        if (payload is not None and payload.get("component_id") == component_id
+                and payload.get("resolution_state") == _UNRESOLVED):
+            result.append(incident_path.stem)
+    return tuple(result)
+
+
 def record_component_recovery(
     root: Path,
     component_id: str,

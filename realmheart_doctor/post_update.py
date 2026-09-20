@@ -220,6 +220,7 @@ def _run_post_update_locked(
     *,
     executor=None,
     notifier=None,
+    resolver=None,
     now: datetime | None = None,
     since: datetime | None = None,
     marker_path: Path | None = None,
@@ -252,7 +253,13 @@ def _run_post_update_locked(
         registry, component_ids=report.affected_components, executor=executor,
         health_context="doctor_background", max_cost="cheap",
     )
-    record_diagnosis(root, diagnosis, now=now)
+    state_record = record_diagnosis(root, diagnosis, now=now)
+    if resolver is not None:
+        for incident_id in state_record.resolved_incidents:
+            try:
+                resolver(incident_id)
+            except Exception:
+                pass
     from .log_evidence import log_collector_for
 
     collector = log_collector_for(registry)
@@ -262,7 +269,7 @@ def _run_post_update_locked(
             relevant_changes=transactions_for_component(registry, report, component.id),
         )
     if notifier is not None:
-        dispatch_notifications(root, notifier, now=now)
+        dispatch_notifications(root, notifier, now=now, registry=registry)
     report = record_package_updates(root, report, marker_path=marker_path)
     from .retention import apply_retention
 
@@ -276,6 +283,7 @@ def run_post_update(
     *,
     executor=None,
     notifier=None,
+    resolver=None,
     now: datetime | None = None,
     since: datetime | None = None,
     marker_path: Path | None = None,
@@ -298,7 +306,7 @@ def run_post_update(
     try:
         with acquire_state_lock(root, timeout=lock_timeout):
             return _run_post_update_locked(
-                registry, root, executor=executor, notifier=notifier, now=now,
+                registry, root, executor=executor, notifier=notifier, resolver=resolver, now=now,
                 since=since, marker_path=marker, log_path=log_path,
             )
     except TimeoutError:

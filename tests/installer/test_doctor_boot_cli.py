@@ -114,14 +114,20 @@ class BootCLITests(unittest.TestCase):
         from realmheart_doctor.diagnosis import ComponentHealth
 
         calls = []
+
+        def deliver(title, body, severity="warning", **metadata):
+            calls.append((title, severity, metadata))
+            return True
+
         with tempfile.TemporaryDirectory() as temp:
             with patch("realmheart_doctor.boot.diagnose", return_value=_diagnosis(ComponentHealth.FAILED)), \
-                 patch("realmheart_doctor.notify_backends.deliver",
-                       side_effect=lambda title, body, severity="warning": calls.append((title, severity)) or True), \
+                 patch("realmheart_doctor.notify_backends.deliver", side_effect=deliver), \
                  contextlib.redirect_stdout(io.StringIO()) as output:
                 code = main(["boot", "--state-dir", temp, "--session-key", "fixture2", "--json"])
             self.assertEqual(code, 0)
             self.assertEqual(len(calls), 1)
             self.assertIn("Realmheart", calls[0][0])
             self.assertEqual(calls[0][1], "critical")
+            self.assertTrue(calls[0][2]["incident_id"].startswith("RH-"))
+            self.assertIn("repair_available", calls[0][2])
             self.assertEqual(json.loads(output.getvalue())["notifications"], 1)

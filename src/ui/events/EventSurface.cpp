@@ -2,6 +2,9 @@
 #include "ui/events/EventRevealClip.hpp"
 
 #include "events/EventProtocol.hpp"
+#include "core/Command.hpp"
+#include "core/DoctorActions.hpp"
+#include "core/DoctorBoot.hpp"
 #include "ui/LayerSurface.hpp"
 #include "ui/MonitorResolver.hpp"
 
@@ -282,10 +285,24 @@ EventSurface::EventSurface(GtkApplication* application)
             }, pending);
         }
     );
+
+    const std::string executable_dir = realmheart::core::current_executable_directory();
+    doctor_action_listener_.start(
+        realmheart::core::kDoctorEventSource,
+        [executable_dir](const Json& invocation) {
+            const auto argv = realmheart::core::doctor_event_action_command(
+                invocation, executable_dir
+            );
+            if (!argv.empty()) {
+                static_cast<void>(realmheart::core::run_background(argv));
+            }
+        }
+    );
 }
 
 EventSurface::~EventSurface() {
     async_state_->owner.store(nullptr);
+    doctor_action_listener_.stop();
     subscriber_.stop();
     cards_.clear();
     if (window_ != nullptr) {

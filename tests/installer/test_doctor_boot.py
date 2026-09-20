@@ -39,10 +39,10 @@ class DoctorBootTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp) / "state"
             first = run_boot(_registry(), state_root=state, session_key="sess-1",
-                             executor=executor, notifier=lambda title, body, severity=None: None,
+                             executor=executor, notifier=lambda title, body, severity=None, **metadata: None,
                              now=datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc))
             second = run_boot(_registry(), state_root=state, session_key="sess-1",
-                              executor=executor, notifier=lambda title, body, severity=None: None,
+                              executor=executor, notifier=lambda title, body, severity=None, **metadata: None,
                               now=datetime(2026, 9, 17, 13, 0, tzinfo=timezone.utc))
             self.assertEqual(first.mode, "ran")
             self.assertEqual(second.mode, "already_ran")
@@ -54,7 +54,7 @@ class DoctorBootTests(unittest.TestCase):
         executor = _executor(HealthStatus.PASS)
         with tempfile.TemporaryDirectory() as temp:
             run_boot(_registry(), state_root=Path(temp) / "state", session_key="sess-background",
-                     executor=executor, notifier=lambda title, body, severity=None: None)
+                     executor=executor, notifier=lambda title, body, severity=None, **metadata: None)
         _, kwargs = executor.execute.call_args
         self.assertEqual(kwargs.get("context"), "doctor_background")
         self.assertEqual(kwargs.get("max_cost"), "cheap")
@@ -69,7 +69,7 @@ class DoctorBootTests(unittest.TestCase):
             log = root / "pacman.log"
             log.write_text("", encoding="utf-8")
             run_boot(_registry(), state_root=state, session_key="sess-update", executor=executor,
-                     notifier=lambda title, body, severity=None: None, marker_path=marker, log_path=log)
+                     notifier=lambda title, body, severity=None, **metadata: None, marker_path=marker, log_path=log)
             session = next((state / "sessions").glob("*.json"))
             payload = json.loads(session.read_text(encoding="utf-8"))
             self.assertIsNotNone(payload["package_updates"])
@@ -102,18 +102,65 @@ class DoctorBootTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp) / "state"
             outcome = run_boot(_registry(), state_root=state, session_key="s",
-                               executor=executor, notifier=lambda t, b, severity=None: calls.append((t, b)))
+                               executor=executor, notifier=lambda t, b, severity=None, **metadata: calls.append((t, b)))
             self.assertEqual(outcome.mode, "ran")
             self.assertEqual(len(calls), 1)
             self.assertIn("RH-", calls[0][1])
             self.assertEqual(len(list((state / "incidents").glob("RH-*.json"))), 1)
+
+    def test_boot_resolves_event_surface_incident_after_verified_recovery(self):
+        failed = _executor(HealthStatus.FAIL)
+        healthy = _executor(HealthStatus.PASS)
+        resolved: list[str] = []
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp) / "state"
+            run_boot(
+                _registry(), state_root=state, session_key="failed-session",
+                executor=failed,
+                notifier=lambda title, body, severity=None, **metadata: None,
+            )
+            incident = next((state / "incidents").glob("RH-*.json")).stem
+            run_boot(
+                _registry(), state_root=state, session_key="healthy-session",
+                executor=healthy,
+                notifier=lambda title, body, severity=None, **metadata: None,
+                resolver=resolved.append,
+            )
+        self.assertEqual(resolved, [incident])
+
+    def test_boot_resolves_all_open_event_surface_incidents_for_component(self):
+        failed = _executor(HealthStatus.FAIL)
+        healthy = _executor(HealthStatus.PASS)
+        resolved: list[str] = []
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp) / "state"
+            run_boot(
+                _registry(), state_root=state, session_key="failed-session",
+                executor=failed,
+                notifier=lambda title, body, severity=None, **metadata: None,
+            )
+            first = next((state / "incidents").glob("RH-*.json"))
+            second = first.with_name("RH-20260920-999.json")
+            payload = json.loads(first.read_text(encoding="utf-8"))
+            payload["id"] = second.stem
+            payload["failure_fingerprint"] = "alternate-fingerprint"
+            second.write_text(json.dumps(payload), encoding="utf-8")
+
+            run_boot(
+                _registry(), state_root=state, session_key="healthy-session",
+                executor=healthy,
+                notifier=lambda title, body, severity=None, **metadata: None,
+                resolver=resolved.append,
+            )
+
+        self.assertEqual(set(resolved), {first.stem, second.stem})
 
     def test_session_key_cannot_escape_state_directory(self):
         executor = _executor(HealthStatus.PASS)
         with tempfile.TemporaryDirectory() as temp:
             state = Path(temp) / "state"
             run_boot(_registry(), state_root=state, session_key="../../evil",
-                     executor=executor, notifier=lambda title, body, severity=None: None)
+                     executor=executor, notifier=lambda title, body, severity=None, **metadata: None)
             sessions = list((state / "sessions").glob("*.json"))
             self.assertEqual(len(sessions := sessions), 1)
             self.assertNotIn("..", sessions[0].name)

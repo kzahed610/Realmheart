@@ -53,6 +53,7 @@ def run_boot(
     session_key: str,
     executor=None,
     notifier,
+    resolver=None,
     now: datetime | None = None,
     lock_timeout: float = 0.0,
     marker_path: Path | None = None,
@@ -73,14 +74,14 @@ def run_boot(
     try:
         with acquire_state_lock(state_root, timeout=lock_timeout):
             return _run_locked(registry, state_root, session_key, marker,
-                               executor=executor, notifier=notifier, now=now,
+                               executor=executor, notifier=notifier, resolver=resolver, now=now,
                                marker_path=marker_path, log_path=log_path)
     except TimeoutError:
         return BootOutcome("deferred_lock")
 
 
 def _run_locked(registry, state_root: Path, session_key: str, marker: Path,
-                *, executor, notifier, now: datetime,
+                *, executor, notifier, resolver, now: datetime,
                 marker_path: Path | None = None, log_path: Path | None = None) -> BootOutcome:
     sessions_dir = state_root / "sessions"
     marker = sessions_dir / _session_marker_name(session_key)
@@ -115,6 +116,12 @@ def _run_locked(registry, state_root: Path, session_key: str, marker: Path,
         max_cost="cheap",
     )
     record = record_diagnosis(state_root, diagnosis, now=now)
+    if resolver is not None:
+        for incident_id in record.resolved_incidents:
+            try:
+                resolver(incident_id)
+            except Exception:
+                pass
     from .log_evidence import log_collector_for
 
     collector = log_collector_for(registry)
@@ -127,7 +134,7 @@ def _run_locked(registry, state_root: Path, session_key: str, marker: Path,
             ),
         )
     if notifier is not None:
-        dispatch_notifications(state_root, notifier, now=now)
+        dispatch_notifications(state_root, notifier, now=now, registry=registry)
     if package_report is not None:
         package_report = record_package_updates(
             state_root, package_report, marker_path=marker_path,

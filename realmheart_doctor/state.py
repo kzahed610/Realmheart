@@ -23,6 +23,7 @@ STATE_FORMAT_VERSION = 1
 @dataclass(frozen=True)
 class StateRecord:
     recovered: tuple[str, ...]
+    resolved_incidents: tuple[str, ...] = ()
 
 
 
@@ -130,6 +131,7 @@ def record_diagnosis(
         budget_exhausted=diagnosis.budget_exhausted,
     )
     recovered: list[str] = []
+    resolved_incidents: list[str] = []
     (root / "corrupt").mkdir(parents=True, exist_ok=True)
 
     previous_payload, corrupt = _load_json(root / "current.json")
@@ -231,8 +233,14 @@ def record_diagnosis(
         }
         _atomic_write_json(lkg_path, lkg)
         if resolve_incidents:
-            from .incidents import record_component_recovery
+            from .incidents import record_component_recovery, unresolved_incident_ids
 
-            record_component_recovery(root, component.id, now=now)
+            open_incidents = unresolved_incident_ids(root, component.id)
+            event = record_component_recovery(root, component.id, now=now)
+            if event is not None:
+                resolved_incidents.extend(open_incidents)
 
-    return StateRecord(recovered=tuple(recovered))
+    return StateRecord(
+        recovered=tuple(recovered),
+        resolved_incidents=tuple(resolved_incidents),
+    )

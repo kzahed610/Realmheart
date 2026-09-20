@@ -19,6 +19,7 @@ def dispatch_notifications(
     notifier,
     *,
     now: datetime | None = None,
+    registry=None,
 ) -> list[dict[str, object]]:
     """Notify once per open incident, recording dedup state per incident."""
 
@@ -57,8 +58,23 @@ def dispatch_notifications(
             f"Inspect: {inspect}"
         )
         severity = "critical" if payload.get("health_state") == "failed" else "warning"
+        repair_available = False
+        if registry is not None and payload.get("health_state") == "failed":
+            try:
+                from .repair import plan_incident_repair
+
+                repair_available = plan_incident_repair(registry, payload) is not None
+            except Exception:
+                # Notifications are never allowed to turn repair planning into a
+                # new failure mode.  The incident remains inspectable even when
+                # action eligibility cannot be established.
+                repair_available = False
         try:
-            delivery_result = notifier(title, body, severity)
+            delivery_result = notifier(
+                title, body, severity,
+                incident_id=incident_id,
+                repair_available=repair_available,
+            )
             # Backends commonly return False for a suppressed/failed delivery.
             # Treat only explicit False as failure; legacy callbacks returning
             # None remain successful.

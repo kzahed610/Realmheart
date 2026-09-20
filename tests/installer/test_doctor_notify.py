@@ -25,7 +25,7 @@ class DoctorNotifyTests(unittest.TestCase):
             now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
             incident_id = _failed_incident(root, now)
             calls: list[tuple[str, str]] = []
-            dispatch_notifications(root, lambda title, body, severity=None: calls.append((title, body)), now=now)
+            dispatch_notifications(root, lambda title, body, severity=None, **metadata: calls.append((title, body)), now=now)
             self.assertEqual(len(calls), 1)
             self.assertIn(incident_id, calls[0][1])
             self.assertIn("realmheart-doctor incident", calls[0][1])
@@ -35,10 +35,10 @@ class DoctorNotifyTests(unittest.TestCase):
             root = Path(temp)
             now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
             _failed_incident(root, now)
-            dispatch_notifications(root, lambda title, body, severity=None: None, now=now)
+            dispatch_notifications(root, lambda title, body, severity=None, **metadata: None, now=now)
             calls: list[tuple[str, str]] = []
             later = datetime(2026, 9, 17, 13, 0, tzinfo=timezone.utc)
-            dispatch_notifications(root, lambda title, body, severity=None: calls.append((title, body)), now=later)
+            dispatch_notifications(root, lambda title, body, severity=None, **metadata: calls.append((title, body)), now=later)
             self.assertEqual(calls, [])
 
     def test_no_incidents_is_silent_and_healthy_paths_never_notify(self):
@@ -47,7 +47,7 @@ class DoctorNotifyTests(unittest.TestCase):
             record_diagnosis(root, _diagnosis(ComponentHealth.HEALTHY),
                              now=datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc))
             calls: list[tuple[str, str]] = []
-            dispatch_notifications(root, lambda title, body, severity=None: calls.append((title, body)))
+            dispatch_notifications(root, lambda title, body, severity=None, **metadata: calls.append((title, body)))
             self.assertEqual(calls, [])
 
     def test_notifier_failure_does_not_raise_and_allows_retry(self):
@@ -55,12 +55,12 @@ class DoctorNotifyTests(unittest.TestCase):
             root = Path(temp)
             now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
             _failed_incident(root, now)
-            def broken(title: str, body: str, severity: str = "warning") -> None:
+            def broken(title: str, body: str, severity: str = "warning", **metadata) -> None:
                 raise RuntimeError("no notification backend")
             results = dispatch_notifications(root, broken, now=now)
             self.assertEqual(results[0]["notified"], False)
             calls: list[tuple[str, str]] = []
-            results = dispatch_notifications(root, lambda title, body, severity=None: calls.append((title, body)),
+            results = dispatch_notifications(root, lambda title, body, severity=None, **metadata: calls.append((title, body)),
                                              now=datetime(2026, 9, 17, 13, 0, tzinfo=timezone.utc))
             self.assertEqual(results[0]["notified"], True)
 
@@ -70,15 +70,31 @@ class DoctorNotifyTests(unittest.TestCase):
             root = Path(temp)
             now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
             _failed_incident(root, now)
-            first = dispatch_notifications(root, lambda *_args: False, now=now)
+            first = dispatch_notifications(root, lambda *_args, **_kwargs: False, now=now)
             self.assertFalse(first[0]["notified"])
             calls = []
             second = dispatch_notifications(
-                root, lambda *args: calls.append(args),
+                root, lambda *args, **kwargs: calls.append((args, kwargs)),
                 now=datetime(2026, 9, 17, 13, 0, tzinfo=timezone.utc),
             )
             self.assertTrue(second[0]["notified"])
             self.assertEqual(len(calls), 1)
+
+    def test_repair_metadata_is_forwarded_only_when_incident_has_a_plan(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
+            incident_id = _failed_incident(root, now)
+            calls: list[dict[str, object]] = []
+            with patch("realmheart_doctor.repair.plan_incident_repair", return_value=object()):
+                dispatch_notifications(
+                    root,
+                    lambda _title, _body, _severity=None, **metadata: calls.append(metadata),
+                    now=now, registry=object(),
+                )
+        self.assertEqual(calls, [{"incident_id": incident_id, "repair_available": True}])
 
     def test_failed_incidents_are_notified_as_critical(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -86,7 +102,7 @@ class DoctorNotifyTests(unittest.TestCase):
             now = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
             _failed_incident(root, now)
             severities: list[str] = []
-            dispatch_notifications(root, lambda title, body, severity="warning": severities.append(severity), now=now)
+            dispatch_notifications(root, lambda title, body, severity="warning", **metadata: severities.append(severity), now=now)
         self.assertEqual(severities, ["critical"])
 
     def test_repair_records_are_notified_as_warnings(self):
@@ -98,7 +114,7 @@ class DoctorNotifyTests(unittest.TestCase):
             record_repair_attempt(root, "demo", ({"action_type": "REBUILD_COMPONENT", "status": "failed"},),
                                   outcome="failed", now=now)
             severities: list[str] = []
-            dispatch_notifications(root, lambda title, body, severity="warning": severities.append(severity), now=now)
+            dispatch_notifications(root, lambda title, body, severity="warning", **metadata: severities.append(severity), now=now)
         self.assertEqual(severities, ["warning"])
 
 
@@ -124,7 +140,7 @@ class NotifyBackendTests(unittest.TestCase):
         self.assertIn("attention", argv)
         self.assertTrue(argv[argv.index("--id") + 1].startswith("realmheart-doctor-"))
 
-    def test_event_surface_notification_adds_copyable_inspect_action(self):
+    def test_event_surface_notification_adds_registered_inspect_and_copy_fallback(self):
         from unittest.mock import patch
 
         from realmheart_doctor import notify_backends
@@ -135,14 +151,54 @@ class NotifyBackendTests(unittest.TestCase):
              patch.object(notify_backends.shutil, "which", return_value="/usr/bin/realmheart-event"), \
              patch.object(notify_backends.subprocess, "run",
                           side_effect=lambda argv, **kwargs: calls.append(tuple(argv))):
-            self.assertTrue(notify_backends.deliver("Realmheart regression", body, severity="critical"))
+            self.assertTrue(notify_backends.deliver(
+                "Realmheart regression", body, severity="critical",
+                incident_id="RH-20260920-001", repair_available=False,
+            ))
         argv = calls[0]
+        self.assertIn("--action-registered", argv)
+        self.assertIn("inspect:RH-20260920-001|Inspect", argv)
         self.assertIn("--action-copy", argv)
         action = argv[argv.index("--action-copy") + 1]
         self.assertEqual(
             action,
-            "inspect|Copy Doctor command|realmheart-doctor incident RH-20260920-001",
+            "copy:RH-20260920-001|Copy Doctor command|realmheart-doctor incident RH-20260920-001",
         )
+
+    def test_event_surface_adds_repair_button_only_when_planner_marks_it_available(self):
+        from unittest.mock import patch
+
+        from realmheart_doctor import notify_backends
+
+        calls: list[tuple[str, ...]] = []
+        body = "Component demo is unresolved.\nInspect: realmheart-doctor incident RH-20260920-001"
+        with patch.dict("os.environ", {"REALMHEART_DOCTOR_NOTIFY_BACKEND": "event"}, clear=False), \
+             patch.object(notify_backends.shutil, "which", return_value="/usr/bin/realmheart-event"), \
+             patch.object(notify_backends.subprocess, "run",
+                          side_effect=lambda argv, **kwargs: calls.append(tuple(argv))):
+            self.assertTrue(notify_backends.deliver(
+                "Realmheart regression", body, severity="critical",
+                incident_id="RH-20260920-001", repair_available=True,
+            ))
+        argv = calls[0]
+        self.assertIn("repair:RH-20260920-001|Attempt Repair", argv)
+        self.assertEqual(argv[argv.index("--id") + 1],
+                         "realmheart-doctor-RH-20260920-001")
+
+    def test_resolving_incident_clears_actions_best_effort(self):
+        from unittest.mock import patch
+
+        from realmheart_doctor import notify_backends
+
+        calls: list[tuple[str, ...]] = []
+        with patch.object(notify_backends.shutil, "which", return_value="/usr/bin/realmheart-event"), \
+             patch.object(notify_backends.subprocess, "run",
+                          side_effect=lambda argv, **kwargs: calls.append(tuple(argv))):
+            self.assertTrue(notify_backends.resolve_incident_event("RH-20260920-001"))
+        argv = calls[0]
+        self.assertEqual(argv[:3], ("/usr/bin/realmheart-event", "resolve",
+                                    "realmheart-doctor-RH-20260920-001"))
+        self.assertIn("--clear-actions", argv)
 
     def test_event_ids_are_stable_for_the_same_incident(self):
         from unittest.mock import patch

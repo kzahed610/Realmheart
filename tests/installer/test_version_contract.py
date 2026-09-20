@@ -24,6 +24,12 @@ class VersionContractTests(unittest.TestCase):
         self.assertNotIn('"0.1.0"', notification_daemon)
         self.assertIn('REALMHEART_VERSION', notification_daemon)
 
+    def test_native_shell_does_not_expose_a_second_doctor_cli(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        main = (root / "src/main.cpp").read_text(encoding="utf-8")
+        self.assertNotIn('command == "--doctor"', main)
+        self.assertNotIn('realmheart --doctor', main)
+
     def test_installer_provenance_version_tracks_realmheart_release(self) -> None:
         root = Path(__file__).resolve().parents[2]
         cmake = (root / "CMakeLists.txt").read_text(encoding="utf-8")

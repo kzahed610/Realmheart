@@ -152,7 +152,8 @@ def _plan_from_context(classification: FailureClassification, context: RepairCon
                 "install the missing packages with pacman (requires sudo)",
                 packages=context.packages,
             ))
-        if failure == "DEPENDENCY_VERSION_MISMATCH" and context.build_targets:
+        if (failure == "DEPENDENCY_VERSION_MISMATCH" and context.build_targets
+                and not context.installer_bound):
             if "rebuild_component" in context.strategy_ids:
                 actions.append(RepairAction(
                     ACTION_REBUILD, RISK_CONFIRM,
@@ -160,7 +161,8 @@ def _plan_from_context(classification: FailureClassification, context: RepairCon
                     targets=context.build_targets,
                 ))
     elif failure in _ARTIFACT_FAILURES:
-        if "rebuild_component" in context.strategy_ids and context.build_targets:
+        if ("rebuild_component" in context.strategy_ids and context.build_targets
+                and not context.installer_bound):
             actions.append(RepairAction(
                 ACTION_REBUILD, RISK_CONFIRM,
                 "rebuild and reinstall the component so its artifacts match the manifest",
@@ -189,6 +191,104 @@ def _plan_from_context(classification: FailureClassification, context: RepairCon
     ))
     return RepairPlan(context.component_id, failure, tuple(actions), tuple(notes))
 
+
+
+def plan_incident_repair(
+    registry: ManifestRegistry, incident: dict[str, object],
+) -> RepairPlan | None:
+    """Build a repair plan from one persisted unresolved incident.
+
+    Notification rendering must not re-run health probes merely to decide
+    whether an action button is useful.  The incident already contains the
+    exact evidence that produced its failure class, so reconstruct the same
+    component context from the canonical manifest and plan from that snapshot.
+    The actual ``repair-incident`` command re-diagnoses before executing, so a
+    stale button can never force a repair after the component has recovered.
+    """
+
+    if incident.get("resolution_state") != "unresolved":
+        return None
+    component_id = incident.get("component_id")
+    failure_class = incident.get("failure_class")
+    confidence = incident.get("confidence")
+    if not isinstance(component_id, str) or component_id not in registry.components:
+        return None
+    if not isinstance(failure_class, str) or not isinstance(confidence, str):
+        return None
+
+    evidence_ids: list[str] = []
+    checks = incident.get("checks")
+    if isinstance(checks, list):
+        evidence_ids.extend(
+            str(item.get("check_id"))
+            for item in checks
+            if isinstance(item, dict) and isinstance(item.get("check_id"), str)
+        )
+    capabilities = incident.get("capabilities")
+    capability_ids: list[str] = []
+    if isinstance(capabilities, list):
+        capability_ids = [
+            str(item.get("capability_id"))
+            for item in capabilities
+            if isinstance(item, dict)
+            and isinstance(item.get("capability_id"), str)
+            and item.get("state") in {"missing", "failed"}
+        ]
+    if failure_class in {"DEPENDENCY_MISSING", "DEPENDENCY_VERSION_MISMATCH"}:
+        evidence_ids = capability_ids
+    if not evidence_ids:
+        return None
+
+    component = registry.components[component_id]
+    packages: list[str] = []
+    gated: list[str] = []
+    for capability_id in capability_ids:
+        capability = registry.capabilities.get(capability_id)
+        if capability is None:
+            continue
+        provider = PACMAN_DEPENDENCY_PROVIDERS.get(capability.dependency_id)
+        if provider is None:
+            continue
+        (packages if provider.automatic else gated).extend(provider.packages)
+
+    targets = tuple(
+        unit.cmake_target
+        for unit in registry.build_units.values()
+        if component_id in unit.component_ids and unit.cmake_target
+    )
+    units = tuple(
+        Path(artifact.path).name
+        for artifact in registry.artifacts.values()
+        if artifact.component_id == component_id and artifact.type == "service"
+    )
+    notes: list[str] = []
+    if component.requires_installer_binding:
+        notes.append(
+            "this component owns privileged installer-bound artifacts; Doctor will not "
+            "perform privileged installs on its own"
+        )
+    if gated:
+        notes.append(
+            "these packages are never installed automatically: "
+            + ", ".join(dict.fromkeys(gated))
+        )
+
+    classification = FailureClassification(
+        failure_class, confidence, tuple(dict.fromkeys(evidence_ids))
+    )
+    return plan_repairs(
+        component_id, classification,
+        context=RepairContext(
+            component_id=component_id,
+            strategy_ids=component.repair_strategy_ids,
+            packages=tuple(dict.fromkeys(packages)),
+            gated_packages=tuple(dict.fromkeys(gated)),
+            build_targets=targets,
+            service_units=units,
+            installer_bound=component.requires_installer_binding,
+            notes=tuple(notes),
+        ),
+    )
 
 def assess_repair_evidence(
     registry: ManifestRegistry,

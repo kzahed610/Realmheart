@@ -77,6 +77,7 @@ set(REALMHEART_WARNING_FLAGS
 set(REALMHEART_RUNTIME_SOURCES
     src/core/Command.cpp
     src/core/Diagnostics.cpp
+    src/core/DoctorActions.cpp
     src/core/DoctorBoot.cpp
     src/core/ModuleRegistry.cpp
     src/core/ShellCommand.cpp
@@ -924,6 +925,16 @@ if(BUILD_TESTING)
         src/core/Command.cpp
     )
     realmheart_register_test(realmheart_doctor_boot_tests)
+
+    add_executable(
+        realmheart_doctor_action_tests
+        tests/DoctorActionTests.cpp
+        src/core/DoctorActions.cpp
+        src/core/DoctorBoot.cpp
+        src/core/Command.cpp
+    )
+    target_include_directories(realmheart_doctor_action_tests PRIVATE src third_party)
+    realmheart_register_test(realmheart_doctor_action_tests)
 
     if(REALMHEART_ENABLE_SCREENSHOT)
         add_executable(

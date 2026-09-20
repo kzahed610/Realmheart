@@ -99,6 +99,30 @@ def _parser(*, manual: bool = False) -> argparse.ArgumentParser:
     repair.add_argument("--receipt", type=_receipt_path, help="installed-state.json receipt (build provenance)")
     repair.add_argument("--state-dir", type=Path, help="explicit local directory for repair records")
     repair.add_argument("--json", action="store_true")
+    repair_incident = sub.add_parser(
+        "repair-incident",
+        help="consent-gated repair for the component named by one saved incident",
+    )
+    repair_incident.add_argument("incident_id")
+    repair_incident.add_argument("--apply", action="store_true",
+                                 help="execute the plan instead of printing it")
+    repair_incident.add_argument("--yes", action="store_true",
+                                 help="answer yes to CONFIRM actions")
+    repair_incident.add_argument("--allow-privileged", action="store_true",
+                                 help="allow PRIVILEGED_CONFIRM actions after consent")
+    repair_incident.add_argument("--build-dir", type=_absolute_path,
+                                 help="explicit build directory for targeted rebuilds")
+    repair_incident.add_argument("--prefix", type=_absolute_path,
+                                 help="explicit installation prefix for targeted installs")
+    repair_incident.add_argument(
+        "--manifest-dir", type=Path,
+        default=Path(os.environ.get("REALMHEART_DOCTOR_MANIFEST_DIR", "components")),
+    )
+    repair_incident.add_argument("--receipt", type=_receipt_path,
+                                 help="installed-state.json receipt (build provenance)")
+    repair_incident.add_argument("--state-dir", type=Path, default=default_state_root(),
+                                 help="Doctor state directory containing the incident")
+    repair_incident.add_argument("--json", action="store_true")
     for name in ("doctor", "components", "validate-manifests"):
         command = sub.add_parser(name)
         command.add_argument("--manifest-dir", type=Path, default=Path(os.environ.get("REALMHEART_DOCTOR_MANIFEST_DIR", "components")))
@@ -152,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         return 4
     if args.command == "boot":
         from .boot import run_boot
-        from .notify_backends import deliver
+        from .notify_backends import deliver, resolve_incident_event
 
         try:
             registry = load_manifest(args.manifest_dir)
@@ -170,16 +194,21 @@ def main(argv: list[str] | None = None) -> int:
             return 4
         notified = 0
 
-        def _notifier(title: str, body: str, severity: str = "warning") -> None:
+        def _notifier(
+            title: str, body: str, severity: str = "warning", **metadata,
+        ) -> None:
             # A suppressed or failed delivery must stay retry-eligible: raising
             # keeps dispatch from recording last_notified_state.
             nonlocal notified
-            if not deliver(title, body, severity=severity):
+            if not deliver(title, body, severity=severity, **metadata):
                 raise RuntimeError("notification delivery failed")
             notified += 1
 
-        outcome = run_boot(registry, args.state_dir, session_key=args.session_key,
-                           notifier=None if args.no_notify else _notifier)
+        outcome = run_boot(
+            registry, args.state_dir, session_key=args.session_key,
+            notifier=None if args.no_notify else _notifier,
+            resolver=None if args.no_notify else resolve_incident_event,
+        )
         payload = {"format_version": 1, "mode": outcome.mode, "notifications": notified}
         print(json.dumps(payload, sort_keys=True) if args.json else f"boot: {outcome.mode}")
         return 0
@@ -206,14 +235,20 @@ def main(argv: list[str] | None = None) -> int:
             if since.tzinfo is None:
                 since = since.replace(tzinfo=timezone.utc)
         notifier = None
+        resolver = None
         if not args.no_notify:
-            from .notify_backends import deliver
+            from .notify_backends import deliver, resolve_incident_event
+            resolver = resolve_incident_event
 
-            def notifier(title: str, body: str, severity: str = "warning") -> None:
-                if not deliver(title, body, severity=severity):
+            def notifier(
+                title: str, body: str, severity: str = "warning", **metadata,
+            ) -> None:
+                if not deliver(title, body, severity=severity, **metadata):
                     raise RuntimeError("notification delivery failed")
 
-        outcome = run_post_update(registry, args.state_dir, notifier=notifier, since=since)
+        outcome = run_post_update(
+            registry, args.state_dir, notifier=notifier, resolver=resolver, since=since,
+        )
         payload = outcome.to_dict()
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
@@ -251,6 +286,34 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"format_version": 1, "error": "incident_report_failed"}) if args.json
                   else "Doctor could not read or safely export the incident")
             return 5
+    if args.command == "repair-incident":
+        from .incident_reports import load_incident
+
+        try:
+            incident_payload = load_incident(args.state_dir, args.incident_id)
+        except (OSError, ValueError, RecursionError):
+            payload = {"format_version": 1, "status": "error", "error": "incident_not_found"}
+            print(json.dumps(payload, sort_keys=True) if args.json else
+                  "Doctor could not load that incident")
+            return 4
+        if incident_payload.get("resolution_state") != "unresolved":
+            payload = {"format_version": 1, "status": "error", "error": "incident_resolved"}
+            print(json.dumps(payload, sort_keys=True) if args.json else
+                  "That Doctor incident is already resolved")
+            return 3
+        component_id = incident_payload.get("component_id")
+        if not isinstance(component_id, str) or not component_id:
+            payload = {"format_version": 1, "status": "error", "error": "incident_invalid"}
+            print(json.dumps(payload, sort_keys=True) if args.json else
+                  "Doctor incident does not identify a component")
+            return 5
+        args.command = "repair"
+        args.component = component_id
+        if args.receipt is None:
+            candidate = args.state_dir.parent / "installed-state.json"
+            if candidate.is_file():
+                args.receipt = candidate
+        return _manual(args)
     if args.command != "assess-install":
         return _manual(args)
     try:
@@ -288,6 +351,34 @@ def _consent_callback(args):
         return answer in {"y", "yes"}
 
     return consent
+
+
+def _resolve_default_state_events(state_dir: Path | None, incident_ids) -> None:
+    """Best-effort mirror of verified recovery into the live Event Surface.
+
+    Event Surface notifications are emitted only for the canonical Doctor state
+    tree.  Keeping custom/test state directories isolated also prevents a
+    diagnostic fixture from touching the user's real eventd instance.
+    """
+
+    if state_dir is None:
+        return
+    from .state import default_state_root
+
+    try:
+        if Path(state_dir).resolve(strict=False) != default_state_root().resolve(strict=False):
+            return
+    except OSError:
+        return
+    try:
+        from .notify_backends import resolve_incident_event
+    except Exception:
+        return
+    for incident_id in incident_ids:
+        try:
+            resolve_incident_event(str(incident_id))
+        except Exception:
+            pass
 
 
 def _repair_exit_code(report) -> int:
@@ -441,7 +532,11 @@ def _repair_transaction(args: argparse.Namespace, registry) -> int:
                 incident_id=repair_incident.incident_id if repair_incident else None,
             )
             if report.verified:
+                from .incidents import unresolved_incident_ids
+
+                resolved_event_ids = unresolved_incident_ids(args.state_dir, args.component)
                 record_component_recovery(args.state_dir, args.component)
+                _resolve_default_state_events(args.state_dir, resolved_event_ids)
         except OSError:
             payload = {"format_version": 1, "status": "error", "error": "state_persistence_failed",
                        "plan": plan.to_dict(), "report": report.to_dict()}
@@ -532,6 +627,7 @@ def _manual(args: argparse.Namespace) -> int:
 
             result = None
             payload = None
+            resolved_event_ids: tuple[str, ...] = ()
             try:
                 # Keep the diagnosis and every state mutation in one transaction.
                 # Acquiring only around the writes would allow a slow stale probe
@@ -540,6 +636,7 @@ def _manual(args: argparse.Namespace) -> int:
                     result = _diagnose_manual()
                     payload = _payload_for(result)
                     state = record_diagnosis(args.state_dir, result)
+                    resolved_event_ids = state.resolved_incidents
                     from .log_evidence import log_collector_for
 
                     collector = log_collector_for(registry)
@@ -596,6 +693,7 @@ def _manual(args: argparse.Namespace) -> int:
                       render_diagnosis(result, verbose=args.verbose) +
                       "\nDoctor state persistence failed")
                 return 5
+            _resolve_default_state_events(args.state_dir, resolved_event_ids)
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
         else:

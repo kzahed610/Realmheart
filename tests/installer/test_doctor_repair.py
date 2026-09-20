@@ -1,8 +1,10 @@
 """Repair planning stays separate from diagnosis and never acts without consent."""
 import unittest
+from pathlib import Path
 
 from realmheart_doctor.classification import FailureClassification, classify_failure
 from realmheart_doctor.health import HealthCheckResult, HealthStatus
+from realmheart_maintenance.manifest import load_manifest
 from realmheart_doctor.repair import (
     ACTION_INSTALL_PACKAGE,
     ACTION_POST_CHECKS,
@@ -12,6 +14,7 @@ from realmheart_doctor.repair import (
     RISK_PRIVILEGED,
     RISK_SAFE,
     RepairContext,
+    plan_incident_repair,
     plan_repairs,
 )
 
@@ -75,6 +78,34 @@ class RepairContextPlanningTests(unittest.TestCase):
         classification = FailureClassification("COMPONENT_ARTIFACT_MISSING", "HIGH", ("check.demo",))
         context = RepairContext("hypr-integration", ())
         self.assertIsNone(plan_repairs("hypr-integration", classification, context=context))
+
+
+    def test_installer_bound_artifact_failure_does_not_offer_unexecutable_rebuild(self):
+        classification = FailureClassification("COMPONENT_ARTIFACT_MISSING", "HIGH", ("check.demo",))
+        context = RepairContext(
+            "lockscreen-auth", ("rebuild_component",),
+            build_targets=("realmheart_auth",), installer_bound=True,
+        )
+        self.assertIsNone(plan_repairs("lockscreen-auth", classification, context=context))
+
+    def test_saved_incident_plans_contextual_repair_without_reprobing(self):
+        root = Path(__file__).resolve().parents[2]
+        registry = load_manifest(root / "components")
+        incident = {
+            "resolution_state": "unresolved",
+            "component_id": "screenshot",
+            "failure_class": "COMPONENT_ARTIFACT_MISSING",
+            "confidence": "HIGH",
+            "checks": [{"check_id": "check.screenshot.binary.exists"}],
+            "capabilities": [],
+        }
+        plan = plan_incident_repair(registry, incident)
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.component_id, "screenshot")
+        self.assertEqual(
+            [item.action_type for item in plan.actions],
+            [ACTION_REBUILD, ACTION_POST_CHECKS],
+        )
 
     def test_action_fingerprints_are_stable_and_content_sensitive(self):
         first = RepairContext("lens", ("install_missing_package",), packages=("grim",))

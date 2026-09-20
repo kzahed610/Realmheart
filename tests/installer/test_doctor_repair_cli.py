@@ -94,6 +94,52 @@ class RepairCliTests(unittest.TestCase):
         self.assertIn("REBUILD_COMPONENT", action_types)
         self.assertEqual(action_types[-1], "RUN_POST_REPAIR_CHECKS")
 
+    def test_repair_incident_routes_to_the_saved_component(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry_dir = self._manifest(root)
+            state = root / "state" / "realmheart" / "doctor"
+            incident_id = "RH-20260920-001"
+            incident_path = state / "incidents" / f"{incident_id}.json"
+            incident_path.parent.mkdir(parents=True, exist_ok=True)
+            incident_path.write_text(json.dumps({
+                "format_version": 1,
+                "id": incident_id,
+                "component_id": "demo",
+                "resolution_state": "unresolved",
+            }), encoding="utf-8")
+            code, payload = _invoke(
+                "repair-incident", incident_id,
+                "--prefix", str(root / "prefix"),
+                "--state-dir", str(state),
+                "--manifest-dir", str(registry_dir), "--json",
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["mode"], "dry_run")
+        self.assertEqual(payload["plan"]["component_id"], "demo")
+
+    def test_repair_incident_refuses_resolved_history(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry_dir = self._manifest(root)
+            state = root / "state" / "realmheart" / "doctor"
+            incident_id = "RH-20260920-001"
+            incident_path = state / "incidents" / f"{incident_id}.json"
+            incident_path.parent.mkdir(parents=True, exist_ok=True)
+            incident_path.write_text(json.dumps({
+                "format_version": 1,
+                "id": incident_id,
+                "component_id": "demo",
+                "resolution_state": "resolved",
+            }), encoding="utf-8")
+            code, payload = _invoke(
+                "repair-incident", incident_id,
+                "--state-dir", str(state),
+                "--manifest-dir", str(registry_dir), "--json",
+            )
+        self.assertEqual(code, 3)
+        self.assertEqual(payload["error"], "incident_resolved")
+
     def test_unknown_component_is_invalid_invocation(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

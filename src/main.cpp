@@ -1,9 +1,6 @@
-#include "core/Diagnostics.hpp"
 #include "core/RestartHandshake.hpp"
 #include "core/ShellCommand.hpp"
 #include "core/ShellControl.hpp"
-#include "services/Audio.hpp"
-#include "services/Brightness.hpp"
 #include "services/HyprlandWorkspaces.hpp"
 #include "services/PowerProfiles.hpp"
 #include "services/ScopeModules.hpp"
@@ -19,7 +16,6 @@
 #include <csignal>
 #include <cstring>
 #include <filesystem>
-#include <iomanip>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -40,7 +36,6 @@ std::string get_supported_commands() {
 void print_usage() {
     std::cout << "Realmheart " << REALMHEART_VERSION << "\n"
               << "Usage:\n"
-              << "  realmheart --doctor              Probe host dependencies and live service state\n"
               << "  realmheart --list-modules        Print confirmed module registry\n"
               << "  realmheart --resolution-status   Print display-tier geometry and asset provenance\n"
               << "  realmheart --cycle-power-profile Cycle battery-saver/balanced/performance\n"
@@ -212,32 +207,6 @@ int run_restart_helper(int argc, char** argv) {
     return fail(exec_error);
 }
 
-int doctor() {
-    std::cout << realmheart::core::format_dependency_report(realmheart::core::collect_dependency_checks()) << '\n';
-
-    if (auto brightness = realmheart::services::Brightness::read()) {
-        std::cout << "Brightness: " << brightness->current << '/' << brightness->maximum
-                  << " (" << std::fixed << std::setprecision(1) << brightness->percent << "%)\n";
-    } else {
-        std::cout << "Brightness: unavailable\n";
-    }
-
-    if (auto audio = realmheart::services::Audio::read_default_sink()) {
-        std::cout << "Audio: " << audio->raw_status << '\n';
-    } else {
-        std::cout << "Audio: unavailable\n";
-    }
-
-    if (auto profile = realmheart::services::PowerProfiles::current()) {
-        std::cout << "Power profile: " << *profile
-                  << " (next: " << realmheart::services::PowerProfiles::next_after(*profile) << ")\n";
-    } else {
-        std::cout << "Power profile: unavailable\n";
-    }
-
-    return 0;
-}
-
 } // namespace
 
 int main(int argc, char** argv) {
@@ -256,7 +225,6 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (command == "--doctor") return doctor();
 
     if (command == "--resolution-status") {
         std::cout << realmheart::ui::resolution_compatibility_report();
