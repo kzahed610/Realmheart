@@ -31,11 +31,12 @@ def classify_failure(
     *,
     missing_capabilities: tuple[str, ...] = (),
     failed_capabilities: tuple[str, ...] = (),
+    failed_upstream: tuple[str, ...] = (),
 ) -> FailureClassification:
     """Classify one component's observed failures.
 
-    Capability evidence participates only when it was actually observed
-    missing or failed; an unobserved capability never becomes a failure class.
+    Capability and upstream evidence participate only when it was actually
+    observed failing; an unobserved condition never becomes a failure class.
     """
 
     observed = tuple(item for item in checks if item.status is HealthStatus.FAIL)
@@ -51,6 +52,10 @@ def classify_failure(
     if failed_capabilities:
         return FailureClassification(
             "DEPENDENCY_VERSION_MISMATCH", "MEDIUM", tuple(sorted(failed_capabilities))
+        )
+    if failed_upstream:
+        return FailureClassification(
+            "COMPONENT_DEPENDENCY_FAILURE", "HIGH", tuple(sorted(failed_upstream))
         )
     if not ordered:
         return FailureClassification("UNKNOWN", "LOW", ())

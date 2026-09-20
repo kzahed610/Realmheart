@@ -27,6 +27,16 @@ class IncidentEvent:
     incident_id: str
 
 
+def _upstream_failures(record: dict) -> tuple[str, ...]:
+    """Required dependencies that were observed failing for this component."""
+
+    upstream: list[str] = []
+    for entry in record.get("uncertainties") or []:
+        if isinstance(entry, str) and entry.startswith("upstream_component_failed:"):
+            upstream.extend(part for part in entry.split(":", 1)[1].split(",") if part)
+    return tuple(sorted(set(upstream)))
+
+
 def _incident_fingerprint(component_id: str, failed: list[dict], uncertainties: list) -> str:
     conditions = sorted({(str(item.get("check_id")), str(item.get("reason_code")))
                          for item in failed})
@@ -117,15 +127,19 @@ def record_component_failure(
         return None
     checks = [item for item in record.get("checks", []) if isinstance(item, dict)]
     failed = [item for item in checks if item.get("status") == "fail"]
+    upstream_failed = _upstream_failures(record)
     fingerprint = _incident_fingerprint(component_id, failed, record.get("uncertainties", []))
-    classification = classify_failure(tuple(
-        HealthCheckResult(
-            check_id=str(item.get("check_id")), component_id=component_id, check=item.get("check"),
-            status=HealthStatus(item.get("status") or "unknown"), reason_code=str(item.get("reason_code")),
-            detail=item.get("detail"),
-        )
-        for item in failed
-    ))
+    classification = classify_failure(
+        tuple(
+            HealthCheckResult(
+                check_id=str(item.get("check_id")), component_id=component_id, check=item.get("check"),
+                status=HealthStatus(item.get("status") or "unknown"), reason_code=str(item.get("reason_code")),
+                detail=item.get("detail"),
+            )
+            for item in failed
+        ),
+        failed_upstream=upstream_failed,
+    )
 
     existing, incidents_dir = _find_open_incident(root, component_id, fingerprint)
     timestamp = now.isoformat()
@@ -144,6 +158,13 @@ def record_component_failure(
 
     incident_id = _next_incident_id(incidents_dir, now)
     primary = failed[0] if failed else {}
+    symptoms = [f"{item.get('check_id')}: {item.get('reason_code')}" for item in failed]
+    if not symptoms:
+        symptoms = ([f"required dependency failed: {name}" for name in upstream_failed]
+                    or [str(entry) for entry in (record.get("uncertainties") or [])][:3])
+    observed = (failed[0].get("detail") if failed else None) or (
+        f"required dependency failed: {', '.join(upstream_failed)}" if upstream_failed
+        else "health check reported failure")
     log_evidence = None
     if log_collector is not None:
         try:
@@ -159,12 +180,12 @@ def record_component_failure(
         "health_state": "failed",
         "failure_class": classification.failure_class,
         "confidence": classification.confidence,
-        "symptoms": [f"{item.get('check_id')}: {item.get('reason_code')}" for item in failed],
+        "symptoms": symptoms,
         "expected": "component passes its canonical health checks",
-        "observed": (failed[0].get("detail") if failed else None) or "health check reported failure",
+        "observed": observed,
         "last_known_good": _read_lkg_summary(root, component_id),
         "relevant_changes": changes_since_healthy(current, _read_lkg_summary(root, component_id)),
-        "checks": failed or checks,
+        "checks": failed,
         "repair_attempts": [],
         "raw_logs": log_evidence,
         "resolution_state": _UNRESOLVED,

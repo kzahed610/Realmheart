@@ -175,6 +175,12 @@ def _plan_from_context(classification: FailureClassification, context: RepairCon
             "restart the component's user services so they pick up the current state",
             targets=context.service_units,
         ))
+    elif failure == "COMPONENT_DEPENDENCY_FAILURE":
+        notes.append(
+            "this component inherits its failure from a required dependency ("
+            + ", ".join(classification.evidence_ids)
+            + "); repair that component instead"
+        )
     if not actions:
         return None
     actions.append(RepairAction(

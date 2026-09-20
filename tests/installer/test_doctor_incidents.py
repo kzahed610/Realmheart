@@ -29,6 +29,26 @@ def _diagnosis(status: ComponentHealth, *, component_id: str = "demo") -> Diagno
 
 
 class DoctorIncidentTests(unittest.TestCase):
+    def test_upstream_only_failure_records_the_named_dependency(self):
+        from realmheart_doctor.diagnosis import ComponentDiagnosis, Diagnosis
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            diagnosis = Diagnosis(
+                release_version="0.7.8", manifest_digest="a" * 64, overall=ComponentHealth.FAILED,
+                components=(ComponentDiagnosis(
+                    "session", "Session", "essential", ComponentHealth.FAILED, (),
+                    ("upstream_component_failed:realmheart-core",),
+                ),),
+                budget_exhausted=False,
+            )
+            record_diagnosis(root, diagnosis)
+            event = record_component_failure(root, "session")
+            payload = json.loads((root / "incidents" / f"{event.incident_id}.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["failure_class"], "COMPONENT_DEPENDENCY_FAILURE")
+        self.assertEqual(payload["checks"], [])
+        self.assertEqual(payload["symptoms"], ["required dependency failed: realmheart-core"])
+        self.assertIn("realmheart-core", payload["observed"])
+
     def test_recovery_requires_current_healthy_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

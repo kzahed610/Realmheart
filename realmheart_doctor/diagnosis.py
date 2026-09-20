@@ -205,10 +205,16 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
                 uncertainties.append("noncritical_runtime_capability_missing")
                 status = ComponentHealth.DEGRADED
         upstream = [results[item.id].status for item in spec.realmheart_dependencies if item.required]
+        failed_upstream = tuple(item.id for item in spec.realmheart_dependencies
+                                if item.required and results[item.id].status is ComponentHealth.FAILED)
         component_uncertainties = uncertainties_by_component.get(key, [])
         uncertainties.extend(component_uncertainties)
         receipt_failed = "receipt_component_failed" in component_uncertainties
-        if receipt_failed or capability_failed or HealthStatus.FAIL in required or ComponentHealth.FAILED in upstream:
+        if failed_upstream and not (receipt_failed or capability_failed or HealthStatus.FAIL in required):
+            # The component itself has no observed failure: it inherits one from
+            # a required dependency.  Say so instead of leaving an empty record.
+            uncertainties.append("upstream_component_failed:" + ",".join(sorted(failed_upstream)))
+        if receipt_failed or capability_failed or HealthStatus.FAIL in required or failed_upstream:
             status = ComponentHealth.FAILED
         elif (uncertainties or any(item in {HealthStatus.UNKNOWN, HealthStatus.NOT_APPLICABLE}
                                    for item in required) or ComponentHealth.UNKNOWN in upstream):

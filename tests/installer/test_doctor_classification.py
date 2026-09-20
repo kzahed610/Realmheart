@@ -24,3 +24,15 @@ class DoctorClassificationTests(unittest.TestCase):
         missing = HealthCheckResult("a", "demo", "artifact_exists", HealthStatus.FAIL, "artifact_missing")
         version = replace(missing, check_id="b", check="version_probe", reason_code="version_mismatch")
         self.assertEqual(classify_failure((missing, version)), classify_failure((version, missing)))
+
+    def test_upstream_failure_is_classified_as_a_dependency_failure(self):
+        result = classify_failure((), failed_upstream=("realmheart-core",))
+        self.assertEqual(result.failure_class, "COMPONENT_DEPENDENCY_FAILURE")
+        self.assertEqual(result.confidence, "HIGH")
+        self.assertEqual(result.evidence_ids, ("realmheart-core",))
+
+    def test_own_evidence_wins_over_an_upstream_failure(self):
+        missing = HealthCheckResult("check.demo", "demo", "artifact_exists",
+                                    HealthStatus.FAIL, "artifact_missing")
+        result = classify_failure((missing,), failed_upstream=("realmheart-core",))
+        self.assertEqual(result.failure_class, "COMPONENT_ARTIFACT_MISSING")

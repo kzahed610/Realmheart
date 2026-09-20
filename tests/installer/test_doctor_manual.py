@@ -587,6 +587,36 @@ contexts = ["doctor_manual"]
         self.assertTrue(component.to_dict()["build_fingerprints"][0]["drift"])
         self.assertFalse(aligned.components[0].build_fingerprints[0].drift)
 
+    def test_upstream_failure_is_named_instead_of_left_empty(self):
+        from unittest.mock import Mock
+        from realmheart_maintenance.manifest import ComponentDependencySpec, load_manifest
+        from realmheart_doctor.diagnosis import diagnose
+        from realmheart_doctor.health import HealthCheckReport, HealthCheckResult, HealthStatus
+        registry = load_manifest(Path("components"))
+        core = replace(registry.components["realmheart-core"], realmheart_dependencies=())
+        session = replace(
+            registry.components["session"],
+            realmheart_dependencies=(ComponentDependencySpec("realmheart-core", True),),
+        )
+        definition = registry.health_checks["check.core.binary.exists"]
+        assert definition.artifact_id is not None
+        artifact = registry.artifacts[definition.artifact_id]
+        registry = replace(
+            registry,
+            components={"realmheart-core": core, "session": session},
+            component_order=("realmheart-core", "session"),
+            capabilities={},
+            artifacts={artifact.id: artifact},
+            health_checks={definition.id: definition},
+        )
+        executor = Mock()
+        executor.execute.return_value = HealthCheckReport((HealthCheckResult(
+            definition.id, "realmheart-core", definition.check, HealthStatus.FAIL, "artifact_missing"),), 0)
+        result = diagnose(registry, executor=executor)
+        session_diagnosis = next(item for item in result.components if item.id == "session")
+        self.assertEqual(session_diagnosis.status.value, "failed")
+        self.assertIn("upstream_component_failed:realmheart-core", session_diagnosis.uncertainties)
+
     def test_empty_check_set_cannot_report_healthy(self):
         with tempfile.TemporaryDirectory() as temp:
             Path(temp, "manifest.toml").write_text('''schema_version = 1
