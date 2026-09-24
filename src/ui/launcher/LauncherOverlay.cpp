@@ -8,6 +8,7 @@
 #include "core/Command.hpp"
 #include "core/TaskExecutor.hpp"
 #include "ui/LayerSurface.hpp"
+#include "ui/MonitorResolver.hpp"
 #include "ui/launcher/CommandReceiptOverlay.hpp"
 #include "ui/bar/widgets/ThemedSvgIcon.hpp"
 
@@ -1459,7 +1460,12 @@ void LauncherOverlay::setup_ui() {
 }
 
 void LauncherOverlay::refresh_wallpaper() {
-    const auto path = wallpaper_service_.load_path();
+    const auto path = wallpaper_service_.load_effective_path(
+        monitor_connector_for_index(
+            gdk_display_get_default(),
+            monitor_index_
+        )
+    );
     if (!path) {
         gtk_picture_set_paintable(GTK_PICTURE(wallpaper_picture_), nullptr);
         wallpaper_texture_path_.clear();

@@ -132,6 +132,30 @@ TEST_F(WallpaperServiceTest, PerOutputPathRoundTripsIndependently) {
     EXPECT_EQ(service.load_output_path("DP-2"), std::nullopt);
 }
 
+TEST_F(WallpaperServiceTest, EffectivePathPrefersOutputOverrideOverGlobalPath) {
+    realmheart::services::WallpaperService service(state_file_);
+    const auto global = create_file("global.png");
+    const auto output = create_file("output.png");
+    ASSERT_TRUE(service.persist_path(global));
+    ASSERT_TRUE(service.persist_output_path("DP-1", output));
+
+    EXPECT_EQ(
+        service.load_effective_path("DP-1"),
+        std::optional<std::filesystem::path>{output}
+    );
+}
+
+TEST_F(WallpaperServiceTest, EffectivePathFallsBackToGlobalPathWithoutOverride) {
+    realmheart::services::WallpaperService service(state_file_);
+    const auto global = create_file("global.png");
+    ASSERT_TRUE(service.persist_path(global));
+
+    EXPECT_EQ(
+        service.load_effective_path("DP-1"),
+        std::optional<std::filesystem::path>{global}
+    );
+}
+
 TEST_F(WallpaperServiceTest, EmptyOutputConnectorIsRejected) {
     realmheart::services::WallpaperService service(state_file_);
     const auto image = create_file("wallpaper.png");

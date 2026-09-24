@@ -196,6 +196,13 @@ std::optional<std::filesystem::path> WallpaperService::load_output_path(
     return read_saved_path(file, *this);
 }
 
+std::optional<std::filesystem::path> WallpaperService::load_effective_path(
+    std::string_view connector
+) const {
+    if (const auto output_path = load_output_path(connector)) return output_path;
+    return load_path();
+}
+
 bool WallpaperService::persist_output_path(
     std::string_view connector,
     const std::filesystem::path& path

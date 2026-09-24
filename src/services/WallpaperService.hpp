@@ -20,6 +20,9 @@ public:
     [[nodiscard]] std::optional<std::filesystem::path> load_output_path(
         std::string_view connector
     ) const;
+    [[nodiscard]] std::optional<std::filesystem::path> load_effective_path(
+        std::string_view connector
+    ) const;
     [[nodiscard]] bool persist_output_path(
         std::string_view connector,
         const std::filesystem::path& path
