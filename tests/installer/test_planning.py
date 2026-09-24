@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import _bootstrap
+from realmheart_maintenance.fingerprint import FingerprintLimitExceeded
 from realmheart_maintenance.manifest import load_manifest
 from realmheart_installer.context import XdgPaths
 from realmheart_installer.environment.capabilities import (
@@ -493,6 +494,20 @@ class PlanningTests(unittest.TestCase):
                     self._build(root, snapshot)
             self.assertEqual(raised.exception.code, "RH_PLAN_INSPECTION_FAILED")
             self.assertIn("Permission denied", raised.exception.message)
+
+    def test_fingerprint_resource_limit_becomes_structured_installer_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            paths = self._paths(root)
+            snapshot = self._snapshot(paths)
+            with patch(
+                "realmheart_installer.planning.planner.fingerprint_path",
+                side_effect=FingerprintLimitExceeded("seconds", 30.0, 30.1),
+            ):
+                with self.assertRaises(PlanningInspectionError) as raised:
+                    self._build(root, snapshot)
+            self.assertEqual(raised.exception.code, "RH_PLAN_INSPECTION_FAILED")
+            self.assertIn("fingerprint seconds limit exceeded", raised.exception.message)
 
     def test_activation_is_not_falsely_promoted_before_new_session_is_proven(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -4,9 +4,11 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from . import _bootstrap  # noqa: F401
 from realmheart_installer.errors import PreconditionFailedError
+from realmheart_installer.filesystem import compare
 from realmheart_installer.filesystem.compare import fingerprint_path
 from realmheart_installer.transaction.preconditions import capture_path_precondition, verify_precondition
 
@@ -45,6 +47,15 @@ class PreconditionTests(unittest.TestCase):
             link.unlink()
             os.symlink(root / "different", link)
             self.assertNotEqual(before, fingerprint_path(link))
+
+    def test_installer_fingerprint_uses_streaming_no_byte_ceiling_mode(self) -> None:
+        path = Path("/tmp/realmheart-fingerprint-test")
+        with patch(
+            "realmheart_installer.filesystem.compare._maintenance_fingerprint_path",
+            return_value="digest",
+        ) as maintenance:
+            self.assertEqual(compare.fingerprint_path(path), "digest")
+        maintenance.assert_called_once_with(path, max_bytes=None)
 
 
 if __name__ == "__main__":

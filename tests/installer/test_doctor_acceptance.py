@@ -723,6 +723,20 @@ class DoctorAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(FingerprintLimitExceeded, "bytes"):
                 fingerprint_path(root, max_bytes=1)
 
+    def test_fingerprint_none_byte_budget_keeps_exact_streaming_mode(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "tree"
+            root.mkdir()
+            (root / "a").write_bytes(b"ab")
+            (root / "b").write_bytes(b"cd")
+
+            with self.assertRaisesRegex(FingerprintLimitExceeded, "bytes"):
+                fingerprint_path(root, max_bytes=1)
+
+            unbounded = fingerprint_path(root, max_bytes=None)
+            regular = fingerprint_path(root, max_bytes=4)
+            self.assertEqual(unbounded, regular)
+
     def test_resource_limit_overrides_cannot_remove_hard_bounds(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

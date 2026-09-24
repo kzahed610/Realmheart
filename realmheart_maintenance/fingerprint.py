@@ -100,15 +100,22 @@ def _readlink(path, *, dir_fd: int | None = None) -> str:
         ) from exc
 
 
-class FingerprintLimitExceeded(RuntimeError):
-    """Raised when bounded fingerprint traversal would exceed its budget."""
+class FingerprintLimitExceeded(FingerprintObservationError):
+    """Raised when bounded fingerprint traversal would exceed its budget.
+
+    Limit exhaustion is an observation failure, not an unexpected runtime crash.
+    Callers that translate ``OSError``/``FingerprintObservationError`` can
+    therefore report a stable, structured diagnostic.
+    """
 
     def __init__(self, resource: str, limit: int | float, observed: int | float) -> None:
-        self.resource = resource
+        self.limit_resource = resource
         self.limit = limit
         self.observed = observed
         super().__init__(
-            f"fingerprint {resource} limit exceeded: {observed} > {limit}"
+            f"fingerprint {resource} limit exceeded: {observed} > {limit}",
+            resource=resource,
+            reason="limit_exceeded",
         )
 
 
@@ -280,7 +287,7 @@ def _check_deadline(deadline: float, *, started_at: float, seconds_limit: float)
 def _read_regular_descriptor(
     descriptor: int,
     *,
-    max_bytes: int,
+    max_bytes: int | None,
     used_bytes: int = 0,
     deadline: float | None = None,
     started_at: float | None = None,
@@ -292,14 +299,17 @@ def _read_regular_descriptor(
     while True:
         if deadline is not None and started_at is not None and seconds_limit is not None:
             _check_deadline(deadline, started_at=started_at, seconds_limit=seconds_limit)
-        remaining = max_bytes - used_bytes
+        remaining = None if max_bytes is None else max_bytes - used_bytes
         try:
-            chunk = _read(descriptor, min(_CHUNK_SIZE, remaining + 1))
+            chunk = _read(
+                descriptor,
+                _CHUNK_SIZE if remaining is None else min(_CHUNK_SIZE, remaining + 1),
+            )
         except InterruptedError:
             continue
         if not chunk:
             break
-        if len(chunk) > remaining:
+        if remaining is not None and len(chunk) > remaining:
             raise FingerprintLimitExceeded(limit_resource, max_bytes, used_bytes + len(chunk))
         if fingerprint_hasher is not None:
             fingerprint_hasher.update(chunk)
@@ -359,7 +369,7 @@ def _fingerprint_directory_descriptor(
     depth: int,
     max_entries: int,
     max_depth: int,
-    max_bytes: int,
+    max_bytes: int | None,
     deadline: float,
     started_at: float,
     seconds_limit: float,
@@ -470,12 +480,13 @@ def _validate_fingerprint_options(
     *,
     max_entries: int,
     max_depth: int,
-    max_bytes: int,
+    max_bytes: int | None,
     max_seconds: int | float,
 ) -> float:
     _validate_limit("max_entries", max_entries, MAX_FINGERPRINT_ENTRIES)
     _validate_limit("max_depth", max_depth, MAX_FINGERPRINT_DEPTH)
-    _validate_limit("max_bytes", max_bytes, MAX_FINGERPRINT_BYTES)
+    if max_bytes is not None:
+        _validate_limit("max_bytes", max_bytes, MAX_FINGERPRINT_BYTES)
     if (
         isinstance(max_seconds, bool)
         or not isinstance(max_seconds, (int, float))
@@ -496,7 +507,7 @@ def observe_path(
     initial_stat: os.stat_result | None = None,
     max_entries: int = MAX_FINGERPRINT_ENTRIES,
     max_depth: int = MAX_FINGERPRINT_DEPTH,
-    max_bytes: int = MAX_FINGERPRINT_BYTES,
+    max_bytes: int | None = MAX_FINGERPRINT_BYTES,
     max_seconds: int | float = MAX_FINGERPRINT_SECONDS,
 ) -> PathObservation:
     """Observe a path through one bound descriptor where content is required.
@@ -671,14 +682,16 @@ def fingerprint_path(
     *,
     max_entries: int = MAX_FINGERPRINT_ENTRIES,
     max_depth: int = MAX_FINGERPRINT_DEPTH,
-    max_bytes: int = MAX_FINGERPRINT_BYTES,
+    max_bytes: int | None = MAX_FINGERPRINT_BYTES,
     max_seconds: int | float = MAX_FINGERPRINT_SECONDS,
 ) -> str:
     """Fingerprint content/shape/mode without following symlinks.
 
     ``max_entries`` counts descendants of a directory, ``max_depth`` counts
-    directory levels below the root, and ``max_bytes`` bounds all regular-file
-    content read during the traversal.  Regular files and directories are
+    directory levels below the root, and a numeric ``max_bytes`` bounds all
+    regular-file content read during the traversal.  ``max_bytes=None`` keeps
+    exact streaming fingerprints while relying on the entry/depth/deadline
+    budgets instead of imposing a total-content byte ceiling.  Regular files and directories are
     opened once and observed through descriptor-relative operations; a path or
     inode change raises ``FingerprintObservationError`` instead of producing a
     clean digest.  The path-only call remains backward compatible.
