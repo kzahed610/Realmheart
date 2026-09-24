@@ -32,17 +32,44 @@ class DiagnosticReportStore:
         self.paths = paths
 
     def save(self, report: DiagnosticReport, *, output_dir: Path | None = None) -> DiagnosticBundle:
+        return self.save_rendered(
+            report.incident_id,
+            payload=json.loads(render_json_report(report)),
+            markdown=render_markdown_report(report),
+            github=render_github_issue(report),
+            output_dir=output_dir,
+        )
+
+    def save_rendered(
+        self,
+        incident_id: str,
+        *,
+        payload: dict[str, object],
+        markdown: str,
+        github: str,
+        output_dir: Path | None = None,
+    ) -> DiagnosticBundle:
+        """Persist an already-rendered privacy-safe diagnostic bundle.
+
+        The emergency CLI failure path uses the same private bundle contract as
+        normal Phase-15 diagnostics, so report-list/inspect/remove continue to
+        work without inventing a second persistence format.
+        """
+        if not _REPORT_ID_RE.fullmatch(incident_id):
+            raise InstallerError("Invalid diagnostic incident id.", code="RH_DIAGNOSTIC_ID_INVALID", stage="diagnostics")
+        if payload.get("incident_id") != incident_id or payload.get("schema_version") != 1:
+            raise InstallerError("Diagnostic report identity/schema mismatch.", code="RH_DIAGNOSTIC_REPORT_INVALID", stage="diagnostics")
         base = Path(output_dir).expanduser() if output_dir is not None else self.paths.reports
         if base.exists() and (base.is_symlink() or not base.is_dir()):
             raise InstallerError("Diagnostic report output root is not a trusted directory.", code="RH_DIAGNOSTIC_STORE_UNSAFE", stage="diagnostics")
         base.mkdir(parents=True, exist_ok=True, mode=0o700)
-        directory = base / report.incident_id
+        directory = base / incident_id
         directory.mkdir(parents=False, exist_ok=False, mode=0o700)
-        bundle = DiagnosticBundle(report.incident_id, directory, directory / "report.json", directory / "report.md", directory / "github-issue.md")
+        bundle = DiagnosticBundle(incident_id, directory, directory / "report.json", directory / "report.md", directory / "github-issue.md")
         try:
-            self._atomic_write(bundle.json_path, render_json_report(report))
-            self._atomic_write(bundle.markdown_path, render_markdown_report(report))
-            self._atomic_write(bundle.github_path, render_github_issue(report))
+            self._atomic_write(bundle.json_path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            self._atomic_write(bundle.markdown_path, markdown)
+            self._atomic_write(bundle.github_path, github)
         except Exception:
             shutil.rmtree(directory, ignore_errors=True)
             raise

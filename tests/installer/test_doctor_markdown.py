@@ -66,6 +66,27 @@ class IncidentReportTests(unittest.TestCase):
             self.assertEqual(main(["doctor", "--report", "--json"]), 4)
 
 
+
+    def test_saved_incident_report_offers_machine_authored_github_handoff(self):
+        incident = {
+            "format_version": 1, "id": "RH-20260917-001",
+            "component_id": "demo", "health_state": "failed",
+            "failure_class": "RUNTIME_FAILURE", "observed": "backend unavailable",
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "incidents").mkdir()
+            (root / "incidents" / (incident["id"] + ".json")).write_text(json.dumps(incident))
+            with patch("realmheart_doctor.cli.offer_github_issue") as offer, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                code = main(["incident", incident["id"], "--report", "--state-dir", temp])
+            self.assertEqual(code, 0)
+            offer.assert_called_once()
+            title, body = offer.call_args.args[:2]
+            self.assertIn("[Doctor] demo", title)
+            self.assertIn("Realmheart Doctor incident", body)
+            self.assertEqual(Path(offer.call_args.kwargs["report_path"]).parent, root / "reports")
+
     def test_saved_incident_cli_writes_sanitized_markdown_without_diagnosis(self):
         incident = {"format_version": 1, "id": "RH-20260917-001",
                     "component_id": "demo", "health_state": "failed",

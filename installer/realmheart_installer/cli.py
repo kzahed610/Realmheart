@@ -11,13 +11,17 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from realmheart_doctor import render_acceptance_assessment
+from realmheart_maintenance.github_issues import offer_github_issue
 from realmheart_maintenance.manifest import load_manifest
 
 from .constants import INSTALLER_VERSION
 from .components.handlers import resolve_component_handler_specs
 from .components.render import render_component_footprints
 from .context import InstallContext, XdgPaths, ensure_not_root, generate_transaction_id
-from .diagnostics import DiagnosticReportBuilder, DiagnosticReportStore, render_json_report, render_markdown_report
+from .diagnostics import (
+    DiagnosticReportBuilder, DiagnosticReportStore, build_failure_report,
+    render_json_report, render_markdown_report,
+)
 from .environment.command import CommandRunner
 from .environment.preflight import PreflightScanner
 from .environment.render import render_preflight
@@ -164,10 +168,65 @@ def _validate_cli_contract(args: argparse.Namespace) -> None:
         )
 
 
+def _should_offer_failure_report(exc: BaseException) -> bool:
+    if not isinstance(exc, InstallerError):
+        return True
+    # Operator/invocation/recovery state is useful to record locally but should
+    # not nudge users toward filing product bugs.
+    if exc.stage in {"cli", "startup", "recovery"}:
+        return False
+    if exc.code.endswith("_CONFIRMATION_REQUIRED") or exc.code.endswith("_ID_REQUIRED"):
+        return False
+    return True
+
+
+def _persist_terminal_failure_report(
+    *,
+    args: argparse.Namespace,
+    exc: BaseException,
+    paths: XdgPaths | None,
+    transaction_id: str | None,
+    snapshot,
+    plan,
+) -> None:
+    """Best-effort incident persistence that never masks the primary error."""
+    if paths is None or transaction_id is None:
+        return
+    try:
+        payload, markdown, github, title = build_failure_report(
+            exc,
+            transaction_id=transaction_id,
+            operation=args.command or "plan",
+            snapshot=snapshot,
+            plan=plan,
+        )
+        bundle = DiagnosticReportStore(paths).save_rendered(
+            str(payload["incident_id"]),
+            payload=payload,
+            markdown=markdown,
+            github=github,
+        )
+        print(f"Diagnostic incident: {bundle.incident_id}", file=sys.stderr)
+        print(f"Machine-authored report: {bundle.github_path}", file=sys.stderr)
+        if not args.json and _should_offer_failure_report(exc):
+            offer_github_issue(title, github, report_path=bundle.github_path)
+    except Exception as report_exc:
+        # Diagnostics are secondary.  Never replace the real installer failure
+        # with a report-generation/browser error.
+        print(
+            f"WARNING [RH_DIAGNOSTIC_REPORT_FAILED]: {type(report_exc).__name__}",
+            file=sys.stderr,
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     context: InstallContext | None = None
+    paths: XdgPaths | None = None
+    transaction_id: str | None = None
+    snapshot = None
+    plan = None
     previous_sigterm_handler = _install_termination_signal_handler()
 
     try:
@@ -727,6 +786,10 @@ def main(argv: list[str] | None = None) -> int:
                     # The original structured installer error remains primary.
                     pass
         print(f"ERROR [{exc.code}]: {exc.message}", file=sys.stderr)
+        _persist_terminal_failure_report(
+            args=args, exc=exc, paths=paths, transaction_id=transaction_id,
+            snapshot=snapshot, plan=plan,
+        )
         return 2
     except Exception as exc:
         # Public CLI boundary: unexpected OS/runtime failures must not dump a
@@ -754,6 +817,10 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 pass
         print(f"ERROR [RH_UNEXPECTED_FAILURE]: {type(exc).__name__}: {exc}", file=sys.stderr)
+        _persist_terminal_failure_report(
+            args=args, exc=exc, paths=paths, transaction_id=transaction_id,
+            snapshot=snapshot, plan=plan,
+        )
         return 1
     finally:
         _restore_termination_signal_handler(previous_sigterm_handler)

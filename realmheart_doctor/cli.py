@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from realmheart_maintenance.forensics import ForensicContractError
+from realmheart_maintenance.github_issues import offer_github_issue
 from realmheart_maintenance.manifest import ManifestError, load_manifest
 from realmheart_maintenance.forensics import load_installed_receipt
 from realmheart_maintenance.version import RELEASE_VERSION
@@ -277,6 +278,15 @@ def main(argv: list[str] | None = None) -> int:
                 payload["report_path"] = str(path)
             print(json.dumps(payload, indent=2, sort_keys=True) if args.json else
                   report["text"] if args.preview or path is None else str(path))
+            if path is not None and not args.json and report["export_allowed"]:
+                incident_payload = load_incident(args.state_dir, args.incident_id)
+                component = incident_payload.get("component_id") or "incident"
+                failure_class = incident_payload.get("failure_class") or incident_payload.get("health_state") or "failure"
+                offer_github_issue(
+                    f"[Doctor] {component}: {failure_class}",
+                    report["text"],
+                    report_path=path,
+                )
             return 0 if report["export_allowed"] else 5
         except TimeoutError:
             print(json.dumps({"format_version": 1, "error": "state_busy"}) if args.json
@@ -703,6 +713,34 @@ def _manual(args: argparse.Namespace) -> int:
 
                 text += "\n\n" + render_explanations(tuple(payload["explanations"]))
             print(text)
+            if args.report and args.state_dir is not None:
+                report_paths = tuple(Path(item) for item in payload.get("reports", ()))
+                if report_paths:
+                    first = report_paths[0]
+                    try:
+                        report_text = first.read_text(encoding="utf-8")
+                    except OSError:
+                        report_text = ""
+                    if report_text:
+                        from .incident_reports import load_incident
+                        incident_id = first.stem
+                        try:
+                            incident_payload = load_incident(args.state_dir, incident_id)
+                        except (OSError, ValueError, RecursionError):
+                            incident_payload = {}
+                        component = incident_payload.get("component_id") or "incident"
+                        failure_class = incident_payload.get("failure_class") or incident_payload.get("health_state") or "failure"
+                        offer_github_issue(
+                            f"[Doctor] {component}: {failure_class}",
+                            report_text,
+                            report_path=first,
+                        )
+                        if len(report_paths) > 1:
+                            print(
+                                f"Doctor generated {len(report_paths) - 1} additional machine-authored report(s); "
+                                "use 'realmheart-doctor incident <id> --report' to open them individually.",
+                                file=sys.stderr,
+                            )
         return EXIT_CODES[result.overall]
     if args.command == "validate-manifests":
         from realmheart_maintenance.repository import validate_repository
