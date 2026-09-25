@@ -253,6 +253,7 @@ add_library(realmheart_ui STATIC
     src/ui/wallpaper/GtkWallpaperBackend.cpp
     src/ui/wallpaper/NativeWallpaperBackend.cpp
     src/ui/wallpaper/WallpaperController.cpp
+    src/ui/wallpaper/WallpaperStartupPlan.cpp
     src/ui/wallpaper/WallpaperTransaction.cpp
     src/ui/ShellApp.cpp
     src/ui/bar/VerticalBar.cpp
@@ -1793,6 +1794,19 @@ if(BUILD_TESTING)
     )
     target_link_libraries(realmheart_wallpaper_transaction_tests PRIVATE GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_wallpaper_transaction_tests)
+
+    add_executable(
+        realmheart_wallpaper_startup_plan_tests
+        tests/WallpaperStartupPlanTests.cpp
+        src/ui/wallpaper/WallpaperStartupPlan.cpp
+    )
+    target_link_libraries(
+        realmheart_wallpaper_startup_plan_tests
+        PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_startup_plan_tests)
 
     add_executable(
         realmheart_wallpaper_controller_tests

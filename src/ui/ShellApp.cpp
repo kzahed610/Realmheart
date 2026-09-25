@@ -40,6 +40,7 @@
 #include "ui/sidebar/SidebarFrame.hpp"
 #include "ui/wallpaper/WallpaperBackend.hpp"
 #include "ui/wallpaper/WallpaperController.hpp"
+#include "ui/wallpaper/WallpaperStartupPlan.hpp"
 #include "ui/wallpaper/WallpaperTransaction.hpp"
 #include "ui/workspace/WorkspaceOverviewOverlay.hpp"
 #include "mana_core/ManaCoresSelector.hpp"
@@ -632,25 +633,12 @@ public:
         schedule_right_sidebar_prewarm();
         const auto current_source = utilities_->load_wallpaper_source();
         if (!current_source) {
-            // Per-output selections are independent state. They must still be
-            // restored when the legacy/global wallpaper state is absent.
-            // Keep cached colors when valid, but explicitly repair any malformed
-            // or semantically incomplete palette before activating the shell.
             theme_service_->ensure_safe_palette();
-            restore_monitor_wallpapers();
-            report_restart_startup_ready();
-            return;
         }
-        request_wallpaper(
-            *current_source,
-            "Unable to restore wallpaper",
-            [this](bool, std::string) {
-                // Restore output-specific overrides even if the global fallback
-                // failed to decode; a valid monitor-local wallpaper should not
-                // disappear because unrelated global state is stale.
-                restore_monitor_wallpapers();
-            }
-        );
+        // Resolve the effective wallpaper per output before the first visible
+        // commit. Applying the global fallback to every output first makes a
+        // stale global image flash before that output's saved override.
+        restore_monitor_wallpapers(current_source);
         report_restart_startup_ready();
     }
 
@@ -2581,6 +2569,7 @@ private:
                                 << error_msg << "\n";
                             return;
                         }
+                        monitor_wallpaper_restore_uses_output_plan_ = true;
                         generate_theme_for(
                             wallpaper::WallpaperSource(std::filesystem::path(path))
                         );
@@ -2672,12 +2661,10 @@ private:
         restore_mana_cores_workspace();
     }
 
-    struct MonitorWallpaperRestore {
-        wallpaper::WallpaperOutputTarget target;
-        std::filesystem::path path;
-    };
-
-    void restore_monitor_wallpapers() {
+    void restore_monitor_wallpapers(
+        const std::optional<wallpaper::WallpaperSource>& global_fallback,
+        bool allow_global_apply = true
+    ) {
         monitor_wallpaper_restore_jobs_.clear();
         monitor_wallpaper_restore_index_ = 0;
         if (wallpaper_controller_ == nullptr) return;
@@ -2687,22 +2674,49 @@ private:
         GListModel* monitors = display != nullptr
             ? gdk_display_get_monitors(display)
             : nullptr;
-        if (service == nullptr || monitors == nullptr) return;
+        if (monitors == nullptr) {
+            monitor_wallpaper_restore_uses_output_plan_ = !allow_global_apply;
+            if (allow_global_apply && global_fallback && !global_fallback->empty()) {
+                request_wallpaper(*global_fallback, "Unable to restore wallpaper");
+            }
+            return;
+        }
 
+        std::vector<wallpaper::WallpaperStartupOutput> outputs;
         const guint count = g_list_model_get_n_items(monitors);
+        outputs.reserve(count);
         for (guint index = 0; index < count; ++index) {
             const std::string connector = monitor_connector_for_index(
                 display, static_cast<int>(index)
             );
             if (connector.empty()) continue;
-            const auto path = service->load_output_path(connector);
-            if (!path) continue;
-            monitor_wallpaper_restore_jobs_.push_back(MonitorWallpaperRestore{
+            std::optional<wallpaper::WallpaperSource> output_source;
+            if (service != nullptr) {
+                if (const auto path = service->load_output_path(connector)) {
+                    output_source.emplace(*path);
+                }
+            }
+            outputs.push_back({
                 wallpaper::WallpaperOutputTarget{
                     static_cast<int>(index), connector
                 },
-                *path
+                std::move(output_source)
             });
+        }
+        auto startup_plan = wallpaper::make_startup_wallpaper_plan(
+            outputs,
+            global_fallback
+        );
+        monitor_wallpaper_restore_uses_output_plan_ =
+            startup_plan.has_output_overrides || !allow_global_apply;
+        if (!startup_plan.has_output_overrides && allow_global_apply && global_fallback &&
+            !global_fallback->empty()) {
+            request_wallpaper(*global_fallback, "Unable to restore wallpaper");
+            return;
+        }
+        monitor_wallpaper_restore_jobs_ = std::move(startup_plan.jobs);
+        if (allow_global_apply && global_fallback && !global_fallback->empty()) {
+            generate_theme_for(*global_fallback);
         }
         restore_next_monitor_wallpaper();
     }
@@ -2716,10 +2730,10 @@ private:
             return;
         }
 
-        const MonitorWallpaperRestore job =
+        const wallpaper::WallpaperStartupJob job =
             monitor_wallpaper_restore_jobs_[monitor_wallpaper_restore_index_++];
         wallpaper_controller_->prepare_wallpaper_for_output_async(
-            job.path,
+            job.source,
             job.target,
             [this, job](bool success, std::string error_message) {
                 if (!success) {
@@ -3458,6 +3472,10 @@ private:
             ensure_notes_overlay(active_monitor_index_);
             notes_overlay_->show();
         }
+        if (wallpaper_controller_ != nullptr &&
+            monitor_wallpaper_restore_uses_output_plan_) {
+            restore_monitor_wallpapers(utilities_->load_wallpaper_source(), false);
+        }
     }
 
     void schedule_monitor_surface_rebuild() {
@@ -3860,8 +3878,9 @@ private:
     std::string mana_cores_restore_monitor_connector_;
     std::uint64_t mana_cores_launch_generation_ = 0;
     std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;
-    std::vector<MonitorWallpaperRestore> monitor_wallpaper_restore_jobs_;
+    std::vector<wallpaper::WallpaperStartupJob> monitor_wallpaper_restore_jobs_;
     std::size_t monitor_wallpaper_restore_index_ = 0;
+    bool monitor_wallpaper_restore_uses_output_plan_ = false;
 
     ShellState state_;
 };
