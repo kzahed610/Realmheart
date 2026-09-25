@@ -13,7 +13,7 @@ using realmheart::effects::supports_target;
 
 int main() {
     const auto specs = effect_specs();
-    assert(specs.size() == 3);
+    assert(specs.size() == 4);
 
     const auto* none = find_effect(EffectId::None);
     assert(none != nullptr);
@@ -32,6 +32,16 @@ int main() {
     assert(!supports_target(*fade_scale, EffectTargetType::Window));
     assert(fade_scale->default_open_duration_seconds >
         fade_scale->default_close_duration_seconds);
+
+    const auto* slide = find_effect(EffectId::SlideFromRight);
+    assert(slide != nullptr);
+    assert(slide->name == "slide-from-right");
+    assert(slide->display_name == "Slide From Right");
+    assert(slide->backend == EffectBackend::SnapshotTransform);
+    assert(supports_target(*slide, EffectTargetType::Sidebar));
+    assert(!supports_target(*slide, EffectTargetType::Launcher));
+    assert(slide->default_open_duration_seconds == 0.34);
+    assert(slide->default_close_duration_seconds == 0.24);
 
 
     const auto* void_effect = find_effect(EffectId::Void);
@@ -52,6 +62,14 @@ int main() {
         EffectId::FadeScale,
         EffectTargetType::Launcher
     ) == EffectId::FadeScale);
+    assert(resolve_effect(
+        EffectId::SlideFromRight,
+        EffectTargetType::Sidebar
+    ) == EffectId::SlideFromRight);
+    assert(resolve_effect(
+        EffectId::SlideFromRight,
+        EffectTargetType::Launcher
+    ) == EffectId::None);
     assert(resolve_effect(
         EffectId::FadeScale,
         EffectTargetType::Window

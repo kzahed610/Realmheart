@@ -31,6 +31,36 @@ int main() {
     assert(near(visible.scale_x, 1.0));
     assert(near(visible.scale_y, 1.0));
 
+    const auto slide_hidden = sample_effect(
+        EffectId::SlideFromRight,
+        0.0,
+        640.0
+    );
+    assert(near(slide_hidden.opacity, 1.0));
+    assert(near(slide_hidden.scale_x, 1.0));
+    assert(near(slide_hidden.scale_y, 1.0));
+    assert(near(slide_hidden.translate_x, 640.0));
+    assert(near(slide_hidden.translate_y, 0.0));
+
+    const auto slide_middle = sample_effect(
+        EffectId::SlideFromRight,
+        0.5,
+        640.0
+    );
+    assert(near(slide_middle.opacity, 1.0));
+    assert(near(slide_middle.scale_x, 1.0));
+    assert(near(slide_middle.translate_x, 80.0));
+
+    const auto slide_visible = sample_effect(
+        EffectId::SlideFromRight,
+        1.0,
+        640.0
+    );
+    assert(near(slide_visible.opacity, 1.0));
+    assert(near(slide_visible.scale_x, 1.0));
+    assert(near(slide_visible.scale_y, 1.0));
+    assert(near(slide_visible.translate_x, 0.0));
+
     const auto before = sample_effect(EffectId::FadeScale, 0.35);
     const auto after = sample_effect(EffectId::FadeScale, 0.70);
     assert(after.opacity > before.opacity);

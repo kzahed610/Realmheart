@@ -612,11 +612,6 @@ void RightSidebar::setup_layout() {
     effect_view_ = realmheart_shell_effect_view_new(frame_->widget());
     gtk_widget_set_hexpand(effect_view_, TRUE);
     gtk_widget_set_vexpand(effect_view_, TRUE);
-    effects::shell::set_origin(
-        REALMHEART_SHELL_EFFECT_VIEW(effect_view_),
-        1.0,
-        0.5
-    );
     gtk_window_set_child(GTK_WINDOW(window_), effect_view_);
 
 }
@@ -762,7 +757,11 @@ void RightSidebar::set_surface_effect(
     if (effect_view_ == nullptr) return;
     effects::shell::set_frame(
         REALMHEART_SHELL_EFFECT_VIEW(effect_view_),
-        effects::sample_effect(effect, progress)
+        effects::sample_effect(
+            effect,
+            progress,
+            static_cast<double>(frame_layout_.surface_width())
+        )
     );
 }
 

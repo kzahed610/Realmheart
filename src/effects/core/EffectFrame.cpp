@@ -19,7 +19,11 @@ double ease_out_cubic(double value) noexcept {
 
 } // namespace
 
-EffectFrame sample_effect(EffectId effect, double progress) noexcept {
+EffectFrame sample_effect(
+    EffectId effect,
+    double progress,
+    double horizontal_extent_px
+) noexcept {
     const double normalized = clamp_unit(progress);
 
     switch (effect) {
@@ -34,6 +38,18 @@ EffectFrame sample_effect(EffectId effect, double progress) noexcept {
             .scale_x = scale,
             .scale_y = scale,
             .translate_x = 0.0,
+            .translate_y = 0.0,
+        };
+    }
+    case EffectId::SlideFromRight: {
+        const double extent = std::isfinite(horizontal_extent_px)
+            ? std::max(horizontal_extent_px, 0.0)
+            : 0.0;
+        return {
+            .opacity = 1.0,
+            .scale_x = 1.0,
+            .scale_y = 1.0,
+            .translate_x = extent * (1.0 - ease_out_cubic(normalized)),
             .translate_y = 0.0,
         };
     }

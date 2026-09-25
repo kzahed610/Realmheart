@@ -5,6 +5,7 @@ namespace realmheart::effects {
 enum class EffectId {
     None,
     FadeScale,
+    SlideFromRight,
     Void,
 };
 
@@ -18,7 +19,8 @@ struct EffectFrame {
 
 [[nodiscard]] EffectFrame sample_effect(
     EffectId effect,
-    double progress
+    double progress,
+    double horizontal_extent_px = 0.0
 ) noexcept;
 
 } // namespace realmheart::effects

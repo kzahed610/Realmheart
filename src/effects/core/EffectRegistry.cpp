@@ -24,7 +24,7 @@ constexpr EffectTargetMask kShellSurfaceTargets =
     effect_target_bit(EffectTargetType::EmojiPicker) |
     effect_target_bit(EffectTargetType::Popover);
 
-constexpr std::array<EffectSpec, 3> kEffectSpecs{{
+constexpr std::array<EffectSpec, 4> kEffectSpecs{{
     {
         .id = EffectId::None,
         .name = "none",
@@ -49,6 +49,20 @@ constexpr std::array<EffectSpec, 3> kEffectSpecs{{
         .supports_close = true,
         .default_open_duration_seconds = 0.22,
         .default_close_duration_seconds = 0.16,
+        .fragment_shader_asset = {},
+        .requires_source_texture = false,
+        .outputs_transparency = false,
+    },
+    {
+        .id = EffectId::SlideFromRight,
+        .name = "slide-from-right",
+        .display_name = "Slide From Right",
+        .backend = EffectBackend::SnapshotTransform,
+        .supported_targets = effect_target_bit(EffectTargetType::Sidebar),
+        .supports_open = true,
+        .supports_close = true,
+        .default_open_duration_seconds = 0.34,
+        .default_close_duration_seconds = 0.24,
         .fragment_shader_asset = {},
         .requires_source_texture = false,
         .outputs_transparency = false,

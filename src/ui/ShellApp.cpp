@@ -104,9 +104,9 @@ std::filesystem::path user_media_directory(GUserDirectory directory, const char*
 // to stay out of the startup critical path, short enough to be warm before
 // a user realistically presses the overview keybind.
 constexpr int kWorkspaceOverviewPrewarmDelayMs = 12000;
-// Staggered 500ms after the overview prewarm so the two hidden-frame warm
-// maps never contend for the frame clock on the same tick.
-constexpr int kRightSidebarPrewarmDelayMs = 12500;
+// Warm the retained sidebar soon after activation so its first interaction is
+// not the cold construction/map path. This runs well before the overview warmup.
+constexpr int kRightSidebarPrewarmDelayMs = 1000;
 constexpr std::string_view kManaCoresWorkspaceName = "realmheart-mana-core";
 // Empty named workspace the lock choreography slides windows off to.
 constexpr std::string_view kLockWorkspaceName = "realmheart-lock";
@@ -134,9 +134,18 @@ void sidebar_input_debug(Args&&... args) {
 
 constexpr int kHotspotInputCommitFrames = 30;
 const effects::EffectId kSidebarSurfaceEffect = effects::resolve_effect(
-    effects::EffectId::FadeScale,
+    effects::EffectId::SlideFromRight,
     effects::EffectTargetType::Sidebar
 );
+
+effects::TransitionDurations sidebar_transition_durations() noexcept {
+    const auto* effect = effects::find_effect(kSidebarSurfaceEffect);
+    if (effect == nullptr) return {};
+    return {
+        effect->default_open_duration_seconds,
+        effect->default_close_duration_seconds,
+    };
+}
 
 struct HotspotInputSetup {
     int frames_remaining = kHotspotInputCommitFrames;
@@ -3726,7 +3735,6 @@ private:
             sidebar_input_debug("visibility: presenting backdrop then sidebar");
             sidebar_character_exit_complete_ = false;
             gtk_widget_set_sensitive(window, TRUE);
-            apply_right_sidebar_surface_effect();
 
             // Use an Overlay backdrop with a carved input region instead of
             // relying on cross-layer stacking. Only clicks outside the sidebar
@@ -3743,6 +3751,7 @@ private:
 
             sidebar_->refresh();
             sidebar_->apply_geometry();
+            apply_right_sidebar_surface_effect();
             gtk_window_present(GTK_WINDOW(window));
             sidebar_->animate_character_in();
             schedule_right_sidebar_frame();
@@ -3833,7 +3842,9 @@ private:
     std::unique_ptr<sidebar::RightSidebar> sidebar_;
     int sidebar_monitor_index_ = -1;
     guint right_sidebar_prewarm_id_ = 0;
-    effects::TransitionTimeline sidebar_transition_{{0.22, 0.16}};
+    effects::TransitionTimeline sidebar_transition_{
+        sidebar_transition_durations()
+    };
     guint sidebar_tick_id_ = 0;
     gint64 sidebar_last_frame_time_ = 0;
     std::uint64_t sidebar_frame_generation_ = 0;
