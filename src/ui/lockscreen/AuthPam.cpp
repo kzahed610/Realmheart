@@ -1,4 +1,5 @@
 #include "ui/lockscreen/AuthPam.hpp"
+#include "ui/lockscreen/AuthHelperPath.hpp"
 
 #include <glib.h>
 
@@ -31,35 +32,27 @@
 namespace realmheart::ui::lockscreen {
 namespace {
 
+bool helper_is_secure(const std::string& path) noexcept;
+
 // Resolve the helper next to the installed executable first. This keeps
 // `cmake --install --prefix ...` relocatable at runtime; the configured absolute
-// path remains a compatibility fallback for older system installations. Every
-// candidate still passes helper_is_secure() before it can be executed.
+// path remains a compatibility fallback for older system installations. A
+// build-tree shell may use a user-local CMake prefix while its privileged helper
+// is installed system-wide, so check standard system prefixes before the
+// executable-directory development copy. Every candidate must satisfy the
+// root-owned setuid security contract before it can be executed.
 std::string auth_helper_path() {
     char exe[4096]{};
     const ssize_t len = ::readlink("/proc/self/exe", exe, sizeof(exe) - 1);
     if (len <= 0) return {};
     exe[len] = '\0';
 
-    std::string path(exe);
-    const auto slash = path.find_last_of('/');
-    if (slash == std::string::npos) return {};
-    const std::string executable_dir = path.substr(0, slash);
-    const std::string relative = REALMHEART_AUTH_HELPER_RELATIVE_PATH;
-    if (!relative.empty() && relative.front() != '/') {
-        const auto prefix_slash = executable_dir.find_last_of('/');
-        if (prefix_slash != std::string::npos) {
-            const std::string prefix = executable_dir.substr(0, prefix_slash);
-            const std::string derived = prefix + "/" + relative;
-            if (::access(derived.c_str(), F_OK) == 0) return derived;
-        }
-    }
-
-    const std::string configured = REALMHEART_AUTH_HELPER_PATH;
-    if (!configured.empty() && ::access(configured.c_str(), F_OK) == 0) {
-        return configured;
-    }
-    return executable_dir + "/realmheart-auth-helper";
+    const std::vector<std::string> candidates = auth_helper_path_candidates(
+        exe,
+        REALMHEART_AUTH_HELPER_RELATIVE_PATH,
+        REALMHEART_AUTH_HELPER_PATH
+    );
+    return first_secure_auth_helper_path(candidates, helper_is_secure);
 }
 
 bool secure_directory(const struct stat& metadata) noexcept {
@@ -241,7 +234,7 @@ void AuthPam::verify_async(
         }
 
         if (helper.empty()) {
-            std::cerr << "[Lockscreen] auth: cannot resolve helper path\n";
+            std::cerr << "[Lockscreen] auth: no secure helper path found\n";
         } else {
             const int helper_fd = open_secure_helper(helper);
             if (helper_fd < 0) {

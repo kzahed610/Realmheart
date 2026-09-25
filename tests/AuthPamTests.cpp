@@ -1,4 +1,5 @@
 #include "ui/lockscreen/AuthPam.hpp"
+#include "ui/lockscreen/AuthHelperPath.hpp"
 
 #include <glib.h>
 
@@ -15,6 +16,58 @@
 using realmheart::ui::lockscreen::AuthPam;
 using realmheart::ui::lockscreen::SecretBuffer;
 using realmheart::ui::lockscreen::auth_helper_is_secure;
+using realmheart::ui::lockscreen::auth_helper_path_candidates;
+using realmheart::ui::lockscreen::first_secure_auth_helper_path;
+
+void test_build_tree_finds_secure_system_helper_instead_of_sibling_binary() {
+    const auto candidates = auth_helper_path_candidates(
+        "/home/example/Realmheart/build-hybrid/realmheart",
+        "libexec/realmheart/realmheart-auth-helper",
+        "/home/example/.local/libexec/realmheart/realmheart-auth-helper"
+    );
+    const std::string system_helper =
+        "/usr/local/libexec/realmheart/realmheart-auth-helper";
+
+    assert(candidates.size() == 5);
+    assert(candidates[2] == system_helper);
+    assert(candidates[4] ==
+        "/home/example/Realmheart/build-hybrid/realmheart-auth-helper");
+    assert(first_secure_auth_helper_path(
+        candidates,
+        [&system_helper](const std::string& candidate) {
+            return candidate == system_helper;
+        }
+    ) == system_helper);
+    assert(first_secure_auth_helper_path(
+        candidates,
+        [](const std::string&) { return false; }
+    ).empty());
+    if (auth_helper_is_secure(system_helper)) {
+        assert(first_secure_auth_helper_path(
+            candidates,
+            auth_helper_is_secure
+        ) == system_helper);
+    }
+}
+
+void test_recommended_installer_usr_local_layout_finds_auth_helper() {
+    const std::string installed_helper =
+        "/usr/local/libexec/realmheart/realmheart-auth-helper";
+    const auto candidates = auth_helper_path_candidates(
+        "/usr/local/bin/realmheart",
+        "libexec/realmheart/realmheart-auth-helper",
+        installed_helper
+    );
+
+    assert(!candidates.empty());
+    assert(candidates.front() == installed_helper);
+    assert(first_secure_auth_helper_path(
+        candidates,
+        [&installed_helper](const std::string& candidate) {
+            return candidate == installed_helper;
+        }
+    ) == installed_helper);
+}
 
 void test_helper_security_metadata_contract() {
     const auto root = std::filesystem::temp_directory_path() /
@@ -55,6 +108,8 @@ void test_helper_security_metadata_contract() {
 }
 
 int main() {
+    test_build_tree_finds_secure_system_helper_instead_of_sibling_binary();
+    test_recommended_installer_usr_local_layout_finds_auth_helper();
     test_helper_security_metadata_contract();
     SecretBuffer secret("correct horse battery staple");
     assert(secret.valid());
