@@ -512,6 +512,7 @@ public:
 
         cancel_workspace_overview_prewarm();
         cancel_right_sidebar_prewarm();
+        cancel_launcher_prewarm();
 
         // Stop callbacks that capture this before tearing down UI/controllers.
         if (terminal_lock_watch_id_ != 0) {
@@ -640,6 +641,7 @@ public:
         apply_bar_visibility();
         schedule_workspace_overview_prewarm();
         schedule_right_sidebar_prewarm();
+        schedule_launcher_prewarm();
         const auto current_source = utilities_->load_wallpaper_source();
         if (!current_source) {
             theme_service_->ensure_safe_palette();
@@ -818,12 +820,14 @@ public:
     }
 
     void launch_launcher_on_monitor(int monitor_index) {
+        cancel_launcher_prewarm();
         active_monitor_index_ = monitor_index;
         ensure_launcher_initialized(monitor_index);
         launcher_overlay_->toggle();
     }
 
     void launch_launcher_query(const std::string& query) {
+        cancel_launcher_prewarm();
         const int monitor_index = invocation_monitor_index();
         active_monitor_index_ = monitor_index;
         ensure_launcher_initialized(monitor_index);
@@ -1050,6 +1054,40 @@ public:
         if (right_sidebar_prewarm_id_ != 0) {
             g_source_remove(right_sidebar_prewarm_id_);
             right_sidebar_prewarm_id_ = 0;
+        }
+    }
+
+    void prewarm_launcher() {
+        if (launcher_overlay_ != nullptr) {
+            launcher_overlay_->prewarm();
+            return;
+        }
+
+        int monitor_index = invocation_monitor_index();
+        if (monitor_index < 0) monitor_index = active_monitor_index_;
+        ensure_launcher_initialized(monitor_index);
+        launcher_overlay_->prewarm();
+    }
+
+    void schedule_launcher_prewarm() {
+        if (launcher_prewarm_id_ != 0) return;
+        launcher_prewarm_id_ = g_idle_add_full(
+            G_PRIORITY_LOW,
+            +[](gpointer raw) -> gboolean {
+                auto* runtime = static_cast<ShellRuntime*>(raw);
+                runtime->launcher_prewarm_id_ = 0;
+                runtime->prewarm_launcher();
+                return G_SOURCE_REMOVE;
+            },
+            this,
+            nullptr
+        );
+    }
+
+    void cancel_launcher_prewarm() {
+        if (launcher_prewarm_id_ != 0) {
+            g_source_remove(launcher_prewarm_id_);
+            launcher_prewarm_id_ = 0;
         }
     }
 
@@ -3852,6 +3890,7 @@ private:
     std::unique_ptr<CommandReceiptOverlay> command_receipts_;
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
     int launcher_monitor_index_ = -1;
+    guint launcher_prewarm_id_ = 0;
     std::unique_ptr<workspace::WorkspaceOverviewOverlay> workspace_overview_;
     int overview_monitor_index_ = -1;
     guint workspace_overview_prewarm_id_ = 0;

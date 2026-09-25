@@ -10,6 +10,7 @@
 #include "ui/LayerSurface.hpp"
 #include "ui/MonitorResolver.hpp"
 #include "ui/launcher/CommandReceiptOverlay.hpp"
+#include "ui/launcher/LauncherPointerSelection.hpp"
 #include "ui/bar/widgets/ThemedSvgIcon.hpp"
 
 #include "services/EmojiData.hpp"
@@ -121,6 +122,8 @@ constexpr int kClipboardThumbnailHeight = 66;
 constexpr std::size_t kClipboardThumbnailCacheLimit = 16;
 constexpr std::size_t kClipboardThumbnailMaximumJobs = 2;
 constexpr std::size_t kClipboardMaximumDecodedBytes = 6U * 1024U * 1024U;
+constexpr guint kLauncherResultsRevealDurationMs = 170;
+constexpr guint kLauncherQueryResultsRevealDurationMs = 80;
 
 [[nodiscard]] double clamp_unit(double value) {
     return std::clamp(value, 0.0, 1.0);
@@ -950,8 +953,9 @@ void LauncherOverlay::apply_display_geometry() {
         monitor_geometry.height
     );
     const auto geometry = launcher::launcher_geometry_for_display_tier(tier);
-    const bool changed = !geometry_initialized_ || display_tier_ != tier ||
+    const bool geometry_values_changed = display_tier_ != tier ||
         launcher_geometry_ != geometry;
+    const bool changed = !geometry_initialized_ || geometry_values_changed;
 
     display_tier_ = tier;
     launcher_geometry_ = geometry;
@@ -1035,7 +1039,11 @@ void LauncherOverlay::apply_display_geometry() {
         );
     }
     if (results_revealer_ != nullptr) {
-        gtk_widget_set_margin_top(results_revealer_, scale_px(2));
+        gtk_widget_set_margin_top(
+            results_revealer_,
+            launcher_geometry_.centre_final_top_margin +
+                launcher_geometry_.centre_height + scale_px(2)
+        );
     }
     if (results_scroller_ != nullptr) {
         int maximum_height = launcher_geometry_.normal_results_max_height;
@@ -1055,14 +1063,18 @@ void LauncherOverlay::apply_display_geometry() {
         return;
     }
 
-    // The wallpaper cache key used to depend only on path and GDK scale. At
-    // scale-1 1440p/4K the aperture itself changes, so force one appropriately
-    // sized decode whenever the logical tier changes.
-    wallpaper_texture_path_.clear();
-    wallpaper_texture_scale_factor_ = 0;
+    // The cache key also depends on tier-specific aperture dimensions. Re-decode
+    // when those values change; at the existing 1080p defaults, a startup-warmed
+    // texture can survive the first realization.
+    if (geometry_values_changed) {
+        wallpaper_texture_path_.clear();
+        wallpaper_texture_scale_factor_ = 0;
+    }
     refresh_wallpaper();
 
-    if (constellation_canvas_ != nullptr) rebuild_constellation();
+    if (constellation_canvas_ != nullptr && idle_content_ready_) {
+        rebuild_constellation();
+    }
     if (results_list_ != nullptr && !current_results_.empty()) rebuild_results();
 
     apply_central_motion();
@@ -1078,6 +1090,58 @@ void LauncherOverlay::setup_ui() {
     gtk_widget_set_hexpand(root_, TRUE);
     gtk_widget_set_vexpand(root_, TRUE);
     gtk_widget_add_css_class(root_, "realmheart-launcher-root");
+
+    GtkEventController* pointer_baseline = gtk_event_controller_motion_new();
+    gtk_event_controller_set_propagation_phase(
+        pointer_baseline,
+        GTK_PHASE_BUBBLE
+    );
+    const auto record_picker_pointer_position = +[](
+        GtkEventController* controller, double x, double y, gpointer data
+    ) {
+        auto* overlay = static_cast<LauncherOverlay*>(data);
+        if (overlay->window_ == nullptr ||
+            (overlay->search_mode_ != SearchMode::Clipboard &&
+             overlay->search_mode_ != SearchMode::ClipboardClear &&
+             overlay->search_mode_ != SearchMode::Emoji)) {
+            return;
+        }
+
+        GtkWidget* widget = gtk_event_controller_get_widget(controller);
+        if (widget == nullptr) return;
+        graphene_point_t root_point{};
+        graphene_point_t window_point{};
+        graphene_point_init(
+            &root_point,
+            static_cast<float>(x),
+            static_cast<float>(y)
+        );
+        if (!gtk_widget_compute_point(
+                widget,
+                GTK_WIDGET(overlay->window_),
+                &root_point,
+                &window_point
+            )) {
+            return;
+        }
+
+        overlay->result_pointer_window_x_ = window_point.x;
+        overlay->result_pointer_window_y_ = window_point.y;
+        overlay->result_pointer_position_valid_ = true;
+    };
+    g_signal_connect(
+        pointer_baseline,
+        "enter",
+        G_CALLBACK(record_picker_pointer_position),
+        this
+    );
+    g_signal_connect(
+        pointer_baseline,
+        "motion",
+        G_CALLBACK(record_picker_pointer_position),
+        this
+    );
+    gtk_widget_add_controller(root_, pointer_baseline);
 
     dismiss_ = gtk_button_new();
     gtk_button_set_has_frame(GTK_BUTTON(dismiss_), FALSE);
@@ -1265,8 +1329,19 @@ void LauncherOverlay::setup_ui() {
         GTK_REVEALER(results_revealer_),
         GTK_REVEALER_TRANSITION_TYPE_SLIDE_DOWN
     );
-    gtk_revealer_set_transition_duration(GTK_REVEALER(results_revealer_), 170);
-    gtk_widget_set_margin_top(results_revealer_, scale_px(2));
+    gtk_revealer_set_transition_duration(
+        GTK_REVEALER(results_revealer_),
+        kLauncherResultsRevealDurationMs
+    );
+    gtk_widget_set_halign(results_revealer_, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(results_revealer_, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(results_revealer_, FALSE);
+    gtk_widget_set_vexpand(results_revealer_, FALSE);
+    gtk_widget_set_margin_top(
+        results_revealer_,
+        launcher_geometry_.centre_final_top_margin +
+            launcher_geometry_.centre_height + scale_px(2)
+    );
 
     results_shell_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_set_size_request(results_shell_, launcher_geometry_.results_shell_width, -1);
@@ -1362,7 +1437,6 @@ void LauncherOverlay::setup_ui() {
 
     gtk_box_append(GTK_BOX(results_shell_), results_overlay_);
     gtk_revealer_set_child(GTK_REVEALER(results_revealer_), results_shell_);
-    gtk_box_append(GTK_BOX(centre_column_), results_revealer_);
 
     // The live GTK centre and the pre-created GtkGLArea share a normal
     // GtkOverlay. The GL child exists before the launcher window is mapped;
@@ -1441,6 +1515,11 @@ void LauncherOverlay::setup_ui() {
     // the lower interaction region, but this also protects the search surface
     // from a malformed or hand-edited saved position.
     gtk_overlay_add_overlay(GTK_OVERLAY(root_), centre_shader_host_);
+
+    // Keep the result sheet outside the shader-captured centre. That lets
+    // query results reveal during opening without changing the capture's
+    // allocation and stretching its transition frame.
+    gtk_overlay_add_overlay(GTK_OVERLAY(root_), results_revealer_);
 
     // Command feedback belongs to the same fullscreen launcher surface. It is
     // layered above the centre/constellation and never creates a notification-
@@ -1524,6 +1603,7 @@ void LauncherOverlay::refresh_idle_content() {
         seed_constellation_layout();
     }
     rebuild_constellation();
+    idle_content_ready_ = true;
     set_selected_result(nullptr);
 }
 
@@ -3138,14 +3218,24 @@ void LauncherOverlay::leave_clipboard_mode() {
 void LauncherOverlay::enter_clipboard_mode(std::string filter) {
     leave_emoji_mode();
     const bool mode_changed = search_mode_ != SearchMode::Clipboard;
-    if (mode_changed) leave_clipboard_mode();
+    if (mode_changed) {
+        leave_clipboard_mode();
+        result_pointer_position_valid_ = false;
+    }
 
     const bool filter_changed = filter != clipboard_filter_;
     search_mode_ = SearchMode::Clipboard;
     clipboard_filter_ = std::move(filter);
     clipboard_status_message_.clear();
     clipboard_clear_armed_ = false;
-    gtk_revealer_set_transition_duration(GTK_REVEALER(results_revealer_), 220);
+    gtk_revealer_set_transition_duration(
+        GTK_REVEALER(results_revealer_),
+        launcher::results_reveal_duration_ms(
+            open_intent_,
+            220,
+            kLauncherQueryResultsRevealDurationMs
+        )
+    );
     gtk_scrolled_window_set_max_content_height(
         GTK_SCROLLED_WINDOW(results_scroller_),
         launcher_geometry_.clipboard_results_max_height
@@ -3177,7 +3267,10 @@ void LauncherOverlay::enter_clipboard_mode(std::string filter) {
 void LauncherOverlay::enter_clipboard_clear_mode() {
     leave_emoji_mode();
     const bool mode_changed = search_mode_ != SearchMode::ClipboardClear;
-    if (mode_changed) leave_clipboard_mode();
+    if (mode_changed) {
+        leave_clipboard_mode();
+        result_pointer_position_valid_ = false;
+    }
 
     search_mode_ = SearchMode::ClipboardClear;
     clipboard_status_message_.clear();
@@ -3220,12 +3313,20 @@ void LauncherOverlay::leave_emoji_mode() {
 void LauncherOverlay::enter_emoji_mode(std::string filter) {
     leave_clipboard_mode();
     const bool mode_changed = search_mode_ != SearchMode::Emoji;
+    if (mode_changed) result_pointer_position_valid_ = false;
 
     const bool filter_changed = filter != emoji_filter_;
     search_mode_ = SearchMode::Emoji;
     emoji_filter_ = std::move(filter);
     emoji_status_message_.clear();
-    gtk_revealer_set_transition_duration(GTK_REVEALER(results_revealer_), 220);
+    gtk_revealer_set_transition_duration(
+        GTK_REVEALER(results_revealer_),
+        launcher::results_reveal_duration_ms(
+            open_intent_,
+            220,
+            kLauncherQueryResultsRevealDurationMs
+        )
+    );
     gtk_scrolled_window_set_max_content_height(
         GTK_SCROLLED_WINDOW(results_scroller_),
         launcher_geometry_.emoji_results_max_height
@@ -4349,7 +4450,7 @@ GtkListBoxRow* LauncherOverlay::append_result_row(
     result_row_motions_.push_back(std::move(motion));
 
     GtkEventController* hover = gtk_event_controller_motion_new();
-    g_signal_connect(hover, "motion", G_CALLBACK(+[](
+    const auto select_on_pointer_motion = +[](
         GtkEventController* controller, double x, double y, gpointer data
     ) {
         auto* overlay = static_cast<LauncherOverlay*>(data);
@@ -4377,15 +4478,20 @@ GtkListBoxRow* LauncherOverlay::append_result_row(
         }
 
         constexpr double kPointerMotionEpsilon = 0.5;
-        const bool pointer_moved = !overlay->result_pointer_position_valid_ ||
-            std::abs(
-                static_cast<double>(window_point.x) -
-                overlay->result_pointer_window_x_
-            ) > kPointerMotionEpsilon ||
-            std::abs(
-                static_cast<double>(window_point.y) -
-                overlay->result_pointer_window_y_
-            ) > kPointerMotionEpsilon;
+        const bool special_picker =
+            overlay->search_mode_ == SearchMode::Clipboard ||
+            overlay->search_mode_ == SearchMode::ClipboardClear ||
+            overlay->search_mode_ == SearchMode::Emoji;
+        const bool pointer_moved =
+            launcher::should_select_result_row_for_pointer_motion(
+                special_picker,
+                overlay->result_pointer_position_valid_,
+                overlay->result_pointer_window_x_,
+                overlay->result_pointer_window_y_,
+                window_point.x,
+                window_point.y,
+                kPointerMotionEpsilon
+            );
 
         overlay->result_pointer_window_x_ = window_point.x;
         overlay->result_pointer_window_y_ = window_point.y;
@@ -4394,7 +4500,19 @@ GtkListBoxRow* LauncherOverlay::append_result_row(
 
         auto* hovered_row = GTK_LIST_BOX_ROW(widget);
         gtk_list_box_select_row(GTK_LIST_BOX(overlay->results_list_), hovered_row);
-    }), this);
+    };
+    g_signal_connect(
+        hover,
+        "enter",
+        G_CALLBACK(select_on_pointer_motion),
+        this
+    );
+    g_signal_connect(
+        hover,
+        "motion",
+        G_CALLBACK(select_on_pointer_motion),
+        this
+    );
     gtk_widget_add_controller(row, hover);
 
     gtk_list_box_append(GTK_LIST_BOX(results_list_), row);
@@ -4411,7 +4529,11 @@ GtkListBoxRow* LauncherOverlay::append_result_row(
 }
 
 void LauncherOverlay::rebuild_results() {
-    result_pointer_position_valid_ = false;
+    if (search_mode_ != SearchMode::Clipboard &&
+        search_mode_ != SearchMode::ClipboardClear &&
+        search_mode_ != SearchMode::Emoji) {
+        result_pointer_position_valid_ = false;
+    }
     selected_result_row_ = nullptr;
     result_selection_target_visible_ = false;
     result_row_motions_.clear();
@@ -4587,6 +4709,11 @@ void LauncherOverlay::on_search_changed() {
         search_mode_ != SearchMode::Normal ||
         query.find_first_not_of(" \t\n\r") != std::string::npos;
 
+    if (!searching && search_mode_ == SearchMode::Normal &&
+        !idle_content_ready_) {
+        refresh_idle_content();
+    }
+
     const bool show_constellation = !searching &&
         central_transition_.target_visible() &&
         central_transition_.progress() >= kConstellationRevealThreshold;
@@ -4606,15 +4733,12 @@ void LauncherOverlay::on_search_changed() {
             gtk_widget_remove_css_class(centre_shadow_, "searching");
         }
     }
-    // Do not mutate the shader host's height while the central surface is
-    // still opening. Realmheart Void is rendering a fixed capture of the
-    // launcher body; revealing the result sheet early would reallocate its
-    // parent to launcher+results height and stretch that capture vertically.
-    const bool centre_fully_open =
-        central_transition_.state() == effects::TransitionState::Visible;
     gtk_revealer_set_reveal_child(
         GTK_REVEALER(results_revealer_),
-        searching && centre_fully_open
+        launcher::should_reveal_search_results(
+            searching,
+            central_transition_.target_visible()
+        )
     );
 
     if (!searching) {
@@ -5184,6 +5308,11 @@ void LauncherOverlay::apply_central_final_geometry() {
         centre_shader_host_,
         launcher_geometry_.centre_final_top_margin
     );
+    gtk_widget_set_margin_top(
+        results_revealer_,
+        launcher_geometry_.centre_final_top_margin +
+            launcher_geometry_.centre_height + scale_px(2)
+    );
     gtk_widget_set_size_request(
         centre_shader_host_,
         launcher_geometry_.centre_final_width,
@@ -5262,13 +5391,15 @@ void LauncherOverlay::apply_central_motion() {
         REALMHEART_SHELL_EFFECT_VIEW(centre_effect_view_),
         effects::sample_effect(kLauncherFallbackEffect, frame)
     );
+    const int centre_top_margin = static_cast<int>(std::lround(interpolate(
+        launcher_geometry_.centre_start_top_margin,
+        launcher_geometry_.centre_final_top_margin,
+        frame
+    )));
+    gtk_widget_set_margin_top(centre_shader_host_, centre_top_margin);
     gtk_widget_set_margin_top(
-        centre_shader_host_,
-        static_cast<int>(std::lround(interpolate(
-            launcher_geometry_.centre_start_top_margin,
-            launcher_geometry_.centre_final_top_margin,
-            frame
-        )))
+        results_revealer_,
+        centre_top_margin + launcher_geometry_.centre_height + scale_px(2)
     );
     const int centre_width = static_cast<int>(std::lround(interpolate(
         launcher_geometry_.centre_start_width,
@@ -5552,9 +5683,7 @@ bool LauncherOverlay::advance_central_frame(GdkFrameClock* frame_clock) {
     finish_central_shader();
     apply_central_motion();
     if (central_transition_.state() == effects::TransitionState::Visible) {
-        // A query may have arrived while the opening shader was still active.
-        // The results were prepared immediately but intentionally withheld
-        // until the fixed-size central transition had completed.
+        // Re-sync after opening in case the query or mode changed mid-transition.
         gtk_revealer_set_reveal_child(
             GTK_REVEALER(results_revealer_),
             search_query_active()
@@ -5588,6 +5717,7 @@ void LauncherOverlay::finish_central_hide() {
     if (centre_shadow_ != nullptr) {
         gtk_widget_set_opacity(centre_shadow_, 0.0);
     }
+    gtk_revealer_set_reveal_child(GTK_REVEALER(results_revealer_), FALSE);
     gtk_widget_set_visible(GTK_WIDGET(window_), FALSE);
     leave_clipboard_mode();
     leave_emoji_mode();
@@ -5604,9 +5734,27 @@ void LauncherOverlay::toggle() {
 }
 
 void LauncherOverlay::show() {
+    show_for_intent(launcher::OpenIntent::Browse);
+}
+
+void LauncherOverlay::prewarm() {
+    if (window_ == nullptr || gtk_widget_get_visible(GTK_WIDGET(window_))) return;
+    refresh_wallpaper();
+}
+
+void LauncherOverlay::show_for_intent(launcher::OpenIntent intent) {
+    open_intent_ = intent;
     if (gtk_widget_get_realized(GTK_WIDGET(window_))) apply_display_geometry();
     const bool already_presented = gtk_widget_get_visible(GTK_WIDGET(window_));
     gtk_widget_set_sensitive(root_, TRUE);
+    gtk_revealer_set_transition_duration(
+        GTK_REVEALER(results_revealer_),
+        launcher::results_reveal_duration_ms(
+            intent,
+            kLauncherResultsRevealDurationMs,
+            kLauncherQueryResultsRevealDurationMs
+        )
+    );
 
     if (!already_presented) {
         finish_central_shader();
@@ -5616,9 +5764,13 @@ void LauncherOverlay::show() {
         central_last_frame_time_ = 0;
         constellation_target_visible_ = false;
         refresh_wallpaper();
-        refresh_idle_content();
-        gtk_editable_set_text(GTK_EDITABLE(search_entry_), "");
-        on_search_changed();
+        if (launcher::should_refresh_idle_content(intent)) {
+            refresh_idle_content();
+        } else {
+            gtk_widget_set_visible(constellation_canvas_, FALSE);
+        }
+        set_entry_text_quiet(std::string{});
+        if (intent == launcher::OpenIntent::Browse) on_search_changed();
 
         central_transition_.open();
         central_shader_preparing_ =
@@ -5672,7 +5824,7 @@ void LauncherOverlay::show_with_query(std::string query) {
         leave_clipboard_mode();
     }
 
-    show();
+    show_for_intent(launcher::OpenIntent::Query);
     gtk_editable_set_text(GTK_EDITABLE(search_entry_), query.c_str());
     gtk_widget_grab_focus(search_entry_);
 
@@ -5713,6 +5865,8 @@ void LauncherOverlay::hide() {
         !central_transition_.target_visible()) {
         return;
     }
+
+    gtk_revealer_set_reveal_child(GTK_REVEALER(results_revealer_), FALSE);
 
     if (central_shader_preparing_) {
         if (central_shader_prepare_tick_id_ != 0 && root_ != nullptr) {

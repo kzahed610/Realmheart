@@ -1320,6 +1320,12 @@ if(BUILD_TESTING)
     realmheart_register_test(realmheart_launcher_geometry_tests)
 
     add_executable(
+        realmheart_launcher_open_policy_tests
+        tests/LauncherOpenPolicyTests.cpp
+    )
+    realmheart_register_test(realmheart_launcher_open_policy_tests)
+
+    add_executable(
         realmheart_resolution_asset_package_tests
         tests/ResolutionAssetPackageTests.cpp
         src/core/DisplayTier.cpp

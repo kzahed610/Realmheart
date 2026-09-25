@@ -4,6 +4,7 @@
 #include "services/LauncherService.hpp"
 #include "services/WallpaperService.hpp"
 #include "ui/launcher/LauncherGeometry.hpp"
+#include "ui/launcher/LauncherOpenPolicy.hpp"
 
 #include <gtk/gtk.h>
 
@@ -39,6 +40,7 @@ public:
 
     void toggle();
     void show();
+    void prewarm();
     void show_with_query(std::string query);
     void hide();
 
@@ -125,6 +127,7 @@ private:
 
     void setup_window();
     void setup_ui();
+    void show_for_intent(launcher::OpenIntent intent);
     void apply_display_geometry();
     void schedule_geometry_retry();
     [[nodiscard]] int scale_px(int baseline) const noexcept;
@@ -282,9 +285,11 @@ private:
     launcher::LauncherGeometry launcher_geometry_{};
     core::DisplayTier display_tier_ = core::DisplayTier::P1080;
     bool geometry_initialized_ = false;
+    bool idle_content_ready_ = false;
     guint geometry_retry_id_ = 0;
 
     SearchMode search_mode_ = SearchMode::Normal;
+    launcher::OpenIntent open_intent_ = launcher::OpenIntent::Browse;
     bool entry_text_programmatic_ = false;
     std::shared_ptr<ClipboardAsyncState> clipboard_async_state_;
     std::string clipboard_history_output_;
