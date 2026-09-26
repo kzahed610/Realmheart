@@ -97,6 +97,7 @@ private:
     void open_exclusive_system();
     void request_workspace_overview_toggle();
     void activate_workspace(int workspace_id);
+    void activate_relative_workspace(int direction);
     [[nodiscard]] std::pair<double, double> power_menu_origin() const;
     [[nodiscard]] std::string assigned_monitor_connector() const;
 

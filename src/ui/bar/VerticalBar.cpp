@@ -439,6 +439,29 @@ void VerticalBar::setup_layout() {
     }), this);
     gtk_widget_add_controller(workspace_box_, GTK_EVENT_CONTROLLER(pill_right_click));
 
+    auto* workspace_scroll = gtk_event_controller_scroll_new(
+        static_cast<GtkEventControllerScrollFlags>(
+            GTK_EVENT_CONTROLLER_SCROLL_VERTICAL |
+            GTK_EVENT_CONTROLLER_SCROLL_DISCRETE
+        )
+    );
+    gtk_event_controller_set_propagation_phase(
+        workspace_scroll, GTK_PHASE_CAPTURE
+    );
+    g_signal_connect(workspace_scroll, "scroll", G_CALLBACK(+[](
+        GtkEventControllerScroll*, double, double vertical_delta, gpointer data
+    ) -> gboolean {
+        auto* bar = static_cast<VerticalBar*>(data);
+        if (bar->workspace_morph_active_) return TRUE;
+        const int direction = workspace_scroll_direction(vertical_delta);
+        if (direction == 0) return FALSE;
+        bar->activate_relative_workspace(direction);
+        return TRUE;
+    }), this);
+    gtk_widget_add_controller(
+        workspace_box_, GTK_EVENT_CONTROLLER(workspace_scroll)
+    );
+
     workspace_region_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_widget_add_css_class(workspace_region_, "realmheart-workspace-section");
     gtk_widget_set_halign(workspace_region_, GTK_ALIGN_CENTER);
@@ -774,6 +797,35 @@ void VerticalBar::activate_workspace(int workspace_id) {
             : services::HyprlandWorkspaces::switch_to_on_monitor(
                   workspace_id, monitor
               );
+        if (!switched) return;
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            +[](gpointer raw) -> gboolean {
+                auto* shared = static_cast<std::shared_ptr<AsyncState>*>(raw);
+                if ((*shared)->alive.load() && (*shared)->owner != nullptr) {
+                    (*shared)->owner->request_workspace_refresh();
+                }
+                return G_SOURCE_REMOVE;
+            },
+            new std::shared_ptr<AsyncState>(state),
+            +[](gpointer raw) { delete static_cast<std::shared_ptr<AsyncState>*>(raw); }
+        );
+    }));
+}
+
+void VerticalBar::activate_relative_workspace(int direction) {
+    if (workspace_morph_active_ || (direction != -1 && direction != 1)) return;
+
+    const auto state = async_state_;
+    const std::string monitor = assigned_monitor_connector();
+    static_cast<void>(realmheart::core::shared_task_executor().post([
+        state,
+        direction,
+        monitor
+    ] {
+        const bool switched = services::HyprlandWorkspaces::switch_relative(
+            direction, monitor
+        );
         if (!switched) return;
         g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,

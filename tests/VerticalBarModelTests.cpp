@@ -13,6 +13,16 @@ void require(bool condition, const std::string& message) {
     }
 }
 
+void test_workspace_scroll_direction_maps_vertical_deltas() {
+    using realmheart::ui::bar::workspace_scroll_direction;
+    require(workspace_scroll_direction(-1.0) == -1,
+            "upward wheel motion must request the previous workspace");
+    require(workspace_scroll_direction(1.0) == 1,
+            "downward wheel motion must request the next workspace");
+    require(workspace_scroll_direction(0.0) == 0,
+            "horizontal-only motion must not request a workspace switch");
+}
+
 void test_workspace_pills_show_four_and_merge_live_state() {
     realmheart::services::WorkspaceSnapshot snapshot;
     snapshot.available = true;
@@ -64,6 +74,7 @@ void test_unavailable_state_still_has_stable_targets() {
 } // namespace
 
 int main() {
+    test_workspace_scroll_direction_maps_vertical_deltas();
     test_workspace_pills_show_four_and_merge_live_state();
     test_workspace_window_slides_only_for_workspace_five();
     test_unavailable_state_still_has_stable_targets();

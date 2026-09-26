@@ -5,6 +5,12 @@
 
 namespace realmheart::ui::bar {
 
+int workspace_scroll_direction(double vertical_delta) noexcept {
+    if (vertical_delta < 0.0) return -1;
+    if (vertical_delta > 0.0) return 1;
+    return 0;
+}
+
 std::vector<realmheart::services::WorkspaceState> build_workspace_pills(
     const realmheart::services::WorkspaceSnapshot& snapshot
 ) {

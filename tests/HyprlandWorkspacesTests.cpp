@@ -265,6 +265,67 @@ void test_switch_to_on_monitor_focuses_output_before_workspace() {
     std::filesystem::remove_all(root);
 }
 
+void test_switch_relative_uses_scroll_direction_on_requested_monitor() {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("realmheart-workspace-relative-switch-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    const auto executable = root / "hyprctl";
+    const auto output = root / "arguments.txt";
+    {
+        std::ofstream script(executable);
+        script << "#!/bin/sh\n"
+               << "printf '%s\\n' \"$*\" >> \"$REALMHEART_HYPRCTL_TEST_OUTPUT\"\n";
+    }
+    std::filesystem::permissions(
+        executable,
+        std::filesystem::perms::owner_read |
+            std::filesystem::perms::owner_write |
+            std::filesystem::perms::owner_exec,
+        std::filesystem::perm_options::replace
+    );
+
+    const char* old_path_value = std::getenv("PATH");
+    const std::string old_path = old_path_value == nullptr ? std::string{} : old_path_value;
+    const std::string test_path = root.string() + (old_path.empty() ? "" : ":" + old_path);
+    ::setenv("PATH", test_path.c_str(), 1);
+    ::setenv("REALMHEART_HYPRCTL_TEST_OUTPUT", output.string().c_str(), 1);
+
+    const bool previous = realmheart::services::HyprlandWorkspaces::switch_relative(
+        -1, "DP-1"
+    );
+    const bool next = realmheart::services::HyprlandWorkspaces::switch_relative(
+        1, "DP-1"
+    );
+    const bool invalid = realmheart::services::HyprlandWorkspaces::switch_relative(
+        0, "DP-1"
+    );
+
+    ::setenv("PATH", old_path.c_str(), 1);
+    ::unsetenv("REALMHEART_HYPRCTL_TEST_OUTPUT");
+
+    require(previous && next && !invalid,
+            "relative workspace switching must accept only one-step directions");
+    std::ifstream recorded(output);
+    const std::vector<std::string> expected = {
+        "dispatch hl.dsp.focus({ monitor = \"DP-1\" })",
+        "dispatch hl.dsp.focus({ workspace = \"r-1\", on_current_monitor = true })",
+        "dispatch hl.dsp.focus({ monitor = \"DP-1\" })",
+        "dispatch hl.dsp.focus({ workspace = \"r+1\", on_current_monitor = true })",
+    };
+    for (const auto& line : expected) {
+        std::string observed;
+        require(static_cast<bool>(std::getline(recorded, observed)) && observed == line,
+                "relative workspace dispatch must preserve direction and monitor ownership");
+    }
+    std::string unexpected;
+    require(!std::getline(recorded, unexpected),
+            "invalid relative offsets must not issue a Hyprland command");
+
+    std::filesystem::remove_all(root);
+}
+
 
 void test_switch_to_named_on_monitor_focuses_output_before_named_workspace() {
     const auto root = std::filesystem::temp_directory_path() /
@@ -376,6 +437,7 @@ int main() {
     test_clients_are_attached_to_their_workspaces();
     test_monitor_specific_fixture_selects_each_output_workspace();
     test_switch_to_on_monitor_focuses_output_before_workspace();
+    test_switch_relative_uses_scroll_direction_on_requested_monitor();
     test_switch_to_named_on_monitor_focuses_output_before_named_workspace();
     test_malformed_clients_fixture_is_unavailable();
     test_failed_clients_query_is_marked_partial();
