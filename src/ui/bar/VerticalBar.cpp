@@ -156,9 +156,9 @@ VerticalBar::VerticalBar(
     refresh_timer_id_ = g_timeout_add_seconds(5, +[](gpointer data) -> gboolean {
         auto* self = static_cast<VerticalBar*>(data);
         ++self->refresh_tick_;
+        self->request_battery_refresh();
         if (self->refresh_tick_ % 6 == 0) {
             self->request_media_refresh();
-            self->request_battery_refresh();
             self->request_wifi_refresh();
         }
         if (self->refresh_tick_ % 12 == 0) self->request_workspace_refresh();
@@ -555,7 +555,10 @@ void VerticalBar::populate_widgets() {
         app_, system_exclusive_open, monitor_index_
     );
     clock_ = std::make_unique<widgets::ClockWidget>();
-    battery_widget_ = std::make_unique<widgets::BatteryWidget>(exclusive_open);
+    battery_widget_ = std::make_unique<widgets::BatteryWidget>(
+        exclusive_open,
+        [this] { request_battery_refresh(); }
+    );
 
     wifi_button_ = std::make_unique<widgets::BarIconButton>(
         "Realmheart-Icons/wifi.svg",
@@ -914,7 +917,11 @@ void VerticalBar::request_media_refresh() {
 }
 
 void VerticalBar::request_battery_refresh() {
-    if (async_state_->battery_in_flight.exchange(true)) return;
+    if (!async_state_->battery_refresh.request()) return;
+    start_battery_refresh();
+}
+
+void VerticalBar::start_battery_refresh() {
     const auto state = async_state_;
     auto* service = &battery_service_;
     if (!realmheart::core::shared_task_executor().post([state, service] {
@@ -928,9 +935,14 @@ void VerticalBar::request_battery_refresh() {
             G_PRIORITY_DEFAULT_IDLE,
             +[](gpointer raw) -> gboolean {
                 auto* payload = static_cast<Payload*>(raw);
-                payload->state->battery_in_flight = false;
                 if (payload->state->alive.load() && payload->state->owner != nullptr) {
-                    payload->state->owner->apply_battery(payload->status);
+                    auto* owner = payload->state->owner;
+                    owner->apply_battery(payload->status);
+                    if (payload->state->battery_refresh.complete()) {
+                        owner->start_battery_refresh();
+                    }
+                } else {
+                    payload->state->battery_refresh.cancel();
                 }
                 return G_SOURCE_REMOVE;
             },
@@ -938,7 +950,9 @@ void VerticalBar::request_battery_refresh() {
             +[](gpointer raw) { delete static_cast<Payload*>(raw); }
         );
     }, {}, [state] { return !state->alive.load(); })) {
-        state->battery_in_flight = false;
+        if (state->battery_refresh.complete()) {
+            start_battery_refresh();
+        }
     }
 }
 

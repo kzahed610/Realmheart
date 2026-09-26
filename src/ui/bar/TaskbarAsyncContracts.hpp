@@ -36,6 +36,48 @@ private:
     std::atomic<bool> queued_{false};
 };
 
+// Coalesce repeated service polls, but retain one request made while a read is
+// active so an explicit user refresh is never discarded behind stale work.
+class RefreshRequestGate {
+public:
+    RefreshRequestGate() = default;
+    RefreshRequestGate(const RefreshRequestGate&) = delete;
+    RefreshRequestGate& operator=(const RefreshRequestGate&) = delete;
+
+    bool request() {
+        std::lock_guard lock(mutex_);
+        if (in_flight_) {
+            pending_ = true;
+            return false;
+        }
+        in_flight_ = true;
+        return true;
+    }
+
+    // Returns true when the caller should immediately start one coalesced read.
+    bool complete() {
+        std::lock_guard lock(mutex_);
+        if (!in_flight_) return false;
+        if (pending_) {
+            pending_ = false;
+            return true;
+        }
+        in_flight_ = false;
+        return false;
+    }
+
+    void cancel() {
+        std::lock_guard lock(mutex_);
+        in_flight_ = false;
+        pending_ = false;
+    }
+
+private:
+    std::mutex mutex_;
+    bool in_flight_ = false;
+    bool pending_ = false;
+};
+
 // Registry for work keyed by an external identity such as a media-art URL.
 // The Request type must expose `using Subscriber = ...` and a
 // `std::vector<Subscriber> subscribers` member. Completion and discard both

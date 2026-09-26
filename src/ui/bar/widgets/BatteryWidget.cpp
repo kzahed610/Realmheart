@@ -1,5 +1,6 @@
 #include "ui/bar/widgets/BatteryWidget.hpp"
 
+#include "ui/bar/widgets/BatteryWidgetModel.hpp"
 #include "ui/bar/widgets/PopoverReveal.hpp"
 
 #include <iomanip>
@@ -14,25 +15,13 @@ namespace {
 constexpr int kPopoverOffsetX = 9;
 constexpr int kPopoverOffsetY = -5;
 
-std::string battery_icon_path(const services::BatteryStatus& status) {
-    int level = 100;
-    if (status.percentage <= 5) level = 0;
-    else if (status.percentage <= 25) level = 25;
-    else if (status.percentage <= 50) level = 50;
-    else if (status.percentage <= 75) level = 75;
-
-    if (status.charging) {
-        if (level == 0) level = 25;
-        return "Realmheart-Icons/battery-charging-" + std::to_string(level) + ".svg";
-    }
-    return "Realmheart-Icons/battery-" + std::to_string(level) + ".svg";
-}
-
 } // namespace
 
 BatteryWidget::BatteryWidget(
-    std::function<void(GtkPopover*)> request_exclusive_open
+    std::function<void(GtkPopover*)> request_exclusive_open,
+    std::function<void()> request_battery_refresh
 ) : request_exclusive_open_(std::move(request_exclusive_open)),
+    request_battery_refresh_(std::move(request_battery_refresh)),
     button_(
         "Realmheart-Icons/battery.svg",
         "Bt",
@@ -61,6 +50,7 @@ BatteryWidget::BatteryWidget(
     rate_label_ = gtk_label_new("");
     gtk_widget_add_css_class(rate_label_, "realmheart-battery-rate");
     gtk_label_set_xalign(GTK_LABEL(rate_label_), 0.0F);
+    gtk_label_set_wrap(GTK_LABEL(rate_label_), TRUE);
     gtk_box_append(GTK_BOX(root), percentage_label_);
     gtk_box_append(GTK_BOX(root), state_label_);
     gtk_box_append(GTK_BOX(root), rate_label_);
@@ -147,19 +137,34 @@ void BatteryWidget::update_popup() {
     gtk_label_set_text(GTK_LABEL(percentage_label_), percentage.c_str());
     gtk_label_set_text(GTK_LABEL(state_label_), status_->status.c_str());
 
-    if (!status_->charging && status_->rate_watts) {
-        std::ostringstream rate;
-        rate << "Discharge rate  " << std::fixed << std::setprecision(2)
-             << *status_->rate_watts << " W";
-        gtk_label_set_text(GTK_LABEL(rate_label_), rate.str().c_str());
-    } else if (status_->charging) {
-        gtk_label_set_text(GTK_LABEL(rate_label_), "External power connected");
+    std::ostringstream details;
+    if (status_->charging) {
+        if (status_->time_to_full_minutes) {
+            details << "Estimated time to full  ~"
+                    << format_battery_duration(*status_->time_to_full_minutes);
+        } else {
+            details << "External power connected";
+        }
     } else {
-        gtk_label_set_text(GTK_LABEL(rate_label_), "Discharge rate unavailable");
+        if (status_->time_remaining_minutes) {
+            details << "Estimated time left  ~"
+                    << format_battery_duration(*status_->time_remaining_minutes);
+        } else {
+            details << "Estimated time left unavailable";
+        }
+
+        if (status_->rate_watts) {
+            details << "\nDischarge rate  " << std::fixed << std::setprecision(2)
+                    << *status_->rate_watts << " W";
+        } else {
+            details << "\nDischarge rate unavailable";
+        }
     }
+    gtk_label_set_text(GTK_LABEL(rate_label_), details.str().c_str());
 }
 
 void BatteryWidget::show_held() {
+    if (request_battery_refresh_) request_battery_refresh_();
     update_popup();
     if (request_exclusive_open_) request_exclusive_open_(GTK_POPOVER(popover_));
     reveal_popover(GTK_POPOVER(popover_), kPopoverOffsetX, kPopoverOffsetY);

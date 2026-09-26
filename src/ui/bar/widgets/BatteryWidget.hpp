@@ -12,7 +12,10 @@ namespace realmheart::ui::bar::widgets {
 
 class BatteryWidget {
 public:
-    explicit BatteryWidget(std::function<void(GtkPopover*)> request_exclusive_open);
+    BatteryWidget(
+        std::function<void(GtkPopover*)> request_exclusive_open,
+        std::function<void()> request_battery_refresh
+    );
     ~BatteryWidget();
 
     BatteryWidget(const BatteryWidget&) = delete;
@@ -29,6 +32,7 @@ private:
     void update_popup();
 
     std::function<void(GtkPopover*)> request_exclusive_open_;
+    std::function<void()> request_battery_refresh_;
     BarIconButton button_;
     GtkWidget* popover_ = nullptr;
     GtkWidget* percentage_label_ = nullptr;

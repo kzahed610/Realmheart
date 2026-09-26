@@ -1,6 +1,7 @@
 #include "ui/bar/TaskbarAsyncContracts.hpp"
 #include "ui/bar/VerticalBar.hpp"
 #include "ui/bar/widgets/ThemedSvgIcon.hpp"
+#include "ui/bar/widgets/BatteryWidgetModel.hpp"
 #include "core/TaskExecutor.hpp"
 
 #include <atomic>
@@ -46,6 +47,51 @@ void test_refresh_gate_coalesces_bursts() {
     gate.release();
     require(!gate.queued(), "completed idle refresh must release the gate");
     require(gate.claim(), "a later event must schedule after release");
+}
+
+void test_refresh_request_gate_preserves_one_follow_up() {
+    realmheart::ui::bar::RefreshRequestGate gate;
+    require(gate.request(), "first battery refresh must start a read");
+    require(!gate.request(), "a refresh during an active read must coalesce");
+    require(gate.complete(), "coalesced refresh must trigger one follow-up read");
+    require(!gate.complete(), "follow-up completion must release the refresh gate");
+    require(gate.request(), "a later refresh must start after the follow-up completes");
+    gate.cancel();
+}
+
+void test_battery_icon_uses_nearest_available_level() {
+    using realmheart::services::BatteryStatus;
+    using realmheart::ui::bar::widgets::battery_icon_path;
+    const auto icon = [](int percentage, bool charging = false) {
+        return battery_icon_path(BatteryStatus{
+            percentage,
+            charging,
+            charging ? "Charging" : "Discharging",
+            std::nullopt,
+            std::nullopt,
+            std::nullopt,
+        });
+    };
+
+    require(icon(0) == "Realmheart-Icons/battery-0.svg", "empty battery must use the empty icon");
+    require(icon(12) == "Realmheart-Icons/battery-0.svg", "below half of the first segment must stay empty");
+    require(icon(13) == "Realmheart-Icons/battery-25.svg", "first segment must begin at its midpoint");
+    require(icon(38) == "Realmheart-Icons/battery-50.svg", "second segment must begin at its midpoint");
+    require(icon(63) == "Realmheart-Icons/battery-75.svg", "third segment must begin at its midpoint");
+    require(icon(88) == "Realmheart-Icons/battery-100.svg", "full icon must begin at its midpoint");
+    require(icon(5, true) == "Realmheart-Icons/battery-charging-25.svg",
+            "charging at empty must retain a visible charging glyph");
+    require(icon(100, true) == "Realmheart-Icons/battery-charging-100.svg",
+            "charging must select the matching full icon variant");
+}
+
+void test_battery_duration_format_is_compact_and_readable() {
+    using realmheart::ui::bar::widgets::format_battery_duration;
+    require(format_battery_duration(0) == "0m", "zero duration must remain visible");
+    require(format_battery_duration(59) == "59m", "sub-hour duration must use minutes");
+    require(format_battery_duration(60) == "1h", "whole-hour duration must omit zero minutes");
+    require(format_battery_duration(121) == "2h 1m",
+            "mixed duration must retain both hours and minutes");
 }
 
 void test_pending_registry_deduplicates_and_cleans_up() {
@@ -209,6 +255,9 @@ void test_svg_fallback_contract_is_discoverable() {
 
 int main() {
     test_refresh_gate_coalesces_bursts();
+    test_refresh_request_gate_preserves_one_follow_up();
+    test_battery_icon_uses_nearest_available_level();
+    test_battery_duration_format_is_compact_and_readable();
     test_pending_registry_deduplicates_and_cleans_up();
     test_pending_registry_cancellation_is_atomic();
     test_pending_registry_handles_independent_bars();

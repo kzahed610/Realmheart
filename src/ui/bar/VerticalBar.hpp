@@ -71,7 +71,7 @@ private:
         std::atomic<bool> media_in_flight{false};
         std::atomic<bool> media_refresh_pending{false};
         RefreshGate media_refresh_queued;
-        std::atomic<bool> battery_in_flight{false};
+        RefreshRequestGate battery_refresh;
         std::atomic<bool> wifi_in_flight{false};
         std::atomic<bool> notification_refresh_queued{false};
         RefreshGate workspace_refresh_queued;
@@ -83,6 +83,7 @@ private:
     void request_workspace_refresh();
     void request_media_refresh();
     void request_battery_refresh();
+    void start_battery_refresh();
     void request_wifi_refresh();
     void apply_geometry();
     void apply_layout_metrics();

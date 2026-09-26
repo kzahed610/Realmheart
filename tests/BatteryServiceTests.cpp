@@ -102,6 +102,82 @@ void test_invalid_power_rate_falls_back_to_current_voltage() {
     std::filesystem::remove_all(root);
 }
 
+void test_discharge_time_estimate_uses_charge_and_current() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-battery-eta-charge";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "BAT0");
+    std::ofstream(root / "BAT0/capacity") << "50\n";
+    std::ofstream(root / "BAT0/status") << "Discharging\n";
+    std::ofstream(root / "BAT0/charge_now") << "1500000\n";
+    std::ofstream(root / "BAT0/current_now") << "-500000\n";
+    std::ofstream(root / "BAT0/voltage_now") << "12000000\n";
+
+    realmheart::services::BatteryService battery(root);
+    const auto status = battery.read();
+    require(status.has_value(), "battery with charge and current readings must be readable");
+    require(status->time_remaining_minutes == 180,
+            "remaining charge divided by current draw must produce a discharge estimate");
+    require(status->rate_watts == 6.0,
+            "negative discharge current must still produce a positive power rate");
+    require(!status->time_to_full_minutes,
+            "discharging battery must not expose a charge-to-full estimate");
+    std::filesystem::remove_all(root);
+}
+
+void test_charge_time_estimate_uses_remaining_charge() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-battery-eta-full";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "BAT0");
+    std::ofstream(root / "BAT0/capacity") << "75\n";
+    std::ofstream(root / "BAT0/status") << "Charging\n";
+    std::ofstream(root / "BAT0/charge_now") << "1500000\n";
+    std::ofstream(root / "BAT0/charge_full") << "2000000\n";
+    std::ofstream(root / "BAT0/current_now") << "500000\n";
+
+    realmheart::services::BatteryService battery(root);
+    const auto status = battery.read();
+    require(status.has_value(), "charging battery with charge readings must be readable");
+    require(status->time_to_full_minutes == 60,
+            "remaining capacity divided by charge current must estimate time to full");
+    require(!status->time_remaining_minutes,
+            "charging battery must not expose a discharge estimate");
+    std::filesystem::remove_all(root);
+}
+
+void test_discharge_time_estimate_supports_energy_and_power() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-battery-eta-energy";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "BAT0");
+    std::ofstream(root / "BAT0/capacity") << "50\n";
+    std::ofstream(root / "BAT0/status") << "Discharging\n";
+    std::ofstream(root / "BAT0/energy_now") << "2000000\n";
+    std::ofstream(root / "BAT0/power_now") << "1000000\n";
+
+    realmheart::services::BatteryService battery(root);
+    const auto status = battery.read();
+    require(status.has_value(), "battery with energy and power readings must be readable");
+    require(status->time_remaining_minutes == 120,
+            "remaining energy divided by draw power must estimate runtime");
+    std::filesystem::remove_all(root);
+}
+
+void test_zero_discharge_current_has_no_time_estimate() {
+    const auto root = std::filesystem::temp_directory_path() / "realmheart-battery-eta-zero";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "BAT0");
+    std::ofstream(root / "BAT0/capacity") << "50\n";
+    std::ofstream(root / "BAT0/status") << "Discharging\n";
+    std::ofstream(root / "BAT0/charge_now") << "1500000\n";
+    std::ofstream(root / "BAT0/current_now") << "0\n";
+
+    realmheart::services::BatteryService battery(root);
+    const auto status = battery.read();
+    require(status.has_value(), "battery with zero current must still be readable");
+    require(!status->time_remaining_minutes,
+            "zero current must be reported as unavailable rather than an infinite estimate");
+    std::filesystem::remove_all(root);
+}
+
 } // namespace
 
 int main() {
@@ -111,6 +187,10 @@ int main() {
     test_power_rate_is_read_without_extra_processes();
     test_current_voltage_rate_fallback_is_read();
     test_invalid_power_rate_falls_back_to_current_voltage();
+    test_discharge_time_estimate_uses_charge_and_current();
+    test_charge_time_estimate_uses_remaining_charge();
+    test_discharge_time_estimate_supports_energy_and_power();
+    test_zero_discharge_current_has_no_time_estimate();
     std::cout << "BatteryService tests PASSED\n";
     return 0;
 }
