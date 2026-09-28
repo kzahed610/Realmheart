@@ -1,6 +1,7 @@
 #include "ui/workspace/animation/WorkspaceOverviewMorphRenderer.hpp"
 
 #include "effects/core/ShaderSource.hpp"
+#include "ui/workspace/animation/WorkspaceMorphCapturePixels.hpp"
 #include "ui/workspace/animation/WorkspaceMorphRendererState.hpp"
 
 #include <epoxy/gl.h>
@@ -119,25 +120,6 @@ GLuint link_program(
     glDeleteProgram(program);
     set_error(error, "shader link failed: " + log);
     return 0;
-}
-
-// gdk_texture_download() uses CAIRO_FORMAT_ARGB32. On little-endian hosts the
-// bytes are B,G,R,A; OpenGL's GL_RGBA upload expects R,G,B,A.
-void convert_argb32_to_rgba(std::vector<std::uint8_t>& pixels) {
-    for (std::size_t offset = 0; offset + 3 < pixels.size(); offset += 4) {
-#if G_BYTE_ORDER == G_LITTLE_ENDIAN
-        std::swap(pixels[offset], pixels[offset + 2]);
-#else
-        const std::uint8_t alpha = pixels[offset];
-        const std::uint8_t red = pixels[offset + 1];
-        const std::uint8_t green = pixels[offset + 2];
-        const std::uint8_t blue = pixels[offset + 3];
-        pixels[offset] = red;
-        pixels[offset + 1] = green;
-        pixels[offset + 2] = blue;
-        pixels[offset + 3] = alpha;
-#endif
-    }
 }
 
 } // namespace
@@ -409,13 +391,12 @@ struct WorkspaceOverviewMorphRenderer::State {
         );
         gdk_texture_download(texture, pixels.data(), stride);
         g_object_unref(texture);
-        convert_argb32_to_rgba(pixels);
-
-        std::uint8_t maximum_alpha = 0;
-        for (std::size_t offset = 3; offset < pixels.size(); offset += 4) {
-            maximum_alpha = std::max(maximum_alpha, pixels[offset]);
-        }
-        if (maximum_alpha == 0) {
+        const bool has_nontransparent_alpha =
+            convert_cairo_argb32_to_rgba_and_find_alpha(
+                pixels,
+                G_BYTE_ORDER == G_LITTLE_ENDIAN
+            );
+        if (!has_nontransparent_alpha) {
             set_error(error, "captured overview snapshot is fully transparent");
             return false;
         }

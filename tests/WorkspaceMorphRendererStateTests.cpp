@@ -1,6 +1,9 @@
 #include "ui/workspace/animation/WorkspaceMorphRendererState.hpp"
+#include "ui/workspace/animation/WorkspaceMorphCapturePixels.hpp"
 
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <stdexcept>
 
@@ -102,6 +105,43 @@ void test_overlay_opacity_is_safe_at_readiness_and_handoff_frames() {
             "the hidden handoff must fade smoothly instead of snapping");
 }
 
+void test_pixel_conversion_preserves_rgba_and_detects_visible_alpha() {
+    std::array<std::uint8_t, 8> little_endian{{
+        30, 20, 10, 0,
+        60, 50, 40, 128,
+    }};
+    const bool little_has_alpha =
+        realmheart::ui::workspace::animation::
+            convert_cairo_argb32_to_rgba_and_find_alpha(little_endian, true);
+    require(little_has_alpha,
+            "conversion must detect visible alpha after transparent pixels");
+    require(little_endian == std::array<std::uint8_t, 8>{{
+                10, 20, 30, 0,
+                40, 50, 60, 128,
+            }},
+            "little-endian ARGB32 bytes must become RGBA without changing alpha");
+
+    std::array<std::uint8_t, 8> big_endian{{
+        0, 10, 20, 30,
+        128, 40, 50, 60,
+    }};
+    const bool big_has_alpha =
+        realmheart::ui::workspace::animation::
+            convert_cairo_argb32_to_rgba_and_find_alpha(big_endian, false);
+    require(big_has_alpha,
+            "big-endian conversion must detect visible alpha");
+    require(big_endian == std::array<std::uint8_t, 8>{{
+                10, 20, 30, 0,
+                40, 50, 60, 128,
+            }},
+            "big-endian ARGB32 bytes must become RGBA without changing alpha");
+
+    std::array<std::uint8_t, 8> transparent{};
+    require(!realmheart::ui::workspace::animation::
+                convert_cairo_argb32_to_rgba_and_find_alpha(transparent, true),
+            "fully transparent captures must still be rejected");
+}
+
 } // namespace
 
 int main() {
@@ -111,6 +151,7 @@ int main() {
         test_finish_and_repeated_begin_reset_transient_state();
         test_updates_are_clamped_and_idle_updates_are_ignored();
         test_overlay_opacity_is_safe_at_readiness_and_handoff_frames();
+        test_pixel_conversion_preserves_rgba_and_detects_visible_alpha();
     } catch (const std::exception& error) {
         std::cerr << "WorkspaceMorphRendererStateTests failed: "
                   << error.what() << '\n';
