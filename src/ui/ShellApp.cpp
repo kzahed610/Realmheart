@@ -2515,21 +2515,74 @@ private:
         ] {
             handle_mana_cores_dismiss(original_workspace, monitor_connector);
         });
+        mana_cores_selector_->set_apply_prepare_callback([
+            this, wallpaper_target, topology_generation
+        ](const std::string& path, mana_core::ApplyCompletion completion) {
+            if (monitor_topology_generation_ != topology_generation ||
+                monitor_connector_for_index(
+                    gdk_display_get_default(), wallpaper_target.monitor_index
+                ) != wallpaper_target.connector) {
+                completion(false, "wallpaper output changed during preparation");
+                return;
+            }
+            if (!wallpaper_controller_) {
+                completion(false, "wallpaper controller is unavailable");
+                return;
+            }
+            wallpaper_controller_->prepare_wallpaper_for_output_async(
+                wallpaper::WallpaperSource(std::filesystem::path(path)),
+                wallpaper_target,
+                [this, wallpaper_target, topology_generation,
+                 completion = std::move(completion)](
+                    bool prepared,
+                    std::string error
+                ) mutable {
+                    if (!prepared) {
+                        completion(false, std::move(error));
+                        return;
+                    }
+                    if (monitor_topology_generation_ != topology_generation ||
+                        monitor_connector_for_index(
+                            gdk_display_get_default(), wallpaper_target.monitor_index
+                        ) != wallpaper_target.connector) {
+                        if (wallpaper_controller_) {
+                            wallpaper_controller_->discard_prepared_wallpaper();
+                        }
+                        completion(false, "wallpaper output changed during preparation");
+                        return;
+                    }
+                    completion(true, {});
+                }
+            );
+        });
+        mana_cores_selector_->set_apply_abort_callback([this] {
+            if (wallpaper_controller_) {
+                wallpaper_controller_->discard_prepared_wallpaper();
+            }
+        });
         // Set apply callback to commit the selected wallpaper only to the
         // output that owns this Mana Cores session. The selector is a
         // monitor-local surface; applying from monitor A must never mutate
         // monitor B's wallpaper.
         mana_cores_selector_->set_apply_callback([
             this, wallpaper_target, topology_generation
-        ](const std::string& path) {
+        ](const std::string& path, mana_core::ApplyCompletion completion) {
             if (monitor_topology_generation_ != topology_generation ||
                 monitor_connector_for_index(
                     gdk_display_get_default(), wallpaper_target.monitor_index
                 ) != wallpaper_target.connector) {
                 std::cerr << "[ManaCores] refusing wallpaper apply for stale monitor target\n";
+                if (wallpaper_controller_) {
+                    wallpaper_controller_->discard_prepared_wallpaper();
+                }
+                completion(false, "wallpaper output changed before commit");
                 return;
             }
-            if (wallpaper_controller_) {
+            if (!wallpaper_controller_) {
+                completion(false, "wallpaper controller is unavailable");
+                return;
+            }
+            {
                 const auto utilities = utilities_;
                 const std::optional<wallpaper::WallpaperSource> previous_source =
                     [&utilities, wallpaper_target]() ->
@@ -2547,12 +2600,21 @@ private:
                         }
                         return std::optional<wallpaper::WallpaperSource>{};
                     }();
-                const auto apply_output = [this, wallpaper_target](
+                const auto initial_prepared = std::make_shared<bool>(true);
+                const auto apply_output = [
+                    this, wallpaper_target, initial_prepared
+                ](
                     const wallpaper::WallpaperSource& requested_source,
                     wallpaper::WallpaperTransaction::Completion callback
                 ) {
                     if (wallpaper_controller_ == nullptr) {
                         callback(false, "wallpaper controller is unavailable");
+                        return;
+                    }
+                    if (std::exchange(*initial_prepared, false)) {
+                        wallpaper_controller_->commit_prepared_wallpaper_async(
+                            std::move(callback)
+                        );
                         return;
                     }
                     wallpaper_controller_->prepare_wallpaper_for_output_async(
@@ -2609,17 +2671,22 @@ private:
                         }
                         return false;
                     },
-                    [this, path](bool success, std::string error_msg) {
+                    [this, path, completion = std::move(completion)](
+                        bool success,
+                        std::string error_msg
+                    ) mutable {
                         if (!success) {
                             std::cerr
                                 << "[ManaCores] wallpaper transaction failed: "
                                 << error_msg << "\n";
+                            completion(false, std::move(error_msg));
                             return;
                         }
                         monitor_wallpaper_restore_uses_output_plan_ = true;
                         generate_theme_for(
                             wallpaper::WallpaperSource(std::filesystem::path(path))
                         );
+                        completion(true, {});
                     }
                 });
             }

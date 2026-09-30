@@ -33,8 +33,12 @@ constexpr std::array<char, 8> kPreviewCacheMagic{
 
 constexpr std::uint64_t kMaxSourceBytes = 256ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t kMaxSourcePixels = 64ULL * 1024ULL * 1024ULL;
-constexpr std::uint32_t kMaxSourceDimension = 16384;
-constexpr std::uint32_t kMaxPreviewDimension = 4096;
+constexpr std::uint32_t kMaxSourceDimension = static_cast<std::uint32_t>(
+    ThumbnailCache::max_preview_dimension()
+);
+constexpr std::uint32_t kMaxPreviewDimension = static_cast<std::uint32_t>(
+    ThumbnailCache::max_preview_dimension()
+);
 constexpr std::uintmax_t kMaxCacheBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr std::size_t kMaxCacheEntries = 256;
 constexpr std::size_t kDecodedPixelBudget = 8ULL * 1024ULL * 1024ULL;
@@ -633,7 +637,11 @@ GdkPixbuf* ThumbnailCache::load_or_create(
     }
     g_clear_error(&decode_error);
 
-    store_cached_preview(source_path, target_dimension, pixbuf, memory_key.source_stamp);
+    // A device-resolution cover can exceed the whole on-disk cache budget.
+    // Avoid writing a transient file that prune_cache() would immediately remove.
+    if (gdk_pixbuf_get_byte_length(pixbuf) <= kMaxCacheBytes) {
+        store_cached_preview(source_path, target_dimension, pixbuf, memory_key.source_stamp);
+    }
     retain_if_source_is_current(source_path, memory_key, pixbuf);
     prune_cache();
     

@@ -6,8 +6,10 @@
 #include <iostream>
 #include <algorithm>
 #include <filesystem>
+#include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <epoxy/gl.h>
 #include <gtk/gtk.h>
 #include <gtk4-layer-shell.h>
@@ -239,6 +241,31 @@ void append_annular_sector_path(
     cairo_close_path(cr);
 }
 
+bool pixbuf_is_fully_opaque(GdkPixbuf* pixbuf) noexcept {
+    if (pixbuf == nullptr) return false;
+    if (!gdk_pixbuf_get_has_alpha(pixbuf)) return true;
+
+    const int width = gdk_pixbuf_get_width(pixbuf);
+    const int height = gdk_pixbuf_get_height(pixbuf);
+    const int channels = gdk_pixbuf_get_n_channels(pixbuf);
+    const int rowstride = gdk_pixbuf_get_rowstride(pixbuf);
+    const guchar* pixels = gdk_pixbuf_read_pixels(pixbuf);
+    if (width <= 0 || height <= 0 || channels < 4 || rowstride <= 0 || pixels == nullptr) {
+        return false;
+    }
+
+    for (int y = 0; y < height; ++y) {
+        const guchar* row = pixels + static_cast<std::size_t>(y) *
+            static_cast<std::size_t>(rowstride);
+        for (int x = 0; x < width; ++x) {
+            const auto alpha_index = static_cast<std::size_t>(x) *
+                static_cast<std::size_t>(channels) + 3U;
+            if (row[alpha_index] != 0xffU) return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 ManaCoresSelector::ManaCoresSelector() {
@@ -370,7 +397,8 @@ gboolean ManaCoresSelector::transparency_retry_callback(GtkWidget* widget, GdkFr
 void ManaCoresSelector::present(GtkApplication* app, int monitor_index) {
     // Toggle: if already visible, dismiss instead of re-presenting
     if (visible_) {
-        if (state_ == State::Assembling || state_ == State::Idle) {
+        if (state_ == State::Assembling || state_ == State::Idle ||
+            state_ == State::PreparingApply) {
             begin_dismiss();
         }
         return;
@@ -441,7 +469,14 @@ void ManaCoresSelector::present(GtkApplication* app, int monitor_index) {
 }
 
 void ManaCoresSelector::dismiss() {
+    if (state_ == State::PreparingApply) {
+        cancel_apply_preparation();
+    }
     async_state_->generation.fetch_add(1);
+    apply_generation_ = 0;
+    apply_handoff_start_micros_ = 0;
+    apply_fullscreen_alpha_ = 1.0;
+    apply_handoff_zero_frame_queued_ = false;
     visible_ = false;
     state_ = State::Hidden;
     nav_transitioning_ = false;
@@ -459,6 +494,7 @@ void ManaCoresSelector::dismiss() {
         g_object_unref(apply_fullscreen_pixbuf_);
         apply_fullscreen_pixbuf_ = nullptr;
     }
+    applying_wallpaper_path_.clear();
     if (gl_area_) {
         gtk_widget_set_visible(gl_area_, FALSE);
     }
@@ -1650,14 +1686,17 @@ void ManaCoresSelector::update_particles(guint64 now_micros, double dt) {
 void ManaCoresSelector::draw_reverse_bloom(
     cairo_t* cr,
     double cx, double cy,
-    double mask_radius
+    double mask_radius,
+    double alpha,
+    int canvas_width,
+    int canvas_height
 ) {
-    if (apply_fullscreen_pixbuf_ == nullptr) return;
+    if (apply_fullscreen_pixbuf_ == nullptr || alpha <= 0.0) return;
 
     cairo_save(cr);
 
     // Clip to region OUTSIDE the shrinking circle hole
-    cairo_rectangle(cr, 0, 0, layout_.canvas_width, layout_.canvas_height);
+    cairo_rectangle(cr, 0, 0, canvas_width, canvas_height);
     if (mask_radius > 1.0) {
         cairo_arc_negative(cr, cx, cy, mask_radius, 2.0 * std::numbers::pi, 0.0);
     }
@@ -1668,18 +1707,18 @@ void ManaCoresSelector::draw_reverse_bloom(
         cr,
         apply_fullscreen_pixbuf_,
         0, 0,
-        layout_.canvas_width, layout_.canvas_height,
-        1.0
+        canvas_width, canvas_height,
+        alpha
     );
 
     // Glowing border along the inner reveal edge with Aether violet energy flash
     if (mask_radius > 6.0) {
-        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.85);
+        cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.85 * alpha);
         cairo_set_line_width(cr, 3.0);
         cairo_arc(cr, cx, cy, mask_radius, 0, 2.0 * std::numbers::pi);
         cairo_stroke(cr);
 
-        cairo_set_source_rgba(cr, 0.82, 0.65, 1.0, 0.45); // Aether violet-cyan aura
+        cairo_set_source_rgba(cr, 0.82, 0.65, 1.0, 0.45 * alpha); // Aether violet-cyan aura
         cairo_set_line_width(cr, 20.0);
         cairo_arc(cr, cx, cy, mask_radius, 0, 2.0 * std::numbers::pi);
         cairo_stroke(cr);
@@ -1699,7 +1738,7 @@ void ManaCoresSelector::draw_backdrop_dim(
     cairo_restore(cr);
 }
 
-void ManaCoresSelector::draw(GtkDrawingArea*, cairo_t* cr, int, int) {
+void ManaCoresSelector::draw(GtkDrawingArea*, cairo_t* cr, int width, int height) {
     if (!visible_) return;
 
     // Clear buffer to fully transparent
@@ -1711,7 +1750,15 @@ void ManaCoresSelector::draw(GtkDrawingArea*, cairo_t* cr, int, int) {
 
     // In Applying phase: draw reverse radial bloom first
     if (state_ == State::Applying && apply_mask_radius_ >= 0.0) {
-        draw_reverse_bloom(cr, layout_.core_centre_x, layout_.core_centre_y, apply_mask_radius_);
+        draw_reverse_bloom(
+            cr,
+            layout_.core_centre_x,
+            layout_.core_centre_y,
+            apply_mask_radius_,
+            apply_fullscreen_alpha_,
+            width,
+            height
+        );
     }
 
     // Draw central core and radial slices
@@ -1745,6 +1792,19 @@ void ManaCoresSelector::draw(GtkDrawingArea*, cairo_t* cr, int, int) {
         // 5. Atmospheric Mana & Aether Particles
         draw_mana_particles(cr, current_alpha_ * current_wallpaper_alpha_);
     }
+
+    if (state_ == State::Applying && apply_animation_finished_ &&
+        apply_fullscreen_opaque_ && apply_mask_radius_ <= 0.0 &&
+        apply_fullscreen_alpha_ >= 0.999 && width > 0 && height > 0 &&
+        apply_cover_frame_counter_ == 0 && apply_output_geometry_matches()) {
+        GdkFrameClock* frame_clock = canvas_ != nullptr
+            ? gtk_widget_get_frame_clock(canvas_)
+            : nullptr;
+        if (frame_clock != nullptr) {
+            const gint64 frame_counter = gdk_frame_clock_get_frame_counter(frame_clock);
+            if (frame_counter > 0) apply_cover_frame_counter_ = frame_counter;
+        }
+    }
 }
 
 void ManaCoresSelector::draw_callback(GtkDrawingArea* area, cairo_t* cr, int width, int height, gpointer user_data) {
@@ -1752,7 +1812,9 @@ void ManaCoresSelector::draw_callback(GtkDrawingArea* area, cairo_t* cr, int wid
     self->draw(area, cr, width, height);
 }
 
-gboolean ManaCoresSelector::tick_callback(GtkWidget*, GdkFrameClock*, gpointer user_data) {
+gboolean ManaCoresSelector::tick_callback(
+    GtkWidget*, GdkFrameClock* frame_clock, gpointer user_data
+) {
     auto* self = static_cast<ManaCoresSelector*>(user_data);
     if (!self->visible_) return G_SOURCE_REMOVE;
 
@@ -1772,6 +1834,7 @@ gboolean ManaCoresSelector::tick_callback(GtkWidget*, GdkFrameClock*, gpointer u
 
     self->update_animations(now);
     self->update_particles(now, dt);
+    self->maybe_commit_after_cover_presented(frame_clock);
     return G_SOURCE_CONTINUE;
 }
 
@@ -1942,21 +2005,9 @@ void ManaCoresSelector::update_animations(guint64 now_micros) {
             current_alpha_ = 1.0;
         }
 
-        // 4. Trigger wallpaper commit at 85% progress
-        if (progress >= 0.85 && !apply_callback_fired_) {
-            apply_callback_fired_ = true;
-            if (!all_wallpaper_paths_.empty() && current_wallpaper_index_ >= 0 &&
-                current_wallpaper_index_ < static_cast<int>(all_wallpaper_paths_.size())) {
-                std::string path = all_wallpaper_paths_[current_wallpaper_index_].string();
-                if (apply_callback_) {
-                    apply_callback_(path);
-                }
-            }
-        }
-
         if (progress >= 1.0) {
-            state_ = State::Hidden;
-            dismiss();
+            apply_animation_finished_ = true;
+            finish_apply_if_ready(now_micros);
         }
 
         queue_redraw();
@@ -2037,7 +2088,7 @@ void ManaCoresSelector::request_apply() {
         !wallpaper_decode_ready_[static_cast<std::size_t>(current_wallpaper_index_)]) {
         return;
     }
-    begin_apply();
+    begin_apply_preparation();
 }
 
 void ManaCoresSelector::force_apply(const std::string& wallpaper_path) {
@@ -2053,16 +2104,363 @@ void ManaCoresSelector::force_apply(const std::string& wallpaper_path) {
             break;
         }
     }
+    begin_apply_preparation();
+}
+
+ManaCoresSelector::ApplyOutputGeometry
+ManaCoresSelector::current_apply_output_geometry() const noexcept {
+    GtkNative* native = window_ != nullptr
+        ? gtk_widget_get_native(GTK_WIDGET(window_))
+        : nullptr;
+    GdkSurface* surface = native != nullptr ? gtk_native_get_surface(native) : nullptr;
+    if (surface != nullptr) {
+        const int width = gdk_surface_get_width(surface);
+        const int height = gdk_surface_get_height(surface);
+        const int scale_factor = gdk_surface_get_scale_factor(surface);
+        if (width > 0 && height > 0) {
+            // GdkSurface width/height are application pixels; this factor maps
+            // them to the device-pixel raster used by the surface.
+            return {width, height, std::max(scale_factor, 1)};
+        }
+    }
+
+    const auto logical_dimension = [](double dimension) noexcept {
+        if (!std::isfinite(dimension) || dimension <= 0.0 ||
+            dimension > static_cast<double>(std::numeric_limits<int>::max())) {
+            return 0;
+        }
+        return static_cast<int>(std::ceil(dimension));
+    };
+    return {
+        logical_dimension(layout_.canvas_width),
+        logical_dimension(layout_.canvas_height),
+        1
+    };
+}
+
+bool ManaCoresSelector::apply_output_geometry_matches() const noexcept {
+    return apply_output_geometry_.width > 0 &&
+        apply_output_geometry_.height > 0 &&
+        apply_output_geometry_.scale_factor > 0 &&
+        current_apply_output_geometry() == apply_output_geometry_;
+}
+
+int ManaCoresSelector::apply_preview_target_dimension(
+    int logical_width,
+    int logical_height,
+    int scale_factor,
+    int source_width,
+    int source_height
+) noexcept {
+    if (logical_width <= 0 || logical_height <= 0 || scale_factor <= 0 ||
+        source_width <= 0 || source_height <= 0) {
+        return 0;
+    }
+    const double output_width =
+        static_cast<double>(logical_width) * static_cast<double>(scale_factor);
+    const double output_height =
+        static_cast<double>(logical_height) * static_cast<double>(scale_factor);
+    // Match draw_pixbuf_cover's cover crop in device pixels, including the
+    // source edge that extends beyond the output and is cropped away.
+    const double cover_scale = std::max(
+        output_width / static_cast<double>(source_width),
+        output_height / static_cast<double>(source_height)
+    );
+    const double target_dimension = std::ceil(
+        static_cast<double>(std::max(source_width, source_height)) * cover_scale
+    );
+    if (!std::isfinite(target_dimension) || target_dimension < 1.0 ||
+        !std::isfinite(cover_scale) || cover_scale <= 0.0) {
+        return 0;
+    }
+    return static_cast<int>(std::min(
+        target_dimension,
+        static_cast<double>(ThumbnailCache::max_preview_dimension())
+    ));
+}
+
+void ManaCoresSelector::begin_apply_preparation() {
+    if (state_ != State::Idle || all_wallpaper_paths_.empty() ||
+        current_core_pixbuf_ == nullptr || current_wallpaper_index_ < 0 ||
+        current_wallpaper_index_ >= static_cast<int>(wallpaper_decode_ready_.size()) ||
+        !wallpaper_decode_ready_[static_cast<std::size_t>(current_wallpaper_index_)] ||
+        current_wallpaper_index_ >= static_cast<int>(all_wallpaper_paths_.size())) {
+        return;
+    }
+
+    if (apply_fullscreen_pixbuf_ != nullptr) {
+        g_object_unref(apply_fullscreen_pixbuf_);
+        apply_fullscreen_pixbuf_ = nullptr;
+    }
+    state_ = State::PreparingApply;
+    const auto state = async_state_;
+    const std::uint64_t generation = state->generation.fetch_add(1) + 1;
+    apply_generation_ = generation;
+    applying_wallpaper_path_ =
+        all_wallpaper_paths_[static_cast<std::size_t>(current_wallpaper_index_)].string();
+    apply_preview_ready_ = false;
+    apply_backend_ready_ = false;
+    apply_animation_finished_ = false;
+    apply_commit_finished_ = false;
+    apply_commit_success_ = false;
+    apply_callback_fired_ = false;
+    apply_start_micros_ = 0;
+    apply_handoff_start_micros_ = 0;
+    apply_fullscreen_alpha_ = 1.0;
+    apply_handoff_zero_frame_queued_ = false;
+    apply_fullscreen_opaque_ = false;
+    apply_output_geometry_ = {};
+    apply_cover_frame_counter_ = 0;
+
+    if (nav_transitioning_) {
+        nav_transitioning_ = false;
+        nav_progress_ = 1.0;
+        clear_old_pixbufs();
+    }
+    queue_redraw();
+
+    apply_output_geometry_ = current_apply_output_geometry();
+    if (apply_output_geometry_.width <= 0 ||
+        apply_output_geometry_.height <= 0 ||
+        apply_output_geometry_.scale_factor <= 0) {
+        fail_apply_preparation(generation, "wallpaper output geometry is unavailable");
+        return;
+    }
+    const auto output_geometry = apply_output_geometry_;
+    const auto wallpaper_path =
+        all_wallpaper_paths_[static_cast<std::size_t>(current_wallpaper_index_)];
+
+    struct PreviewPayload {
+        std::shared_ptr<AsyncState> state;
+        std::uint64_t generation = 0;
+        GdkPixbuf* pixbuf = nullptr;
+        bool fully_opaque = false;
+        std::string error;
+
+        ~PreviewPayload() {
+            if (pixbuf != nullptr) g_object_unref(pixbuf);
+        }
+    };
+
+    const bool preview_posted = core::shared_task_executor().post(
+        [state, generation, wallpaper_path, output_geometry] {
+            auto* payload = new PreviewPayload;
+            payload->state = state;
+            payload->generation = generation;
+            int source_width = 0;
+            int source_height = 0;
+            const GdkPixbufFormat* format = gdk_pixbuf_get_file_info(
+                wallpaper_path.c_str(),
+                &source_width,
+                &source_height
+            );
+            const int target_dimension = format != nullptr
+                ? ManaCoresSelector::apply_preview_target_dimension(
+                    output_geometry.width,
+                    output_geometry.height,
+                    output_geometry.scale_factor,
+                    source_width,
+                    source_height
+                )
+                : 0;
+            if (target_dimension <= 0) {
+                payload->error = "unable to determine wallpaper dimensions for output cover";
+            } else {
+                payload->pixbuf = ThumbnailCache::load_or_create(
+                    wallpaper_path,
+                    target_dimension,
+                    &payload->error
+                );
+            }
+            payload->fully_opaque = pixbuf_is_fully_opaque(payload->pixbuf);
+            if (!state->alive.load() || state->generation.load() != generation) {
+                delete payload;
+                return;
+            }
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,
+                +[](gpointer raw) -> gboolean {
+                    auto* payload = static_cast<PreviewPayload*>(raw);
+                    auto* owner = payload->state->owner.load();
+                    if (!payload->state->alive.load() || owner == nullptr ||
+                        payload->state->generation.load() != payload->generation) {
+                        return G_SOURCE_REMOVE;
+                    }
+                    GdkPixbuf* pixbuf = std::exchange(payload->pixbuf, nullptr);
+                    owner->accept_apply_preview(
+                        payload->generation,
+                        pixbuf,
+                        payload->fully_opaque,
+                        std::move(payload->error)
+                    );
+                    return G_SOURCE_REMOVE;
+                },
+                payload,
+                +[](gpointer raw) { delete static_cast<PreviewPayload*>(raw); }
+            );
+        },
+        "mana-core-apply-preview",
+        [state, generation] {
+            return !state->alive.load() || state->generation.load() != generation;
+        }
+    );
+    if (!preview_posted) {
+        fail_apply_preparation(generation, "apply preview worker is unavailable");
+        return;
+    }
+
+    if (!apply_prepare_callback_) {
+        complete_apply_preparation(generation, true, {});
+        return;
+    }
+
+    apply_prepare_callback_(
+        applying_wallpaper_path_,
+        [state, generation](bool success, std::string error) mutable {
+            struct PreparationPayload {
+                std::shared_ptr<AsyncState> state;
+                std::uint64_t generation = 0;
+                bool success = false;
+                std::string error;
+            };
+            g_idle_add_full(
+                G_PRIORITY_DEFAULT_IDLE,
+                +[](gpointer raw) -> gboolean {
+                    auto* payload = static_cast<PreparationPayload*>(raw);
+                    auto* owner = payload->state->owner.load();
+                    if (payload->state->alive.load() && owner != nullptr &&
+                        payload->state->generation.load() == payload->generation) {
+                        owner->complete_apply_preparation(
+                            payload->generation,
+                            payload->success,
+                            std::move(payload->error)
+                        );
+                    }
+                    return G_SOURCE_REMOVE;
+                },
+                new PreparationPayload{
+                    state, generation, success, std::move(error)
+                },
+                +[](gpointer raw) { delete static_cast<PreparationPayload*>(raw); }
+            );
+        }
+    );
+}
+
+void ManaCoresSelector::accept_apply_preview(
+    std::uint64_t generation,
+    GdkPixbuf* pixbuf,
+    bool fully_opaque,
+    std::string error
+) {
+    if (state_ != State::PreparingApply || generation != apply_generation_) {
+        if (pixbuf != nullptr) g_object_unref(pixbuf);
+        return;
+    }
+    if (pixbuf == nullptr) {
+        fail_apply_preparation(
+            generation,
+            error.empty() ? "unable to decode output-sized wallpaper preview" : std::move(error)
+        );
+        return;
+    }
+
+    if (!fully_opaque) {
+        g_object_unref(pixbuf);
+        fail_apply_preparation(
+            generation,
+            "wallpaper contains transparency and cannot provide an opaque handoff cover"
+        );
+        return;
+    }
+
+    if (apply_fullscreen_pixbuf_ != nullptr) {
+        g_object_unref(apply_fullscreen_pixbuf_);
+    }
+    apply_fullscreen_pixbuf_ = pixbuf;
+    apply_fullscreen_opaque_ = true;
+    apply_preview_ready_ = true;
+    maybe_begin_prepared_apply(generation);
+}
+
+void ManaCoresSelector::complete_apply_preparation(
+    std::uint64_t generation,
+    bool success,
+    std::string error
+) {
+    if (state_ != State::PreparingApply || generation != apply_generation_) return;
+    if (!success) {
+        fail_apply_preparation(
+            generation,
+            error.empty() ? "wallpaper backend preparation failed" : std::move(error)
+        );
+        return;
+    }
+    apply_backend_ready_ = true;
+    maybe_begin_prepared_apply(generation);
+}
+
+void ManaCoresSelector::maybe_begin_prepared_apply(std::uint64_t generation) {
+    if (state_ != State::PreparingApply || generation != apply_generation_ ||
+        !apply_preview_ready_ || !apply_backend_ready_ ||
+        apply_fullscreen_pixbuf_ == nullptr) {
+        return;
+    }
+    if (!apply_output_geometry_matches()) {
+        fail_apply_preparation(
+            generation,
+            "wallpaper output geometry changed during apply preparation"
+        );
+        return;
+    }
     begin_apply();
 }
 
+void ManaCoresSelector::fail_apply_preparation(
+    std::uint64_t generation,
+    std::string error
+) {
+    if (state_ != State::PreparingApply || generation != apply_generation_) return;
+    std::cerr << "[ManaCoresSelector] apply preparation failed: " << error << '\n';
+    cancel_apply_preparation();
+}
+
+void ManaCoresSelector::cancel_apply_preparation() {
+    if (state_ != State::PreparingApply) return;
+    apply_handoff_start_micros_ = 0;
+    apply_fullscreen_alpha_ = 1.0;
+    apply_handoff_zero_frame_queued_ = false;
+    async_state_->generation.fetch_add(1);
+    apply_generation_ = 0;
+    if (apply_abort_callback_) apply_abort_callback_();
+    if (apply_fullscreen_pixbuf_ != nullptr) {
+        g_object_unref(apply_fullscreen_pixbuf_);
+        apply_fullscreen_pixbuf_ = nullptr;
+    }
+    applying_wallpaper_path_.clear();
+    apply_preview_ready_ = false;
+    apply_backend_ready_ = false;
+    apply_animation_finished_ = false;
+    apply_commit_finished_ = false;
+    apply_commit_success_ = false;
+    apply_callback_fired_ = false;
+    apply_start_micros_ = 0;
+    apply_mask_radius_ = 0.0;
+    state_ = State::Idle;
+    queue_redraw();
+}
+
 void ManaCoresSelector::begin_apply() {
-    if (all_wallpaper_paths_.empty() || current_core_pixbuf_ == nullptr ||
+    if (apply_fullscreen_pixbuf_ == nullptr || all_wallpaper_paths_.empty() ||
+        current_core_pixbuf_ == nullptr ||
         current_wallpaper_index_ < 0 ||
         current_wallpaper_index_ >= static_cast<int>(wallpaper_decode_ready_.size()) ||
         !wallpaper_decode_ready_[static_cast<std::size_t>(current_wallpaper_index_)]) {
         return;
     }
+    apply_handoff_start_micros_ = 0;
+    apply_fullscreen_alpha_ = 1.0;
+    apply_handoff_zero_frame_queued_ = false;
     state_ = State::Applying;
     if (nav_transitioning_) {
         nav_transitioning_ = false;
@@ -2071,32 +2469,224 @@ void ManaCoresSelector::begin_apply() {
     }
     apply_start_micros_ = g_get_monotonic_time();
     apply_callback_fired_ = false;
+    apply_animation_finished_ = false;
+    apply_commit_finished_ = false;
+    apply_commit_success_ = false;
     apply_mask_radius_ = std::hypot(layout_.canvas_width, layout_.canvas_height);
-
-    // The validated preview is intentionally reused for the reveal. Full-size
-    // decoding here would put an unbounded image allocation back on GTK's main
-    // loop after the thumbnail worker had already done the safe validation.
-    if (!all_wallpaper_paths_.empty() && current_wallpaper_index_ >= 0 &&
-        current_wallpaper_index_ < static_cast<int>(all_wallpaper_paths_.size())) {
-        if (apply_fullscreen_pixbuf_ != nullptr) {
-            g_object_unref(apply_fullscreen_pixbuf_);
-            apply_fullscreen_pixbuf_ = nullptr;
-        }
-        apply_fullscreen_pixbuf_ = current_core_pixbuf_
-            ? GDK_PIXBUF(g_object_ref(current_core_pixbuf_))
-            : nullptr;
-    }
 
     queue_redraw();
 }
 
+void ManaCoresSelector::complete_apply_commit(
+    std::uint64_t generation,
+    bool success,
+    std::string error
+) {
+    if (state_ != State::Applying || generation != apply_generation_ ||
+        apply_commit_finished_) {
+        return;
+    }
+    apply_commit_finished_ = true;
+    apply_commit_success_ = success;
+    if (!success && !error.empty()) {
+        std::cerr << "[ManaCoresSelector] wallpaper apply failed: " << error << '\n';
+    }
+    finish_apply_if_ready(g_get_monotonic_time());
+    queue_redraw();
+}
+
+void ManaCoresSelector::handle_apply_cover_presentation_feedback(
+    gint64 frame_counter,
+    bool complete,
+    gint64 presentation_time
+) {
+    if (state_ != State::Applying || !apply_animation_finished_ ||
+        apply_callback_fired_) return;
+
+    if (!apply_output_geometry_matches()) {
+        abort_apply_handoff("wallpaper output geometry changed before cover presentation");
+        return;
+    }
+    if (!apply_fullscreen_opaque_ || apply_fullscreen_alpha_ < 1.0 ||
+        apply_mask_radius_ > 0.0 || apply_cover_frame_counter_ <= 0 ||
+        frame_counter != apply_cover_frame_counter_) {
+        return;
+    }
+    if (!complete) return;
+    if (presentation_time <= 0) {
+        abort_apply_handoff("compositor did not provide cover frame presentation feedback");
+        return;
+    }
+
+    fire_apply_callback();
+}
+
+void ManaCoresSelector::maybe_commit_after_cover_presented(
+    GdkFrameClock* frame_clock
+) {
+    if (state_ != State::Applying || !apply_animation_finished_ ||
+        apply_callback_fired_) {
+        return;
+    }
+    if (!apply_output_geometry_matches()) {
+        abort_apply_handoff("wallpaper output geometry changed before cover presentation");
+        return;
+    }
+    if (apply_cover_frame_counter_ <= 0) return;
+    if (frame_clock == nullptr) {
+        abort_apply_handoff("GDK frame clock is unavailable for cover presentation");
+        return;
+    }
+
+    GdkFrameTimings* timings = gdk_frame_clock_get_timings(
+        frame_clock,
+        apply_cover_frame_counter_
+    );
+    if (timings == nullptr) {
+        if (gdk_frame_clock_get_history_start(frame_clock) >
+            apply_cover_frame_counter_) {
+            abort_apply_handoff("GDK discarded cover frame timing before presentation was confirmed");
+        }
+        return;
+    }
+    // GdkFrameTimings documents this value as the time the frame became
+    // visible. A paint/tick/after-paint callback alone is not this receipt.
+    handle_apply_cover_presentation_feedback(
+        apply_cover_frame_counter_,
+        gdk_frame_timings_get_complete(timings),
+        gdk_frame_timings_get_presentation_time(timings)
+    );
+}
+
+void ManaCoresSelector::fire_apply_callback() {
+    if (state_ != State::Applying || apply_callback_fired_ ||
+        !apply_animation_finished_ || apply_cover_frame_counter_ <= 0) {
+        return;
+    }
+    apply_callback_fired_ = true;
+    const auto state = async_state_;
+    const std::uint64_t generation = apply_generation_;
+    auto completion = [state, generation](bool success, std::string error) mutable {
+        struct CommitPayload {
+            std::shared_ptr<AsyncState> state;
+            std::uint64_t generation = 0;
+            bool success = false;
+            std::string error;
+        };
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            +[](gpointer raw) -> gboolean {
+                auto* payload = static_cast<CommitPayload*>(raw);
+                auto* owner = payload->state->owner.load();
+                if (payload->state->alive.load() && owner != nullptr &&
+                    payload->state->generation.load() == payload->generation) {
+                    owner->complete_apply_commit(
+                        payload->generation,
+                        payload->success,
+                        std::move(payload->error)
+                    );
+                }
+                return G_SOURCE_REMOVE;
+            },
+            new CommitPayload{state, generation, success, std::move(error)},
+            +[](gpointer raw) { delete static_cast<CommitPayload*>(raw); }
+        );
+    };
+    if (apply_callback_) {
+        apply_callback_(applying_wallpaper_path_, std::move(completion));
+    } else {
+        completion(true, {});
+    }
+}
+
+void ManaCoresSelector::abort_apply_handoff(std::string error) {
+    if (state_ != State::Applying || apply_callback_fired_) return;
+    std::cerr << "[ManaCoresSelector] apply handoff aborted: " << error << '\n';
+    if (apply_abort_callback_) apply_abort_callback_();
+    async_state_->generation.fetch_add(1);
+    apply_generation_ = 0;
+    reset_apply_to_idle();
+}
+
+void ManaCoresSelector::finish_apply_if_ready(guint64 now_micros) {
+    if (state_ != State::Applying || !apply_animation_finished_ ||
+        !apply_commit_finished_) {
+        return;
+    }
+    if (apply_commit_success_) {
+        if (apply_handoff_start_micros_ == 0) {
+            apply_handoff_start_micros_ = now_micros;
+        }
+        // GTK/Cairo's cover and the wallpaper renderer's EGL frame can differ
+        // slightly in filtering or output scale. Dissolve the cover only after
+        // both the reveal and backend transaction are complete; never unmap it
+        // abruptly over the committed output.
+        const double handoff_progress = std::clamp(
+            static_cast<double>(now_micros - apply_handoff_start_micros_) /
+                static_cast<double>(kApplyHandoffDurationMicros),
+            0.0,
+            1.0
+        );
+        const double handoff_ease = handoff_progress * handoff_progress *
+            (3.0 - 2.0 * handoff_progress);
+        apply_fullscreen_alpha_ = 1.0 - handoff_ease;
+        if (handoff_progress >= 1.0) {
+            if (apply_handoff_zero_frame_queued_) {
+                dismiss();
+            } else {
+                // Keep the transparent layer mapped through one frame-clock
+                // turn so GTK submits the final zero-opacity composition
+                // before the layer surface is unmapped.
+                apply_handoff_zero_frame_queued_ = true;
+            }
+        }
+        return;
+    }
+    reset_apply_to_idle();
+}
+
+void ManaCoresSelector::reset_apply_to_idle() {
+    apply_handoff_start_micros_ = 0;
+    apply_fullscreen_alpha_ = 1.0;
+    apply_handoff_zero_frame_queued_ = false;
+    if (apply_fullscreen_pixbuf_ != nullptr) {
+        g_object_unref(apply_fullscreen_pixbuf_);
+        apply_fullscreen_pixbuf_ = nullptr;
+    }
+    apply_generation_ = 0;
+    applying_wallpaper_path_.clear();
+    apply_preview_ready_ = false;
+    apply_backend_ready_ = false;
+    apply_animation_finished_ = false;
+    apply_commit_finished_ = false;
+    apply_commit_success_ = false;
+    apply_callback_fired_ = false;
+    apply_start_micros_ = 0;
+    apply_mask_radius_ = 0.0;
+    state_ = State::Idle;
+    current_cx_ = layout_.core_centre_x;
+    current_cy_ = layout_.core_centre_y;
+    current_core_radius_ = layout_.core_radius_expanded;
+    current_slice_r_in_ = layout_.core_radius_expanded + layout_.slice_gap;
+    current_slice_r_out_ = current_slice_r_in_ + layout_.slice_depth_expanded;
+    current_slices_ = layout_.detached_slices;
+    current_alpha_ = 1.0;
+    current_wallpaper_alpha_ = 1.0;
+    mana_fill_alpha_ = 0.0;
+    queue_redraw();
+}
+
 void ManaCoresSelector::request_dismiss() {
-    if (state_ == State::Assembling || state_ == State::Idle) {
+    if (state_ == State::Assembling || state_ == State::Idle ||
+        state_ == State::PreparingApply) {
         begin_dismiss();
     }
 }
 
 void ManaCoresSelector::begin_dismiss() {
+    if (state_ == State::PreparingApply) {
+        cancel_apply_preparation();
+    }
     state_ = State::Dismissing;
     dismiss_phase_ = DismissPhase::Contraction;
     dismiss_start_micros_ = g_get_monotonic_time();
@@ -2154,6 +2744,11 @@ bool ManaCoresSelector::handle_key(guint keyval) {
 
         default:
             break;
+        }
+    } else if (state_ == State::PreparingApply) {
+        if (keyval == GDK_KEY_Escape || keyval == GDK_KEY_q || keyval == GDK_KEY_Q) {
+            begin_dismiss();
+            return true;
         }
     } else if (state_ == State::Assembling) {
         if (keyval == GDK_KEY_Escape || keyval == GDK_KEY_q || keyval == GDK_KEY_Q) {

@@ -19,6 +19,13 @@
 namespace realmheart::mana_core {
 
 using DismissCallback = std::function<void()>;
+using ApplyCompletion = std::function<void(bool, std::string)>;
+using ApplyPreparationCallback = std::function<void(
+    const std::string&,
+    ApplyCompletion
+)>;
+using ApplyCallback = std::function<void(const std::string&, ApplyCompletion)>;
+using ApplyAbortCallback = std::function<void()>;
 
 class ManaCoresSelector {
 public:
@@ -32,7 +39,13 @@ public:
 
     // Set callback invoked when selector is dismissed (Esc or apply complete)
     void set_dismiss_callback(DismissCallback cb) { dismiss_callback_ = std::move(cb); }
-    void set_apply_callback(std::function<void(const std::string&)> cb) { apply_callback_ = std::move(cb); }
+    void set_apply_prepare_callback(ApplyPreparationCallback cb) {
+        apply_prepare_callback_ = std::move(cb);
+    }
+    void set_apply_callback(ApplyCallback cb) { apply_callback_ = std::move(cb); }
+    void set_apply_abort_callback(ApplyAbortCallback cb) {
+        apply_abort_callback_ = std::move(cb);
+    }
 
     // Wallpaper management
     void set_current_wallpaper(GdkPixbuf* pixbuf);
@@ -57,8 +70,16 @@ private:
         std::atomic<std::uint64_t> generation{0};
     };
 
+    struct ApplyOutputGeometry {
+        int width = 0;
+        int height = 0;
+        int scale_factor = 1;
+
+        bool operator==(const ApplyOutputGeometry&) const = default;
+    };
+
     // State machine
-    enum class State { Hidden, Assembling, Idle, Applying, Dismissing };
+    enum class State { Hidden, Assembling, Idle, PreparingApply, Applying, Dismissing };
     State state_ = State::Hidden;
 
     // Assembly sub-phases
@@ -92,6 +113,7 @@ private:
     guint64 animation_start_micros_ = 0;
     guint64 idle_start_micros_ = 0;
     guint64 apply_start_micros_ = 0;
+    guint64 apply_handoff_start_micros_ = 0;
     guint64 dismiss_start_micros_ = 0;
 
     // Current animated coordinates & radii
@@ -106,6 +128,8 @@ private:
     double current_wallpaper_alpha_ = 0.0;
     double mana_fill_alpha_ = 1.0;      // Opacity of the mana gradient fill inside slices
     double apply_mask_radius_ = 0.0;
+    double apply_fullscreen_alpha_ = 1.0;
+    static constexpr guint64 kApplyHandoffDurationMicros = 180'000;
 
     // Navigation crossfade
     guint64 nav_transition_start_micros_ = 0;
@@ -119,6 +143,17 @@ private:
     // Hovered radial slice index (-1 = none, 0 = silver, 1 = yellow, 2 = orange)
     int hovered_radial_ = -1;
     bool apply_callback_fired_ = false;
+    bool apply_preview_ready_ = false;
+    bool apply_backend_ready_ = false;
+    bool apply_animation_finished_ = false;
+    bool apply_commit_finished_ = false;
+    bool apply_commit_success_ = false;
+    bool apply_handoff_zero_frame_queued_ = false;
+    bool apply_fullscreen_opaque_ = false;
+    ApplyOutputGeometry apply_output_geometry_;
+    std::int64_t apply_cover_frame_counter_ = 0;
+    std::uint64_t apply_generation_ = 0;
+    std::string applying_wallpaper_path_;
 
     // Atmospheric Mana & Aether Particle System (zero-allocation fixed pool)
     struct ManaParticle {
@@ -166,7 +201,15 @@ private:
     void draw_core(cairo_t* cr, double cx, double cy, double radius, double alpha, double wallpaper_alpha);
     void draw_radial_slices(cairo_t* cr, double cx, double cy, double r_in, double r_out, double alpha, double wallpaper_alpha);
     void draw_mana_particles(cairo_t* cr, double alpha);
-    void draw_reverse_bloom(cairo_t* cr, double cx, double cy, double mask_radius);
+    void draw_reverse_bloom(
+        cairo_t* cr,
+        double cx,
+        double cy,
+        double mask_radius,
+        double alpha,
+        int canvas_width,
+        int canvas_height
+    );
     void draw_backdrop_dim(cairo_t* cr, double alpha);
     static void draw_pixbuf_cover(cairo_t* cr, GdkPixbuf* pixbuf, double x, double y, double width, double height, double alpha);
 
@@ -175,7 +218,46 @@ private:
     void spawn_particle(double x, double y, double vx, double vy, double r, double g, double b, double size, double decay);
     void queue_redraw();
     void start_idle_animation();
+    void begin_apply_preparation();
     void begin_apply();
+    void accept_apply_preview(
+        std::uint64_t generation,
+        GdkPixbuf* pixbuf,
+        bool fully_opaque,
+        std::string error
+    );
+    void complete_apply_preparation(
+        std::uint64_t generation,
+        bool success,
+        std::string error
+    );
+    void maybe_begin_prepared_apply(std::uint64_t generation);
+    void fail_apply_preparation(std::uint64_t generation, std::string error);
+    void complete_apply_commit(
+        std::uint64_t generation,
+        bool success,
+        std::string error
+    );
+    void maybe_commit_after_cover_presented(GdkFrameClock* frame_clock);
+    void handle_apply_cover_presentation_feedback(
+        gint64 frame_counter,
+        bool complete,
+        gint64 presentation_time
+    );
+    void fire_apply_callback();
+    void abort_apply_handoff(std::string error);
+    [[nodiscard]] ApplyOutputGeometry current_apply_output_geometry() const noexcept;
+    [[nodiscard]] bool apply_output_geometry_matches() const noexcept;
+    [[nodiscard]] static int apply_preview_target_dimension(
+        int logical_width,
+        int logical_height,
+        int scale_factor,
+        int source_width,
+        int source_height
+    ) noexcept;
+    void finish_apply_if_ready(guint64 now_micros);
+    void reset_apply_to_idle();
+    void cancel_apply_preparation();
     void begin_dismiss();
     void setup_window(GtkApplication* app);
 
@@ -192,7 +274,9 @@ private:
 
     // Callbacks
     DismissCallback dismiss_callback_;
-    std::function<void(const std::string& /*path*/)> apply_callback_;
+    ApplyPreparationCallback apply_prepare_callback_;
+    ApplyCallback apply_callback_;
+    ApplyAbortCallback apply_abort_callback_;
     std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
 };
 

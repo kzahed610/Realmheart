@@ -75,20 +75,243 @@ TEST(ManaCoresSelector, DismissCallbackInvokedOnDismiss) {
     EXPECT_FALSE(sel.is_visible());
 }
 
-TEST(ManaCoresSelector, ApplyCallbackWiring) {
+TEST(ManaCoresSelector, BeginApplyKeepsPreparedFullResolutionFrame) {
+    realmheart::mana_core::ManaCoresSelector sel;
+    seed_preview_batch(sel);
+    auto* prepared = make_sized_test_pixbuf(0x55, 64, 32);
+    ASSERT_NE(prepared, nullptr);
+    sel.apply_fullscreen_pixbuf_ = prepared;
+
+    sel.begin_apply();
+
+    ASSERT_NE(sel.apply_fullscreen_pixbuf_, nullptr);
+    EXPECT_EQ(gdk_pixbuf_get_width(sel.apply_fullscreen_pixbuf_), 64);
+    EXPECT_EQ(gdk_pixbuf_get_height(sel.apply_fullscreen_pixbuf_), 32);
+}
+
+TEST(ManaCoresSelector, BeginApplyRefusesThumbnailWhenNoPreparedFrameExists) {
+    realmheart::mana_core::ManaCoresSelector sel;
+    seed_preview_batch(sel);
+    sel.state_ = realmheart::mana_core::ManaCoresSelector::State::Idle;
+
+    sel.begin_apply();
+
+    EXPECT_EQ(sel.state_, realmheart::mana_core::ManaCoresSelector::State::Idle);
+    EXPECT_EQ(sel.apply_fullscreen_pixbuf_, nullptr);
+}
+
+TEST(ManaCoresSelector, ApplyPreviewTargetDimensionMatchesDeviceScaleAndCoverCrop) {
+    using Selector = realmheart::mana_core::ManaCoresSelector;
+    EXPECT_EQ(Selector::apply_preview_target_dimension(3840, 2160, 2, 3840, 2160), 7680);
+    EXPECT_EQ(Selector::apply_preview_target_dimension(1920, 1080, 1, 6000, 2500), 2592);
+    EXPECT_EQ(Selector::apply_preview_target_dimension(1920, 1080, 1, 2500, 6000), 4608);
+    EXPECT_EQ(Selector::apply_preview_target_dimension(16384, 2160, 2, 3840, 2160), 16384);
+    EXPECT_EQ(Selector::apply_preview_target_dimension(3840, 2160, 0, 3840, 2160), 0);
+    EXPECT_EQ(Selector::apply_preview_target_dimension(3840, 2160, 1, 0, 2160), 0);
+}
+
+TEST(ManaCoresSelector, RequestApplyWaitsForAsyncPreparationBeforeStartingAnimation) {
+    realmheart::mana_core::ManaCoresSelector sel;
+    seed_preview_batch(sel);
+    const auto source_path = std::filesystem::temp_directory_path() /
+        ("realmheart-mana-apply-" + std::to_string(getpid()) + "-" +
+         std::to_string(g_get_monotonic_time()) + ".png");
+    GError* save_error = nullptr;
+    GdkPixbuf* source = make_sized_test_pixbuf(0x55, 96, 64);
+    ASSERT_NE(source, nullptr);
+    ASSERT_TRUE(gdk_pixbuf_save(source, source_path.c_str(), "png", &save_error, nullptr));
+    g_clear_error(&save_error);
+    g_object_unref(source);
+    sel.all_wallpaper_paths_[0] = source_path;
+    sel.layout_ = realmheart::mana_core::ManaCoresLayout::for_height(1080, 1920);
+    sel.visible_ = true;
+    sel.state_ = realmheart::mana_core::ManaCoresSelector::State::Idle;
+    realmheart::mana_core::ApplyCompletion finish_preparation;
+    sel.set_apply_prepare_callback([
+        &finish_preparation
+    ](const std::string&, realmheart::mana_core::ApplyCompletion completion) {
+        finish_preparation = std::move(completion);
+    });
+
+    sel.request_apply();
+
+    EXPECT_EQ(sel.apply_start_micros_, 0U);
+    EXPECT_FALSE(sel.apply_callback_fired_);
+
+    realmheart::core::shared_task_executor().wait_for_idle();
+    while (g_main_context_iteration(nullptr, FALSE)) {}
+
+    ASSERT_TRUE(static_cast<bool>(finish_preparation));
+    EXPECT_EQ(sel.state_, realmheart::mana_core::ManaCoresSelector::State::PreparingApply);
+    EXPECT_TRUE(sel.apply_preview_ready_);
+    EXPECT_FALSE(sel.apply_backend_ready_);
+    EXPECT_EQ(sel.apply_start_micros_, 0U);
+
+    finish_preparation(true, {});
+    while (g_main_context_iteration(nullptr, FALSE)) {}
+    ASSERT_EQ(sel.state_, realmheart::mana_core::ManaCoresSelector::State::Applying);
+    ASSERT_NE(sel.apply_fullscreen_pixbuf_, nullptr);
+    EXPECT_EQ(gdk_pixbuf_get_width(sel.apply_fullscreen_pixbuf_), 96);
+    EXPECT_EQ(gdk_pixbuf_get_height(sel.apply_fullscreen_pixbuf_), 64);
+    sel.dismiss();
+    std::error_code remove_error;
+    std::filesystem::remove(source_path, remove_error);
+}
+
+TEST(ManaCoresSelector, ApplyCallbackWaitsForPresentedOpaqueCoverFrame) {
     realmheart::mana_core::ManaCoresSelector sel;
     std::string applied_path;
-    sel.set_apply_callback([&applied_path](const std::string& path) {
+    sel.set_apply_callback([&applied_path](
+        const std::string& path,
+        realmheart::mana_core::ApplyCompletion completion
+    ) {
+        applied_path = path;
+        completion(true, {});
+    });
+    seed_preview_batch(sel);
+    sel.layout_ = realmheart::mana_core::ManaCoresLayout::for_height(1080, 1920);
+    sel.apply_output_geometry_ = sel.current_apply_output_geometry();
+    sel.visible_ = true;
+    sel.state_ = realmheart::mana_core::ManaCoresSelector::State::Idle;
+    sel.current_wallpaper_index_ = 1;
+    sel.apply_fullscreen_pixbuf_ = make_sized_test_pixbuf(0x55, 64, 32);
+    sel.apply_fullscreen_opaque_ = true;
+    sel.applying_wallpaper_path_ = "core-b.png";
+    sel.begin_apply();
+    ASSERT_EQ(sel.state_, realmheart::mana_core::ManaCoresSelector::State::Applying);
+    constexpr guint64 animation_start = 1'000'000;
+    sel.apply_start_micros_ = animation_start;
+    sel.update_animations(animation_start + 600'000);
+
+    EXPECT_TRUE(applied_path.empty());
+    EXPECT_GT(sel.apply_mask_radius_, 0.0);
+
+    sel.update_animations(animation_start + 650'000);
+    EXPECT_TRUE(sel.apply_animation_finished_);
+    EXPECT_DOUBLE_EQ(sel.apply_mask_radius_, 0.0);
+    EXPECT_TRUE(applied_path.empty());
+
+    sel.apply_cover_frame_counter_ = 42;
+    sel.handle_apply_cover_presentation_feedback(41, true, 12'345);
+    EXPECT_TRUE(applied_path.empty());
+    sel.handle_apply_cover_presentation_feedback(42, false, 0);
+    EXPECT_TRUE(applied_path.empty());
+    sel.handle_apply_cover_presentation_feedback(42, true, 12'345);
+
+    EXPECT_EQ(applied_path, "core-b.png");
+    while (g_main_context_iteration(nullptr, FALSE)) {}
+}
+
+TEST(ManaCoresSelector, MissingPresentationTimestampAbortsApplyBeforeCommit) {
+    realmheart::mana_core::ManaCoresSelector sel;
+    bool aborted = false;
+    std::string applied_path;
+    sel.set_apply_abort_callback([&aborted] { aborted = true; });
+    sel.set_apply_callback([&applied_path](
+        const std::string& path,
+        realmheart::mana_core::ApplyCompletion
+    ) {
         applied_path = path;
     });
     seed_preview_batch(sel);
+    sel.layout_ = realmheart::mana_core::ManaCoresLayout::for_height(1080, 1920);
+    sel.apply_output_geometry_ = sel.current_apply_output_geometry();
     sel.visible_ = true;
     sel.state_ = realmheart::mana_core::ManaCoresSelector::State::Idle;
-    sel.force_apply("core-b.png");
-    ASSERT_EQ(sel.state_, realmheart::mana_core::ManaCoresSelector::State::Applying);
-    sel.apply_start_micros_ = g_get_monotonic_time() - 600'000;
-    realmheart::mana_core::ManaCoresSelector::tick_callback(nullptr, nullptr, &sel);
-    EXPECT_EQ(applied_path, "core-b.png");
+    sel.apply_fullscreen_pixbuf_ = make_sized_test_pixbuf(0x55, 64, 32);
+    sel.apply_fullscreen_opaque_ = true;
+    sel.begin_apply();
+    sel.apply_start_micros_ = 2'000'000;
+    sel.update_animations(2'650'000);
+    sel.apply_cover_frame_counter_ = 9;
+
+    sel.handle_apply_cover_presentation_feedback(9, true, 0);
+
+    EXPECT_TRUE(aborted);
+    EXPECT_TRUE(applied_path.empty());
+    EXPECT_EQ(sel.state_, realmheart::mana_core::ManaCoresSelector::State::Idle);
+}
+
+TEST(ManaCoresSelector, OutputGeometryChangeAbortsBeforeCoverFrameIsRecorded) {
+    realmheart::mana_core::ManaCoresSelector sel;
+    bool aborted = false;
+    sel.set_apply_abort_callback([&aborted] { aborted = true; });
+    seed_preview_batch(sel);
+    sel.layout_ = realmheart::mana_core::ManaCoresLayout::for_height(1080, 1920);
+    sel.apply_output_geometry_ = sel.current_apply_output_geometry();
+    sel.visible_ = true;
+    sel.state_ = realmheart::mana_core::ManaCoresSelector::State::Idle;
+    sel.apply_fullscreen_pixbuf_ = make_sized_test_pixbuf(0x55, 64, 32);
+    sel.apply_fullscreen_opaque_ = true;
+    sel.begin_apply();
+    sel.apply_start_micros_ = 4'000'000;
+    sel.update_animations(4'650'000);
+    ASSERT_EQ(sel.apply_cover_frame_counter_, 0);
+
+    sel.layout_.canvas_width += 1.0;
+    sel.maybe_commit_after_cover_presented(nullptr);
+
+    EXPECT_TRUE(aborted);
+    EXPECT_EQ(sel.state_, realmheart::mana_core::ManaCoresSelector::State::Idle);
+}
+
+TEST(ManaCoresSelector, ApplyAnimationCrossfadesCommittedWallpaperBeforeDismissing) {
+    realmheart::mana_core::ManaCoresSelector sel;
+    seed_preview_batch(sel);
+    sel.layout_ = realmheart::mana_core::ManaCoresLayout::for_height(1080, 1920);
+    sel.apply_output_geometry_ = sel.current_apply_output_geometry();
+    sel.visible_ = true;
+    sel.state_ = realmheart::mana_core::ManaCoresSelector::State::Idle;
+    sel.apply_fullscreen_pixbuf_ = make_sized_test_pixbuf(0x55, 64, 32);
+    sel.apply_fullscreen_opaque_ = true;
+    realmheart::mana_core::ApplyCompletion finish_commit;
+    sel.set_apply_callback([
+        &finish_commit
+    ](const std::string&, realmheart::mana_core::ApplyCompletion completion) {
+        finish_commit = std::move(completion);
+    });
+
+    sel.begin_apply();
+    constexpr guint64 animation_start = 3'000'000;
+    sel.apply_start_micros_ = animation_start;
+    sel.update_animations(animation_start + 650'000);
+    EXPECT_FALSE(static_cast<bool>(finish_commit));
+    sel.apply_cover_frame_counter_ = 11;
+    sel.handle_apply_cover_presentation_feedback(11, true, 12'345);
+
+    ASSERT_TRUE(static_cast<bool>(finish_commit));
+    EXPECT_EQ(sel.state_, realmheart::mana_core::ManaCoresSelector::State::Applying);
+    EXPECT_TRUE(sel.visible_);
+    EXPECT_NE(sel.apply_fullscreen_pixbuf_, nullptr);
+
+    finish_commit(true, {});
+    while (g_main_context_iteration(nullptr, FALSE)) {}
+    EXPECT_EQ(sel.state_, realmheart::mana_core::ManaCoresSelector::State::Applying);
+    EXPECT_TRUE(sel.visible_);
+    EXPECT_NE(sel.apply_fullscreen_pixbuf_, nullptr);
+    ASSERT_NE(sel.apply_handoff_start_micros_, 0U);
+    EXPECT_DOUBLE_EQ(sel.apply_fullscreen_alpha_, 1.0);
+
+    const guint64 handoff_start = sel.apply_handoff_start_micros_;
+    sel.update_animations(
+        handoff_start + realmheart::mana_core::ManaCoresSelector::kApplyHandoffDurationMicros / 2
+    );
+    EXPECT_TRUE(sel.visible_);
+    EXPECT_NEAR(sel.apply_fullscreen_alpha_, 0.5, 0.01);
+
+    sel.update_animations(
+        handoff_start + realmheart::mana_core::ManaCoresSelector::kApplyHandoffDurationMicros
+    );
+    EXPECT_EQ(sel.state_, realmheart::mana_core::ManaCoresSelector::State::Applying);
+    EXPECT_TRUE(sel.visible_);
+    EXPECT_DOUBLE_EQ(sel.apply_fullscreen_alpha_, 0.0);
+
+    sel.update_animations(
+        handoff_start + realmheart::mana_core::ManaCoresSelector::kApplyHandoffDurationMicros +
+            16'000
+    );
+    EXPECT_EQ(sel.state_, realmheart::mana_core::ManaCoresSelector::State::Hidden);
+    EXPECT_FALSE(sel.visible_);
 }
 
 TEST(ManaCoresSelector, HandleKeyWhenHiddenReturnsFalse) {
@@ -259,10 +482,47 @@ TEST(ThumbnailCache, RejectsUnsafeTargetDimensionsBeforeDecode) {
         "realmheart-thumbnail-cache-missing.png";
     std::string error;
     EXPECT_EQ(
-        realmheart::mana_core::ThumbnailCache::load_or_create(missing, 5000, &error),
+        realmheart::mana_core::ThumbnailCache::load_or_create(
+            missing,
+            realmheart::mana_core::ThumbnailCache::max_preview_dimension() + 1,
+            &error
+        ),
         nullptr
     );
-    EXPECT_FALSE(error.empty());
+    EXPECT_EQ(error, "thumbnail target dimension is out of bounds");
+}
+
+TEST(ThumbnailCache, SupportsDeviceResolutionPreviewsAbove4096Pixels) {
+    const auto source = std::filesystem::temp_directory_path() /
+        ("realmheart-thumbnail-cache-device-resolution-" +
+         std::to_string(static_cast<long long>(::getpid())) + "-" +
+         std::to_string(static_cast<long long>(g_get_real_time())) + ".png");
+    GdkPixbuf* source_pixbuf = make_sized_test_pixbuf(0x71, 5000, 2);
+    ASSERT_NE(source_pixbuf, nullptr);
+    GError* save_error = nullptr;
+    ASSERT_TRUE(gdk_pixbuf_save(
+        source_pixbuf,
+        source.c_str(),
+        "png",
+        &save_error,
+        nullptr
+    ));
+    if (save_error != nullptr) g_error_free(save_error);
+    g_object_unref(source_pixbuf);
+
+    std::string error;
+    GdkPixbuf* preview = realmheart::mana_core::ThumbnailCache::load_or_create(
+        source,
+        5000,
+        &error
+    );
+    ASSERT_NE(preview, nullptr) << error;
+    EXPECT_EQ(gdk_pixbuf_get_width(preview), 5000);
+    EXPECT_EQ(gdk_pixbuf_get_height(preview), 2);
+
+    g_object_unref(preview);
+    std::error_code remove_error;
+    std::filesystem::remove(source, remove_error);
 }
 
 TEST(ThumbnailCache, ReusesDecodedPreviewAndInvalidatesChangedSource) {
