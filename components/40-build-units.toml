@@ -1,5 +1,5 @@
 schema_version = 1
-release_version = "0.7.8"
+release_version = "0.8.0"
 
 [[build_units]]
 id = "realmheart-shell"

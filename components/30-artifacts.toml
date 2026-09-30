@@ -1,5 +1,5 @@
 schema_version = 1
-release_version = "0.7.8"
+release_version = "0.8.0"
 
 [[artifacts]]
 id = "core.binary"
@@ -333,7 +333,7 @@ contexts = ["doctor_background", "doctor_manual"]
 [health_checks.args]
 version_argv = ["--version"]
 version_prefix = "realmheart"
-expected_version = "0.7.8"
+expected_version = "0.8.0"
 
 [[health_checks]]
 id = "check.core.power-menu-renderer.exists"
@@ -367,7 +367,7 @@ contexts = ["doctor_background", "doctor_manual"]
 [health_checks.args]
 version_argv = ["--version"]
 version_prefix = "realmheart power menu renderer"
-expected_version = "0.7.8"
+expected_version = "0.8.0"
 
 [[health_checks]]
 id = "check.core.assets.exists"
@@ -471,7 +471,7 @@ contexts = ["doctor_background", "doctor_manual"]
 [health_checks.args]
 version_argv = ["--version"]
 version_prefix = "realmheart event daemon"
-expected_version = "0.7.8"
+expected_version = "0.8.0"
 
 [[health_checks]]
 id = "check.event.cli.exists"
@@ -505,7 +505,7 @@ contexts = ["doctor_background", "doctor_manual"]
 [health_checks.args]
 version_argv = ["--version"]
 version_prefix = "realmheart event cli"
-expected_version = "0.7.8"
+expected_version = "0.8.0"
 
 [[health_checks]]
 id = "check.event.service.exists"
@@ -560,7 +560,7 @@ contexts = ["doctor_background", "doctor_manual"]
 [health_checks.args]
 version_argv = ["--version"]
 version_prefix = "realmheart screenshot"
-expected_version = "0.7.8"
+expected_version = "0.8.0"
 
 [[health_checks]]
 id = "check.screenshot.regions.exists"
@@ -594,7 +594,7 @@ contexts = ["doctor_background", "doctor_manual"]
 [health_checks.args]
 version_argv = ["--version"]
 version_prefix = "realmheart screenshot regions"
-expected_version = "0.7.8"
+expected_version = "0.8.0"
 
 [[health_checks]]
 id = "check.auth.helper.exists"
@@ -690,7 +690,7 @@ contexts = ["doctor_background", "doctor_manual"]
 [health_checks.args]
 version_argv = ["--version"]
 version_prefix = "realmheart wallpaper renderer"
-expected_version = "0.7.8"
+expected_version = "0.8.0"
 
 # The setuid auth helper and the compositor-coupled FX loader/plugin have no
 # safe version-only probe: the helper must never run outside the PAM path, and
