@@ -42,7 +42,7 @@ class ManifestTests(unittest.TestCase):
     def test_real_manifest_loads_and_is_complete(self) -> None:
         registry = load_manifest(_bootstrap.REPO_ROOT / "components")
         self.assertEqual(registry.schema_version, 1)
-        self.assertEqual(registry.release_version, "0.7.8")
+        self.assertEqual(registry.release_version, _bootstrap.RELEASE_VERSION)
         self.assertEqual(len(registry.components), 18)
         self.assertEqual(len(registry.dependencies), 63)
         self.assertEqual(len(registry.capabilities), 65)

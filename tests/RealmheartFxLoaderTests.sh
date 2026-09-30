@@ -51,7 +51,7 @@ case "${1:-} ${2:-}" in
         esac
         ;;
     "realmheart-fx identity")
-        printf 'build_id=%s\nrealmheart_version=0.7.8\nhyprland_commit=%s\nhyprland_abi=%s\n' \
+        printf 'build_id=%s\nrealmheart_version=0.8.0\nhyprland_commit=%s\nhyprland_abi=%s\n' \
             "${FAKE_LOADED_BUILD_ID:-${FAKE_BUILD_ID:?}}" "${FAKE_COMMIT:?}" "${FAKE_ABI:?}"
         ;;
     *)

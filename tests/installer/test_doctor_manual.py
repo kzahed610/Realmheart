@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from . import _bootstrap
 from realmheart_doctor.cli import main
 
 
@@ -30,7 +31,7 @@ class DoctorManualTests(unittest.TestCase):
              'assert not any(k.startswith("realmheart_installer") for k in sys.modules)'],
             capture_output=True, text=True, timeout=10, check=True,
         )
-        self.assertEqual(json.loads(result.stdout)["doctor_version"], "0.7.8")
+        self.assertEqual(json.loads(result.stdout)["doctor_version"], _bootstrap.RELEASE_VERSION)
 
     def test_explicit_state_directory_records_diagnosis_and_incident(self):
         from unittest.mock import patch

@@ -48,12 +48,12 @@ def component(cid: str, state: ComponentHealthState, category="core") -> Compone
 def verification(*, transaction_id="RH-FINAL", manifest_digest="manifest", plan_digest="plan", health=InstallHealthState.HEALTHY, activation=ActivationState.ACTIVE, runtime=RuntimeHealthState.HEALTHY, core=ComponentHealthState.HEALTHY, fx=ComponentHealthState.HEALTHY, warnings=()):
     comps=(component("realmheart-core",core), component("realmheart-fx",fx,"fx"))
     receipt=ReceiptInputAssembly(
-        2,"0.7.8",1,manifest_digest,INSTALLER_VERSION,transaction_id,health.value,activation.value,runtime.value,
+        2,_bootstrap.RELEASE_VERSION,1,manifest_digest,INSTALLER_VERSION,transaction_id,health.value,activation.value,runtime.value,
         datetime.now(timezone.utc).isoformat(),comps,(),(),(),
         FxReceiptInput(True,"compatible","realmheart-fx","build","fx.plugin","fx.loader",None,None,"0.56.2","abc","abi",()),
         {"compiler":"test"},
     )
-    return VerificationReport(1,transaction_id,"0.7.8",manifest_digest,plan_digest,health,ActivationVerification(activation,runtime,"test",True,True),comps,(),(),(),receipt,tuple(warnings),())
+    return VerificationReport(1,transaction_id,_bootstrap.RELEASE_VERSION,manifest_digest,plan_digest,health,ActivationVerification(activation,runtime,"test",True,True),comps,(),(),(),receipt,tuple(warnings),())
 
 
 class Phase16FinalizationTests(unittest.TestCase):

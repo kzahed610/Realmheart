@@ -129,11 +129,11 @@ class PlanningTests(unittest.TestCase):
         }, uid=1000)
 
     def _installation(self, origin: InstallOrigin, mode: InstallMode, *, installed="0.7.8") -> InstallationState:
-        version = parse_version("0.7.8")
+        version = parse_version(_bootstrap.RELEASE_VERSION)
         source = SourceIdentity(
             source_root=str(_bootstrap.REPO_ROOT),
             version=version,
-            version_text="0.7.8",
+            version_text=_bootstrap.RELEASE_VERSION,
             cmake_path=str(_bootstrap.REPO_ROOT / "CMakeLists.txt"),
             git_commit="deadbeef",
             git_dirty=False,

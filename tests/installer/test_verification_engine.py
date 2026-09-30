@@ -43,7 +43,7 @@ class VerificationRunner:
                 return CommandResult(command, 3, "inactive\n")
             return CommandResult(command, 0, "active\n")
         if len(command) == 2 and command[1] == "--version" and command[0].endswith("/realmheart"):
-            return CommandResult(command, 0, "Realmheart 0.7.8\n")
+            return CommandResult(command, 0, f"Realmheart {_bootstrap.RELEASE_VERSION}\n")
         if len(command) == 2 and command[1] == "--help" and command[0].endswith("/realmheart-event"):
             return CommandResult(command, 0, "help\n")
         if len(command) == 2 and command[1] == "ping" and command[0].endswith("/realmheart-event"):
@@ -92,8 +92,11 @@ class Phase13VerificationTests(unittest.TestCase):
         return tuple(results)
 
     def _snapshot(self, paths: XdgPaths):
-        version = parse_version("0.7.8")
-        source = SourceIdentity(str(_bootstrap.REPO_ROOT), version, "0.7.8", str(_bootstrap.REPO_ROOT / "CMakeLists.txt"), "deadbeef", False)
+        version = parse_version(self.registry.release_version)
+        source = SourceIdentity(
+            str(_bootstrap.REPO_ROOT), version, self.registry.release_version,
+            str(_bootstrap.REPO_ROOT / "CMakeLists.txt"), "deadbeef", False,
+        )
         installation = InstallationState(
             origin=InstallOrigin.NONE,
             source=source,

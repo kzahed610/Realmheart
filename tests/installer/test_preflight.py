@@ -64,7 +64,7 @@ class PreflightTests(unittest.TestCase):
         for name in ("home", "cfg", "state", "data", "cache", "run", "source"):
             (root / name).mkdir()
         (root / "source/CMakeLists.txt").write_text(
-            "cmake_minimum_required(VERSION 3.25)\nproject(Realmheart VERSION 0.7.8 LANGUAGES C CXX)\n",
+            f"cmake_minimum_required(VERSION 3.25)\nproject(Realmheart VERSION {_bootstrap.RELEASE_VERSION} LANGUAGES C CXX)\n",
             encoding="utf-8",
         )
         shutil.copytree(_bootstrap.REPO_ROOT / "components", root / "source" / "components")
@@ -167,7 +167,10 @@ class PreflightTests(unittest.TestCase):
             root = Path(temp)
             paths = self._paths(root)
             manifest_file = next((root / "source/components").glob("*.toml"))
-            manifest_file.write_text('schema_version = 999\nrelease_version = "0.7.8"\n', encoding="utf-8")
+            manifest_file.write_text(
+                f'schema_version = 999\nrelease_version = "{_bootstrap.RELEASE_VERSION}"\n',
+                encoding="utf-8",
+            )
             scanner = PreflightScanner(
                 paths=paths,
                 source_root=root / "source",

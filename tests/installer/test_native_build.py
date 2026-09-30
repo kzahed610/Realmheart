@@ -79,7 +79,7 @@ class FakeBuildRunner:
                 path.write_text("mutated by fake build\n")
             return CommandResult(command, 0, f"built {target}\n")
         if len(command) == 2 and command[0] == str(Path(self.plan.build.build_dir) / "realmheart") and command[1] == "--version":
-            return CommandResult(command, 0, "Realmheart 0.7.8\n")
+            return CommandResult(command, 0, f"Realmheart {_bootstrap.RELEASE_VERSION}\n")
         if command and command[0] in {"bash", "/usr/bin/bash"} and len(command) >= 2 and command[1].endswith("Tests.sh"):
             return CommandResult(command, 0, "contract passed\n")
         if command[:2] == ("cmake", "--install"):
@@ -145,7 +145,9 @@ def make_paths(root: Path) -> XdgPaths:
 def make_source(root: Path) -> Path:
     source = root / "source"
     source.mkdir()
-    (source / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.25)\nproject(Realmheart VERSION 0.7.8 LANGUAGES C CXX)\n")
+    (source / "CMakeLists.txt").write_text(
+        f"cmake_minimum_required(VERSION 3.25)\nproject(Realmheart VERSION {_bootstrap.RELEASE_VERSION} LANGUAGES C CXX)\n"
+    )
     shutil.copytree(_bootstrap.REPO_ROOT / "components", source / "components")
     for directory in ("assets", "styles", "effects"):
         (source / directory).mkdir()
@@ -158,10 +160,10 @@ def make_source(root: Path) -> Path:
 
 
 def make_snapshot(paths: XdgPaths, source: Path, registry) -> EnvironmentSnapshot:
-    version = parse_version("0.7.8")
+    version = parse_version(registry.release_version)
     installation = InstallationState(
         origin=InstallOrigin.NONE,
-        source=SourceIdentity(str(source), version, "0.7.8", str(source / "CMakeLists.txt"), None, None),
+        source=SourceIdentity(str(source), version, registry.release_version, str(source / "CMakeLists.txt"), None, None),
         installed_version=None,
         installed_version_text=None,
         version_evidence=VersionEvidence.NONE,

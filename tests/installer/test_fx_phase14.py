@@ -39,7 +39,7 @@ class FxRuntimeRunner(phase13.VerificationRunner):
                 command,
                 0,
                 f"build_id={self.plugin_build_id}\n"
-                "realmheart_version=0.7.8\n"
+                f"realmheart_version={_bootstrap.RELEASE_VERSION}\n"
                 f"hyprland_commit={self.commit}\n"
                 f"hyprland_abi={self.abi}\n",
             )

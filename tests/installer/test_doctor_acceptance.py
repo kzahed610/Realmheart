@@ -878,7 +878,7 @@ class DoctorAcceptanceTests(unittest.TestCase):
             wrapper.chmod(0o755)
             result=subprocess.run([str(wrapper),"--version"],cwd=Path("/"),text=True,capture_output=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr)
-            self.assertEqual(result.stdout.strip(),"realmheart-doctor 0.7.8")
+            self.assertEqual(result.stdout.strip(),f"realmheart-doctor {_bootstrap.RELEASE_VERSION}")
 
     def test_installed_wrapper_exports_canonical_install_roots(self):
         import contextlib
@@ -963,7 +963,7 @@ class DoctorAcceptanceTests(unittest.TestCase):
         from tests.installer.test_finalization import Phase16FinalizationTests, verification
         with tempfile.TemporaryDirectory() as temp:
             helper=Phase16FinalizationTests(); _, plan=helper._plan(Path(temp),InstallMode.FRESH)
-            assessment=AcceptanceAssessment(1,AcceptanceRecommendation.REVERT_RECOMMENDED,plan.transaction_id,"0.7.8",plan.manifest_digest,1,1,"active","healthy",(),0,0,"critical Doctor evidence")
+            assessment=AcceptanceAssessment(1,AcceptanceRecommendation.REVERT_RECOMMENDED,plan.transaction_id,plan.target_version,plan.manifest_digest,1,1,"active","healthy",(),0,0,"critical Doctor evidence")
             decision=build_final_decision(plan,verification(),assessment)
             self.assertEqual(decision.severity,FinalSeverity.CRITICAL)
             self.assertTrue(decision.requires_explicit_choice)
@@ -975,7 +975,7 @@ class DoctorAcceptanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             helper=Phase16FinalizationTests(); _, plan=helper._plan(Path(temp))
             report=verification(transaction_id=plan.transaction_id,manifest_digest=plan.manifest_digest,plan_digest=plan.plan_digest)
-            assessment=AcceptanceAssessment(1,AcceptanceRecommendation.KEEP,plan.transaction_id,"0.7.8",plan.manifest_digest,1,1,"active","healthy",(),0,0,"looks good")
+            assessment=AcceptanceAssessment(1,AcceptanceRecommendation.KEEP,plan.transaction_id,plan.target_version,plan.manifest_digest,1,1,"active","healthy",(),0,0,"looks good")
             payload=build_installed_state_receipt(plan,report,doctor_assessment=assessment)
             self.assertEqual(payload["doctor_acceptance"]["recommendation"],"keep")
 

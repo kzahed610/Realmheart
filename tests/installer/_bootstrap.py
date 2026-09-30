@@ -7,3 +7,5 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLER_ROOT = REPO_ROOT / "installer"
 if str(INSTALLER_ROOT) not in sys.path:
     sys.path.insert(0, str(INSTALLER_ROOT))
+
+from realmheart_maintenance.version import RELEASE_VERSION

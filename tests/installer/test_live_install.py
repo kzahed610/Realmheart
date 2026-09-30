@@ -77,7 +77,7 @@ class FakeLiveRunner:
             return CommandResult(command, 0, "prompt\n")
 
         if len(command) == 2 and command[1] == "--version" and command[0].endswith("/realmheart"):
-            return CommandResult(command, 0, "Realmheart 0.7.8\n")
+            return CommandResult(command, 0, f"Realmheart {self.plan.target_version}\n")
         if len(command) == 2 and command[1] == "--help" and command[0].endswith("/realmheart-event"):
             return CommandResult(command, 0, "help\n")
         if len(command) == 2 and command[1] == "ping" and command[0].endswith("/realmheart-event"):
