@@ -37,8 +37,8 @@ public:
                << "  '-t -f DEVICE,TYPE,STATE device') IFS= read -r active < \"$REALMHEART_WIFI_TEST_ACTIVE\"; if [ -n \"$active\" ]; then printf 'wlan0:wifi:connected\\n'; else printf 'wlan0:wifi:disconnected\\n'; fi ;;\n"
                << "  '-t -f DEVICE,TYPE,STATE,CONNECTION device status') IFS= read -r active < \"$REALMHEART_WIFI_TEST_ACTIVE\"; case \"$active\" in 'Realm:Net') printf 'wlan0:wifi:connected:Realm\\:Net\\n' ;; OpenNet) printf 'wlan0:wifi:connected:OpenNet\\n' ;; SecretNet) printf 'wlan0:wifi:connected:SecretNet\\n' ;; *) printf 'wlan0:wifi:disconnected:--\\n' ;; esac ;;\n"
                << "  'connection up uuid uuid-realm') printf 'Realm:Net' > \"$REALMHEART_WIFI_TEST_ACTIVE\" ;;\n"
-               << "  '--ask device wifi connect OpenNet') printf 'OpenNet' > \"$REALMHEART_WIFI_TEST_ACTIVE\" ;;\n"
-               << "  '--ask device wifi connect SecretNet') IFS= read -r password; [ \"$password\" = aether-key ] || exit 65; printf 'SecretNet' > \"$REALMHEART_WIFI_TEST_ACTIVE\" ;;\n"
+               << "  '--ask device wifi connect OpenNet') [ -t 0 ] || exit 66; printf 'OpenNet' > \"$REALMHEART_WIFI_TEST_ACTIVE\" ;;\n"
+               << "  '--ask device wifi connect SecretNet') [ -t 0 ] || exit 66; printf 'Password: ' > /dev/tty; IFS= read -r password < /dev/tty; [ \"$password\" = aether-key ] || exit 65; printf 'SecretNet' > \"$REALMHEART_WIFI_TEST_ACTIVE\" ;;\n"
                << "  'device disconnect wlan0') printf '' > \"$REALMHEART_WIFI_TEST_ACTIVE\" ;;\n"
                << "  'connection delete uuid uuid-realm') : ;;\n"
                << "  *) printf 'unexpected arguments: %s\\n' \"$*\"; exit 64 ;;\n"
@@ -129,6 +129,9 @@ int main() {
             "Realm:Net", std::nullopt, "uuid-realm"
         );
         require(saved_connect.success, "saved WiFi profile should reconnect by UUID");
+
+        const auto open_connect = realmheart::services::Wifi::connect("OpenNet");
+        require(open_connect.success, "new open WiFi network should connect through an interactive CLI");
 
         const auto secure_connect = realmheart::services::Wifi::connect(
             "SecretNet", std::string("aether-key")

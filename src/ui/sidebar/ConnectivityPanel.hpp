@@ -49,6 +49,7 @@ private:
     void set_busy(bool busy, const std::string& message = {});
     void set_available(bool available);
     void set_status(const std::string& message, bool error = false);
+    void open_settings();
 
     static void on_row_action(GtkButton* button, gpointer data);
 
@@ -60,6 +61,7 @@ private:
     GtkWidget* spinner_ = nullptr;
     GtkWidget* refresh_button_ = nullptr;
     GtkWidget* power_button_ = nullptr;
+    GtkWidget* settings_hint_ = nullptr;
     GtkWidget* password_revealer_ = nullptr;
     GtkWidget* password_title_ = nullptr;
     GtkWidget* password_entry_ = nullptr;
@@ -102,6 +104,7 @@ private:
     void set_busy(bool busy, const std::string& message = {});
     void set_available(bool available);
     void set_status(const std::string& message, bool error = false);
+    void open_settings();
 
     static void on_row_action(GtkButton* button, gpointer data);
 
@@ -113,6 +116,7 @@ private:
     GtkWidget* spinner_ = nullptr;
     GtkWidget* refresh_button_ = nullptr;
     GtkWidget* power_button_ = nullptr;
+    GtkWidget* settings_hint_ = nullptr;
     std::function<void()> state_changed_;
     std::shared_ptr<LifetimeState> lifetime_;
     bool requested_visible_ = false;

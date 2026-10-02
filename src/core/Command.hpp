@@ -28,6 +28,9 @@ struct CommandOptions {
     std::size_t max_output_bytes = 64 * 1024;
     bool separate_stderr = false;
     std::optional<std::string> stdin_data;
+    // Attach stdin/stdout/stderr to a no-echo pseudo-terminal for CLIs that
+    // only accept interactive prompts from a terminal (for example nmcli --ask).
+    bool interactive_terminal = false;
     std::optional<std::string> working_directory;
     std::function<bool()> cancelled;
 };

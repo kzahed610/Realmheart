@@ -270,6 +270,7 @@ add_library(realmheart_ui STATIC
     src/ui/bar/widgets/SystemMonitorWidget.cpp
     src/ui/bar/widgets/BatteryWidget.cpp
     src/services/SystemMonitorService.cpp
+    src/services/ConnectivityMonitor.cpp
     src/ui/sidebar/VerticalRevealClip.cpp
     src/ui/sidebar/ConnectivityPanel.cpp
     src/ui/sidebar/NightLightPanel.cpp
@@ -1489,6 +1490,24 @@ if(BUILD_TESTING)
 
     add_executable(realmheart_hyprland_event_monitor_tests tests/HyprlandEventMonitorTests.cpp src/services/HyprlandEventMonitor.cpp)
     realmheart_register_test(realmheart_hyprland_event_monitor_tests)
+
+    add_executable(
+        realmheart_connectivity_monitor_tests
+        tests/ConnectivityMonitorTests.cpp
+        src/services/ConnectivityMonitor.cpp
+    )
+    target_link_libraries(realmheart_connectivity_monitor_tests PRIVATE PkgConfig::GIO)
+    realmheart_register_dbus_test(realmheart_connectivity_monitor_tests)
+
+    add_executable(
+        realmheart_connectivity_settings_tests
+        tests/ConnectivitySettingsAppsTests.cpp
+    )
+    target_link_libraries(
+        realmheart_connectivity_settings_tests
+        PRIVATE GTest::gtest GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_connectivity_settings_tests)
 
     add_executable(
         realmheart_hyprland_application_monitor_tests

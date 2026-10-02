@@ -291,7 +291,11 @@ WifiMutationResult Wifi::connect(
     }
 
     auto command_options = options;
-    if (password && !password->empty()) command_options.stdin_data = *password + "\n";
+    command_options.interactive_terminal = connection_uuid.empty();
+    command_options.stdin_data.reset();
+    if (connection_uuid.empty() && password && !password->empty()) {
+        command_options.stdin_data = *password + "\n";
+    }
     const auto write = realmheart::core::run_capture(command, command_options);
     if (!write.succeeded()) return failed_mutation(write, "WiFi connection failed");
 

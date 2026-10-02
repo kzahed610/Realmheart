@@ -128,6 +128,29 @@ void test_early_child_exit_does_not_raise_sigpipe() {
             "early stdin consumer exit should preserve the child result");
 }
 
+void test_interactive_command_uses_no_echo_terminal() {
+    realmheart::core::CommandOptions options;
+    options.deadline = 2s;
+    options.stdin_data = "12345\n";
+    options.interactive_terminal = true;
+
+    const auto result = realmheart::core::run_capture(
+        {
+            "/bin/sh", "-c",
+            "test -t 0 && test -t 1 && test -t 2 || exit 66; "
+            "printf 'Password: '; IFS= read -r secret; "
+            "test \"$secret\" = 12345 || exit 65; printf 'accepted\\n'"
+        },
+        options
+    );
+
+    require(result.succeeded(), "interactive command must receive input from a terminal");
+    require(result.output.find("accepted") != std::string::npos,
+            "interactive command output must be captured");
+    require(result.output.find("12345") == std::string::npos,
+            "terminal input must not be echoed into captured output");
+}
+
 void test_failure_detail_is_terminal_safe_and_single_line() {
     const std::string unsafe = "\x1b[31mboom\x1b[0m\nsecond\tline\x07";
     require(
@@ -210,6 +233,7 @@ int main() {
     test_find_in_path_rejects_executable_directories();
     test_cancellation_terminates_child();
     test_early_child_exit_does_not_raise_sigpipe();
+    test_interactive_command_uses_no_echo_terminal();
     test_failure_detail_is_terminal_safe_and_single_line();
     test_background_preserves_shell_script_as_one_argument();
     test_background_reports_exec_failure();

@@ -1,5 +1,6 @@
 #include "ui/sidebar/ConnectivityPanel.hpp"
 
+#include "ui/sidebar/ConnectivitySettingsApps.hpp"
 #include "ui/sidebar/VerticalRevealClip.hpp"
 
 #include "core/TaskExecutor.hpp"
@@ -10,6 +11,7 @@
 #include <exception>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace realmheart::ui::sidebar {
 namespace {
@@ -85,6 +87,141 @@ std::string refresh_key(std::string_view prefix, const std::shared_ptr<State>& s
     return std::string(prefix) + ":" + std::to_string(
         reinterpret_cast<std::uintptr_t>(state.get())
     );
+}
+
+GAppInfo* find_desktop_app_info(std::string_view desktop_id) {
+    GList* apps = g_app_info_get_all();
+    GAppInfo* found = nullptr;
+    for (GList* node = apps; node != nullptr; node = node->next) {
+        auto* app = G_APP_INFO(node->data);
+        const char* id = g_app_info_get_id(app);
+        if (id != nullptr && desktop_id == id) {
+            found = G_APP_INFO(g_object_ref(app));
+            break;
+        }
+    }
+    g_list_free_full(apps, g_object_unref);
+    return found;
+}
+
+bool settings_candidate_is_installed(const SettingsAppCandidate& candidate) {
+    if (!candidate.desktop_id.empty()) {
+        GAppInfo* app = find_desktop_app_info(candidate.desktop_id);
+        if (app == nullptr) return false;
+        g_object_unref(app);
+        return true;
+    }
+
+    const std::string executable(candidate.executable);
+    gchar* path = g_find_program_in_path(executable.c_str());
+    const bool available = path != nullptr;
+    g_free(path);
+    return available;
+}
+
+bool launch_settings_candidate(
+    const SettingsAppCandidate& candidate,
+    std::string& error_message
+) {
+    if (!candidate.desktop_id.empty()) {
+        GAppInfo* app = find_desktop_app_info(candidate.desktop_id);
+        if (app == nullptr) return false;
+
+        GError* error = nullptr;
+        const gboolean launched = g_app_info_launch(app, nullptr, nullptr, &error);
+        if (!launched && error != nullptr) error_message = error->message;
+        if (error != nullptr) g_error_free(error);
+        g_object_unref(app);
+        return launched != FALSE;
+    }
+
+    std::vector<std::string> arguments{std::string(candidate.executable)};
+    if (!candidate.argument.empty()) arguments.emplace_back(candidate.argument);
+    std::vector<gchar*> argv;
+    argv.reserve(arguments.size() + 1);
+    for (std::string& argument : arguments) argv.push_back(argument.data());
+    argv.push_back(nullptr);
+
+    GError* error = nullptr;
+    const gboolean launched = g_spawn_async(
+        nullptr,
+        argv.data(),
+        nullptr,
+        G_SPAWN_SEARCH_PATH,
+        nullptr,
+        nullptr,
+        nullptr,
+        &error
+    );
+    if (!launched && error != nullptr) error_message = error->message;
+    if (error != nullptr) g_error_free(error);
+    return launched != FALSE;
+}
+
+void show_settings_feedback(
+    ConnectivitySettingsService service,
+    GtkWidget* status,
+    GtkWidget* hint
+) {
+    std::string launch_error;
+    const SettingsAppLaunchStatus result = launch_available_connectivity_settings(
+        service,
+        settings_candidate_is_installed,
+        [&launch_error](const SettingsAppCandidate& candidate) {
+            return launch_settings_candidate(candidate, launch_error);
+        }
+    );
+
+    switch (result) {
+    case SettingsAppLaunchStatus::Opened:
+        gtk_label_set_text(GTK_LABEL(status), "Settings opened");
+        set_error_class(status, false);
+        gtk_widget_set_visible(hint, FALSE);
+        break;
+    case SettingsAppLaunchStatus::Unavailable: {
+        gtk_label_set_text(GTK_LABEL(status), "Settings app not installed");
+        set_error_class(status, true);
+        const std::string suggestion(connectivity_settings_install_suggestion(service));
+        gtk_label_set_text(GTK_LABEL(hint), suggestion.c_str());
+        gtk_widget_set_visible(hint, TRUE);
+        break;
+    }
+    case SettingsAppLaunchStatus::Failed:
+        gtk_label_set_text(GTK_LABEL(status), "Could not open settings app");
+        set_error_class(status, true);
+        if (launch_error.empty()) launch_error = "An installed settings app could not be started.";
+        gtk_label_set_text(GTK_LABEL(hint), launch_error.c_str());
+        gtk_widget_set_visible(hint, TRUE);
+        break;
+    }
+}
+
+GtkWidget* make_settings_footer(
+    const char* tooltip,
+    GtkWidget** hint_out,
+    void (*on_clicked)(GtkButton*, gpointer),
+    gpointer user_data
+) {
+    GtkWidget* footer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 3);
+    gtk_widget_add_css_class(footer, "realmheart-manager-settings-footer");
+
+    GtkWidget* hint = make_text_label("", "realmheart-manager-settings-hint");
+    gtk_label_set_wrap(GTK_LABEL(hint), TRUE);
+    gtk_label_set_justify(GTK_LABEL(hint), GTK_JUSTIFY_CENTER);
+    gtk_label_set_max_width_chars(GTK_LABEL(hint), 44);
+    gtk_widget_set_hexpand(hint, TRUE);
+    gtk_widget_set_visible(hint, FALSE);
+    gtk_box_append(GTK_BOX(footer), hint);
+    *hint_out = hint;
+
+    GtkWidget* button = gtk_button_new_with_label("More settings");
+    gtk_widget_add_css_class(button, "realmheart-manager-quiet-button");
+    gtk_widget_add_css_class(button, "realmheart-manager-settings-button");
+    gtk_widget_set_halign(button, GTK_ALIGN_CENTER);
+    gtk_widget_set_tooltip_text(button, tooltip);
+    g_signal_connect(button, "clicked", G_CALLBACK(on_clicked), user_data);
+    gtk_box_append(GTK_BOX(footer), button);
+    return footer;
 }
 
 } // namespace
@@ -249,6 +386,16 @@ void WifiManagerPopover::build() {
     gtk_box_append(GTK_BOX(password_box), password_actions);
     gtk_revealer_set_child(GTK_REVEALER(password_revealer_), password_box);
     gtk_box_append(GTK_BOX(content_), password_revealer_);
+
+    GtkWidget* settings_footer = make_settings_footer(
+        "Open Wi-Fi settings",
+        &settings_hint_,
+        +[](GtkButton*, gpointer data) {
+            static_cast<WifiManagerPopover*>(data)->open_settings();
+        },
+        this
+    );
+    gtk_box_append(GTK_BOX(content_), settings_footer);
 }
 
 void WifiManagerPopover::show() {
@@ -598,6 +745,10 @@ void WifiManagerPopover::set_status(const std::string& message, bool error) {
     set_error_class(status_, error);
 }
 
+void WifiManagerPopover::open_settings() {
+    show_settings_feedback(ConnectivitySettingsService::Wifi, status_, settings_hint_);
+}
+
 struct BluetoothManagerPopover::LifetimeState {
     std::atomic<bool> alive{true};
     std::atomic<std::uint64_t> generation{0};
@@ -716,6 +867,16 @@ void BluetoothManagerPopover::build() {
     gtk_widget_add_css_class(list_, "realmheart-manager-list");
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), list_);
     gtk_box_append(GTK_BOX(content_), scroller);
+
+    GtkWidget* settings_footer = make_settings_footer(
+        "Open Bluetooth settings",
+        &settings_hint_,
+        +[](GtkButton*, gpointer data) {
+            static_cast<BluetoothManagerPopover*>(data)->open_settings();
+        },
+        this
+    );
+    gtk_box_append(GTK_BOX(content_), settings_footer);
 }
 
 void BluetoothManagerPopover::show() {
@@ -1031,6 +1192,10 @@ void BluetoothManagerPopover::set_available(bool available) {
 void BluetoothManagerPopover::set_status(const std::string& message, bool error) {
     gtk_label_set_text(GTK_LABEL(status_), message.c_str());
     set_error_class(status_, error);
+}
+
+void BluetoothManagerPopover::open_settings() {
+    show_settings_feedback(ConnectivitySettingsService::Bluetooth, status_, settings_hint_);
 }
 
 } // namespace realmheart::ui::sidebar

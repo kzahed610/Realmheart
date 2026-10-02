@@ -24,6 +24,10 @@
 #include <tuple>
 #include <vector>
 
+namespace realmheart::services {
+class ConnectivityMonitor;
+}
+
 namespace realmheart::animation::character {
 class CharacterCompositor;
 }
@@ -103,15 +107,16 @@ private:
         std::atomic<std::uint64_t> generation{0};
         std::atomic<bool> refresh_in_flight{false};
         std::atomic<bool> refresh_pending{false};
+        std::atomic<bool> wifi_refresh_in_flight{false};
+        std::atomic<bool> wifi_refresh_pending{false};
+        std::atomic<bool> bluetooth_refresh_in_flight{false};
+        std::atomic<bool> bluetooth_refresh_pending{false};
         std::mutex operation_mutex;
         RightSidebar* owner = nullptr; // GTK main thread only
     };
 
     struct ControlRefreshResult {
         std::shared_ptr<AsyncUiState> state;
-        std::optional<std::string> wifi_status;
-        bool wifi_active = false;
-        std::optional<bool> bluetooth_powered;
         std::optional<bool> night_light_enabled;
         bool night_light_recovery_available = false;
         std::optional<std::string> active_profile;
@@ -119,6 +124,14 @@ private:
         std::optional<double> volume_percent;
         std::uint64_t brightness_generation = 0;
         std::uint64_t volume_generation = 0;
+    };
+
+    struct ConnectivityRefreshResult {
+        std::shared_ptr<AsyncUiState> state;
+        bool wifi = false;
+        std::optional<std::string> wifi_status;
+        bool wifi_active = false;
+        std::optional<bool> bluetooth_powered;
     };
 
     void setup_layout();
@@ -136,8 +149,13 @@ private:
     void build_power_profiles();
     void install_panel_click_away();
     void refresh_controls();
+    void refresh_connectivity();
+    void refresh_wifi_status();
+    void refresh_bluetooth_status();
     static gboolean finish_control_refresh(gpointer raw);
     static void destroy_control_refresh_result(gpointer raw);
+    static gboolean finish_connectivity_refresh(gpointer raw);
+    static void destroy_connectivity_refresh_result(gpointer raw);
     void post_control_action(
         std::function<void()> action,
         std::function<void()> completion = {}
@@ -196,6 +214,7 @@ private:
     std::unique_ptr<WifiManagerPopover> wifi_panel_;
     std::unique_ptr<BluetoothManagerPopover> bluetooth_panel_;
     std::unique_ptr<NightLightPanel> night_light_panel_;
+    std::unique_ptr<services::ConnectivityMonitor> connectivity_monitor_;
     std::shared_ptr<AsyncUiState> async_ui_state_ = std::make_shared<AsyncUiState>();
 };
 

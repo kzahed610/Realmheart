@@ -13,6 +13,7 @@
 #include "services/Audio.hpp"
 #include "services/Bluetooth.hpp"
 #include "services/Brightness.hpp"
+#include "services/ConnectivityMonitor.hpp"
 #include "services/NightLight.hpp"
 #include "services/PowerProfiles.hpp"
 #include "services/Wifi.hpp"
@@ -414,6 +415,15 @@ RightSidebar::RightSidebar(
     setup_layout();
     populate_modules();
     install_panel_click_away();
+    const auto monitor_state = async_ui_state_;
+    connectivity_monitor_ = std::make_unique<services::ConnectivityMonitor>(
+        [monitor_state] {
+            if (!monitor_state->alive.load()) return;
+            auto* owner = monitor_state->owner;
+            if (owner != nullptr) owner->refresh_connectivity();
+        }
+    );
+    connectivity_monitor_->start();
     refresh_controls();
 }
 
@@ -430,6 +440,7 @@ RightSidebar::~RightSidebar() {
     }
     async_ui_state_->alive = false;
     async_ui_state_->owner = nullptr;
+    connectivity_monitor_.reset();
     wifi_panel_.reset();
     bluetooth_panel_.reset();
     night_light_panel_.reset();
@@ -982,10 +993,10 @@ void RightSidebar::build_quick_controls() {
     gtk_box_append(GTK_BOX(container_), section);
 
     wifi_panel_ = std::make_unique<WifiManagerPopover>(
-        content_overlay_, [this] { refresh_controls(); }
+        content_overlay_, [this] { refresh_connectivity(); }
     );
     bluetooth_panel_ = std::make_unique<BluetoothManagerPopover>(
-        content_overlay_, [this] { refresh_controls(); }
+        content_overlay_, [this] { refresh_connectivity(); }
     );
     night_light_panel_ = std::make_unique<NightLightPanel>(
         content_overlay_, [this] { refresh_controls(); }
@@ -1157,6 +1168,8 @@ void RightSidebar::refresh() {
 }
 
 void RightSidebar::refresh_controls() {
+    refresh_connectivity();
+
     // Keep the open path GTK-only and cheap. NotificationWidget already tracks
     // history changes through its subscription, so rebuilding every row here
     // would only delay presentation of the sidebar.
@@ -1190,8 +1203,6 @@ void RightSidebar::refresh_controls() {
     const bool queued = realmheart::core::shared_task_executor().post([
         state, brightness_generation, volume_generation
     ] {
-        std::optional<services::WifiState> wifi;
-        std::optional<services::BluetoothState> bluetooth;
         std::optional<services::NightLightState> night_light;
         std::optional<std::string> active_profile;
         std::optional<services::BrightnessState> brightness;
@@ -1205,8 +1216,6 @@ void RightSidebar::refresh_controls() {
                 state->refresh_in_flight = false;
                 return;
             }
-            wifi = services::Wifi::read();
-            bluetooth = services::Bluetooth::read();
             night_light = services::NightLight::read();
             active_profile = services::PowerProfiles::current();
             brightness = services::Brightness::read();
@@ -1215,11 +1224,6 @@ void RightSidebar::refresh_controls() {
 
         auto* result = new ControlRefreshResult{
             .state = state,
-            .wifi_status = std::nullopt,
-            .wifi_active = false,
-            .bluetooth_powered = bluetooth
-                ? std::optional<bool>{bluetooth->powered}
-                : std::nullopt,
             .night_light_enabled = night_light
                 ? std::optional<bool>{night_light->enabled}
                 : std::nullopt,
@@ -1235,12 +1239,6 @@ void RightSidebar::refresh_controls() {
             .brightness_generation = brightness_generation,
             .volume_generation = volume_generation,
         };
-        if (wifi) {
-            result->wifi_active = wifi->enabled;
-            result->wifi_status = !wifi->enabled
-                ? "Off"
-                : (wifi->ssid.empty() ? "Disconnected" : wifi->ssid);
-        }
 
         g_idle_add_full(
             G_PRIORITY_DEFAULT_IDLE,
@@ -1252,29 +1250,136 @@ void RightSidebar::refresh_controls() {
     if (!queued) state->refresh_in_flight = false;
 }
 
+void RightSidebar::refresh_connectivity() {
+    refresh_wifi_status();
+    refresh_bluetooth_status();
+}
+
+void RightSidebar::refresh_wifi_status() {
+    const auto state = async_ui_state_;
+    if (!state->alive.load()) return;
+    if (state->wifi_refresh_in_flight.exchange(true)) {
+        state->wifi_refresh_pending = true;
+        return;
+    }
+
+    const bool queued = realmheart::core::shared_task_executor().post([state] {
+        const auto wifi = services::Wifi::read();
+        if (!state->alive.load()) {
+            state->wifi_refresh_in_flight = false;
+            return;
+        }
+
+        auto* result = new ConnectivityRefreshResult{
+            .state = state,
+            .wifi = true,
+            .wifi_status = wifi
+                ? std::optional<std::string>{!wifi->enabled
+                    ? "Off"
+                    : (wifi->ssid.empty() ? "Disconnected" : wifi->ssid)}
+                : std::nullopt,
+            .wifi_active = wifi && wifi->enabled,
+            .bluetooth_powered = std::nullopt,
+        };
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            &RightSidebar::finish_connectivity_refresh,
+            result,
+            &RightSidebar::destroy_connectivity_refresh_result
+        );
+    });
+    if (!queued) state->wifi_refresh_in_flight = false;
+}
+
+void RightSidebar::refresh_bluetooth_status() {
+    const auto state = async_ui_state_;
+    if (!state->alive.load()) return;
+    if (state->bluetooth_refresh_in_flight.exchange(true)) {
+        state->bluetooth_refresh_pending = true;
+        return;
+    }
+
+    const bool queued = realmheart::core::shared_task_executor().post([state] {
+        const auto bluetooth = services::Bluetooth::read();
+        if (!state->alive.load()) {
+            state->bluetooth_refresh_in_flight = false;
+            return;
+        }
+
+        auto* result = new ConnectivityRefreshResult{
+            .state = state,
+            .wifi = false,
+            .wifi_status = std::nullopt,
+            .wifi_active = false,
+            .bluetooth_powered = bluetooth
+                ? std::optional<bool>{bluetooth->powered}
+                : std::nullopt,
+        };
+        g_idle_add_full(
+            G_PRIORITY_DEFAULT_IDLE,
+            &RightSidebar::finish_connectivity_refresh,
+            result,
+            &RightSidebar::destroy_connectivity_refresh_result
+        );
+    });
+    if (!queued) state->bluetooth_refresh_in_flight = false;
+}
+
+gboolean RightSidebar::finish_connectivity_refresh(gpointer raw) {
+    auto* result = static_cast<ConnectivityRefreshResult*>(raw);
+    auto& state = *result->state;
+    auto* owner = state.owner;
+    if (state.alive.load() && owner != nullptr) {
+        if (result->wifi) {
+            if (result->wifi_status) {
+                owner->wifi_tile_->set_state(
+                    *result->wifi_status, result->wifi_active, true
+                );
+            } else {
+                owner->wifi_tile_->set_state("Unavailable", false, false);
+            }
+            if (owner->wifi_panel_ != nullptr && owner->wifi_panel_->visible()) {
+                owner->wifi_panel_->refresh(false);
+            }
+        } else {
+            if (result->bluetooth_powered) {
+                owner->bluetooth_tile_->set_state(
+                    *result->bluetooth_powered ? "On" : "Off",
+                    *result->bluetooth_powered,
+                    true
+                );
+            } else {
+                owner->bluetooth_tile_->set_state("Unavailable", false, false);
+            }
+            if (owner->bluetooth_panel_ != nullptr && owner->bluetooth_panel_->visible()) {
+                owner->bluetooth_panel_->refresh(false);
+            }
+        }
+    }
+
+    auto& in_flight = result->wifi
+        ? state.wifi_refresh_in_flight
+        : state.bluetooth_refresh_in_flight;
+    auto& pending = result->wifi
+        ? state.wifi_refresh_pending
+        : state.bluetooth_refresh_pending;
+    in_flight = false;
+    if (state.alive.load() && owner != nullptr && pending.exchange(false)) {
+        if (result->wifi) owner->refresh_wifi_status();
+        else owner->refresh_bluetooth_status();
+    }
+    return G_SOURCE_REMOVE;
+}
+
+void RightSidebar::destroy_connectivity_refresh_result(gpointer raw) {
+    delete static_cast<ConnectivityRefreshResult*>(raw);
+}
+
 gboolean RightSidebar::finish_control_refresh(gpointer raw) {
     auto* result = static_cast<ControlRefreshResult*>(raw);
     auto& state = *result->state;
     auto* owner = state.owner;
     if (state.alive.load() && owner != nullptr) {
-        if (result->wifi_status) {
-            owner->wifi_tile_->set_state(
-                *result->wifi_status, result->wifi_active, true
-            );
-        } else {
-            owner->wifi_tile_->set_state("Unavailable", false, false);
-        }
-
-        if (result->bluetooth_powered) {
-            owner->bluetooth_tile_->set_state(
-                *result->bluetooth_powered ? "On" : "Off",
-                *result->bluetooth_powered,
-                true
-            );
-        } else {
-            owner->bluetooth_tile_->set_state("Unavailable", false, false);
-        }
-
         const auto [night_light_status, night_light_active, night_light_available] =
             night_light_tile_presentation(
                 result->night_light_enabled,

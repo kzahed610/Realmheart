@@ -15,8 +15,10 @@
 #include <signal.h>
 #include <sstream>
 #include <string_view>
+#include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 #include <condition_variable>
 #include <vector>
@@ -503,6 +505,12 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
     if (options.stdin_data && options.stdin_data->size() > 4096) {
         return error_result(CommandStatus::InvalidArguments, "stdin payload exceeds command limit");
     }
+    if (options.interactive_terminal && options.separate_stderr) {
+        return error_result(
+            CommandStatus::InvalidArguments,
+            "interactive terminal output cannot separate stderr"
+        );
+    }
 
     std::vector<char*> exec_argv;
     exec_argv.reserve(argv.size() + 1);
@@ -513,13 +521,63 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
     int error_pipe[2] = {-1, -1};
     int exec_pipe[2] = {-1, -1};
     int input_pipe[2] = {-1, -1};
-    if (::pipe2(output_pipe, O_CLOEXEC) != 0) {
-        return error_result(CommandStatus::SystemError, std::string("pipe2 failed: ") + std::strerror(errno));
+    int terminal_slave = -1;
+    if (options.interactive_terminal) {
+        const int terminal_master = ::posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+        if (terminal_master < 0) {
+            return error_result(
+                CommandStatus::SystemError,
+                std::string("posix_openpt failed: ") + std::strerror(errno)
+            );
+        }
+        std::array<char, 128> terminal_name{};
+        const int name_error = ::grantpt(terminal_master) != 0 ||
+                ::unlockpt(terminal_master) != 0
+            ? errno
+            : ::ptsname_r(terminal_master, terminal_name.data(), terminal_name.size());
+        if (name_error != 0) {
+            const auto error = std::string("pseudo-terminal setup failed: ") +
+                std::strerror(name_error);
+            ::close(terminal_master);
+            return error_result(CommandStatus::SystemError, error);
+        }
+        terminal_slave = ::open(
+            terminal_name.data(), O_RDWR | O_NOCTTY | O_CLOEXEC
+        );
+        if (terminal_slave < 0) {
+            const auto error = std::string("pseudo-terminal open failed: ") +
+                std::strerror(errno);
+            ::close(terminal_master);
+            return error_result(CommandStatus::SystemError, error);
+        }
+        termios terminal_attributes{};
+        if (::tcgetattr(terminal_slave, &terminal_attributes) != 0) {
+            const auto error = std::string("pseudo-terminal settings read failed: ") +
+                std::strerror(errno);
+            ::close(terminal_slave);
+            ::close(terminal_master);
+            return error_result(CommandStatus::SystemError, error);
+        }
+        terminal_attributes.c_lflag &= static_cast<tcflag_t>(~(ECHO | ECHONL));
+        if (::tcsetattr(terminal_slave, TCSAFLUSH, &terminal_attributes) != 0) {
+            const auto error = std::string("pseudo-terminal settings write failed: ") +
+                std::strerror(errno);
+            ::close(terminal_slave);
+            ::close(terminal_master);
+            return error_result(CommandStatus::SystemError, error);
+        }
+        output_pipe[0] = terminal_master;
+    } else if (::pipe2(output_pipe, O_CLOEXEC) != 0) {
+        return error_result(
+            CommandStatus::SystemError,
+            std::string("pipe2 failed: ") + std::strerror(errno)
+        );
     }
     if (options.separate_stderr && ::pipe2(error_pipe, O_CLOEXEC) != 0) {
         const auto error = std::string("stderr pipe2 failed: ") + std::strerror(errno);
         ::close(output_pipe[0]);
         ::close(output_pipe[1]);
+        close_fd(terminal_slave);
         return error_result(CommandStatus::SystemError, error);
     }
     if (::pipe2(exec_pipe, O_CLOEXEC) != 0) {
@@ -528,9 +586,11 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
         ::close(output_pipe[1]);
         close_fd(error_pipe[0]);
         close_fd(error_pipe[1]);
+        close_fd(terminal_slave);
         return error_result(CommandStatus::SystemError, error);
     }
-    if (options.stdin_data && ::pipe2(input_pipe, O_CLOEXEC) != 0) {
+    if (!options.interactive_terminal && options.stdin_data &&
+        ::pipe2(input_pipe, O_CLOEXEC) != 0) {
         const auto error = std::string("stdin pipe2 failed: ") + std::strerror(errno);
         ::close(output_pipe[0]);
         ::close(output_pipe[1]);
@@ -538,6 +598,7 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
         close_fd(error_pipe[1]);
         ::close(exec_pipe[0]);
         ::close(exec_pipe[1]);
+        close_fd(terminal_slave);
         return error_result(CommandStatus::SystemError, error);
     }
 
@@ -552,6 +613,7 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
         close_fd(error_pipe[1]);
         close_fd(input_pipe[0]);
         close_fd(input_pipe[1]);
+        close_fd(terminal_slave);
         return error_result(CommandStatus::SpawnFailed, error);
     }
 
@@ -559,7 +621,21 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
         ::close(output_pipe[0]);
         ::close(exec_pipe[0]);
         if (options.separate_stderr) ::close(error_pipe[0]);
-        if (options.stdin_data) {
+        if (options.interactive_terminal) {
+            if (::setsid() < 0 || ::ioctl(terminal_slave, TIOCSCTTY, 0) < 0) {
+                const int child_errno = errno;
+                static_cast<void>(::write(exec_pipe[1], &child_errno, sizeof(child_errno)));
+                _exit(127);
+            }
+            if (::dup2(terminal_slave, STDIN_FILENO) < 0 ||
+                ::dup2(terminal_slave, STDOUT_FILENO) < 0 ||
+                ::dup2(terminal_slave, STDERR_FILENO) < 0) {
+                const int child_errno = errno;
+                static_cast<void>(::write(exec_pipe[1], &child_errno, sizeof(child_errno)));
+                _exit(127);
+            }
+            ::close(terminal_slave);
+        } else if (options.stdin_data) {
             ::close(input_pipe[1]);
             if (::dup2(input_pipe[0], STDIN_FILENO) < 0) {
                 const int child_errno = errno;
@@ -574,18 +650,19 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
             static_cast<void>(::write(exec_pipe[1], &child_errno, sizeof(child_errno)));
             _exit(127);
         }
-        ::setpgid(0, 0);
-
-        const bool stderr_ready = options.separate_stderr
-            ? ::dup2(error_pipe[1], STDERR_FILENO) >= 0
-            : ::dup2(output_pipe[1], STDERR_FILENO) >= 0;
-        if (::dup2(output_pipe[1], STDOUT_FILENO) < 0 || !stderr_ready) {
-            const int child_errno = errno;
-            static_cast<void>(::write(exec_pipe[1], &child_errno, sizeof(child_errno)));
-            _exit(127);
+        if (!options.interactive_terminal) {
+            ::setpgid(0, 0);
+            const bool stderr_ready = options.separate_stderr
+                ? ::dup2(error_pipe[1], STDERR_FILENO) >= 0
+                : ::dup2(output_pipe[1], STDERR_FILENO) >= 0;
+            if (::dup2(output_pipe[1], STDOUT_FILENO) < 0 || !stderr_ready) {
+                const int child_errno = errno;
+                static_cast<void>(::write(exec_pipe[1], &child_errno, sizeof(child_errno)));
+                _exit(127);
+            }
+            ::close(output_pipe[1]);
+            if (options.separate_stderr) ::close(error_pipe[1]);
         }
-        ::close(output_pipe[1]);
-        if (options.separate_stderr) ::close(error_pipe[1]);
 
         ::execvp(exec_argv[0], exec_argv.data());
         const int child_errno = errno;
@@ -593,15 +670,17 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
         _exit(127);
     }
 
-    ::close(output_pipe[1]);
-    output_pipe[1] = -1;
+    if (!options.interactive_terminal) {
+        ::close(output_pipe[1]);
+        output_pipe[1] = -1;
+    }
     if (options.separate_stderr) {
         ::close(error_pipe[1]);
         error_pipe[1] = -1;
     }
     ::close(exec_pipe[1]);
     exec_pipe[1] = -1;
-    if (options.stdin_data) {
+    if (!options.interactive_terminal && options.stdin_data) {
         ::close(input_pipe[0]);
         input_pipe[0] = -1;
         const auto& input = *options.stdin_data;
@@ -620,8 +699,24 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
             break;
         }
         close_fd(input_pipe[1]);
+    } else if (options.interactive_terminal && options.stdin_data) {
+        const auto& input = *options.stdin_data;
+        std::size_t written = 0;
+        while (written < input.size()) {
+            const ssize_t count = write_without_sigpipe(
+                output_pipe[0],
+                input.data() + written,
+                input.size() - written
+            );
+            if (count > 0) {
+                written += static_cast<std::size_t>(count);
+                continue;
+            }
+            if (count < 0 && errno == EINTR) continue;
+            break;
+        }
     }
-    static_cast<void>(::setpgid(child, child));
+    if (!options.interactive_terminal) static_cast<void>(::setpgid(child, child));
 
     CommandResult result;
     result.status = CommandStatus::SystemError;
@@ -634,6 +729,7 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
         close_fd(output_pipe[0]);
         close_fd(error_pipe[0]);
         close_fd(exec_pipe[0]);
+        close_fd(terminal_slave);
         return result;
     }
 
@@ -737,6 +833,7 @@ CommandResult run_capture(const std::vector<std::string>& argv, const CommandOpt
     close_fd(output_pipe[0]);
     close_fd(error_pipe[0]);
     close_fd(exec_pipe[0]);
+    close_fd(terminal_slave);
     result.output = trim(std::move(result.output));
     result.standard_error = trim(std::move(result.standard_error));
 

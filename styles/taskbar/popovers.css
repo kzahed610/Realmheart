@@ -858,6 +858,20 @@ button.realmheart-manager-quiet-button:hover {
   color: @rh_text;
   background-color: alpha(@rh_surface_variant, 0.42);
 }
+.realmheart-manager-settings-footer {
+  padding: 6px 9px 8px 9px;
+  border-top: 1px solid alpha(@rh_outline, 0.16);
+}
+.realmheart-manager-settings-hint {
+  color: alpha(@rh_error, 0.92);
+  font-size: 0.60em;
+}
+button.realmheart-manager-settings-button {
+  min-width: 70px;
+  min-height: 21px;
+  padding: 1px 9px;
+  font-size: 0.60em;
+}
 button.realmheart-manager-forget-button {
   color: alpha(@rh_error, 0.82);
   background-color: transparent;
