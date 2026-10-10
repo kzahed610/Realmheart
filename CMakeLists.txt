@@ -573,6 +573,7 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
         add_executable(realmheart-wallpaper-renderer
             src/wallpaper-native/main.cpp
             src/wallpaper-native/NativeWallpaperRenderer.cpp
+            src/wallpaper-native/source/StaticImageSource.cpp
             "${REALMHEART_LAYER_SHELL_HEADER}"
             "${REALMHEART_LAYER_SHELL_CODE}"
             "${REALMHEART_XDG_SHELL_CODE}"

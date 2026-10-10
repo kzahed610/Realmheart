@@ -1,6 +1,8 @@
 #pragma once
 
 #include "wallpaper-native/NativeWallpaperContracts.hpp"
+#include "wallpaper-native/gpu/RenderFrame.hpp"
+#include "wallpaper-native/source/RuntimeWallpaperSource.hpp"
 
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
@@ -66,12 +68,6 @@ public:
     int run_stdio();
 
 private:
-    struct Texture {
-        GLuint id = 0;
-        int width = 0;
-        int height = 0;
-    };
-
     struct OutputSurface {
         NativeWallpaperRenderer* owner = nullptr;
         std::uint32_t registry_name = 0;
@@ -84,13 +80,9 @@ private:
         int logical_height = 0;
         int scale = 1;
         std::string name;
-        Texture override_texture;
+        RuntimeSourcePtr override_source;
         bool configured = false;
         bool closed = false;
-        std::string override_source_path;
-        std::shared_ptr<const std::string> override_source_bytes;
-        int decoded_required_width = 0;
-        int decoded_required_height = 0;
     };
 
 public:
@@ -159,18 +151,13 @@ private:
         int height,
         std::string* error_message = nullptr
     );
-
-    [[nodiscard]] bool upload_texture(
-        const std::string& path,
-        Texture& texture,
+    // Prepares a freshly created source. A current GL context is required on
+    // entry: a source's own work (and its destruction) needs one.
+    [[nodiscard]] bool prepare_source(
+        RuntimeWallpaperSource& source,
         std::string* error_message
     );
-    [[nodiscard]] bool upload_texture_bytes(
-        const std::string& bytes,
-        Texture& texture,
-        std::string* error_message,
-        std::string_view target_output = {}
-    );
+
     [[nodiscard]] GLuint compile_shader(
         GLenum type,
         const char* source,
@@ -189,7 +176,6 @@ private:
     ) noexcept;
     void clear_output_overrides() noexcept;
     void advance_animation();
-    void destroy_texture(Texture& texture) noexcept;
     void destroy_layer_surface(OutputSurface& output) noexcept;
     void destroy_output_surface(OutputSurface& output) noexcept;
     void remove_output(std::uint32_t registry_name) noexcept;
@@ -230,18 +216,10 @@ private:
     GLint next_uv_uniform_ = -1;
 
 
-    Texture current_texture_;
-    Texture next_texture_;
-    Texture prepared_texture_;
-    std::string current_source_path_;
-    std::shared_ptr<const std::string> current_source_bytes_;
-    std::string next_source_path_;
-    std::shared_ptr<const std::string> next_source_bytes_;
-    int decoded_required_width_ = 0;
-    int decoded_required_height_ = 0;
+    RuntimeSourcePtr current_source_;
+    RuntimeSourcePtr next_source_;
+    RuntimeSourcePtr prepared_source_;
     std::string prepared_output_name_;
-    std::string prepared_source_path_;
-    std::shared_ptr<const std::string> prepared_source_bytes_;
     std::vector<std::uint32_t> closed_output_registry_names_;
     bool animating_ = false;
     std::chrono::steady_clock::time_point animation_started_{};

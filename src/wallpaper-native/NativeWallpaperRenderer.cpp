@@ -1,7 +1,9 @@
 #include "wallpaper-native/NativeWallpaperRenderer.hpp"
 #include "wallpaper-native/NativeWallpaperContracts.hpp"
 #include "wallpaper-native/WallpaperScheduling.hpp"
+#include "wallpaper-native/source/RuntimeWallpaperSource.hpp"
 #include "wallpaper-native/source/StaticDecodePlan.hpp"
+#include "wallpaper-native/source/StaticImageSource.hpp"
 
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 
@@ -78,6 +80,13 @@ constexpr zwlr_layer_surface_v1_listener kLayerSurfaceListener{
 
 void set_error(std::string* destination, const std::string& message) {
     if (destination != nullptr) *destination = message;
+}
+
+// A source slot is only drawable while it publishes a frame. An empty slot and
+// a frameless source are both treated as "nothing to show", which is what keeps
+// the renderer's decision points readable when sources become dynamic.
+bool source_has_frame(const RuntimeSourcePtr& source) noexcept {
+    return source != nullptr && source->has_frame();
 }
 
 std::array<float, 4> cover_uv(
@@ -319,39 +328,32 @@ bool NativeWallpaperRenderer::set_wallpaper(
 
     if (!discard_prepared_wallpaper(error_message)) return false;
 
-    Texture candidate;
-    if (!upload_texture(path, candidate, error_message)) return false;
+    auto candidate = make_static_image_source(path);
+    if (!prepare_source(*candidate, error_message)) return false;
 
-    if (current_texture_.id == 0) {
+    if (!source_has_frame(current_source_)) {
         clear_output_overrides();
-        current_texture_ = candidate;
-        current_source_path_ = path;
-        current_source_bytes_.reset();
+        current_source_ = std::move(candidate);
         if (!draw_all(error_message)) {
-            destroy_texture(current_texture_);
-            current_source_path_.clear();
+            current_source_.reset();
             set_error(error_message, "native wallpaper failed to render the first frame");
             return false;
         }
         const auto required = required_output_dimensions();
-        decoded_required_width_ = required.first;
-        decoded_required_height_ = required.second;
+        current_source_->set_output_requirement(required.first, required.second);
         return true;
     }
 
-    destroy_texture(next_texture_);
-    next_texture_ = candidate;
-    next_source_path_ = path;
-    next_source_bytes_.reset();
-    decoded_required_width_ = 0;
-    decoded_required_height_ = 0;
+    // Assigning over the slot releases the previous incoming source, which
+    // releases its GL texture. A current context is guaranteed here by
+    // prepare_source().
+    next_source_ = std::move(candidate);
+    next_source_->set_output_requirement(0, 0);
     active_transition_duration_ = transition_duration_;
     animation_started_ = std::chrono::steady_clock::now();
     animating_ = true;
     if (!draw_all(error_message)) {
-        destroy_texture(next_texture_);
-        next_source_path_.clear();
-        next_source_bytes_.reset();
+        next_source_.reset();
         animating_ = false;
         set_error(error_message, "native wallpaper failed to render the transition frame");
         return false;
@@ -374,37 +376,28 @@ bool NativeWallpaperRenderer::set_wallpaper_bytes(
     }
     if (!discard_prepared_wallpaper(error_message)) return false;
 
-    Texture candidate;
-    if (!upload_texture_bytes(*bytes, candidate, error_message)) return false;
-    if (current_texture_.id == 0) {
+    auto candidate = make_static_image_source(std::move(bytes));
+    if (!prepare_source(*candidate, error_message)) return false;
+    if (!source_has_frame(current_source_)) {
         clear_output_overrides();
-        current_texture_ = candidate;
-        current_source_path_.clear();
-        current_source_bytes_ = std::move(bytes);
+        current_source_ = std::move(candidate);
         if (!draw_all(error_message)) {
-            destroy_texture(current_texture_);
-            current_source_bytes_.reset();
+            current_source_.reset();
             set_error(error_message, "native wallpaper failed to render the first frame");
             return false;
         }
         const auto required = required_output_dimensions();
-        decoded_required_width_ = required.first;
-        decoded_required_height_ = required.second;
+        current_source_->set_output_requirement(required.first, required.second);
         return true;
     }
 
-    destroy_texture(next_texture_);
-    next_texture_ = candidate;
-    next_source_path_.clear();
-    next_source_bytes_ = std::move(bytes);
-    decoded_required_width_ = 0;
-    decoded_required_height_ = 0;
+    next_source_ = std::move(candidate);
+    next_source_->set_output_requirement(0, 0);
     active_transition_duration_ = transition_duration_;
     animation_started_ = std::chrono::steady_clock::now();
     animating_ = true;
     if (!draw_all(error_message)) {
-        destroy_texture(next_texture_);
-        next_source_bytes_.reset();
+        next_source_.reset();
         animating_ = false;
         set_error(error_message, "native wallpaper failed to render the transition frame");
         return false;
@@ -429,12 +422,10 @@ bool NativeWallpaperRenderer::prepare_wallpaper(
     // PREPARE is authoritative for the next transaction. Never retain a stale
     // full-resolution candidate if this decode fails or the selection changed.
     if (!discard_prepared_wallpaper(error_message)) return false;
-    Texture candidate;
-    if (!upload_texture(path, candidate, error_message)) return false;
-    prepared_texture_ = candidate;
+    auto candidate = make_static_image_source(path);
+    if (!prepare_source(*candidate, error_message)) return false;
+    prepared_source_ = std::move(candidate);
     prepared_output_name_.clear();
-    prepared_source_path_ = path;
-    prepared_source_bytes_.reset();
     return true;
 }
 
@@ -456,12 +447,10 @@ bool NativeWallpaperRenderer::prepare_wallpaper_bytes(
         return false;
     }
     if (!discard_prepared_wallpaper(error_message)) return false;
-    Texture candidate;
-    if (!upload_texture_bytes(*bytes, candidate, error_message)) return false;
-    prepared_texture_ = candidate;
+    auto candidate = make_static_image_source(std::move(bytes));
+    if (!prepare_source(*candidate, error_message)) return false;
+    prepared_source_ = std::move(candidate);
     prepared_output_name_.clear();
-    prepared_source_path_.clear();
-    prepared_source_bytes_ = std::move(bytes);
     return true;
 }
 
@@ -488,12 +477,10 @@ bool NativeWallpaperRenderer::prepare_wallpaper_for_output(
     }
 
     if (!discard_prepared_wallpaper(error_message)) return false;
-    Texture candidate;
-    if (!upload_texture(path, candidate, error_message)) return false;
-    prepared_texture_ = candidate;
+    auto candidate = make_static_image_source(path);
+    if (!prepare_source(*candidate, error_message)) return false;
+    prepared_source_ = std::move(candidate);
     prepared_output_name_ = output_name;
-    prepared_source_path_ = path;
-    prepared_source_bytes_.reset();
     return true;
 }
 
@@ -524,12 +511,10 @@ bool NativeWallpaperRenderer::prepare_wallpaper_for_output_bytes(
     }
 
     if (!discard_prepared_wallpaper(error_message)) return false;
-    Texture candidate;
-    if (!upload_texture_bytes(*bytes, candidate, error_message, output_name)) return false;
-    prepared_texture_ = candidate;
+    auto candidate = make_static_image_source(std::move(bytes));
+    if (!prepare_source(*candidate, error_message)) return false;
+    prepared_source_ = std::move(candidate);
     prepared_output_name_ = output_name;
-    prepared_source_path_.clear();
-    prepared_source_bytes_ = std::move(bytes);
     return true;
 }
 
@@ -541,7 +526,7 @@ bool NativeWallpaperRenderer::commit_prepared_wallpaper(
         set_error(error_message, "native wallpaper renderer is not initialized");
         return false;
     }
-    if (prepared_texture_.id == 0) {
+    if (prepared_source_ == nullptr || !prepared_source_->has_frame()) {
         set_error(error_message, "native wallpaper renderer has no prepared wallpaper");
         return false;
     }
@@ -563,65 +548,46 @@ bool NativeWallpaperRenderer::commit_prepared_wallpaper(
         }
         if (!make_pbuffer_current(error_message)) return false;
 
-        Texture previous = output->override_texture;
-        output->override_texture = prepared_texture_;
+        RuntimeSourcePtr previous = std::move(output->override_source);
+        output->override_source = std::move(prepared_source_);
         if (!output->configured || output->closed ||
             !draw_output(*output, 1.0F, error_message)) {
-            destroy_texture(output->override_texture);
-            output->override_texture = previous;
+            // Assigning over the failed candidate releases it, which restores
+            // the previous override exactly as the texture version did.
+            output->override_source = std::move(previous);
             set_error(error_message, "native wallpaper failed to render the output frame");
             return false;
         }
-        destroy_texture(previous);
-        output->override_source_path = prepared_source_path_;
-        output->override_source_bytes = prepared_source_bytes_;
+        previous.reset();
         const auto required = required_output_dimensions(output->name);
-        output->decoded_required_width = required.first;
-        output->decoded_required_height = required.second;
-        prepared_texture_ = {};
+        output->override_source->set_output_requirement(
+            required.first,
+            required.second
+        );
         prepared_output_name_.clear();
-        prepared_source_path_.clear();
-        prepared_source_bytes_.reset();
         return true;
     }
 
-    if (current_texture_.id == 0) {
+    if (!source_has_frame(current_source_)) {
         clear_output_overrides();
-        current_texture_ = prepared_texture_;
-        current_source_path_ = prepared_source_path_;
-        current_source_bytes_ = prepared_source_bytes_;
-        prepared_texture_ = {};
-        prepared_source_path_.clear();
-        prepared_source_bytes_.reset();
+        current_source_ = std::move(prepared_source_);
         if (!draw_all(error_message)) {
-            destroy_texture(current_texture_);
-            current_source_path_.clear();
-            current_source_bytes_.reset();
+            current_source_.reset();
             set_error(error_message, "native wallpaper failed to render the prepared frame");
             return false;
         }
         const auto required = required_output_dimensions();
-        decoded_required_width_ = required.first;
-        decoded_required_height_ = required.second;
+        current_source_->set_output_requirement(required.first, required.second);
         return true;
     }
 
-    destroy_texture(next_texture_);
-    next_texture_ = prepared_texture_;
-    next_source_path_ = prepared_source_path_;
-    next_source_bytes_ = prepared_source_bytes_;
-    decoded_required_width_ = 0;
-    decoded_required_height_ = 0;
-    prepared_texture_ = {};
-    prepared_source_path_.clear();
-    prepared_source_bytes_.reset();
+    next_source_ = std::move(prepared_source_);
+    next_source_->set_output_requirement(0, 0);
     active_transition_duration_ = transition_duration_;
     animation_started_ = std::chrono::steady_clock::now();
     animating_ = true;
     if (!draw_all(error_message)) {
-        destroy_texture(next_texture_);
-        next_source_path_.clear();
-        next_source_bytes_.reset();
+        next_source_.reset();
         animating_ = false;
         set_error(error_message, "native wallpaper failed to render the prepared transition");
         return false;
@@ -633,14 +599,16 @@ bool NativeWallpaperRenderer::discard_prepared_wallpaper(
     std::string* error_message
 ) noexcept {
     prepared_output_name_.clear();
-    prepared_source_path_.clear();
-    prepared_source_bytes_.reset();
-    if (!initialized_ || prepared_texture_.id == 0) return true;
+    if (prepared_source_ == nullptr || !prepared_source_->has_frame()) return true;
+    // An uninitialized renderer keeps its prepared slot for cleanup(), which
+    // releases it with a current context; releasing it here could run the GL
+    // deletion without one.
+    if (!initialized_) return true;
     if (!make_pbuffer_current(error_message)) {
         mark_fatal(error_message != nullptr ? *error_message : "");
         return false;
     }
-    destroy_texture(prepared_texture_);
+    prepared_source_.reset();
     return true;
 }
 
@@ -832,7 +800,7 @@ void NativeWallpaperRenderer::layer_surface_configure(
     }
 
     output->configured = true;
-    if (output->owner->current_texture_.id != 0) {
+    if (source_has_frame(output->owner->current_source_)) {
         if (!output->owner->draw_output(
                 *output,
                 output->owner->animating_ ? 0.0F : 1.0F,
@@ -958,290 +926,15 @@ bool NativeWallpaperRenderer::configure_egl_surface(
     return true;
 }
 
-bool NativeWallpaperRenderer::upload_texture(
-    const std::string& path,
-    Texture& texture,
+bool NativeWallpaperRenderer::prepare_source(
+    RuntimeWallpaperSource& source,
     std::string* error_message
 ) {
+    // A source's decode and its GL texture destruction both need a current
+    // context. Making the pbuffer current here covers every caller: prepare,
+    // transaction discard, and the release of a replaced slot.
     if (!make_pbuffer_current(error_message)) return false;
-
-    std::error_code file_error;
-    const auto file_size = std::filesystem::file_size(path, file_error);
-    if (file_error || file_size > kNativeMaxSourceBytes) {
-        set_error(error_message, "wallpaper file exceeds the decode budget");
-        return false;
-    }
-
-    int source_width = 0;
-    int source_height = 0;
-    (void)gdk_pixbuf_get_file_info(
-        path.c_str(),
-        &source_width,
-        &source_height
-    );
-
-    GLint maximum_texture_size = 0;
-    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum_texture_size);
-
-    // Decode geometry is a pure decision shared with the tests. Output size
-    // never shrinks it: a wallpaper decodes at native resolution so a later
-    // hotplug or scale increase cannot stretch a texture chosen for an older
-    // topology; only the GL texture-size limit can reduce it.
-    const StaticDecodePlan plan = plan_static_decode(
-        source_width,
-        source_height,
-        maximum_texture_size
-    );
-    if (!plan.valid) {
-        set_error(error_message, "wallpaper dimensions exceed the decode budget");
-        return false;
-    }
-
-    const int target_width = plan.target_width;
-    const int target_height = plan.target_height;
-
-    GError* error = nullptr;
-    GdkPixbuf* pixbuf = nullptr;
-    if (plan.downscaled) {
-        pixbuf = gdk_pixbuf_new_from_file_at_scale(
-            path.c_str(),
-            target_width,
-            target_height,
-            TRUE,
-            &error
-        );
-    } else {
-        pixbuf = gdk_pixbuf_new_from_file(path.c_str(), &error);
-    }
-
-    if (pixbuf == nullptr) {
-        set_error(
-            error_message,
-            error != nullptr ? error->message : "unable to decode wallpaper"
-        );
-        if (error != nullptr) g_error_free(error);
-        return false;
-    }
-    if (error != nullptr) g_error_free(error);
-
-    const int width = gdk_pixbuf_get_width(pixbuf);
-    const int height = gdk_pixbuf_get_height(pixbuf);
-    const int channels = gdk_pixbuf_get_n_channels(pixbuf);
-    const int row_stride = gdk_pixbuf_get_rowstride(pixbuf);
-    const guchar* source = gdk_pixbuf_read_pixels(pixbuf);
-
-    if (width <= 0 || height <= 0 || source == nullptr ||
-        (channels != 3 && channels != 4)) {
-        g_object_unref(pixbuf);
-        set_error(error_message, "decoded wallpaper has an unsupported pixel layout");
-        return false;
-    }
-
-    const std::size_t tight_stride = static_cast<std::size_t>(width) * channels;
-    const GLenum format = channels == 4 ? GL_RGBA : GL_RGB;
-
-    // Clear any stale error left by driver initialization before attributing an
-    // upload failure to this texture.
-    while (glGetError() != GL_NO_ERROR) {}
-
-    glGenTextures(1, &texture.id);
-    if (texture.id == 0) {
-        g_object_unref(pixbuf);
-        set_error(error_message, "OpenGL failed to allocate a wallpaper texture");
-        return false;
-    }
-
-    texture.width = width;
-    texture.height = height;
-    glBindTexture(GL_TEXTURE_2D, texture.id);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    if (static_cast<std::size_t>(row_stride) == tight_stride) {
-        // Common case: upload directly from the decoder buffer. Avoiding a
-        // second full-image copy keeps wallpaper-change peak RAM bounded.
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            static_cast<GLint>(format),
-            width,
-            height,
-            0,
-            format,
-            GL_UNSIGNED_BYTE,
-            source
-        );
-    } else {
-        // GLES2 has no GL_UNPACK_ROW_LENGTH. Allocate the texture once, then
-        // upload padded pixbuf rows individually instead of copying the entire
-        // image into another temporary buffer.
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            static_cast<GLint>(format),
-            width,
-            height,
-            0,
-            format,
-            GL_UNSIGNED_BYTE,
-            nullptr
-        );
-        for (int row = 0; row < height; ++row) {
-            glTexSubImage2D(
-                GL_TEXTURE_2D,
-                0,
-                0,
-                row,
-                width,
-                1,
-                format,
-                GL_UNSIGNED_BYTE,
-                source + static_cast<std::size_t>(row) * row_stride
-            );
-        }
-    }
-
-    glBindTexture(GL_TEXTURE_2D, 0);
-    const GLenum gl_error = glGetError();
-    g_object_unref(pixbuf);
-
-    if (gl_error != GL_NO_ERROR) {
-        destroy_texture(texture);
-        set_error(error_message, "OpenGL failed while uploading the wallpaper texture");
-        return false;
-    }
-
-    return true;
-}
-
-bool NativeWallpaperRenderer::upload_texture_bytes(
-    const std::string& bytes,
-    Texture& texture,
-    std::string* error_message,
-    std::string_view /*target_output*/
-) {
-    if (!make_pbuffer_current(error_message)) return false;
-    if (bytes.empty() || bytes.size() > kNativeMaxSourceBytes) {
-        set_error(error_message, "owned wallpaper bytes exceed the decode budget or are empty");
-        return false;
-    }
-
-    GdkPixbufLoader* loader = gdk_pixbuf_loader_new();
-    if (loader == nullptr) {
-        set_error(error_message, "unable to create the wallpaper byte decoder");
-        return false;
-    }
-
-    GError* error = nullptr;
-    const gboolean write_ok = gdk_pixbuf_loader_write(
-        loader,
-        reinterpret_cast<const guchar*>(bytes.data()),
-        bytes.size(),
-        &error
-    );
-    const gboolean close_ok = write_ok && gdk_pixbuf_loader_close(loader, &error);
-    GdkPixbuf* pixbuf = nullptr;
-    if (close_ok) {
-        pixbuf = gdk_pixbuf_loader_get_pixbuf(loader);
-        if (pixbuf != nullptr) g_object_ref(pixbuf);
-    }
-    g_object_unref(loader);
-
-    if (!write_ok || !close_ok || pixbuf == nullptr) {
-        set_error(
-            error_message,
-            error != nullptr ? error->message : "unable to decode owned wallpaper bytes"
-        );
-        g_clear_error(&error);
-        if (pixbuf != nullptr) g_object_unref(pixbuf);
-        return false;
-    }
-    g_clear_error(&error);
-
-    const int width = gdk_pixbuf_get_width(pixbuf);
-    const int height = gdk_pixbuf_get_height(pixbuf);
-    const int channels = gdk_pixbuf_get_n_channels(pixbuf);
-    const int row_stride = gdk_pixbuf_get_rowstride(pixbuf);
-    const guchar* source = gdk_pixbuf_read_pixels(pixbuf);
-    if (width <= 0 || height <= 0 || source == nullptr ||
-        !plan_static_decode(width, height, 0).valid ||
-        (channels != 3 && channels != 4)) {
-        g_object_unref(pixbuf);
-        set_error(error_message, "decoded wallpaper exceeds the decode budget or has an unsupported pixel layout");
-        return false;
-    }
-
-    const std::size_t tight_stride = static_cast<std::size_t>(width) * channels;
-    const GLenum format = channels == 4 ? GL_RGBA : GL_RGB;
-    while (glGetError() != GL_NO_ERROR) {}
-
-    glGenTextures(1, &texture.id);
-    if (texture.id == 0) {
-        g_object_unref(pixbuf);
-        set_error(error_message, "OpenGL failed to allocate a wallpaper texture");
-        return false;
-    }
-
-    texture.width = width;
-    texture.height = height;
-    glBindTexture(GL_TEXTURE_2D, texture.id);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    if (static_cast<std::size_t>(row_stride) == tight_stride) {
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            static_cast<GLint>(format),
-            width,
-            height,
-            0,
-            format,
-            GL_UNSIGNED_BYTE,
-            source
-        );
-    } else {
-        glTexImage2D(
-            GL_TEXTURE_2D,
-            0,
-            static_cast<GLint>(format),
-            width,
-            height,
-            0,
-            format,
-            GL_UNSIGNED_BYTE,
-            nullptr
-        );
-        for (int row = 0; row < height; ++row) {
-            glTexSubImage2D(
-                GL_TEXTURE_2D,
-                0,
-                0,
-                row,
-                width,
-                1,
-                format,
-                GL_UNSIGNED_BYTE,
-                source + static_cast<std::size_t>(row) * row_stride
-            );
-        }
-    }
-
-    glBindTexture(GL_TEXTURE_2D, 0);
-    const GLenum gl_error = glGetError();
-    g_object_unref(pixbuf);
-    if (gl_error != GL_NO_ERROR) {
-        destroy_texture(texture);
-        set_error(error_message, "OpenGL failed while uploading the owned wallpaper texture");
-        return false;
-    }
-    return true;
+    return source.prepare(error_message);
 }
 
 GLuint NativeWallpaperRenderer::compile_shader(
@@ -1307,7 +1000,9 @@ bool NativeWallpaperRenderer::link_program(std::string* error_message) {
 }
 
 bool NativeWallpaperRenderer::draw_all(std::string* error_message) {
-    if (current_texture_.id == 0 && next_texture_.id == 0) return true;
+    if (!source_has_frame(current_source_) && !source_has_frame(next_source_)) {
+        return true;
+    }
 
     float progress = 1.0F;
     if (animating_) {
@@ -1346,10 +1041,18 @@ bool NativeWallpaperRenderer::draw_output(
     float progress,
     std::string* error_message
 ) {
-    const Texture& current = output.override_texture.id != 0
-        ? output.override_texture
-        : current_texture_;
-    if (output.egl_surface == EGL_NO_SURFACE || current.id == 0) {
+    // A per-output override wins over the global wallpaper, exactly as the
+    // per-output texture used to; an output without an override draws the
+    // global source. Frames are borrowed views, never copied.
+    const RenderFrameView override_frame = output.override_source != nullptr
+        ? output.override_source->current_frame()
+        : RenderFrameView{};
+    const RenderFrameView global_frame = source_has_frame(current_source_)
+        ? current_source_->current_frame()
+        : RenderFrameView{};
+    const RenderFrameView current =
+        override_frame.valid() ? override_frame : global_frame;
+    if (output.egl_surface == EGL_NO_SURFACE || !current.valid()) {
         set_error(error_message, "native wallpaper output is not renderable");
         return false;
     }
@@ -1383,16 +1086,21 @@ bool NativeWallpaperRenderer::draw_output(
         1.0F, 1.0F,
     };
 
-    const Texture& incoming = next_texture_.id != 0 ? next_texture_ : current;
+    // A transition blends the incoming frame over the current one. With no
+    // incoming frame the shader still samples two units, so both point at the
+    // current frame and progress is forced to 1.0, leaving it untouched.
+    const bool has_incoming = source_has_frame(next_source_);
+    const RenderFrameView incoming =
+        has_incoming ? next_source_->current_frame() : current;
     const auto current_uv = cover_uv(
-        current.width,
-        current.height,
+        current.width(),
+        current.height(),
         pixel_width,
         pixel_height
     );
     const auto next_uv = cover_uv(
-        incoming.width,
-        incoming.height,
+        incoming.width(),
+        incoming.height(),
         pixel_width,
         pixel_height
     );
@@ -1418,14 +1126,14 @@ bool NativeWallpaperRenderer::draw_output(
     );
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, current.id);
+    glBindTexture(GL_TEXTURE_2D, current.texture());
     glUniform1i(current_sampler_uniform_, 0);
 
     glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, incoming.id);
+    glBindTexture(GL_TEXTURE_2D, incoming.texture());
     glUniform1i(next_sampler_uniform_, 1);
 
-    glUniform1f(progress_uniform_, next_texture_.id != 0 ? progress : 1.0F);
+    glUniform1f(progress_uniform_, has_incoming ? progress : 1.0F);
     glUniform4fv(current_uv_uniform_, 1, current_uv.data());
     glUniform4fv(next_uv_uniform_, 1, next_uv.data());
 
@@ -1460,13 +1168,11 @@ NativeWallpaperRenderer::find_output_by_name(std::string_view name) noexcept {
 }
 
 void NativeWallpaperRenderer::clear_output_overrides() noexcept {
+    // Releasing a slot releases its GL texture, so callers guarantee a current
+    // context (preparing a source, or making the pbuffer current) first.
     for (const auto& output : outputs_) {
         if (output != nullptr) {
-            destroy_texture(output->override_texture);
-            output->override_source_path.clear();
-            output->override_source_bytes.reset();
-            output->decoded_required_width = 0;
-            output->decoded_required_height = 0;
+            output->override_source.reset();
         }
     }
 }
@@ -1494,27 +1200,29 @@ void NativeWallpaperRenderer::advance_animation() {
         return;
     }
     clear_output_overrides();
-    destroy_texture(current_texture_);
-    current_texture_ = next_texture_;
-    next_texture_ = {};
-    current_source_path_ = next_source_path_;
-    next_source_path_.clear();
-    current_source_bytes_ = std::move(next_source_bytes_);
-    decoded_required_width_ = 0;
-    decoded_required_height_ = 0;
+    // The promoted source keeps the transition's fresh frame; the outgoing one
+    // is released by the assignment. The new current starts with no recorded
+    // output requirement, exactly as the texture slots did, so the next
+    // topology change re-checks coverage.
+    current_source_ = std::move(next_source_);
+    if (current_source_ != nullptr) {
+        current_source_->set_output_requirement(0, 0);
+    }
     animating_ = false;
     active_transition_duration_ = transition_duration_;
-    if (topology_redecode_pending_ && !redecode_for_topology(&error)) {
-        if (set_response_pending_) {
-            set_response_pending_ = false;
-            send_error(error);
+    if (topology_redecode_pending_) {
+        // A topology change waited out the transition; it records the output
+        // requirement itself when it re-decodes.
+        if (!redecode_for_topology(&error)) {
+            if (set_response_pending_) {
+                set_response_pending_ = false;
+                send_error(error);
+            }
+            return;
         }
-        return;
-    }
-    if (!topology_redecode_pending_) {
+    } else if (current_source_ != nullptr) {
         const auto required = required_output_dimensions();
-        decoded_required_width_ = required.first;
-        decoded_required_height_ = required.second;
+        current_source_->set_output_requirement(required.first, required.second);
     }
     if (!draw_all(&error)) {
         if (set_response_pending_) {
@@ -1539,13 +1247,6 @@ void NativeWallpaperRenderer::advance_animation() {
         }
         send_ok();
     }
-}
-
-void NativeWallpaperRenderer::destroy_texture(Texture& texture) noexcept {
-    if (texture.id != 0) {
-        glDeleteTextures(1, &texture.id);
-    }
-    texture = {};
 }
 
 void NativeWallpaperRenderer::mark_fatal(const std::string& message) noexcept {
@@ -1579,84 +1280,61 @@ bool NativeWallpaperRenderer::redecode_for_topology(
         topology_redecode_pending_ = true;
         return true;
     }
-    if (current_texture_.id == 0 ||
-        (current_source_path_.empty() && current_source_bytes_ == nullptr)) {
-        return true;
-    }
+    if (!source_has_frame(current_source_)) return true;
 
+    // Callers (layer-surface configure, output scale) already drew the new
+    // topology, so this only re-derives a source whose coverage box grew.
+    // Video sources keep their encoded geometry and report no work, which is
+    // why the extra draw stays conditional.
     const auto required = required_output_dimensions();
-    const int required_width = required.first;
-    const int required_height = required.second;
-    if (native_output_requires_redecode(
-            decoded_required_width_,
-            decoded_required_height_,
-            required_width,
-            required_height
+    if (current_source_->requires_topology_rederive(
+            required.first,
+            required.second
         )) {
-        Texture candidate;
-        const bool uploaded = current_source_bytes_ != nullptr
-            ? upload_texture_bytes(*current_source_bytes_, candidate, error_message)
-            : upload_texture(current_source_path_, candidate, error_message);
-        if (!uploaded) {
+        if (!make_pbuffer_current(error_message)) {
             mark_fatal(error_message != nullptr ? *error_message : "");
             return false;
         }
-        Texture previous = current_texture_;
-        current_texture_ = candidate;
-        if (!draw_all(error_message)) {
-            current_texture_ = previous;
-            destroy_texture(candidate);
+        if (!current_source_->adapt_to_topology(
+                required.first,
+                required.second,
+                error_message
+            )) {
+            mark_fatal(error_message != nullptr ? *error_message : "");
             return false;
         }
-        destroy_texture(previous);
-        decoded_required_width_ = required_width;
-        decoded_required_height_ = required_height;
+        if (!draw_all(error_message)) return false;
     }
 
     for (const auto& output : outputs_) {
-        if (output == nullptr ||
-            (output->override_source_path.empty() && output->override_source_bytes == nullptr) ||
-            output->override_texture.id == 0 || !output->configured ||
-            output->closed) {
+        if (output == nullptr || !source_has_frame(output->override_source) ||
+            !output->configured || output->closed) {
             continue;
         }
         const int output_width = std::max(output->logical_width * output->scale, 1);
         const int output_height = std::max(output->logical_height * output->scale, 1);
-        if (!native_output_requires_redecode(
-                output->decoded_required_width,
-                output->decoded_required_height,
+        if (!output->override_source->requires_topology_rederive(
                 output_width,
                 output_height
             )) {
             continue;
         }
-        Texture override_candidate;
-        const bool uploaded = output->override_source_bytes != nullptr
-            ? upload_texture_bytes(
-                  *output->override_source_bytes,
-                  override_candidate,
-                  error_message
-              )
-            : upload_texture(
-                  output->override_source_path,
-                  override_candidate,
-                  error_message
-              );
-        if (!uploaded) {
+        if (!make_pbuffer_current(error_message)) {
             mark_fatal(error_message != nullptr ? *error_message : "");
             return false;
         }
-        Texture previous_override = output->override_texture;
-        output->override_texture = override_candidate;
+        if (!output->override_source->adapt_to_topology(
+                output_width,
+                output_height,
+                error_message
+            )) {
+            mark_fatal(error_message != nullptr ? *error_message : "");
+            return false;
+        }
         if (!draw_output(*output, 1.0F, error_message)) {
-            output->override_texture = previous_override;
-            destroy_texture(override_candidate);
             mark_fatal(error_message != nullptr ? *error_message : "");
             return false;
         }
-        destroy_texture(previous_override);
-        output->decoded_required_width = output_width;
-        output->decoded_required_height = output_height;
     }
     topology_redecode_pending_ = false;
     return true;
@@ -1717,9 +1395,12 @@ void NativeWallpaperRenderer::destroy_layer_surface(OutputSurface& output) noexc
 }
 
 void NativeWallpaperRenderer::destroy_output_surface(OutputSurface& output) noexcept {
+    // An override can only have been prepared while the renderer was
+    // initialized, so releasing it here always happens with a current context
+    // (and therefore actually deletes the GL texture).
     if (initialized_) {
         (void)make_pbuffer_current();
-        destroy_texture(output.override_texture);
+        output.override_source.reset();
     }
     destroy_layer_surface(output);
     if (output.output != nullptr) {
@@ -2025,6 +1706,9 @@ std::string NativeWallpaperRenderer::egl_error_message(const char* operation) {
 }
 
 void NativeWallpaperRenderer::cleanup() noexcept {
+    // Sources must be released while the pbuffer is still current: releasing a
+    // slot deletes its GL texture. Output overrides are held by OutputSurface
+    // and are released by destroy_output_surface() below.
     if (egl_display_ != EGL_NO_DISPLAY && egl_context_ != EGL_NO_CONTEXT &&
         pbuffer_surface_ != EGL_NO_SURFACE) {
         (void)eglMakeCurrent(
@@ -2033,9 +1717,9 @@ void NativeWallpaperRenderer::cleanup() noexcept {
             pbuffer_surface_,
             egl_context_
         );
-        destroy_texture(prepared_texture_);
-        destroy_texture(next_texture_);
-        destroy_texture(current_texture_);
+        prepared_source_.reset();
+        next_source_.reset();
+        current_source_.reset();
         if (program_ != 0) {
             glDeleteProgram(program_);
             program_ = 0;
@@ -2081,14 +1765,11 @@ void NativeWallpaperRenderer::cleanup() noexcept {
     running_ = false;
     set_response_pending_ = false;
     topology_redecode_pending_ = false;
-    current_source_path_.clear();
-    current_source_bytes_.reset();
-    next_source_path_.clear();
-    next_source_bytes_.reset();
-    decoded_required_width_ = 0;
-    decoded_required_height_ = 0;
-    prepared_source_path_.clear();
-    prepared_source_bytes_.reset();
+    // Any source that outlived the EGL teardown above is released here without
+    // a GL context, which can only happen when the renderer never initialized.
+    prepared_source_.reset();
+    next_source_.reset();
+    current_source_.reset();
     fatal_error_.clear();
     closed_output_registry_names_.clear();
 }
