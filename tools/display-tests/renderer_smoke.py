@@ -33,6 +33,35 @@ class HarnessError(RuntimeError):
     pass
 
 
+STALE_SESSION_PREFIX = "/tmp/realmheart-renderer-smoke-"
+
+
+def hyprland_processes() -> list[str]:
+    result = subprocess.run(
+        ["ps", "-eo", "pid,cmd"], capture_output=True, text=True, timeout=30
+    )
+    return [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if "Hyprland" in line and "-c " in line and "smoke" in line
+    ]
+
+
+def assert_no_stale_sessions() -> None:
+    """Refuse to start while a previous run left a compositor behind.
+
+    An orphaned nested Hyprland keeps running with a deleted config and
+    surfaces emergency-mode windows, so a stale run is a hard error rather
+    than something to layer another session on top of.
+    """
+    stale = hyprland_processes()
+    if stale:
+        raise HarnessError(
+            "a previous renderer smoke session is still running; kill it first: "
+            + "; ".join(stale)
+        )
+
+
 def command_path(name: str) -> str:
     found = shutil.which(name)
     if found is None:
@@ -187,6 +216,7 @@ def main() -> int:
         raise HarnessError(f"wallpaper image not found: {image}")
     if not Path(args.renderer).is_file():
         raise HarnessError(f"renderer binary not found: {args.renderer}")
+    assert_no_stale_sessions()
 
     session_root = Path(tempfile.mkdtemp(prefix="realmheart-renderer-smoke-", dir="/tmp"))
     output_dir = Path("/tmp/realmheart-display-tests") / "renderer-smoke"
@@ -224,6 +254,58 @@ def main() -> int:
     for subdir in ("config", "state", "cache", "data"):
         (session_root / subdir).mkdir(parents=True, exist_ok=True)
 
+    # Track everything that must die before the temp dir can be removed. The
+    # nested compositor is launched as its own process group leader, and it is
+    # that group which is signalled: dbus-run-session does not forward a
+    # termination to the compositor it spawned, so signalling the wrapper alone
+    # orphans a Hyprland that later wakes with no config (emergency mode).
+    tracked: dict[int, subprocess.Popen] = {}
+    cleanup_done = False
+
+    def terminate_tracked() -> None:
+        for pid, process in list(tracked.items()):
+            if process.poll() is None:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if all(process.poll() is not None for _, process in tracked.items()):
+                break
+            time.sleep(0.2)
+        for pid, process in list(tracked.items()):
+            if process.poll() is None:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+
+    def cleanup(success: bool) -> None:
+        nonlocal cleanup_done
+        if cleanup_done:
+            return
+        cleanup_done = True
+        terminate_tracked()
+        survivors = hyprland_processes()
+        if survivors:
+            # Never delete the config of a compositor that is still alive; that
+            # is what turns a leaked session into emergency-mode windows.
+            print(
+                "[session] WARNING: nested Hyprland survived cleanup: "
+                + "; ".join(survivors),
+                file=sys.stderr,
+            )
+        # Never leave a temp config behind for a surviving compositor to find.
+        if not args.keep and not survivors:
+            shutil.rmtree(session_root, ignore_errors=True)
+        elif args.keep and success:
+            print(f"[session] kept isolated session at {session_root}")
+
+    import atexit
+
+    atexit.register(cleanup, False)
+
     nested: subprocess.Popen | None = None
     renderer: RendererProcess | None = None
     try:
@@ -235,6 +317,11 @@ def main() -> int:
                 env=env,
                 start_new_session=True,
             )
+            # The compositor is a child of the wrapper; its group leader is the
+            # wrapper PID, and the compositor joins that group because
+            # start_new_session=True applies to dbus-run-session and its
+            # children.
+            tracked[nested.pid] = nested
             instance = None
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
@@ -333,29 +420,21 @@ def main() -> int:
 
         print(f"[capture] {output_dir}")
         print("[smoke] renderer protocol + static render path OK")
-        if not args.keep:
-            subprocess.run(
-                [hyprctl, "--instance", instance, "dispatch", "exit"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            for _ in range(50):
-                if nested is not None and nested.poll() is not None:
-                    break
-                time.sleep(0.2)
+        # Ask the compositor to leave first so it can tear down its clients,
+        # then let the group-level cleanup confirm it is really gone.
+        subprocess.run(
+            [hyprctl, "--instance", instance, "dispatch", "exit"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        cleanup(True)
         return 0
     finally:
+        # Covers every early exit: an error, a KeyboardInterrupt, or a crash.
         if renderer is not None:
             renderer.close()
-        if nested is not None and nested.poll() is None:
-            nested.send_signal(signal.SIGTERM)
-            try:
-                nested.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                nested.kill()
-        if not args.keep:
-            shutil.rmtree(session_root, ignore_errors=True)
+        cleanup(False)
 
 
 if __name__ == "__main__":
