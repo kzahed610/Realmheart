@@ -309,18 +309,28 @@ Realmheart moves with Hyprland. The current release requires Hyprland
 with 0.56.2 retained as the preferred development baseline; newer minor lines
 are compatibility-unknown until Realmheart FX ABI support is validated.
 
-Currently used elsewhere: GTK 4.12 or newer (development on 4.22),
-gtk4-layer-shell 1.3, matugen 4.x.
+Currently used elsewhere: GTK 4.12 or newer (development on 4.24),
+GLib 2.90, gtk4-layer-shell 1.3, matugen 4.x.
 
 The required FX plugin compiles against Hyprland's internal plugin ABI and
 must be rebuilt after every Hyprland update. The installer binds the build to
 the exact detected Hyprland build/ABI identity rather than assuming minor-line
 compatibility is sufficient for a previously built plugin.
 
-Stable host baseline: CachyOS/Arch Linux, Hyprland 0.56.2, GTK 4.22.
-Display compatibility is additionally regression-tested in isolated Hyprland
-sessions across the standard, ultrawide, super-ultrawide, mixed-resolution,
-and mixed-DPI matrix documented above.
+Stable host baseline: CachyOS/Arch Linux, Hyprland 0.56.2, GTK 4.24,
+GLib 2.90, Mesa 26.2. Display compatibility is additionally
+regression-tested in isolated Hyprland sessions across the standard,
+ultrawide, super-ultrawide, mixed-resolution, and mixed-DPI matrix
+documented above.
+
+Toolstack qualification: the GTK 4.24 / GLib 2.90 line and the 26.2
+graphics stack were qualified against the 2026-10-10 CachyOS host update
+with a full clean rebuild, the native test suite, the Installer/Doctor
+suite, and the isolated multi-output display matrix. A Hyprland package
+revision that keeps the same upstream commit and ABI hash (such as a
+0.56.x pkgrel bump) does not change the FX ABI contract, but the plugin
+is still rebuilt and re-attested against the detected build identity on
+every exchange with the compositor.
 
 ---
 
