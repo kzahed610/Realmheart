@@ -610,6 +610,8 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
         if(REALMHEART_HAVE_LIVE_WALLPAPER)
             target_sources(realmheart-wallpaper-renderer PRIVATE
                 src/wallpaper-native/source/VideoWallpaperSource.cpp
+                src/wallpaper-native/video/VideoDecoder.cpp
+                src/wallpaper-native/video/VideoFrameQueue.cpp
             )
             target_link_libraries(realmheart-wallpaper-renderer PRIVATE
                 PkgConfig::REALMHEART_AVFORMAT
@@ -1870,6 +1872,50 @@ if(BUILD_TESTING)
         message(STATUS "Wallpaper media probe tests: built without live video classification")
     endif()
     realmheart_register_test(realmheart_wallpaper_media_probe_tests)
+
+    # Decoded frame queue. Pure logic: no FFmpeg, no media, no Wayland.
+    add_executable(
+        realmheart_wallpaper_video_frame_queue_tests
+        tests/WallpaperVideoFrameQueueTests.cpp
+        src/wallpaper-native/video/VideoFrameQueue.cpp
+    )
+    target_link_libraries(
+        realmheart_wallpaper_video_frame_queue_tests
+        PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_video_frame_queue_tests)
+
+    # FFmpeg decoder. Registered like the renderer's live support: the tests
+    # cover the "not compiled in" behaviour either way.
+    add_executable(
+        realmheart_wallpaper_video_decoder_tests
+        tests/WallpaperVideoDecoderTests.cpp
+        src/wallpaper-native/video/VideoDecoder.cpp
+    )
+    if(REALMHEART_HAVE_LIVE_WALLPAPER)
+        target_compile_definitions(
+            realmheart_wallpaper_video_decoder_tests
+            PRIVATE
+            REALMHEART_HAVE_LIVE_WALLPAPER=1
+        )
+        target_link_libraries(
+            realmheart_wallpaper_video_decoder_tests
+            PRIVATE
+            PkgConfig::REALMHEART_AVFORMAT
+            PkgConfig::REALMHEART_AVCODEC
+            PkgConfig::REALMHEART_AVUTIL
+            PkgConfig::REALMHEART_SWSCALE
+        )
+    endif()
+    target_link_libraries(
+        realmheart_wallpaper_video_decoder_tests
+        PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_video_decoder_tests)
 
     add_executable(
         realmheart_native_wallpaper_lifecycle_tests
