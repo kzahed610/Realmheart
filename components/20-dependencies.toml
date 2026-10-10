@@ -815,10 +815,73 @@ kind = "pkg_config"
 module = "wayland-protocols"
 
 [[external_dependencies]]
+id = "dep.wallpaper.avformat"
+name = "FFmpeg libavformat"
+reason = "Required by Realmheart capability wallpaper.avformat (live wallpaper media demuxing)"
+
+[[capabilities]]
+id = "wallpaper.avformat"
+dependency_id = "dep.wallpaper.avformat"
+display_name = "FFmpeg libavformat"
+requirement = "soft"
+lifecycle = ["build"]
+component_id = "wallpaper-native"
+[capabilities.probe]
+kind = "pkg_config"
+module = "libavformat"
+
+[[external_dependencies]]
+id = "dep.wallpaper.avcodec"
+name = "FFmpeg libavcodec"
+reason = "Required by Realmheart capability wallpaper.avcodec (live wallpaper decoding)"
+
+[[capabilities]]
+id = "wallpaper.avcodec"
+dependency_id = "dep.wallpaper.avcodec"
+display_name = "FFmpeg libavcodec"
+requirement = "soft"
+lifecycle = ["build"]
+component_id = "wallpaper-native"
+[capabilities.probe]
+kind = "pkg_config"
+module = "libavcodec"
+
+[[external_dependencies]]
+id = "dep.wallpaper.avutil"
+name = "FFmpeg libavutil"
+reason = "Required by Realmheart capability wallpaper.avutil (live wallpaper support library)"
+
+[[capabilities]]
+id = "wallpaper.avutil"
+dependency_id = "dep.wallpaper.avutil"
+display_name = "FFmpeg libavutil"
+requirement = "soft"
+lifecycle = ["build"]
+component_id = "wallpaper-native"
+[capabilities.probe]
+kind = "pkg_config"
+module = "libavutil"
+
+[[external_dependencies]]
+id = "dep.wallpaper.swscale"
+name = "FFmpeg libswscale"
+reason = "Required by Realmheart capability wallpaper.swscale (live wallpaper pixel conversion)"
+
+[[capabilities]]
+id = "wallpaper.swscale"
+dependency_id = "dep.wallpaper.swscale"
+display_name = "FFmpeg libswscale"
+requirement = "soft"
+lifecycle = ["build"]
+component_id = "wallpaper-native"
+[capabilities.probe]
+kind = "pkg_config"
+module = "libswscale"
+
+[[external_dependencies]]
 id = "dep.wayland.scanner"
 name = "wayland-scanner"
 reason = "Required by Realmheart capability wayland.scanner"
-
 [[capabilities]]
 id = "wayland.scanner"
 dependency_id = "dep.wayland.scanner"

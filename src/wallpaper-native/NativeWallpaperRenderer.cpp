@@ -4,6 +4,8 @@
 #include "wallpaper-native/source/RuntimeWallpaperSource.hpp"
 #include "wallpaper-native/source/StaticDecodePlan.hpp"
 #include "wallpaper-native/source/StaticImageSource.hpp"
+#include "wallpaper-native/source/VideoWallpaperSource.hpp"
+#include "wallpaper-native/source/WallpaperMediaProbe.hpp"
 
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 
@@ -328,7 +330,8 @@ bool NativeWallpaperRenderer::set_wallpaper(
 
     if (!discard_prepared_wallpaper(error_message)) return false;
 
-    auto candidate = make_static_image_source(path);
+    auto candidate = create_path_source(path, error_message);
+    if (candidate == nullptr) return false;
     if (!prepare_source(*candidate, error_message)) return false;
 
     if (!source_has_frame(current_source_)) {
@@ -376,7 +379,8 @@ bool NativeWallpaperRenderer::set_wallpaper_bytes(
     }
     if (!discard_prepared_wallpaper(error_message)) return false;
 
-    auto candidate = make_static_image_source(std::move(bytes));
+    auto candidate = create_bytes_source(std::move(bytes), error_message);
+    if (candidate == nullptr) return false;
     if (!prepare_source(*candidate, error_message)) return false;
     if (!source_has_frame(current_source_)) {
         clear_output_overrides();
@@ -422,7 +426,8 @@ bool NativeWallpaperRenderer::prepare_wallpaper(
     // PREPARE is authoritative for the next transaction. Never retain a stale
     // full-resolution candidate if this decode fails or the selection changed.
     if (!discard_prepared_wallpaper(error_message)) return false;
-    auto candidate = make_static_image_source(path);
+    auto candidate = create_path_source(path, error_message);
+    if (candidate == nullptr) return false;
     if (!prepare_source(*candidate, error_message)) return false;
     prepared_source_ = std::move(candidate);
     prepared_output_name_.clear();
@@ -447,7 +452,8 @@ bool NativeWallpaperRenderer::prepare_wallpaper_bytes(
         return false;
     }
     if (!discard_prepared_wallpaper(error_message)) return false;
-    auto candidate = make_static_image_source(std::move(bytes));
+    auto candidate = create_bytes_source(std::move(bytes), error_message);
+    if (candidate == nullptr) return false;
     if (!prepare_source(*candidate, error_message)) return false;
     prepared_source_ = std::move(candidate);
     prepared_output_name_.clear();
@@ -477,7 +483,8 @@ bool NativeWallpaperRenderer::prepare_wallpaper_for_output(
     }
 
     if (!discard_prepared_wallpaper(error_message)) return false;
-    auto candidate = make_static_image_source(path);
+    auto candidate = create_path_source(path, error_message);
+    if (candidate == nullptr) return false;
     if (!prepare_source(*candidate, error_message)) return false;
     prepared_source_ = std::move(candidate);
     prepared_output_name_ = output_name;
@@ -511,7 +518,8 @@ bool NativeWallpaperRenderer::prepare_wallpaper_for_output_bytes(
     }
 
     if (!discard_prepared_wallpaper(error_message)) return false;
-    auto candidate = make_static_image_source(std::move(bytes));
+    auto candidate = create_bytes_source(std::move(bytes), error_message);
+    if (candidate == nullptr) return false;
     if (!prepare_source(*candidate, error_message)) return false;
     prepared_source_ = std::move(candidate);
     prepared_output_name_ = output_name;
@@ -935,6 +943,51 @@ bool NativeWallpaperRenderer::prepare_source(
     // transaction discard, and the release of a replaced slot.
     if (!make_pbuffer_current(error_message)) return false;
     return source.prepare(error_message);
+}
+
+RuntimeSourcePtr NativeWallpaperRenderer::create_path_source(
+    const std::string& path,
+    std::string* error_message
+) {
+    const WallpaperMediaProbe probe = probe_wallpaper_media(path);
+    switch (probe.type) {
+        case WallpaperMediaType::StaticImage:
+            return make_static_image_source(path);
+        case WallpaperMediaType::Video:
+#if REALMHEART_HAVE_LIVE_WALLPAPER
+            return make_video_wallpaper_source(path, probe.detail);
+#else
+            set_error(
+                error_message,
+                "this build has no live wallpaper support; video wallpapers "
+                "require FFmpeg development libraries at build time"
+            );
+            return nullptr;
+#endif
+        case WallpaperMediaType::Unsupported:
+            break;
+    }
+    // A classification failure keeps the current wallpaper: the caller fails
+    // the transaction before anything is drawn.
+    set_error(error_message, probe.reason);
+    return nullptr;
+}
+
+RuntimeSourcePtr NativeWallpaperRenderer::create_bytes_source(
+    std::shared_ptr<const std::string> bytes,
+    std::string* error_message
+) {
+    // Owned payloads stay static-only. A video payload is rejected here with
+    // the real reason instead of surfacing as a decode failure.
+    if (probe_wallpaper_media_bytes(*bytes).type == WallpaperMediaType::Video) {
+        set_error(
+            error_message,
+            "live wallpaper video currently requires a local file path; "
+            "owned video payloads are unsupported"
+        );
+        return nullptr;
+    }
+    return make_static_image_source(std::move(bytes));
 }
 
 GLuint NativeWallpaperRenderer::compile_shader(

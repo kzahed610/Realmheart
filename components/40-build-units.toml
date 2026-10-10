@@ -79,5 +79,8 @@ cmake_target = "realmheart-wallpaper-renderer"
 component_ids = ["wallpaper-native"]
 artifact_ids = ["wallpaper.renderer"]
 build_dependencies = ["dep.wallpaper.wayland-egl", "dep.wallpaper.egl", "dep.wallpaper.wayland-protocols"]
+# Live wallpaper demux/decode (FFmpeg) is deliberately absent: those
+# capabilities are declared "soft" in 20-dependencies.toml, so a host without
+# them still builds and ships a complete static wallpaper renderer.
 abi_sensitive_dependencies = []
 rebuild_on_dependency_change = []

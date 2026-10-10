@@ -46,6 +46,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(REALMHEART_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(REALMHEART_ENABLE_NATIVE_WALLPAPER "Build the Wayland/EGL wallpaper renderer when dependencies are available" ON)
+option(REALMHEART_ENABLE_LIVE_WALLPAPER "Build video/live wallpaper support when the FFmpeg development libraries are available" ON)
 option(REALMHEART_BUILD_HYPRLAND_PLUGIN "Build the optional Realmheart FX Hyprland plugin when matching headers are available" ON)
 option(REALMHEART_ENABLE_SCREENSHOT "Build the optional Wayland/OpenCV screenshot tools" ON)
 option(REALMHEART_EVENTD_AUTOSTART "Install/enable/restart the user Event Surface daemon after relinking it" ON)
@@ -508,7 +509,21 @@ target_link_libraries(realmheart_lockscreen_test PRIVATE
 )
 
 set(REALMHEART_NATIVE_WALLPAPER_BUILT OFF)
+set(REALMHEART_HAVE_LIVE_WALLPAPER OFF)
 if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
+    if(REALMHEART_ENABLE_LIVE_WALLPAPER)
+        # Optional: live wallpaper support. Probing here (rather than wrapping
+        # the whole renderer) is what lets a static-only build stay complete.
+        pkg_check_modules(REALMHEART_AVFORMAT QUIET IMPORTED_TARGET libavformat)
+        pkg_check_modules(REALMHEART_AVCODEC QUIET IMPORTED_TARGET libavcodec)
+        pkg_check_modules(REALMHEART_AVUTIL QUIET IMPORTED_TARGET libavutil)
+        pkg_check_modules(REALMHEART_SWSCALE QUIET IMPORTED_TARGET libswscale)
+        if(REALMHEART_AVFORMAT_FOUND AND REALMHEART_AVCODEC_FOUND AND
+           REALMHEART_AVUTIL_FOUND AND REALMHEART_SWSCALE_FOUND)
+            set(REALMHEART_HAVE_LIVE_WALLPAPER ON)
+        endif()
+    endif()
+
     pkg_check_modules(WAYLAND_CLIENT QUIET IMPORTED_TARGET wayland-client)
     pkg_check_modules(WAYLAND_EGL QUIET IMPORTED_TARGET wayland-egl)
     pkg_check_modules(EGL QUIET IMPORTED_TARGET egl)
@@ -574,6 +589,7 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
             src/wallpaper-native/main.cpp
             src/wallpaper-native/NativeWallpaperRenderer.cpp
             src/wallpaper-native/source/StaticImageSource.cpp
+            src/wallpaper-native/source/WallpaperMediaProbe.cpp
             "${REALMHEART_LAYER_SHELL_HEADER}"
             "${REALMHEART_LAYER_SHELL_CODE}"
             "${REALMHEART_XDG_SHELL_CODE}"
@@ -588,6 +604,27 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
         )
         target_compile_options(realmheart-wallpaper-renderer PRIVATE ${REALMHEART_WARNING_FLAGS})
         target_compile_definitions(realmheart-wallpaper-renderer PRIVATE REALMHEART_VERSION="${PROJECT_VERSION}")
+
+        # Live wallpaper support is additive: the static renderer above must
+        # build and behave identically whether or not FFmpeg is available.
+        if(REALMHEART_HAVE_LIVE_WALLPAPER)
+            target_sources(realmheart-wallpaper-renderer PRIVATE
+                src/wallpaper-native/source/VideoWallpaperSource.cpp
+            )
+            target_link_libraries(realmheart-wallpaper-renderer PRIVATE
+                PkgConfig::REALMHEART_AVFORMAT
+                PkgConfig::REALMHEART_AVCODEC
+                PkgConfig::REALMHEART_AVUTIL
+                PkgConfig::REALMHEART_SWSCALE
+            )
+            target_compile_definitions(realmheart-wallpaper-renderer PRIVATE
+                REALMHEART_HAVE_LIVE_WALLPAPER=1
+            )
+            message(STATUS "Live wallpaper support: enabled (libavformat ${REALMHEART_AVFORMAT_VERSION}, libavcodec ${REALMHEART_AVCODEC_VERSION}, libavutil ${REALMHEART_AVUTIL_VERSION}, libswscale ${REALMHEART_SWSCALE_VERSION})")
+        else()
+            message(STATUS "Live wallpaper support: disabled (FFmpeg development libraries unavailable or REALMHEART_ENABLE_LIVE_WALLPAPER=OFF); static wallpaper renderer still builds")
+        endif()
+
         set(REALMHEART_NATIVE_WALLPAPER_BUILT ON)
     else()
         message(STATUS "Native wallpaper renderer disabled: one or more optional Wayland/EGL dependencies are unavailable")
@@ -648,6 +685,17 @@ if(REALMHEART_NATIVE_WALLPAPER_BUILT)
             dep.lib.glesv2:${GLESV2_VERSION}
             dep.lib.gdk-pixbuf:${GDK_PIXBUF_VERSION}
     )
+    if(REALMHEART_HAVE_LIVE_WALLPAPER)
+        # Live wallpaper capability is part of this build unit's identity, so
+        # Doctor can tell a static-only build from a live-capable one.
+        realmheart_add_build_fingerprint(wallpaper-native
+            DEPENDENCIES
+                dep.wallpaper.avformat:${REALMHEART_AVFORMAT_VERSION}
+                dep.wallpaper.avcodec:${REALMHEART_AVCODEC_VERSION}
+                dep.wallpaper.avutil:${REALMHEART_AVUTIL_VERSION}
+                dep.wallpaper.swscale:${REALMHEART_SWSCALE_VERSION}
+        )
+    endif()
 endif()
 if(TARGET realmheart_fx)
     realmheart_add_build_fingerprint(realmheart-fx
@@ -1781,6 +1829,47 @@ if(BUILD_TESTING)
         GTest::gtest_main
     )
     realmheart_register_test(realmheart_wallpaper_static_decode_plan_tests)
+
+    # Media classification. The FFmpeg-backed half of the probe only exists in a
+    # live-capable build, so the target (and its tests) follow the same option.
+    add_executable(
+        realmheart_wallpaper_media_probe_tests
+        tests/WallpaperMediaProbeTests.cpp
+        src/wallpaper-native/source/WallpaperMediaProbe.cpp
+    )
+    target_compile_definitions(
+        realmheart_wallpaper_media_probe_tests
+        PRIVATE
+        REALMHEART_TEST_PROBE_IMAGE="${CMAKE_SOURCE_DIR}/assets/Realmheart-Icons/realmheart-icon.png"
+    )
+    if(REALMHEART_HAVE_LIVE_WALLPAPER)
+        target_compile_definitions(
+            realmheart_wallpaper_media_probe_tests
+            PRIVATE
+            REALMHEART_HAVE_LIVE_WALLPAPER=1
+        )
+        target_link_libraries(
+            realmheart_wallpaper_media_probe_tests
+            PRIVATE
+            PkgConfig::GDK_PIXBUF
+            PkgConfig::REALMHEART_AVFORMAT
+            PkgConfig::REALMHEART_AVCODEC
+            PkgConfig::REALMHEART_AVUTIL
+            PkgConfig::REALMHEART_SWSCALE
+            GTest::gtest
+            GTest::gtest_main
+        )
+    else()
+        target_link_libraries(
+            realmheart_wallpaper_media_probe_tests
+            PRIVATE
+            PkgConfig::GDK_PIXBUF
+            GTest::gtest
+            GTest::gtest_main
+        )
+        message(STATUS "Wallpaper media probe tests: built without live video classification")
+    endif()
+    realmheart_register_test(realmheart_wallpaper_media_probe_tests)
 
     add_executable(
         realmheart_native_wallpaper_lifecycle_tests

@@ -88,6 +88,12 @@ PACMAN_DEPENDENCY_PROVIDERS = {
     'dep.wallpaper.wayland-egl': PacmanProvider(('wayland',)),
     'dep.wallpaper.egl': PacmanProvider(('libglvnd',)),
     'dep.wallpaper.wayland-protocols': PacmanProvider(('wayland-protocols',)),
+    # Live wallpaper support is optional: the static wallpaper renderer builds
+    # and runs without any of these.
+    'dep.wallpaper.avformat': PacmanProvider(('ffmpeg',), note='optional live wallpaper demuxing support'),
+    'dep.wallpaper.avcodec': PacmanProvider(('ffmpeg',), note='optional live wallpaper decoding support'),
+    'dep.wallpaper.avutil': PacmanProvider(('ffmpeg',), note='optional live wallpaper support library'),
+    'dep.wallpaper.swscale': PacmanProvider(('ffmpeg',), note='optional live wallpaper pixel conversion support'),
     'dep.wayland.scanner': PacmanProvider(('wayland',)),
     'dep.build.cxx26': PacmanProvider(('gcc',)),
     'dep.opencv.ximgproc': PacmanProvider(('opencv',)),

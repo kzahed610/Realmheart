@@ -157,6 +157,17 @@ private:
         RuntimeWallpaperSource& source,
         std::string* error_message
     );
+    // Classifies an external path and returns the matching source, or nullptr
+    // with a reason in error_message. Media type is decided by content, never
+    // by extension, and nothing about the static path changes.
+    [[nodiscard]] RuntimeSourcePtr create_path_source(
+        const std::string& path,
+        std::string* error_message
+    );
+    [[nodiscard]] RuntimeSourcePtr create_bytes_source(
+        std::shared_ptr<const std::string> bytes,
+        std::string* error_message
+    );
 
     [[nodiscard]] GLuint compile_shader(
         GLenum type,
