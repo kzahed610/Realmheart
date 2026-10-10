@@ -163,8 +163,7 @@ private:
     [[nodiscard]] bool upload_texture(
         const std::string& path,
         Texture& texture,
-        std::string* error_message,
-        std::string_view target_output = {}
+        std::string* error_message
     );
     [[nodiscard]] bool upload_texture_bytes(
         const std::string& bytes,

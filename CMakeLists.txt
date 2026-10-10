@@ -1754,6 +1754,33 @@ if(BUILD_TESTING)
     add_executable(realmheart_wallpaper_backend_tests tests/WallpaperBackendTests.cpp src/ui/wallpaper/WallpaperBackend.cpp)
     realmheart_register_test(realmheart_wallpaper_backend_tests)
 
+    # Renderer policy contracts that can be exercised without a Wayland/EGL
+    # context. These lock the static idle invariant and the static decode
+    # geometry before the runtime-source refactor.
+    add_executable(
+        realmheart_wallpaper_scheduling_tests
+        tests/WallpaperSchedulingTests.cpp
+    )
+    target_link_libraries(
+        realmheart_wallpaper_scheduling_tests
+        PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_scheduling_tests)
+
+    add_executable(
+        realmheart_wallpaper_static_decode_plan_tests
+        tests/WallpaperStaticDecodePlanTests.cpp
+    )
+    target_link_libraries(
+        realmheart_wallpaper_static_decode_plan_tests
+        PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_static_decode_plan_tests)
+
     add_executable(
         realmheart_native_wallpaper_lifecycle_tests
         tests/NativeWallpaperLifecycleTests.cpp

@@ -1,5 +1,7 @@
 #include "wallpaper-native/NativeWallpaperRenderer.hpp"
 #include "wallpaper-native/NativeWallpaperContracts.hpp"
+#include "wallpaper-native/WallpaperScheduling.hpp"
+#include "wallpaper-native/source/StaticDecodePlan.hpp"
 
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 
@@ -73,8 +75,6 @@ constexpr zwlr_layer_surface_v1_listener kLayerSurfaceListener{
     &NativeWallpaperRenderer::layer_surface_configure,
     &NativeWallpaperRenderer::layer_surface_closed,
 };
-
-constexpr std::uintmax_t kMaxDecodedPixels = 64'000'000;
 
 void set_error(std::string* destination, const std::string& message) {
     if (destination != nullptr) *destination = message;
@@ -489,7 +489,7 @@ bool NativeWallpaperRenderer::prepare_wallpaper_for_output(
 
     if (!discard_prepared_wallpaper(error_message)) return false;
     Texture candidate;
-    if (!upload_texture(path, candidate, error_message, output_name)) return false;
+    if (!upload_texture(path, candidate, error_message)) return false;
     prepared_texture_ = candidate;
     prepared_output_name_ = output_name;
     prepared_source_path_ = path;
@@ -658,7 +658,13 @@ int NativeWallpaperRenderer::run_stdio() {
             {STDIN_FILENO, POLLIN | POLLHUP, 0},
         };
 
-        const int timeout = animating_ ? 16 : -1;
+        // Deadline-driven: a stable static wallpaper with no transition and no
+        // timed source blocks indefinitely (poll timeout -1).
+        const int timeout = wallpaper_poll_timeout_ms(
+            animating_,
+            std::nullopt,
+            std::chrono::steady_clock::now()
+        );
         const int result = poll(descriptors, 2, timeout);
         if (result < 0) {
             if (errno == EINTR) continue;
@@ -955,8 +961,7 @@ bool NativeWallpaperRenderer::configure_egl_surface(
 bool NativeWallpaperRenderer::upload_texture(
     const std::string& path,
     Texture& texture,
-    std::string* error_message,
-    std::string_view target_output
+    std::string* error_message
 ) {
     if (!make_pbuffer_current(error_message)) return false;
 
@@ -974,76 +979,30 @@ bool NativeWallpaperRenderer::upload_texture(
         &source_width,
         &source_height
     );
-    if (source_width <= 0 || source_height <= 0 ||
-        static_cast<std::uintmax_t>(source_width) >
-            kMaxDecodedPixels / static_cast<std::uintmax_t>(source_height)) {
+
+    GLint maximum_texture_size = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum_texture_size);
+
+    // Decode geometry is a pure decision shared with the tests. Output size
+    // never shrinks it: a wallpaper decodes at native resolution so a later
+    // hotplug or scale increase cannot stretch a texture chosen for an older
+    // topology; only the GL texture-size limit can reduce it.
+    const StaticDecodePlan plan = plan_static_decode(
+        source_width,
+        source_height,
+        maximum_texture_size
+    );
+    if (!plan.valid) {
         set_error(error_message, "wallpaper dimensions exceed the decode budget");
         return false;
     }
 
-    int target_width = source_width;
-    int target_height = source_height;
-    if (source_width > 0 && source_height > 0) {
-        // Decode at source resolution so a later hotplug or scale increase
-        // never stretches a texture chosen for an older output topology.
-        double required_scale = 1.0;
-        for (const auto& output : outputs_) {
-            if (!output->configured || output->closed) continue;
-            if (!target_output.empty() && output->name != target_output) continue;
-            const int output_width = std::max(
-                output->logical_width * output->scale,
-                1
-            );
-            const int output_height = std::max(
-                output->logical_height * output->scale,
-                1
-            );
-            required_scale = std::max(
-                required_scale,
-                std::max(
-                    static_cast<double>(output_width) / source_width,
-                    static_cast<double>(output_height) / source_height
-                )
-            );
-        }
-
-        // Never upscale a source during decoding. When downscaling, preserve
-        // enough pixels for COVER on every configured output.
-        if (required_scale > 0.0 && required_scale < 1.0) {
-            target_width = std::max(
-                1,
-                static_cast<int>(std::ceil(source_width * required_scale))
-            );
-            target_height = std::max(
-                1,
-                static_cast<int>(std::ceil(source_height * required_scale))
-            );
-        }
-
-        GLint maximum_texture_size = 0;
-        glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximum_texture_size);
-        if (maximum_texture_size > 0 &&
-            (target_width > maximum_texture_size ||
-             target_height > maximum_texture_size)) {
-            const double limit_scale = std::min(
-                static_cast<double>(maximum_texture_size) / target_width,
-                static_cast<double>(maximum_texture_size) / target_height
-            );
-            target_width = std::max(
-                1,
-                static_cast<int>(std::floor(target_width * limit_scale))
-            );
-            target_height = std::max(
-                1,
-                static_cast<int>(std::floor(target_height * limit_scale))
-            );
-        }
-    }
+    const int target_width = plan.target_width;
+    const int target_height = plan.target_height;
 
     GError* error = nullptr;
     GdkPixbuf* pixbuf = nullptr;
-    if (source_width > 0 && source_height > 0 &&
-        (target_width != source_width || target_height != source_height)) {
+    if (plan.downscaled) {
         pixbuf = gdk_pixbuf_new_from_file_at_scale(
             path.c_str(),
             target_width,
@@ -1208,8 +1167,7 @@ bool NativeWallpaperRenderer::upload_texture_bytes(
     const int row_stride = gdk_pixbuf_get_rowstride(pixbuf);
     const guchar* source = gdk_pixbuf_read_pixels(pixbuf);
     if (width <= 0 || height <= 0 || source == nullptr ||
-        static_cast<std::uintmax_t>(width) >
-            kMaxDecodedPixels / static_cast<std::uintmax_t>(height) ||
+        !plan_static_decode(width, height, 0).valid ||
         (channels != 3 && channels != 4)) {
         g_object_unref(pixbuf);
         set_error(error_message, "decoded wallpaper exceeds the decode budget or has an unsupported pixel layout");
@@ -1677,14 +1635,12 @@ bool NativeWallpaperRenderer::redecode_for_topology(
             ? upload_texture_bytes(
                   *output->override_source_bytes,
                   override_candidate,
-                  error_message,
-                  output->name
+                  error_message
               )
             : upload_texture(
                   output->override_source_path,
                   override_candidate,
-                  error_message,
-                  output->name
+                  error_message
               );
         if (!uploaded) {
             mark_fatal(error_message != nullptr ? *error_message : "");
