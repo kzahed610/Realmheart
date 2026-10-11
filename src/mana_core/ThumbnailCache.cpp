@@ -1,5 +1,7 @@
 #include "mana_core/ThumbnailCache.hpp"
 
+#include "core/Command.hpp"
+
 #include <glib.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 
@@ -308,6 +310,95 @@ std::filesystem::path preview_cache_path(
     return root / "realmheart" / "mana-core-thumbnails" / name;
 }
 
+// Live videos are discovered but have no decodable still frame, so the selector
+// previews them from one poster frame. The shell never decodes video itself:
+// this is a bounded ffmpeg invocation, exactly the way the theme path already
+// shells out to matugen, and it produces one small image rather than playin
+// anything.
+bool is_video_source(const std::filesystem::path& path) {
+    std::string extension = path.extension().string();
+    std::transform(
+        extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char value) { return static_cast<char>(std::tolower(value)); }
+    );
+    static constexpr std::string_view videos[] = {
+        ".mp4", ".m4v", ".webm", ".mkv", ".mov", ".avi"
+    };
+    return std::find(std::begin(videos), std::end(videos), extension) !=
+           std::end(videos);
+}
+
+// Writes one scaled poster frame for 'video' into the cache directory. Bounded
+// by a deadline so a pathological file cannot stall the selector.
+std::filesystem::path extract_video_poster_frame(
+    const std::filesystem::path& video,
+    int target_dimension
+) {
+    std::error_code directory_error;
+    auto parent = preview_cache_path(video, target_dimension).parent_path();
+    std::filesystem::create_directories(parent, directory_error);
+    if (directory_error) return {};
+
+    // A filename derived from the stem keeps parallel requests for the same
+    // video from colliding with each other's output.
+    const std::filesystem::path poster =
+        parent / (video.stem().string() + "-poster.png");
+
+    const int scale = target_dimension > 0 ? target_dimension : 360;
+    const std::vector<std::string> argv = {
+        "ffmpeg",
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-i", video.string(),
+        "-frames:v", "1",
+        "-vf", "scale=" + std::to_string(scale) + ":-2:flags=area",
+        "-f", "image2",
+        poster.string(),
+    };
+
+    realmheart::core::CommandOptions options;
+    options.deadline = std::chrono::seconds(10);
+    options.max_output_bytes = 4 * 1024;
+    options.separate_stderr = true;
+    const auto result = realmheart::core::run_capture(argv, options);
+    if (!result.succeeded() || !std::filesystem::is_regular_file(poster)) return {};
+    return poster;
+}
+
+GdkPixbuf* load_or_create_video_poster(
+    const std::filesystem::path& source,
+    int target_dimension,
+    std::string* error
+) {
+    const auto poster = extract_video_poster_frame(source, target_dimension);
+    if (poster.empty()) {
+        if (error != nullptr) {
+            *error = "live wallpaper preview is unavailable; ffmpeg could not "
+                     "extract a poster frame";
+        }
+        return nullptr;
+    }
+
+    GError* decode_error = nullptr;
+    GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file(poster.c_str(), &decode_error);
+    if (pixbuf == nullptr) {
+        if (error != nullptr) {
+            *error = decode_error != nullptr && decode_error->message != nullptr
+                ? decode_error->message
+                : "unable to decode the live wallpaper poster frame";
+        }
+        g_clear_error(&decode_error);
+        std::error_code remove_error;
+        std::filesystem::remove(poster, remove_error);
+        return nullptr;
+    }
+    g_clear_error(&decode_error);
+
+    // The poster is transient: the canonical preview cache is what survives.
+    std::error_code remove_error;
+    std::filesystem::remove(poster, remove_error);
+    return pixbuf;
+}
+
 template <typename Value>
 bool read_binary(std::ifstream& input, Value& value) {
     input.read(reinterpret_cast<char*>(&value), static_cast<std::streamsize>(sizeof(Value)));
@@ -596,6 +687,20 @@ GdkPixbuf* ThumbnailCache::load_or_create(
             return cached;
         }
         g_object_unref(cached);
+    }
+
+    // A live video has no decodable still frame, so preview it from one poster
+    // frame. This replaces what would otherwise be a rejected tile. The cache
+    // above is consulted first, so extraction happens once per video.
+    if (is_video_source(source_path)) {
+        GdkPixbuf* poster =
+            load_or_create_video_poster(source_path, target_dimension, error);
+        if (poster == nullptr) return nullptr;
+        store_cached_preview(source_path, target_dimension, poster, memory_key.source_stamp);
+        retain_if_source_is_current(source_path, memory_key, poster);
+        prune_cache();
+        if (error) error->clear();
+        return poster;
     }
 
     int source_width = 0;

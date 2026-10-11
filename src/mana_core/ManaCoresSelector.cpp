@@ -884,12 +884,12 @@ void ManaCoresSelector::apply_preview_load(
         return;
     }
 
-    const bool complete_batch = std::all_of(
-        pixbufs.begin(),
-        pixbufs.end(),
-        [](GdkPixbuf* pixbuf) { return pixbuf != nullptr; }
-    );
-    if (!complete_batch) {
+    // Per-tile readiness. A batch whose core tile failed is a failed navigation:
+    // keep the visible batch and do not animate. A batch whose *adjacent* tiles
+    // failed still publishes — one undecodable neighbour must not blank the
+    // carousel window, which is what a single live video used to do.
+    const bool core_ready = pixbufs[0] != nullptr;
+    if (!core_ready) {
         if (pending_navigation_) {
             wallpaper_decode_ready_[static_cast<std::size_t>(wallpaper_index)] = false;
             pending_navigation_ = false;
@@ -899,6 +899,15 @@ void ManaCoresSelector::apply_preview_load(
         }
         queue_redraw();
         return;
+    }
+
+    for (std::size_t slot = 0; slot < pixbufs.size(); ++slot) {
+        const std::size_t path_index =
+            static_cast<std::size_t>((wallpaper_index + static_cast<int>(slot)) %
+                static_cast<int>(all_wallpaper_paths_.size()));
+        if (path_index < wallpaper_decode_ready_.size()) {
+            wallpaper_decode_ready_[path_index] = pixbufs[slot] != nullptr;
+        }
     }
 
     const bool navigation_publication = pending_navigation_;
@@ -935,7 +944,7 @@ void ManaCoresSelector::apply_preview_load(
         pixbufs[index + 1] = nullptr;
     }
     wallpaper_decode_ready_[static_cast<std::size_t>(wallpaper_index)] =
-        true;
+        pixbufs[0] != nullptr;
 
     if (pending_navigation_) {
         pending_navigation_ = false;
