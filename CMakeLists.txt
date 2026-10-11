@@ -588,6 +588,7 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
         add_executable(realmheart-wallpaper-renderer
             src/wallpaper-native/main.cpp
             src/wallpaper-native/NativeWallpaperRenderer.cpp
+            src/wallpaper-native/source/RuntimeSourceRegistry.cpp
             src/wallpaper-native/source/StaticImageSource.cpp
             src/wallpaper-native/source/WallpaperMediaProbe.cpp
             src/wallpaper-native/video/VideoDecodeCoordinator.cpp
@@ -1933,6 +1934,20 @@ if(BUILD_TESTING)
         GTest::gtest_main
     )
     realmheart_register_test(realmheart_wallpaper_frame_scheduler_tests)
+
+    # Source sharing across outputs: one decoder per wallpaper identity.
+    add_executable(
+        realmheart_wallpaper_source_registry_tests
+        tests/WallpaperSourceRegistryTests.cpp
+        src/wallpaper-native/source/RuntimeSourceRegistry.cpp
+    )
+    target_link_libraries(
+        realmheart_wallpaper_source_registry_tests
+        PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_source_registry_tests)
 
     # Decode wakeup channel and the CPU frame importer. The importer needs a GL
     # context, which EGL provides headlessly through Mesa's software renderer.

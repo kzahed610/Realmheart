@@ -90,7 +90,9 @@ void VideoWallpaperSource::stop() noexcept {
     // Everything queued belongs to a timeline that no longer exists.
     queue_.close();
     scheduler_.stop();
-    prepared_ = false;
+    // 'prepared_' is deliberately not cleared: it means "this source was
+    // successfully prepared", which stays true when playback stops. A source
+    // that stopped mid-session is still committable.
 }
 
 std::optional<std::chrono::steady_clock::time_point>
