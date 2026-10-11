@@ -47,24 +47,27 @@ TEST_F(WallpaperLibraryTest, DefaultRootResolvesToPicturesWallpapers) {
     );
 }
 
-TEST_F(WallpaperLibraryTest, DiscoversSupportedImagesAndIgnoresOthers) {
+TEST_F(WallpaperLibraryTest, DiscoversSupportedWallpapersAndIgnoresOthers) {
     realmheart::mana_core::WallpaperLibrary library;
 
-    // Minimal valid magic headers (plausible_image probes magic, not full decode)
+    // Minimal valid magic headers (plausible_wallpaper probes magic, not full decode)
     create_binary("a.png", {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00});
     create_binary("B.JpEg", {0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x00, 0x00, 0x00});
     create_binary("webp.webp", {'R', 'I', 'F', 'F', 0x00, 0x00, 0x00, 0x00, 'W', 'E', 'B', 'P'});
+    // A live video is discovered without being decoded: demuxing every
+    // candidate at startup is exactly what discovery must not do.
+    create_binary("video.mp4", {0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70});
 
     create_binary("notes.txt", {'h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd'});
-    create_binary("video.mp4", {0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70});
     create_binary("fake.png", {'n', 'o', 't', ' ', 'a', ' ', 'p', 'n', 'g', '!'});
 
     auto discovery = library.discover(root_);
 
-    ASSERT_EQ(discovery.paths.size(), 3u);
+    ASSERT_EQ(discovery.paths.size(), 4u);
     EXPECT_EQ(discovery.paths[0].filename(), "a.png");
     EXPECT_EQ(discovery.paths[1].filename(), "B.JpEg");
-    EXPECT_EQ(discovery.paths[2].filename(), "webp.webp");
+    EXPECT_EQ(discovery.paths[2].filename(), "video.mp4");
+    EXPECT_EQ(discovery.paths[3].filename(), "webp.webp");
     for (const auto& path : discovery.paths) {
         EXPECT_TRUE(path.is_absolute());
     }

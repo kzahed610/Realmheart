@@ -11,6 +11,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 
@@ -216,6 +217,26 @@ GtkWallpaperBackend::decode_wallpaper(
             ) == nullptr || header_width <= 0 || header_height <= 0 ||
             static_cast<std::uintmax_t>(header_width) >
                 kMaxDecodedPixels / static_cast<std::uintmax_t>(header_height)) {
+            // A live video reaching the GTK backend means the native renderer
+            // declined it. That is a real capability gap, not a decode budget
+            // problem, and the operator needs to see which one it was.
+            static constexpr std::string_view video_extensions[] = {
+                ".mp4", ".m4v", ".webm", ".mkv", ".mov", ".avi"
+            };
+            std::string extension = path->extension().string();
+            std::transform(
+                extension.begin(), extension.end(), extension.begin(),
+                [](unsigned char value) { return static_cast<char>(std::tolower(value)); }
+            );
+            if (std::find(
+                    std::begin(video_extensions), std::end(video_extensions), extension
+                ) != std::end(video_extensions)) {
+                set_error(
+                    error_message,
+                    "live video wallpapers require the native wallpaper backend"
+                );
+                return std::nullopt;
+            }
             set_error(error_message, "wallpaper dimensions exceed the decode budget");
             return std::nullopt;
         }

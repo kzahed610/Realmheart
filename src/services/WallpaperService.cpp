@@ -35,13 +35,18 @@ std::filesystem::path default_state_file() {
            "wallpaper/path.txt";
 }
 
+// Wallpaper sources are still images and moving images alike: which one a
+// source *is* is decided by the renderer, by content, not by this list. What
+// this list decides is only that the path is a wallpaper we can hand to a
+// backend at all.
 bool is_supported_extension(std::string extension) {
     std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
         return static_cast<char>(std::tolower(value));
     });
 
     constexpr std::string_view supported[] = {
-        ".jpg", ".jpeg", ".png", ".webp", ".avif", ".bmp", ".tif", ".tiff"
+        ".jpg", ".jpeg", ".png", ".webp", ".avif", ".bmp", ".tif", ".tiff",
+        ".mp4", ".m4v", ".webm", ".mkv", ".mov", ".avi"
     };
     return std::find(std::begin(supported), std::end(supported), extension) != std::end(supported);
 }
@@ -70,7 +75,7 @@ std::optional<std::filesystem::path> read_saved_path(
     if (saved_path.empty()) return std::nullopt;
 
     std::filesystem::path path(saved_path);
-    if (!service.validate_image(path)) return std::nullopt;
+    if (!service.validate_wallpaper(path)) return std::nullopt;
     return path;
 }
 
@@ -79,7 +84,7 @@ bool persist_saved_path(
     const std::filesystem::path& path,
     const WallpaperService& service
 ) {
-    if (!service.validate_image(path)) return false;
+    if (!service.validate_wallpaper(path)) return false;
 
     std::error_code error;
     auto absolute_path = std::filesystem::absolute(path, error);
@@ -136,7 +141,7 @@ bool persist_saved_path(
 WallpaperService::WallpaperService(std::filesystem::path state_file)
     : state_file_(state_file.empty() ? default_state_file() : std::move(state_file)) {}
 
-bool WallpaperService::validate_image(const std::filesystem::path& path) const {
+bool WallpaperService::validate_wallpaper(const std::filesystem::path& path) const {
     std::error_code error;
     if (!std::filesystem::is_regular_file(path, error) || error) return false;
     return is_supported_extension(path.extension().string());
@@ -172,7 +177,7 @@ std::optional<WallpaperSource> WallpaperService::load_source() const {
     if (saved_path.empty()) return std::nullopt;
 
     std::filesystem::path path(saved_path);
-    if (!validate_image(path)) return std::nullopt;
+    if (!validate_wallpaper(path)) return std::nullopt;
     return WallpaperSource(std::move(path));
 }
 

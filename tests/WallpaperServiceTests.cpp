@@ -42,27 +42,46 @@ protected:
 TEST_F(WallpaperServiceTest, RejectsMissingPath) {
     realmheart::services::WallpaperService service(state_file_);
 
-    EXPECT_FALSE(service.validate_image(root_ / "missing.png"));
+    EXPECT_FALSE(service.validate_wallpaper(root_ / "missing.png"));
 }
 
 TEST_F(WallpaperServiceTest, RejectsDirectory) {
     realmheart::services::WallpaperService service(state_file_);
 
-    EXPECT_FALSE(service.validate_image(root_));
+    EXPECT_FALSE(service.validate_wallpaper(root_));
 }
 
 TEST_F(WallpaperServiceTest, AcceptsSupportedExtensionCaseInsensitively) {
     realmheart::services::WallpaperService service(state_file_);
     const auto image = create_file("wallpaper.JpEg");
 
-    EXPECT_TRUE(service.validate_image(image));
+    EXPECT_TRUE(service.validate_wallpaper(image));
 }
 
-TEST_F(WallpaperServiceTest, RejectsVideoExtension) {
+TEST_F(WallpaperServiceTest, AcceptsVideoExtensionCaseInsensitively) {
+    realmheart::services::WallpaperService service(state_file_);
+    const auto video = create_file("wallpaper.MP4");
+
+    // A video is a wallpaper the renderer can classify and play. Persistence
+    // only decides the path is one we can hand to a backend at all.
+    EXPECT_TRUE(service.validate_wallpaper(video));
+}
+
+TEST_F(WallpaperServiceTest, RejectsNonWallpaperExtension) {
+    realmheart::services::WallpaperService service(state_file_);
+    const auto document = create_file("wallpaper.txt");
+
+    EXPECT_FALSE(service.validate_wallpaper(document));
+}
+
+TEST_F(WallpaperServiceTest, VideoPathPersistsAndLoads) {
     realmheart::services::WallpaperService service(state_file_);
     const auto video = create_file("wallpaper.mp4");
 
-    EXPECT_FALSE(service.validate_image(video));
+    // A live wallpaper has to survive a restart, which means the persisted path
+    // must load back rather than being filtered out on read.
+    ASSERT_TRUE(service.persist_path(video));
+    EXPECT_EQ(service.load_path(), std::optional<std::filesystem::path>{video});
 }
 
 TEST_F(WallpaperServiceTest, PersistedPathRoundTrips) {

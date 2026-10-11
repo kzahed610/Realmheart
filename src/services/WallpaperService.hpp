@@ -13,7 +13,7 @@ class WallpaperService {
 public:
     explicit WallpaperService(std::filesystem::path state_file = {});
 
-    [[nodiscard]] bool validate_image(const std::filesystem::path& path) const;
+    [[nodiscard]] bool validate_wallpaper(const std::filesystem::path& path) const;
     [[nodiscard]] std::optional<WallpaperSource> load_source() const;
     [[nodiscard]] std::optional<std::filesystem::path> load_path() const;
     [[nodiscard]] bool persist_path(const std::filesystem::path& path) const;

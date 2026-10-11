@@ -17,6 +17,9 @@
 namespace realmheart::mana_core {
 namespace {
 
+// Mirrors the set the wallpaper service can persist, so anything applicable is
+// also selectable. Live videos are discovered but not decoded here: the
+// renderer classifies them at apply time.
 bool supported_extension(std::string extension) {
     std::transform(
         extension.begin(),
@@ -26,13 +29,31 @@ bool supported_extension(std::string extension) {
     );
 
     constexpr std::string_view supported[] = {
-        ".png", ".jpg", ".jpeg", ".webp"
+        ".png", ".jpg", ".jpeg", ".webp", ".avif", ".bmp", ".tif", ".tiff",
+        ".mp4", ".m4v", ".webm", ".mkv", ".mov", ".avi"
     };
     return std::find(
         std::begin(supported),
         std::end(supported),
         extension
     ) != std::end(supported);
+}
+
+// Live videos are discovered but never decoded here. Which kind a file is ends
+// up decided by the renderer at apply time, so discovery only has to avoid
+// treating a valid video as garbage.
+bool is_video_extension(std::string extension) {
+    std::transform(
+        extension.begin(),
+        extension.end(),
+        extension.begin(),
+        [](unsigned char value) { return static_cast<char>(std::tolower(value)); }
+    );
+
+    constexpr std::string_view videos[] = {
+        ".mp4", ".m4v", ".webm", ".mkv", ".mov", ".avi"
+    };
+    return std::find(std::begin(videos), std::end(videos), extension) != std::end(videos);
 }
 
 std::string lowercase_filename(const std::filesystem::path& path) {
@@ -46,15 +67,22 @@ std::string lowercase_filename(const std::filesystem::path& path) {
     return filename;
 }
 
-bool plausible_image(const std::filesystem::path& path) {
+bool plausible_wallpaper(const std::filesystem::path& path) {
     // Bounded discovery: probe the magic header instead of fully decoding the
     // image. gdk_pixbuf_new_from_file_at_scale() decodes the ENTIRE frame
     // even for a 1x1 scale, so validating every library member that way made
     // startup block for seconds on large collections (1.1 GB / 39 files took
     // ~13.5 s in the field). The header probe rejects the same garbage
-    // (text files, videos, random data) in constant time; images that are
+    // (text files, random data) in constant time; images that are
     // magic-valid but truncated are surfaced with a decode error later at
     // preload/show time, where the overlay already handles failure cleanly.
+    //
+    // A video is accepted on extension alone: demuxing every candidate to
+    // validate it is exactly the "do not fully decode every video during
+    // library startup" trap, and a corrupt video is reported by the renderer
+    // when it is actually applied.
+    if (is_video_extension(path.extension().string())) return true;
+
     std::error_code error;
     const auto size = std::filesystem::file_size(path, error);
     if (error || size == 0) return false;
@@ -144,7 +172,7 @@ WallpaperDiscovery WallpaperLibrary::discover(std::filesystem::path root) const 
                 "ignored unreadable entry: " + path.string()
             );
         } else if (regular && supported_extension(path.extension().string())) {
-            if (plausible_image(path)) {
+            if (plausible_wallpaper(path)) {
                 candidates.push_back(path);
             } else {
                 result.diagnostics.emplace_back(
