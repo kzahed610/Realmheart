@@ -24,7 +24,22 @@ namespace {
 
 #if REALMHEART_HAVE_LIVE_WALLPAPER
 
-constexpr std::int64_t kMicrosecondsPerSecond = 1'000'000;
+// Measured with tools/display-tests/bench_video_decode.py against a 1080p30
+// H.264 wallpaper (i5-11300H, software decode):
+//
+//   threads | cpu/frame | wall/frame
+//         1 |    19.9ms |     20.3ms
+//         2 |    23.0ms |     14.0ms
+//         4 |    26.7ms |      9.7ms
+//     auto  |    34.9ms |      6.6ms
+//
+// Threading raises CPU cost monotonically and buys wall time the wallpaper
+// never needed: the decoder only has to sustain the media's own frame rate
+// into a three-frame queue, not decode as fast as possible. Two threads is
+// chosen over one because it costs 3 ms more per frame while keeping 60 FPS
+// sources inside their 16.7 ms budget; auto expanded to nine threads for a
+// 75 % CPU penalty.
+constexpr int kDecoderThreadCount = 2;
 
 // Bounds decode work: a corrupt frame must not stall the wallpapers event loop
 // for longer than this. The renderer still runs the decoder on its own worker.
@@ -113,7 +128,8 @@ bool VideoDecoder::open(const std::string& path, std::string* error_message) {
         close();
         return false;
     }
-    codec_context_->thread_count = 0;  // Let FFmpeg pick a sensible default.
+    // Decoding is bounded by the media's own frame rate, not by the machine.
+    codec_context_->thread_count = kDecoderThreadCount;
 
     if (avcodec_open2(codec_context_, codec, nullptr) < 0) {
         if (error_message != nullptr) {
