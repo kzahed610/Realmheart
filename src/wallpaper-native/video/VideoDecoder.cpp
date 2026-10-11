@@ -22,12 +22,16 @@ namespace realmheart::wallpaper_native {
 
 namespace {
 
+#if REALMHEART_HAVE_LIVE_WALLPAPER
+
 constexpr std::int64_t kMicrosecondsPerSecond = 1'000'000;
 
 // Bounds decode work: a corrupt frame must not stall the wallpapers event loop
 // for longer than this. The renderer still runs the decoder on its own worker.
 constexpr std::int64_t kProbeSizeBytes = 8LL * 1024LL * 1024LL;
 constexpr std::int64_t kMaxAnalyzeMicros = 2LL * AV_TIME_BASE;
+
+#endif
 
 } // namespace
 
@@ -391,18 +395,19 @@ bool VideoDecoder::initialize_scaler(
     int format_code,
     std::string* error_message
 ) {
-    // The only place the FFmpeg pixel format enters: the interface stays
-    // FFmpeg-free so the renderer never sees one.
-    const AVPixelFormat format = static_cast<AVPixelFormat>(format_code);
 #if !REALMHEART_HAVE_LIVE_WALLPAPER
     (void)width;
     (void)height;
-    (void)format;
+    (void)format_code;
     if (error_message != nullptr) {
         *error_message = "live wallpaper video decoding is not compiled into this build";
     }
     return false;
 #else
+    // The only place the FFmpeg pixel format enters: the interface stays
+    // FFmpeg-free so the renderer never sees one.
+    const AVPixelFormat format = static_cast<AVPixelFormat>(format_code);
+
     if (scaler_ != nullptr && converted_frame_->width == width &&
         converted_frame_->height == height &&
         converted_frame_->format == AV_PIX_FMT_RGBA) {

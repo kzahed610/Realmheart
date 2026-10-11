@@ -72,8 +72,9 @@ TEST(VideoFrameQueueTest, ProducerWaitsInsteadOfGrowing) {
     }
 
     std::atomic<bool> finished{false};
-    std::jthread producer([&queue, &finished](std::stop_token token) {
-        queue.push(make_frame(99), 1, token);
+    std::atomic<bool> accepted{true};
+    std::jthread producer([&queue, &finished, &accepted](std::stop_token token) {
+        accepted.store(queue.push(make_frame(99), 1, token));
         finished.store(true);
     });
     // The queue is full: the producer must still be blocked, and the size must

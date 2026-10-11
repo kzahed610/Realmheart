@@ -47,6 +47,11 @@ public:
         return frame_.texture != 0;
     }
 
+    // For a static source a decoded frame is also what makes it committable.
+    [[nodiscard]] bool committable() const noexcept override {
+        return frame_.texture != 0;
+    }
+
     void set_output_requirement(int width, int height) noexcept override;
     [[nodiscard]] bool requires_topology_rederive(
         int required_width,

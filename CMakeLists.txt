@@ -590,6 +590,7 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
             src/wallpaper-native/NativeWallpaperRenderer.cpp
             src/wallpaper-native/source/StaticImageSource.cpp
             src/wallpaper-native/source/WallpaperMediaProbe.cpp
+            src/wallpaper-native/video/VideoDecodeCoordinator.cpp
             "${REALMHEART_LAYER_SHELL_HEADER}"
             "${REALMHEART_LAYER_SHELL_CODE}"
             "${REALMHEART_XDG_SHELL_CODE}"
@@ -610,8 +611,10 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
         if(REALMHEART_HAVE_LIVE_WALLPAPER)
             target_sources(realmheart-wallpaper-renderer PRIVATE
                 src/wallpaper-native/source/VideoWallpaperSource.cpp
+                src/wallpaper-native/gpu/CpuUploadFrameImporter.cpp
                 src/wallpaper-native/video/VideoDecoder.cpp
                 src/wallpaper-native/video/VideoFrameQueue.cpp
+                src/wallpaper-native/video/FrameScheduler.cpp
             )
             target_link_libraries(realmheart-wallpaper-renderer PRIVATE
                 PkgConfig::REALMHEART_AVFORMAT
@@ -1930,6 +1933,36 @@ if(BUILD_TESTING)
         GTest::gtest_main
     )
     realmheart_register_test(realmheart_wallpaper_frame_scheduler_tests)
+
+    # Decode wakeup channel and the CPU frame importer. The importer needs a GL
+    # context, which EGL provides headlessly through Mesa's software renderer.
+    add_executable(
+        realmheart_wallpaper_video_decode_coordinator_tests
+        tests/WallpaperVideoDecodeCoordinatorTests.cpp
+        src/wallpaper-native/video/VideoDecodeCoordinator.cpp
+    )
+    target_link_libraries(
+        realmheart_wallpaper_video_decode_coordinator_tests
+        PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_video_decode_coordinator_tests)
+
+    add_executable(
+        realmheart_wallpaper_cpu_frame_importer_tests
+        tests/WallpaperCpuFrameImporterTests.cpp
+        src/wallpaper-native/gpu/CpuUploadFrameImporter.cpp
+    )
+    target_link_libraries(
+        realmheart_wallpaper_cpu_frame_importer_tests
+        PRIVATE
+        PkgConfig::EGL
+        PkgConfig::GLESV2
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_cpu_frame_importer_tests)
 
     add_executable(
         realmheart_native_wallpaper_lifecycle_tests

@@ -34,13 +34,13 @@ private:
     std::filesystem::path directory_;
 };
 
-[[nodiscard]] bool ffmpeg_available() {
+[[maybe_unused]] bool ffmpeg_available() {
     return std::system("command -v ffmpeg >/dev/null 2>&1") == 0;
 }
 
 // A tiny, deterministic, several-frame video. Built at runtime so the
 // repository carries no opaque binary fixture.
-[[nodiscard]] bool build_fixture(
+[[maybe_unused]] bool build_fixture(
     const std::filesystem::path& destination,
     const std::string& filters
 ) {

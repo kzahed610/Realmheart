@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_NAME = "REALMHEART-TEST"
@@ -38,13 +39,23 @@ STALE_SESSION_PREFIX = "/tmp/realmheart-renderer-smoke-"
 
 def hyprland_processes() -> list[str]:
     result = subprocess.run(
-        ["ps", "-eo", "pid,cmd"], capture_output=True, text=True, timeout=30
+        ["ps", "-eo", "pid,args"], capture_output=True, text=True, timeout=30
     )
-    return [
-        line.strip()
-        for line in result.stdout.splitlines()
-        if "Hyprland" in line and "-c " in line and "smoke" in line
-    ]
+    matches: list[str] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        _, _, arguments = line.partition(" ")
+        # Only a real compositor process counts: matching the substring alone
+        # would also match a shell command that merely names one.
+        executable = arguments.split(" ", 1)[0] if arguments else ""
+        if Path(executable).name not in {"Hyprland", "hyprland"}:
+            continue
+        if " -c " not in arguments or "smoke" not in arguments:
+            continue
+        matches.append(line)
+    return matches
 
 
 def assert_no_stale_sessions() -> None:
@@ -107,15 +118,27 @@ def write_config(path: Path) -> None:
 class RendererProcess:
     """The real renderer, driven over its stdio protocol."""
 
-    def __init__(self, executable: str, wayland_display: str) -> None:
+    def __init__(
+        self,
+        executable: str,
+        wayland_display: str,
+        stderr_path: Path | None = None,
+    ) -> None:
         env = os.environ.copy()
         env["WAYLAND_DISPLAY"] = wayland_display
         env.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
+        # A pipe that is never read would fill up and stall the renderer, so
+        # stderr goes to a file instead.
+        if stderr_path is not None:
+            stderr_target: Any = stderr_path.open("wb")
+        else:
+            stderr_target = subprocess.DEVNULL
+        self._stderr_stream = stderr_target if stderr_path is not None else None
         self._process = subprocess.Popen(
             [executable, "--stdio"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=stderr_target,
             env=env,
             text=True,
             bufsize=1,
@@ -154,6 +177,8 @@ class RendererProcess:
             except HarnessError:
                 self._process.kill()
         self._process.wait(timeout=10)
+        if self._stderr_stream is not None:
+            self._stderr_stream.close()
 
 
 def encode_path(path: Path) -> str:
@@ -170,26 +195,129 @@ def wait_for_output(hyprctl: str, instance: str, timeout: float = 15.0) -> None:
     raise HarnessError(f"headless output {OUTPUT_NAME} never appeared")
 
 
-def capture(hyprctl: str, instance: str, grim: str, destination: Path) -> None:
+def capture(
+    hyprctl: str,
+    instance: str,
+    grim: str,
+    destination: Path,
+    attempts: int = 4,
+    nudge: Any = None,
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["WAYLAND_DISPLAY"] = capture.socket  # type: ignore[attr-defined]
     env["HYPRLAND_INSTANCE_SIGNATURE"] = instance
-    result = subprocess.run(
-        [grim, "-o", OUTPUT_NAME, str(destination)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        env=env,
-    )
-    if result.returncode != 0:
-        print(f"[capture] grim failed: {result.stderr.strip()}")
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline:
+
+    # The headless output only has a frame once something damages it, and a
+    # nested compositor that has been restarted many times in one session can
+    # stall screencopy. Nudge the renderer (which repaints) and retry instead of
+    # failing the whole run.
+    for attempt in range(1, attempts + 1):
+        result = None
+        try:
+            result = subprocess.run(
+                [grim, "-o", OUTPUT_NAME, str(destination)],
+                capture_output=True,
+                text=True,
+                timeout=25,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            # A nested compositor's screencopy can stall; the retry below is the
+            # recovery, so a timeout is an attempt that failed, not a crash.
+            pass
         if destination.exists() and destination.stat().st_size > 0:
             return
-        time.sleep(0.2)
+        if result is not None and result.returncode != 0:
+            print(f"[capture] grim failed: {result.stderr.strip()[:200]}")
+        if attempt < attempts:
+            print(f"[capture] capture attempt {attempt}/{attempts} failed; nudging")
+            if nudge is not None:
+                nudge()
+            time.sleep(0.5)
     raise HarnessError(f"screenshot never appeared: {destination}")
+
+
+def build_video_fixture(destination: Path) -> None:
+    """A small, deterministic, multi-frame video for the runtime smoke test."""
+    command = (
+        "ffmpeg -hide_banner -loglevel error -y"
+        " -f lavfi -i \"testsrc=size=320x240:rate=10:duration=2\""
+        " -c:v libx264 -pix_fmt yuv420p "
+        f"{destination} 2>/dev/null"
+    )
+    if subprocess.run(command, shell=True, timeout=300).returncode != 0:
+        raise HarnessError("ffmpeg could not build the video fixture")
+    if not destination.is_file() or destination.stat().st_size == 0:
+        raise HarnessError("the video fixture is empty")
+
+
+def mean_pixel_delta(first: Path, second: Path) -> float:
+    """Average per-channel difference between two captures, in 0..255."""
+    try:
+        from PIL import Image, ImageChops
+    except ImportError:
+        # Without Pillow, fall back to a byte comparison, which detects a
+        # completely still image but not a subtle animation.
+        return 1.0 if first.read_bytes() != second.read_bytes() else 0.0
+
+    with Image.open(first) as left, Image.open(second) as right:
+        if left.size != right.size:
+            return 255.0
+        difference = ImageChops.difference(left.convert("RGB"), right.convert("RGB"))
+        histogram = difference.histogram()
+        pixels = left.size[0] * left.size[1]
+        total = sum(index * count for index, count in enumerate(histogram))
+        return total / (pixels * 3)
+
+
+def run_video_checks(setup, output_dir: Path) -> None:
+    """Play a real video wallpaper and prove it moves.
+
+    This is the part the unit tests cannot cover: the decode worker, the frame
+    queue, the presentation scheduler and the CPU upload all running against a
+    live Wayland surface.
+    """
+    video = output_dir / "smoke-video.mp4"
+    build_video_fixture(video)
+    print(f"[video] fixture={video}")
+
+    encoded = encode_path(video)
+    check = setup["check"]
+
+    # PREPARE must succeed only once the video is genuinely playable.
+    check("prepare-video", f"PREPARE {encoded}", "PREPARED")
+    # COMMIT hands over after the visual-ready boundary, like any wallpaper.
+    check("commit-video", "COMMIT", "OK")
+
+    # The crossfade runs into the video; let it settle before capturing.
+    time.sleep(1.0)
+    capture(setup["hyprctl"], setup["instance"], setup["grim"],
+            output_dir / "renderer-video-a.png")
+    time.sleep(0.6)
+    capture(setup["hyprctl"], setup["instance"], setup["grim"],
+            output_dir / "renderer-video-b.png")
+
+    delta = mean_pixel_delta(
+        output_dir / "renderer-video-a.png",
+        output_dir / "renderer-video-b.png",
+    )
+    print(f"[video] mean frame delta = {delta:.2f}/255")
+    if delta < 1.0:
+        raise HarnessError(
+            "the video wallpaper is not animating: two captures 600 ms apart "
+            "are identical"
+        )
+
+    # A live wallpaper must not make the renderer unresponsive.
+    check("alive-while-playing", "PING", "OK")
+
+    # Switching back to a static image must work from a live source.
+    check("set-static-from-video", f"SET {encode_path(setup['image'])}", "OK")
+    time.sleep(1.0)
+    capture(setup["hyprctl"], setup["instance"], setup["grim"],
+            output_dir / "renderer-after-video.png")
+    print("[video] live wallpaper path OK")
 
 
 def main() -> int:
@@ -199,6 +327,11 @@ def main() -> int:
         default=str(REPO_ROOT / "build-verify" / "realmheart-wallpaper-renderer"),
     )
     parser.add_argument("--image", default=None, help="image used as a wallpaper")
+    parser.add_argument(
+        "--skip-video",
+        action="store_true",
+        help="do not exercise the live video path",
+    )
     parser.add_argument("--keep", action="store_true", help="keep the isolated session")
     args = parser.parse_args()
 
@@ -303,8 +436,26 @@ def main() -> int:
             print(f"[session] kept isolated session at {session_root}")
 
     import atexit
+    import signal
+
+    def _terminate(signum, _frame):
+        # A timeout or Ctrl-C must still tear the compositor down: an orphan
+        # wakes later with a deleted config and surfaces emergency-mode
+        # windows.
+        cleanup(False)
+        raise SystemExit(128 + signum)
+
+    previous_handlers = {
+        number: signal.signal(number, _terminate)
+        for number in (signal.SIGTERM, signal.SIGINT)
+    }
+
+    def restore_handlers() -> None:
+        for number, handler in previous_handlers.items():
+            signal.signal(number, handler)
 
     atexit.register(cleanup, False)
+    atexit.register(restore_handlers)
 
     nested: subprocess.Popen | None = None
     renderer: RendererProcess | None = None
@@ -371,7 +522,11 @@ def main() -> int:
             print(f"[session] wayland socket={wayland_display}")
             capture.socket = wayland_display  # type: ignore[attr-defined]
 
-            renderer = RendererProcess(str(Path(args.renderer).resolve()), wayland_display)
+            renderer = RendererProcess(
+                str(Path(args.renderer).resolve()),
+                wayland_display,
+                output_dir / "renderer-stderr.log",
+            )
             results: list[tuple[str, str]] = []
 
             def check(label: str, line: str, expected: str) -> None:
@@ -385,14 +540,18 @@ def main() -> int:
             # SET with no current wallpaper draws the first frame immediately.
             check("set-path", f"SET {encode_path(image)}", "OK")
             time.sleep(0.5)
-            capture(hyprctl, instance, grim, output_dir / "renderer-set-static.png")
+            capture(
+                hyprctl, instance, grim, output_dir / "renderer-set-static.png",
+                nudge=lambda: renderer.command(f"SET {encode_path(image)}"),
+            )
 
             # PREPARE must not disturb the visible wallpaper, COMMIT promotes it.
             check("prepare-path", f"PREPARE {encode_path(image)}", "PREPARED")
             check("commit-prepared", "COMMIT", "OK")
             time.sleep(0.8)
             capture(
-                hyprctl, instance, grim, output_dir / "renderer-after-transition.png"
+                hyprctl, instance, grim, output_dir / "renderer-after-transition.png",
+                nudge=lambda: renderer.command(f"SET {encode_path(image)}"),
             )
 
             # Per-output override is independent of the global wallpaper.
@@ -414,6 +573,17 @@ def main() -> int:
                 raise HarnessError(f"malformed path must be rejected, got {response!r}")
             print(f"[protocol] malformed-path: {response}")
             check("still-alive", "PING", "OK")
+
+            if not args.skip_video:
+                setup = {
+                    "check": check,
+                    "renderer": renderer,
+                    "hyprctl": hyprctl,
+                    "instance": instance,
+                    "grim": grim,
+                    "image": image,
+                }
+                run_video_checks(setup, output_dir)
 
             renderer.close()
             renderer = None
@@ -438,6 +608,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import functools
+
+    print = functools.partial(print, flush=True)
     try:
         raise SystemExit(main())
     except HarnessError as error:

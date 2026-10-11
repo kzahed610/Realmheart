@@ -148,6 +148,16 @@ bool NativeWallpaperRenderer::initialize(std::string* error_message) {
     if (error_message != nullptr) error_message->clear();
     if (initialized_) return true;
 
+#if REALMHEART_HAVE_LIVE_WALLPAPER
+    // The decode wakeup channel must exist before any worker can signal it.
+    video_coordinator_ = std::make_unique<VideoDecodeCoordinator>();
+    if (!video_coordinator_->initialize(error_message)) {
+        video_coordinator_.reset();
+        cleanup();
+        return false;
+    }
+#endif
+
     if (!initialize_wayland(error_message) ||
         !initialize_egl(error_message) ||
         !initialize_gl(error_message)) {
@@ -337,6 +347,8 @@ bool NativeWallpaperRenderer::set_wallpaper(
     if (!source_has_frame(current_source_)) {
         clear_output_overrides();
         current_source_ = std::move(candidate);
+        if (!make_pbuffer_current(error_message)) return false;
+        current_source_->start(std::chrono::steady_clock::now());
         if (!draw_all(error_message)) {
             current_source_.reset();
             set_error(error_message, "native wallpaper failed to render the first frame");
@@ -347,14 +359,7 @@ bool NativeWallpaperRenderer::set_wallpaper(
         return true;
     }
 
-    // Assigning over the slot releases the previous incoming source, which
-    // releases its GL texture. A current context is guaranteed here by
-    // prepare_source().
-    next_source_ = std::move(candidate);
-    next_source_->set_output_requirement(0, 0);
-    active_transition_duration_ = transition_duration_;
-    animation_started_ = std::chrono::steady_clock::now();
-    animating_ = true;
+    if (!begin_transition(std::move(candidate), error_message)) return false;
     if (!draw_all(error_message)) {
         next_source_.reset();
         animating_ = false;
@@ -385,6 +390,8 @@ bool NativeWallpaperRenderer::set_wallpaper_bytes(
     if (!source_has_frame(current_source_)) {
         clear_output_overrides();
         current_source_ = std::move(candidate);
+        if (!make_pbuffer_current(error_message)) return false;
+        current_source_->start(std::chrono::steady_clock::now());
         if (!draw_all(error_message)) {
             current_source_.reset();
             set_error(error_message, "native wallpaper failed to render the first frame");
@@ -395,11 +402,7 @@ bool NativeWallpaperRenderer::set_wallpaper_bytes(
         return true;
     }
 
-    next_source_ = std::move(candidate);
-    next_source_->set_output_requirement(0, 0);
-    active_transition_duration_ = transition_duration_;
-    animation_started_ = std::chrono::steady_clock::now();
-    animating_ = true;
+    if (!begin_transition(std::move(candidate), error_message)) return false;
     if (!draw_all(error_message)) {
         next_source_.reset();
         animating_ = false;
@@ -534,7 +537,7 @@ bool NativeWallpaperRenderer::commit_prepared_wallpaper(
         set_error(error_message, "native wallpaper renderer is not initialized");
         return false;
     }
-    if (prepared_source_ == nullptr || !prepared_source_->has_frame()) {
+    if (prepared_source_ == nullptr || !prepared_source_->committable()) {
         set_error(error_message, "native wallpaper renderer has no prepared wallpaper");
         return false;
     }
@@ -579,6 +582,8 @@ bool NativeWallpaperRenderer::commit_prepared_wallpaper(
     if (!source_has_frame(current_source_)) {
         clear_output_overrides();
         current_source_ = std::move(prepared_source_);
+        if (!make_pbuffer_current(error_message)) return false;
+        current_source_->start(std::chrono::steady_clock::now());
         if (!draw_all(error_message)) {
             current_source_.reset();
             set_error(error_message, "native wallpaper failed to render the prepared frame");
@@ -589,11 +594,7 @@ bool NativeWallpaperRenderer::commit_prepared_wallpaper(
         return true;
     }
 
-    next_source_ = std::move(prepared_source_);
-    next_source_->set_output_requirement(0, 0);
-    active_transition_duration_ = transition_duration_;
-    animation_started_ = std::chrono::steady_clock::now();
-    animating_ = true;
+    if (!begin_transition(std::move(prepared_source_), error_message)) return false;
     if (!draw_all(error_message)) {
         next_source_.reset();
         animating_ = false;
@@ -607,7 +608,7 @@ bool NativeWallpaperRenderer::discard_prepared_wallpaper(
     std::string* error_message
 ) noexcept {
     prepared_output_name_.clear();
-    if (prepared_source_ == nullptr || !prepared_source_->has_frame()) return true;
+    if (prepared_source_ == nullptr || !prepared_source_->committable()) return true;
     // An uninitialized renderer keeps its prepared slot for cleanup(), which
     // releases it with a current context; releasing it here could run the GL
     // deletion without one.
@@ -629,9 +630,14 @@ int NativeWallpaperRenderer::run_stdio() {
         process_closed_outputs();
         if (wl_display_flush(display_) < 0 && errno != EAGAIN) return 1;
 
-        pollfd descriptors[2] = {
+        const int coordinator_fd = video_coordinator_ != nullptr &&
+                                           video_coordinator_->ready()
+                                       ? video_coordinator_->wake_fd()
+                                       : -1;
+        pollfd descriptors[3] = {
             {wl_display_get_fd(display_), POLLIN, 0},
             {STDIN_FILENO, POLLIN | POLLHUP, 0},
+            {coordinator_fd, POLLIN, 0},
         };
 
         // Deadline-driven: a stable static wallpaper with no transition and no
@@ -644,7 +650,7 @@ int NativeWallpaperRenderer::run_stdio() {
             source_deadline,
             std::chrono::steady_clock::now()
         );
-        const int result = poll(descriptors, 2, timeout);
+        const int result = poll(descriptors, 3, timeout);
         if (result < 0) {
             if (errno == EINTR) continue;
             return 1;
@@ -657,6 +663,34 @@ int NativeWallpaperRenderer::run_stdio() {
 
         if ((descriptors[1].revents & (POLLIN | POLLHUP)) != 0) {
             process_stdin_bytes();
+        }
+
+        // A decode worker signals the shared channel when it publishes a frame,
+        // loops, or fails. A presentation deadline that expires is the other way
+        // a video source needs attention.
+        bool video_dirty = false;
+        if ((descriptors[2].revents & POLLIN) != 0) {
+            video_coordinator_->acknowledge();
+            video_dirty = true;
+        } else if (result == 0 && source_deadline.has_value() &&
+                   std::chrono::steady_clock::now() >= *source_deadline) {
+            video_dirty = true;
+        }
+
+        if (video_dirty) {
+            std::string error;
+            bool redraw = false;
+            if (!tick_sources(&redraw, &error)) {
+                mark_fatal(error);
+                return 1;
+            }
+            if (redraw && !animating_ && !draw_all(&error)) {
+                if (set_response_pending_) {
+                    set_response_pending_ = false;
+                    send_error(error);
+                }
+                continue;
+            }
         }
 
         if (animating_) advance_animation();
@@ -958,7 +992,11 @@ RuntimeSourcePtr NativeWallpaperRenderer::create_path_source(
             return make_static_image_source(path);
         case WallpaperMediaType::Video:
 #if REALMHEART_HAVE_LIVE_WALLPAPER
-            return make_video_wallpaper_source(path, probe.detail);
+            return make_video_wallpaper_source(
+                path,
+                probe.detail,
+                video_coordinator_.get()
+            );
 #else
             set_error(
                 error_message,
@@ -974,6 +1012,32 @@ RuntimeSourcePtr NativeWallpaperRenderer::create_path_source(
     // the transaction before anything is drawn.
     set_error(error_message, probe.reason);
     return nullptr;
+}
+
+bool NativeWallpaperRenderer::tick_sources(
+    bool* redraw_required,
+    std::string* error_message
+) {
+    *redraw_required = false;
+    if (error_message != nullptr) error_message->clear();
+    const auto now = std::chrono::steady_clock::now();
+
+    const auto advance = [&](const RuntimeSourcePtr& source) -> bool {
+        if (source == nullptr) return true;
+        const SourceTickResult result = source->tick(now);
+        if (result.failed) {
+            set_error(error_message, result.error);
+            return false;
+        }
+        if (result.redraw_required) *redraw_required = true;
+        return true;
+    };
+
+    if (!advance(current_source_)) return false;
+    for (const auto& output : outputs_) {
+        if (output != nullptr && !advance(output->override_source)) return false;
+    }
+    return true;
 }
 
 std::optional<std::chrono::steady_clock::time_point>
@@ -997,6 +1061,28 @@ NativeWallpaperRenderer::earliest_source_deadline() const {
         if (output != nullptr) consider(output->override_source);
     }
     return earliest;
+}
+
+bool NativeWallpaperRenderer::begin_transition(
+    RuntimeSourcePtr incoming,
+    std::string* error_message
+) {
+    // The outgoing source stops decoding new frames but keeps its last frame,
+    // which is exactly the crossfade source (renderer docs section 9). Releasing
+    // it happens when the transition completes.
+    if (current_source_ != nullptr) current_source_->stop();
+    if (!make_pbuffer_current(error_message)) return false;
+
+    next_source_ = std::move(incoming);
+    next_source_->set_output_requirement(0, 0);
+    // Establishes playback time zero and presents a first frame, so a committed
+    // video is drawable immediately rather than on the next worker wakeup.
+    next_source_->start(std::chrono::steady_clock::now());
+
+    active_transition_duration_ = transition_duration_;
+    animation_started_ = std::chrono::steady_clock::now();
+    animating_ = true;
+    return true;
 }
 
 RuntimeSourcePtr NativeWallpaperRenderer::create_bytes_source(
@@ -1802,12 +1888,23 @@ void NativeWallpaperRenderer::cleanup() noexcept {
             glDeleteProgram(program_);
             program_ = 0;
         }
+    } else {
+        // Without a context the sources are still released so their workers
+        // stop; only an initialized renderer can hold textures.
+        prepared_source_.reset();
+        next_source_.reset();
+        current_source_.reset();
     }
 
     for (const auto& output : outputs_) {
         destroy_output_surface(*output);
     }
     outputs_.clear();
+
+    if (video_coordinator_ != nullptr) {
+        video_coordinator_->shutdown();
+        video_coordinator_.reset();
+    }
 
     if (pbuffer_surface_ != EGL_NO_SURFACE && egl_display_ != EGL_NO_DISPLAY) {
         eglDestroySurface(egl_display_, pbuffer_surface_);

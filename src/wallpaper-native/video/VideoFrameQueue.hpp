@@ -39,6 +39,21 @@ public:
     // Returns false when the queue is empty.
     [[nodiscard]] bool pop(VideoFrame& frame, std::uint64_t& generation);
 
+    // Timing of every queued frame, in order, without removing any of them.
+    // The presentation scheduler decides against this snapshot.
+    struct QueuedTiming {
+        std::int64_t presentation_us = 0;
+        bool has_timestamp = false;
+    };
+    [[nodiscard]] std::vector<QueuedTiming> timing() const;
+
+    // Removes 'count' frames from the front. Returns false when fewer than
+    // 'count' are queued, in which case nothing is removed.
+    [[nodiscard]] bool take(
+        std::size_t count,
+        std::vector<VideoFrame>& frames
+    );
+
     // Drops queued frames older than 'generation'. A frame is "newer" only
     // when its generation is greater than or equal to the requested one.
     void discard_stale(std::uint64_t generation);

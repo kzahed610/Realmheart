@@ -43,6 +43,38 @@ bool VideoFrameQueue::pop(VideoFrame& frame, std::uint64_t& generation) {
     return true;
 }
 
+std::vector<VideoFrameQueue::QueuedTiming> VideoFrameQueue::timing() const {
+    std::lock_guard lock(mutex_);
+    std::vector<QueuedTiming> result;
+    result.reserve(entries_.size());
+    for (const auto& entry : entries_) {
+        result.push_back(QueuedTiming{
+            entry.frame.presentation_us,
+            entry.frame.has_timestamp
+        });
+    }
+    return result;
+}
+
+bool VideoFrameQueue::take(
+    std::size_t count,
+    std::vector<VideoFrame>& frames
+) {
+    frames.clear();
+    if (count == 0) return true;
+
+    std::lock_guard lock(mutex_);
+    if (entries_.size() < count) return false;
+
+    frames.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        frames.push_back(std::move(entries_.front().frame));
+        entries_.pop_front();
+    }
+    space_available_.notify_all();
+    return true;
+}
+
 void VideoFrameQueue::discard_stale(std::uint64_t generation) {
     std::lock_guard lock(mutex_);
     const auto before = entries_.size();

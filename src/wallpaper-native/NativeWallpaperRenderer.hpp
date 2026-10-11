@@ -3,6 +3,7 @@
 #include "wallpaper-native/NativeWallpaperContracts.hpp"
 #include "wallpaper-native/gpu/RenderFrame.hpp"
 #include "wallpaper-native/source/RuntimeWallpaperSource.hpp"
+#include "wallpaper-native/video/VideoDecodeCoordinator.hpp"
 
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
@@ -172,6 +173,20 @@ private:
     // keeps the static idle invariant: the loop then blocks indefinitely.
     [[nodiscard]] std::optional<std::chrono::steady_clock::time_point>
     earliest_source_deadline() const;
+    // Advances every committed source. Returns false (with a reason) when a
+    // source failed; the caller keeps the last good frame on screen.
+    [[nodiscard]] bool tick_sources(
+        bool* redraw_required,
+        std::string* error_message
+    );
+    // Starts a wallpaper transition onto 'incoming'. The outgoing source stops
+    // decoding but keeps its last frame as the crossfade source; the incoming
+    // source establishes its playback clock. Kept in one place so SET and
+    // COMMIT cannot drift apart.
+    [[nodiscard]] bool begin_transition(
+        RuntimeSourcePtr incoming,
+        std::string* error_message
+    );
 
     [[nodiscard]] GLuint compile_shader(
         GLenum type,
@@ -235,6 +250,10 @@ private:
     RuntimeSourcePtr next_source_;
     RuntimeSourcePtr prepared_source_;
     std::string prepared_output_name_;
+    // Shared decode wakeup channel. Owned here so one eventfd serves every
+    // video source; declared after the source slots so it outlives them during
+    // teardown (a worker signals it until its source joins).
+    std::unique_ptr<VideoDecodeCoordinator> video_coordinator_;
     std::vector<std::uint32_t> closed_output_registry_names_;
     bool animating_ = false;
     std::chrono::steady_clock::time_point animation_started_{};

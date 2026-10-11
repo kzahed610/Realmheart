@@ -60,9 +60,13 @@ public:
 
     [[nodiscard]] virtual RenderFrameView current_frame() const noexcept = 0;
 
-    // True while the source publishes a drawable frame. A prepared-but-empty
-    // source is never committed, and a released slot is never drawn.
+    // True while the source holds a drawable frame.
     [[nodiscard]] virtual bool has_frame() const noexcept = 0;
+
+    // True while a prepared source can be committed. A source can be
+    // committable before it has ever drawn a frame: a video's first decoded
+    // frame is only presented once playback starts.
+    [[nodiscard]] virtual bool committable() const noexcept = 0;
 
     // Records the output pixel box this source must cover. Static sources use
     // it to decide when a topology change forces a re-decode; video sources
