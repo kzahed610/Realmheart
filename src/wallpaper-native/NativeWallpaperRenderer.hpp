@@ -168,6 +168,10 @@ private:
         std::shared_ptr<const std::string> bytes,
         std::string* error_message
     );
+    // The earliest timed work any committed source needs. nullopt is what
+    // keeps the static idle invariant: the loop then blocks indefinitely.
+    [[nodiscard]] std::optional<std::chrono::steady_clock::time_point>
+    earliest_source_deadline() const;
 
     [[nodiscard]] GLuint compile_shader(
         GLenum type,

@@ -635,10 +635,13 @@ int NativeWallpaperRenderer::run_stdio() {
         };
 
         // Deadline-driven: a stable static wallpaper with no transition and no
-        // timed source blocks indefinitely (poll timeout -1).
+        // timed source blocks indefinitely (poll timeout -1). A video source
+        // contributes its own presentation deadline, and the earliest of the
+        // two wins.
+        const auto source_deadline = earliest_source_deadline();
         const int timeout = wallpaper_poll_timeout_ms(
             animating_,
-            std::nullopt,
+            source_deadline,
             std::chrono::steady_clock::now()
         );
         const int result = poll(descriptors, 2, timeout);
@@ -973,11 +976,33 @@ RuntimeSourcePtr NativeWallpaperRenderer::create_path_source(
     return nullptr;
 }
 
+std::optional<std::chrono::steady_clock::time_point>
+NativeWallpaperRenderer::earliest_source_deadline() const {
+    std::optional<std::chrono::steady_clock::time_point> earliest;
+    const auto consider = [&earliest](
+                              const RuntimeSourcePtr& source
+                          ) {
+        if (source == nullptr || source->kind() != WallpaperMediaKind::Video) {
+            return;
+        }
+        const auto deadline = source->next_deadline();
+        if (!deadline.has_value()) return;
+        if (!earliest.has_value() || *deadline < *earliest) {
+            earliest = deadline;
+        }
+    };
+
+    consider(current_source_);
+    for (const auto& output : outputs_) {
+        if (output != nullptr) consider(output->override_source);
+    }
+    return earliest;
+}
+
 RuntimeSourcePtr NativeWallpaperRenderer::create_bytes_source(
     std::shared_ptr<const std::string> bytes,
     std::string* error_message
-) {
-    // Owned payloads stay static-only. A video payload is rejected here with
+) {    // Owned payloads stay static-only. A video payload is rejected here with
     // the real reason instead of surfacing as a decode failure.
     if (probe_wallpaper_media_bytes(*bytes).type == WallpaperMediaType::Video) {
         set_error(

@@ -15,8 +15,8 @@ namespace realmheart::wallpaper_native {
 // This patch lands the seam, not the player: a source is classified as video,
 // carries its probe detail, and fails prepare() with a specific message rather
 // than pretending a frozen frame or an error log means playback succeeded.
-// The decoder, its worker, and the bounded frame queue replace that message in
-// the following patches (renderer plan patches 3-5).
+// The decoder, its bounded queue and the presentation scheduler that feed this
+// source arrive in the following patches.
 class VideoWallpaperSource : public RuntimeWallpaperSource {
 public:
     VideoWallpaperSource(std::string path, std::string detail)
@@ -30,9 +30,7 @@ public:
     void start(std::chrono::steady_clock::time_point now) noexcept override;
     void stop() noexcept override;
     [[nodiscard]] std::optional<std::chrono::steady_clock::time_point>
-    next_deadline() const noexcept override {
-        return std::nullopt;
-    }
+    next_deadline() const noexcept override;
     SourceTickResult tick(std::chrono::steady_clock::time_point now) noexcept override;
     [[nodiscard]] RenderFrameView current_frame() const noexcept override;
     [[nodiscard]] bool has_frame() const noexcept override {

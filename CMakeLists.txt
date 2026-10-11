@@ -1917,6 +1917,20 @@ if(BUILD_TESTING)
     )
     realmheart_register_test(realmheart_wallpaper_video_decoder_tests)
 
+    # Frame scheduler: pure presentation-timing policy, no FFmpeg, no Wayland.
+    add_executable(
+        realmheart_wallpaper_frame_scheduler_tests
+        tests/WallpaperFrameSchedulerTests.cpp
+        src/wallpaper-native/video/FrameScheduler.cpp
+    )
+    target_link_libraries(
+        realmheart_wallpaper_frame_scheduler_tests
+        PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_frame_scheduler_tests)
+
     add_executable(
         realmheart_native_wallpaper_lifecycle_tests
         tests/NativeWallpaperLifecycleTests.cpp

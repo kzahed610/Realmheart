@@ -14,15 +14,23 @@ bool VideoWallpaperSource::prepare(std::string* error_message) {
 }
 
 void VideoWallpaperSource::start(std::chrono::steady_clock::time_point) noexcept {
-    // No playback clock exists yet.
+    // No playback clock exists until the decode worker lands.
 }
 
 void VideoWallpaperSource::stop() noexcept {}
 
+std::optional<std::chrono::steady_clock::time_point>
+VideoWallpaperSource::next_deadline() const noexcept {
+    // No frames are decoded yet, so this source contributes no timed work: the
+    // renderer stays idle. The presentation scheduler takes this over when the
+    // decode worker and its frame queue arrive.
+    return std::nullopt;
+}
+
 SourceTickResult VideoWallpaperSource::tick(
     std::chrono::steady_clock::time_point
 ) noexcept {
-    // No decoded frame can be published, so nothing forces a redraw.
+    // Nothing to advance and nothing to present yet.
     return {};
 }
 
