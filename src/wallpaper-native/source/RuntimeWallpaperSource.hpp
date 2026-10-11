@@ -1,6 +1,7 @@
 #pragma once
 
 #include "wallpaper-native/gpu/RenderFrame.hpp"
+#include "wallpaper-native/video/WallpaperVideoStats.hpp"
 
 #include <chrono>
 #include <memory>
@@ -35,6 +36,10 @@ public:
     virtual ~RuntimeWallpaperSource() = default;
 
     [[nodiscard]] virtual WallpaperMediaKind kind() const noexcept = 0;
+
+    // Optional per-source diagnostics for the resource governor. Sources that
+    // do not track counters leave the defaults in place.
+    virtual void collect_stats(WallpaperVideoStats& /*stats*/) const noexcept {}
 
     // A dynamic source has its own timeline and timed work.
     [[nodiscard]] bool dynamic() const noexcept {

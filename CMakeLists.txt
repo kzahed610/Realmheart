@@ -592,6 +592,8 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
             src/wallpaper-native/source/StaticImageSource.cpp
             src/wallpaper-native/source/WallpaperMediaProbe.cpp
             src/wallpaper-native/video/VideoDecodeCoordinator.cpp
+            # Counters are reported in every build, not only live-capable ones.
+            src/wallpaper-native/video/WallpaperVideoStats.cpp
             "${REALMHEART_LAYER_SHELL_HEADER}"
             "${REALMHEART_LAYER_SHELL_CODE}"
             "${REALMHEART_XDG_SHELL_CODE}"
@@ -1948,6 +1950,22 @@ if(BUILD_TESTING)
         GTest::gtest_main
     )
     realmheart_register_test(realmheart_wallpaper_source_registry_tests)
+
+    # Live wallpaper counters. Pure formatting, so the STATS contract is locked
+    # down without a compositor.
+    add_executable(
+        realmheart_wallpaper_video_stats_tests
+        tests/WallpaperVideoStatsTests.cpp
+        src/wallpaper-native/video/WallpaperVideoStats.cpp
+    )
+
+    target_link_libraries(
+        realmheart_wallpaper_video_stats_tests
+        PRIVATE
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_video_stats_tests)
 
     # Decode wakeup channel and the CPU frame importer. The importer needs a GL
     # context, which EGL provides headlessly through Mesa's software renderer.

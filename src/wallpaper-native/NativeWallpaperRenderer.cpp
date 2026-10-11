@@ -6,6 +6,8 @@
 #include "wallpaper-native/source/StaticImageSource.hpp"
 #include "wallpaper-native/source/VideoWallpaperSource.hpp"
 #include "wallpaper-native/source/WallpaperMediaProbe.hpp"
+#include "wallpaper-native/video/VideoDecodeCoordinator.hpp"
+#include "wallpaper-native/video/WallpaperVideoStats.hpp"
 
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 
@@ -987,31 +989,38 @@ RuntimeSourcePtr NativeWallpaperRenderer::create_path_source(
     std::string* error_message
 ) {
     const WallpaperMediaProbe probe = probe_wallpaper_media(path);
-    switch (probe.type) {
-        case WallpaperMediaType::StaticImage:
-            return make_static_image_source(path);
-        case WallpaperMediaType::Video:
-#if REALMHEART_HAVE_LIVE_WALLPAPER
-            return make_video_wallpaper_source(
-                path,
-                probe.detail,
-                video_coordinator_.get()
-            );
-#else
-            set_error(
-                error_message,
-                "this build has no live wallpaper support; video wallpapers "
-                "require FFmpeg development libraries at build time"
-            );
-            return nullptr;
-#endif
-        case WallpaperMediaType::Unsupported:
-            break;
+    if (probe.type == WallpaperMediaType::Unsupported) {
+        set_error(error_message, probe.reason);
+        return nullptr;
     }
-    // A classification failure keeps the current wallpaper: the caller fails
-    // the transaction before anything is drawn.
-    set_error(error_message, probe.reason);
-    return nullptr;
+
+    // One source per wallpaper identity: the same video as the global wallpaper
+    // and as an output override shares its decoder, queue, and presentation
+    // clock (renderer docs section 11). The factory only runs on a miss, so a
+    // second output with the same path never starts a second decode.
+    return source_registry_.acquire(
+        path,
+        [this, &path, &probe]() -> RuntimeSourcePtr {
+            switch (probe.type) {
+                case WallpaperMediaType::StaticImage:
+                    return make_static_image_source(path);
+                case WallpaperMediaType::Video:
+#if REALMHEART_HAVE_LIVE_WALLPAPER
+                    return make_video_wallpaper_source(
+                        path,
+                        probe.detail,
+                        video_coordinator_.get()
+                    );
+#else
+                    return nullptr;
+#endif
+                case WallpaperMediaType::Unsupported:
+                    break;
+            }
+            return nullptr;
+        },
+        error_message
+    );
 }
 
 bool NativeWallpaperRenderer::tick_sources(
@@ -1038,6 +1047,23 @@ bool NativeWallpaperRenderer::tick_sources(
         if (output != nullptr && !advance(output->override_source)) return false;
     }
     return true;
+}
+
+WallpaperVideoStats NativeWallpaperRenderer::video_stats() const {
+    WallpaperVideoStats stats;
+    const auto consider = [&stats](const RuntimeSourcePtr& source) {
+        if (source == nullptr) return;
+        source->collect_stats(stats);
+    };
+
+    consider(current_source_);
+    for (const auto& output : outputs_) {
+        if (output != nullptr) consider(output->override_source);
+    }
+    if (video_coordinator_ != nullptr) {
+        stats.decode_wakeups = video_coordinator_->wakeups();
+    }
+    return stats;
 }
 
 std::optional<std::chrono::steady_clock::time_point>
@@ -1695,6 +1721,12 @@ void NativeWallpaperRenderer::process_command(const std::string& command) {
         send_ok();
         return;
     }
+    if (command == "STATS") {
+        // One line of counters for the resource governor and Doctor. Answers
+        // with data, never with per-frame logging.
+        send_raw(format_wallpaper_video_stats(video_stats()));
+        return;
+    }
     if (command == "QUIT") {
         send_ok();
         running_ = false;
@@ -1835,6 +1867,10 @@ void NativeWallpaperRenderer::send_ok() const {
 
 void NativeWallpaperRenderer::send_error(const std::string& message) const {
     std::cout << "ERROR " << base64_encode(message) << '\n' << std::flush;
+}
+
+void NativeWallpaperRenderer::send_raw(const std::string& line) const {
+    std::cout << line << '\n' << std::flush;
 }
 
 bool NativeWallpaperRenderer::make_pbuffer_current(std::string* error_message) {

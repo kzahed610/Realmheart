@@ -70,6 +70,38 @@ public:
     [[nodiscard]] const std::string& path() const noexcept { return path_; }
     [[nodiscard]] const std::string& detail() const noexcept { return detail_; }
 
+    // Backend counters for the resource governor (renderer docs section 23).
+    // Reading them touches only atomics, so they are safe from any thread.
+    [[nodiscard]] std::uint64_t frames_decoded() const noexcept {
+        return frames_decoded_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::uint64_t frames_dropped() const noexcept {
+        return frames_dropped_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::uint64_t loop_restarts() const noexcept {
+        return scheduler_.loop_restarts();
+    }
+    [[nodiscard]] std::uint64_t clock_resets() const noexcept {
+        return scheduler_.clock_resets();
+    }
+    [[nodiscard]] std::size_t queue_high_water() const noexcept {
+        return queue_.high_water();
+    }
+    [[nodiscard]] bool failed() const noexcept {
+        return failed_.load(std::memory_order_relaxed);
+    }
+
+    void collect_stats(WallpaperVideoStats& stats) const noexcept override {
+        stats.frames_decoded += frames_decoded();
+        stats.frames_dropped += frames_dropped();
+        stats.loop_restarts += loop_restarts();
+        stats.clock_resets += clock_resets();
+        stats.queue_high_water =
+            std::max(stats.queue_high_water, queue_high_water());
+        ++stats.active_video_sources;
+        if (failed()) stats.any_source_failed = true;
+    }
+
 private:
     void decode_loop(std::stop_token token);
     void freeze(std::string_view reason) noexcept;
@@ -88,6 +120,8 @@ private:
     std::atomic<bool> failed_{false};
     bool prepared_ = false;
     bool started_ = false;
+    std::atomic<std::uint64_t> frames_decoded_{0};
+    std::atomic<std::uint64_t> frames_dropped_{0};
 
     // Declared last: the thread is stopped and joined before the members it
     // touches are destroyed.

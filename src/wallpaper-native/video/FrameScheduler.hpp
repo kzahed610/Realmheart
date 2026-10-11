@@ -83,7 +83,6 @@ public:
     [[nodiscard]] std::uint64_t clock_resets() const noexcept {
         return clock_resets_;
     }
-
     void set_frames_per_second(double frames_per_second) noexcept {
         fallback_fps_ = frames_per_second > 0.0 ? frames_per_second : 0.0;
     }

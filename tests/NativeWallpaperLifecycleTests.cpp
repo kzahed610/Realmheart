@@ -94,6 +94,26 @@ private:
     std::filesystem::path state_path_;
 };
 
+// Decodes the base64 payload of a "SET <token>" record back into a path, so a
+// replay can be checked against the source the shell actually asked for.
+std::filesystem::path decoded_wallpaper_path(const std::string& record) {
+    const std::size_t separator = record.find(' ');
+    if (separator == std::string::npos) return {};
+    const std::string token = record.substr(separator + 1);
+    gsize decoded_size = 0;
+    guchar* decoded = g_base64_decode(token.c_str(), &decoded_size);
+    if (decoded == nullptr || decoded_size == 0) {
+        if (decoded != nullptr) g_free(decoded);
+        return {};
+    }
+    std::filesystem::path path(
+        std::string(reinterpret_cast<const char*>(decoded),
+                    static_cast<std::size_t>(decoded_size))
+    );
+    g_free(decoded);
+    return path;
+}
+
 bool wait_for_records(const std::filesystem::path& path, std::size_t count) {
     for (int attempt = 0; attempt < 500; ++attempt) {
         while (g_main_context_pending(nullptr)) {
@@ -227,6 +247,30 @@ TEST(NativeWallpaperProtocolTest, TruncationAndLineBoundsCleanDecoderState) {
     EXPECT_FALSE(oversized.feed(oversized_line, &inputs, &error));
     EXPECT_TRUE(inputs.empty());
     EXPECT_FALSE(oversized.feed("SET legacy\n", &inputs, &error));
+}
+
+// A video wallpaper must survive a renderer crash the same way a static one
+// does: the committed path is replayed, and playback restarts from the
+// beginning rather than being persisted with a timestamp (renderer docs 14).
+TEST(NativeWallpaperTransportTest, VideoPathReplaysAfterRendererCrash) {
+    RendererEnvironment environment;
+    environment.exit_after_set();
+    auto backend = std::make_shared<NativeWallpaperBackend>();
+    std::string error;
+    ASSERT_TRUE(backend->initialize(&error)) << error;
+    const std::filesystem::path video = "/home/zahed/Pictures/Wallpapers/Test.mp4";
+
+    ASSERT_TRUE(backend->set_wallpaper(WallpaperSource(video), &error)) << error;
+
+    ASSERT_TRUE(wait_for_records(environment.log_path(), 2));
+    const auto records = read_records(environment.log_path());
+    ASSERT_GE(records.size(), 2U);
+    for (const auto& record : records) {
+        EXPECT_TRUE(record.starts_with("SET "));
+        // The replay carries the same external video path rather than a
+        // substitute, so the decoder restarts from the beginning of this video.
+        EXPECT_EQ(decoded_wallpaper_path(record), video);
+    }
 }
 
 TEST(NativeWallpaperTransportTest, OwnedGlobalSetReplaysPayloadAfterHelperRestart) {

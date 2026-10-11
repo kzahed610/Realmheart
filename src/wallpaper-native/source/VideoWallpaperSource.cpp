@@ -150,6 +150,10 @@ SourceTickResult VideoWallpaperSource::tick(
 
     // Present the newest due frame; the frames it supersedes are dropped here
     // rather than presented in sequence.
+    frames_dropped_.fetch_add(
+        static_cast<std::uint64_t>(decision.drop_before),
+        std::memory_order_relaxed
+    );
     std::vector<VideoFrame> taken;
     if (!queue_.take(decision.drop_before + 1, taken)) return {};
 
@@ -236,6 +240,7 @@ void VideoWallpaperSource::decode_loop(std::stop_token token) {
             // Cancelled: the source is being discarded or replaced.
             return;
         }
+        frames_decoded_.fetch_add(1, std::memory_order_relaxed);
         if (coordinator_ != nullptr) coordinator_->wake();
     }
 }

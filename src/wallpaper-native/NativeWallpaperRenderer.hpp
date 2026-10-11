@@ -2,6 +2,7 @@
 
 #include "wallpaper-native/NativeWallpaperContracts.hpp"
 #include "wallpaper-native/gpu/RenderFrame.hpp"
+#include "wallpaper-native/source/RuntimeSourceRegistry.hpp"
 #include "wallpaper-native/source/RuntimeWallpaperSource.hpp"
 #include "wallpaper-native/video/VideoDecodeCoordinator.hpp"
 
@@ -173,6 +174,8 @@ private:
     // keeps the static idle invariant: the loop then blocks indefinitely.
     [[nodiscard]] std::optional<std::chrono::steady_clock::time_point>
     earliest_source_deadline() const;
+    // Aggregated counters for every committed source, for the STATS reply.
+    [[nodiscard]] WallpaperVideoStats video_stats() const;
     // Advances every committed source. Returns false (with a reason) when a
     // source failed; the caller keeps the last good frame on screen.
     [[nodiscard]] bool tick_sources(
@@ -220,6 +223,7 @@ private:
     void process_binary_frame(NativeBinaryFrame frame);
     void send_ok() const;
     void send_error(const std::string& message) const;
+    void send_raw(const std::string& line) const;
     void cleanup() noexcept;
 
     [[nodiscard]] bool make_pbuffer_current(std::string* error_message = nullptr);
@@ -250,6 +254,10 @@ private:
     RuntimeSourcePtr next_source_;
     RuntimeSourcePtr prepared_source_;
     std::string prepared_output_name_;
+    // One source per wallpaper identity. Holds the strong references the
+    // renderer's slots point at, so a shared wallpaper across outputs keeps a
+    // single decoder and a dropped output releases it.
+    RuntimeSourceRegistry source_registry_;
     // Shared decode wakeup channel. Owned here so one eventfd serves every
     // video source; declared after the source slots so it outlives them during
     // teardown (a worker signals it until its source joins).
