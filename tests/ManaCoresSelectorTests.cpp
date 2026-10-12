@@ -57,6 +57,19 @@ std::array<GdkPixbuf*, 4> make_target_batch() {
     };
 }
 
+// Publishes a batch the way the async task does, then reports whether the
+// wallpaper the user is looking at is marked ready to apply.
+bool ready_after_publication(
+    realmheart::mana_core::ManaCoresSelector& selector,
+    std::array<GdkPixbuf*, 4>& batch,
+    int index
+) {
+    selector.apply_preview_load(selector.async_state_->generation.load(), index, batch);
+    for (auto& pixbuf : batch) pixbuf = nullptr;  // ownership moved
+    return selector.current_wallpaper_index_ == index &&
+           selector.wallpaper_decode_ready_[static_cast<std::size_t>(index)];
+}
+
 } // namespace
 
 TEST(ManaCoresSelector, Constructs) {
@@ -384,6 +397,47 @@ TEST(ManaCoresSelector, RapidNavigationPublishesOnlyLatestGeneration) {
     EXPECT_EQ(sel.slice_pixbufs_[2], expected[3]);
     EXPECT_EQ(sel.nav_direction_, -1);
     EXPECT_TRUE(sel.nav_transitioning_);
+}
+
+// The apply gate. request_apply() refuses to do anything unless the wallpaper
+// on screen is marked decode-ready, so a publication that leaves it unready
+// makes the selector look fine while every apply silently does nothing. This is
+// a regression test for exactly that: the readiness flag was once re-derived
+// from an array whose element had already been consumed.
+TEST(ManaCoresSelector, PublicationMarksTheShownWallpaperReadyToApply) {
+    realmheart::mana_core::ManaCoresSelector selector;
+    seed_preview_batch(selector);
+    selector.wallpaper_decode_ready_.assign(4, false);
+
+    auto batch = make_target_batch();
+    ASSERT_TRUE(ready_after_publication(selector, batch, 0));
+}
+
+// Navigating and then publishing must also leave the arrived-at wallpaper
+// ready, or the first apply after any scroll is silently dropped.
+TEST(ManaCoresSelector, PublicationAfterNavigationMarksTheNewWallpaperReady) {
+    realmheart::mana_core::ManaCoresSelector selector;
+    seed_preview_batch(selector);
+    selector.cycle_wallpaper(1);
+    const int landed = selector.current_wallpaper_index_;
+    ASSERT_EQ(landed, 1);
+
+    selector.wallpaper_decode_ready_.assign(4, false);
+    auto batch = make_target_batch();
+    ASSERT_TRUE(ready_after_publication(selector, batch, landed));
+}
+
+// An unreadable neighbour must not cost the shown wallpaper its own readiness.
+TEST(ManaCoresSelector, OneFailedNeighbourKeepsTheShownWallpaperReady) {
+    realmheart::mana_core::ManaCoresSelector selector;
+    seed_preview_batch(selector);
+
+    auto batch = make_target_batch();
+    g_object_unref(batch[1]);
+    batch[1] = nullptr;  // a neighbour that could not be decoded
+
+    ASSERT_TRUE(ready_after_publication(selector, batch, 0));
+    EXPECT_FALSE(selector.wallpaper_decode_ready_[1]);
 }
 
 TEST(ManaCoresSelector, StaleOrFailedBatchRetainsVisibleBatchWithoutTransition) {

@@ -943,8 +943,10 @@ void ManaCoresSelector::apply_preview_load(
         slice_pixbufs_[index] = pixbufs[index + 1];
         pixbufs[index + 1] = nullptr;
     }
-    wallpaper_decode_ready_[static_cast<std::size_t>(wallpaper_index)] =
-        pixbufs[0] != nullptr;
+    // Readiness for every tile in this batch was recorded above, before the
+    // array was consumed. It must not be re-derived here: pixbufs[0] has been
+    // taken already, so reading it would clear the readiness the apply gate
+    // checks.
 
     if (pending_navigation_) {
         pending_navigation_ = false;
