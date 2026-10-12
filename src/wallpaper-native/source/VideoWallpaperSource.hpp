@@ -56,6 +56,7 @@ public:
     [[nodiscard]] RenderFrameView current_frame() const noexcept override;
     [[nodiscard]] bool has_frame() const noexcept override;
     [[nodiscard]] bool committable() const noexcept override;
+    [[nodiscard]] bool playing() const noexcept override { return started_; }
     void set_output_requirement(int width, int height) noexcept override;
     [[nodiscard]] bool requires_topology_rederive(
         int required_width,
@@ -90,6 +91,13 @@ public:
     [[nodiscard]] bool failed() const noexcept {
         return failed_.load(std::memory_order_relaxed);
     }
+
+    // Lifecycle state for the regression tests around BUG-1 (re-applying the
+    // wallpaper that is already playing). Reading them never touches the
+    // worker thread's FFmpeg state.
+    [[nodiscard]] bool started() const noexcept { return started_; }
+    [[nodiscard]] bool decoder_open() const noexcept { return decoder_.is_open(); }
+    [[nodiscard]] std::size_t queue_size() const noexcept { return queue_.size(); }
 
     void collect_stats(WallpaperVideoStats& stats) const noexcept override {
         stats.frames_decoded += frames_decoded();

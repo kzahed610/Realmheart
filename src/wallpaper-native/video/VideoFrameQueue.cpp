@@ -101,6 +101,17 @@ void VideoFrameQueue::close() noexcept {
     space_available_.notify_all();
 }
 
+void VideoFrameQueue::reopen() noexcept {
+    {
+        std::lock_guard lock(mutex_);
+        // close() already released every queued frame, so only the flag moves.
+        // An open queue is untouched: it still holds the frame decoded during
+        // prepare(), which is the frame a freshly committed source must show.
+        closed_ = false;
+    }
+    space_available_.notify_all();
+}
+
 std::size_t VideoFrameQueue::size() const noexcept {
     std::lock_guard lock(mutex_);
     return entries_.size();

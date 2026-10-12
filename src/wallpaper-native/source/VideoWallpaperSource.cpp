@@ -28,6 +28,13 @@ bool VideoWallpaperSource::prepare(std::string* error_message) {
         }
         return false;
     }
+    // Re-preparing a source that is already playing is a no-op. The source
+    // registry hands the very same object back for the same wallpaper, so this
+    // is the re-apply path, and VideoDecoder::open() closes before it opens:
+    // that would free the FFmpeg contexts the decode worker is still using.
+    // (BUG-1: the renderer died here and the shell fell back to GTK.)
+    if (prepared_ && started_) return true;
+
     if (!decoder_.open(path_, error_message)) return false;
 
     // The media's own frame rate is the fallback for a stream without usable
@@ -73,6 +80,9 @@ void VideoWallpaperSource::start(std::chrono::steady_clock::time_point now) noex
     loop_pending_.store(false);
     generation_ = 0;
     scheduler_.start(now);
+    // stop() closed the queue; a source that was stopped and started again
+    // would otherwise accept no frames at all and silently show nothing.
+    queue_.reopen();
     worker_ = std::jthread([this](std::stop_token token) { decode_loop(token); });
 
     // The first frame was decoded during prepare(), so present it right away.

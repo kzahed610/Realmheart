@@ -62,6 +62,11 @@ public:
     // discarded or replaced (renderer docs section 13.3).
     void close() noexcept;
 
+    // Re-opens a queue that close() shut, so a source that stopped and was
+    // started again can publish frames. A source that never closed keeps the
+    // frame it decoded during prepare(); reopening must not drop it.
+    void reopen() noexcept;
+
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] std::size_t capacity() const noexcept { return capacity_; }
     // Diagnostics for the resource governor: how deep this queue ever got.

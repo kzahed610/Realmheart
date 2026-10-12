@@ -563,6 +563,13 @@ bool NativeWallpaperRenderer::commit_prepared_wallpaper(
 
         RuntimeSourcePtr previous = std::move(output->override_source);
         output->override_source = std::move(prepared_source_);
+        // A video source is only drawable once it has started: prepare() leaves
+        // the first frame in the queue without uploading it. Starting it here
+        // is what makes a per-output live override visible at all, and
+        // playing() keeps a re-apply from restarting one that already runs.
+        if (!output->override_source->playing()) {
+            output->override_source->start(std::chrono::steady_clock::now());
+        }
         if (!output->configured || output->closed ||
             !draw_output(*output, 1.0F, error_message)) {
             // Assigning over the failed candidate releases it, which restores
@@ -1093,6 +1100,28 @@ bool NativeWallpaperRenderer::begin_transition(
     RuntimeSourcePtr incoming,
     std::string* error_message
 ) {
+    // Re-applying the wallpaper that is already current must not restart it.
+    // The source registry hands back the very same object for the same path,
+    // so this is the same live source: stopping it would tear down the decode
+    // worker it is running on, and starting it again would crossfade the source
+    // into itself. (BUG-1: the re-apply path used to free the FFmpeg contexts
+    // the worker was still decoding with, and the renderer died.)
+    if (incoming != nullptr && incoming == current_source_) {
+        // A transition to a different wallpaper that was still in flight is
+        // cancelled: this wallpaper is the authoritative one now.
+        next_source_.reset();
+        animating_ = false;
+        active_transition_duration_ = transition_duration_;
+        if (!make_pbuffer_current(error_message)) return false;
+        // Cancelling a transition freezes the outgoing source, and a frozen
+        // video would stay frozen on screen forever, so re-anchor it.
+        if (!current_source_->playing()) {
+            current_source_->start(std::chrono::steady_clock::now());
+        }
+        if (!draw_all(error_message)) return false;
+        return true;
+    }
+
     // The outgoing source stops decoding new frames but keeps its last frame,
     // which is exactly the crossfade source (renderer docs section 9). Releasing
     // it happens when the transition completes.

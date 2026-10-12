@@ -55,6 +55,12 @@ public:
     virtual void start(std::chrono::steady_clock::time_point now) = 0;
     virtual void stop() noexcept = 0;
 
+    // True while this source is the live, playing wallpaper. A video that a
+    // cancelled transition froze reports false, so the next apply can re-anchor
+    // it instead of leaving a frozen frame on screen. A static source has no
+    // timeline and is always ready, which is the default.
+    [[nodiscard]] virtual bool playing() const noexcept { return true; }
+
     // nullopt means the source has no timed work of its own, which is what
     // keeps a stable static wallpaper fully idle.
     [[nodiscard]] virtual std::optional<std::chrono::steady_clock::time_point>

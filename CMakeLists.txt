@@ -1951,6 +1951,49 @@ if(BUILD_TESTING)
     )
     realmheart_register_test(realmheart_wallpaper_source_registry_tests)
 
+    # Live wallpaper source lifecycle: prepare/start/stop across a re-apply of
+    # the wallpaper that is already playing. Needs a GL context for the frame
+    # upload, which EGL provides headlessly through Mesa's software renderer.
+    add_executable(
+        realmheart_wallpaper_video_source_tests
+        tests/WallpaperVideoSourceTests.cpp
+        src/wallpaper-native/source/VideoWallpaperSource.cpp
+        src/wallpaper-native/gpu/CpuUploadFrameImporter.cpp
+        src/wallpaper-native/video/VideoDecodeCoordinator.cpp
+        src/wallpaper-native/video/VideoFrameQueue.cpp
+        src/wallpaper-native/video/FrameScheduler.cpp
+        src/wallpaper-native/video/WallpaperVideoStats.cpp
+    )
+    target_link_libraries(
+        realmheart_wallpaper_video_source_tests
+        PRIVATE
+        PkgConfig::EGL
+        PkgConfig::GLESV2
+        GTest::gtest
+        GTest::gtest_main
+    )
+    if(REALMHEART_HAVE_LIVE_WALLPAPER)
+        target_compile_definitions(
+            realmheart_wallpaper_video_source_tests
+            PRIVATE
+            REALMHEART_HAVE_LIVE_WALLPAPER=1
+        )
+        target_sources(
+            realmheart_wallpaper_video_source_tests
+            PRIVATE
+            src/wallpaper-native/video/VideoDecoder.cpp
+        )
+        target_link_libraries(
+            realmheart_wallpaper_video_source_tests
+            PRIVATE
+            PkgConfig::REALMHEART_AVFORMAT
+            PkgConfig::REALMHEART_AVCODEC
+            PkgConfig::REALMHEART_AVUTIL
+            PkgConfig::REALMHEART_SWSCALE
+        )
+    endif()
+    realmheart_register_test(realmheart_wallpaper_video_source_tests)
+
     # Live wallpaper counters. Pure formatting, so the STATS contract is locked
     # down without a compositor.
     add_executable(

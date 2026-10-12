@@ -64,6 +64,11 @@ public:
     // True after decode_next reported the end of the stream.
     [[nodiscard]] bool at_eof() const noexcept { return at_eof_; }
 
+    // True while the decoder holds a live FFmpeg context. A source that is
+    // already playing must never re-open: open() closes first, which would
+    // free the contexts the decode worker is still using.
+    [[nodiscard]] bool is_open() const noexcept { return opened_; }
+
     // Seeks back to the start, flushes the codec, and re-normalizes the
     // presentation clock so a loop starts from playback time zero.
     [[nodiscard]] bool restart_from_beginning(std::string* error_message);

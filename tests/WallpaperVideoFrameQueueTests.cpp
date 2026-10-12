@@ -172,3 +172,38 @@ TEST(VideoFrameQueueTest, ZeroCapacityFallsBackToTheDefault) {
     VideoFrameQueue queue(0);
     EXPECT_EQ(queue.capacity(), VideoFrameQueue::kDefaultCapacity);
 }
+
+// A source that stopped and started again has to publish frames again
+// (BUG-1). Re-opening is the difference between a restarted video and a
+// wallpaper that silently stopped moving.
+TEST(VideoFrameQueueTest, ReopenAcceptsFramesAgainAfterClose) {
+    VideoFrameQueue queue(2);
+    ASSERT_TRUE(queue.push(make_frame(1), 1, {}));
+    queue.close();
+    EXPECT_FALSE(queue.push(make_frame(2), 1, {}));
+
+    queue.reopen();
+    EXPECT_TRUE(queue.push(make_frame(3), 1, {}));
+    EXPECT_EQ(queue.size(), 1U);
+
+    VideoFrame frame;
+    std::uint64_t generation = 0;
+    ASSERT_TRUE(queue.pop(frame, generation));
+    EXPECT_EQ(pixel_value(frame), 3);
+}
+
+// Re-opening a queue that never closed must not drop the frame decoded during
+// prepare(): that frame is the first thing a freshly committed source draws.
+TEST(VideoFrameQueueTest, ReopenKeepsAnOpenQueueIntact) {
+    VideoFrameQueue queue(2);
+    ASSERT_TRUE(queue.push(make_frame(4), 1, {}));
+
+    queue.reopen();
+    EXPECT_EQ(queue.size(), 1U);
+    EXPECT_TRUE(queue.push(make_frame(5), 1, {}));
+
+    VideoFrame frame;
+    std::uint64_t generation = 0;
+    ASSERT_TRUE(queue.pop(frame, generation));
+    EXPECT_EQ(pixel_value(frame), 4);
+}
