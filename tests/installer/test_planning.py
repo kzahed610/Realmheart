@@ -465,7 +465,7 @@ class PlanningTests(unittest.TestCase):
             payload = to_jsonable(plan)
             json.dumps(payload)
             self.assertEqual(payload["manifest_digest"], self.registry.digest)
-            self.assertEqual(len(payload["components"]), 18)
+            self.assertEqual(len(payload["components"]), 19)
             self.assertEqual(len(payload["build_units"]), 9)
             self.assertEqual(len(payload["plan_digest"]), 64)
 

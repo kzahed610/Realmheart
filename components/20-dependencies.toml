@@ -771,6 +771,29 @@ id = "dep.wallpaper.wayland-egl"
 name = "Wayland EGL"
 reason = "Required by Realmheart capability wallpaper.wayland-egl"
 
+# The wallpaper engine lives in the shell binary and turns wallpapers into a
+# library, a weighted rotation, and a settings surface. Its health evidence is
+# that the shell binary is present and can list its own modules; it deliberately
+# does not depend on any provider being reachable, because rotation works from a
+# local cache alone.
+[[external_dependencies]]
+id = "dep.wallpaper.engine"
+name = "Realmheart shell with the wallpaper engine"
+reason = "Required by Realmheart capability wallpaper.rotation"
+
+[[capabilities]]
+id = "wallpaper.rotation"
+dependency_id = "dep.wallpaper.engine"
+display_name = "Wallpaper rotation"
+requirement = "soft"
+lifecycle = ["runtime"]
+component_id = "wallpaper-engine"
+[capabilities.probe]
+kind = "executable"
+executable = "realmheart"
+version_argv = ["--list-modules"]
+version_prefix = "Realmheart module registry"
+
 [[capabilities]]
 id = "wallpaper.wayland-egl"
 dependency_id = "dep.wallpaper.wayland-egl"

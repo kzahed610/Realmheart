@@ -68,7 +68,7 @@ class Phase12ComponentHandlerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             plan = self._plan(Path(temp))
             specs = resolve_component_handler_specs(plan, self.registry)
-            self.assertEqual(len(specs), 18)
+            self.assertEqual(len(specs), 19)
             self.assertEqual(tuple(item.component.id for item in specs), self.registry.component_order)
             self.assertTrue(all(item.component.name for item in specs))
             self.assertTrue(all(item.footprint.health_check_ids == item.component.health_check_ids for item in specs))
@@ -96,11 +96,11 @@ class Phase12ComponentHandlerTests(unittest.TestCase):
                 bindings=default_installer_bindings(),
                 package_actions_applied=True,
             )
-            self.assertEqual(len(report.results), 18)
+            self.assertEqual(len(report.results), 19)
             self.assertTrue(all(item.state is ComponentState.PASS for item in report.results))
             self.assertFalse(any(item.error_code == "binding_not_implemented" for item in report.results))
             rendered = render_component_report(report)
-            self.assertIn("[01/18] Realmheart Core", rendered)
+            self.assertIn("[01/19] Realmheart Core", rendered)
             self.assertIn("Realmheart FX", rendered)
             self.assertIn("Lockscreen Authentication", rendered)
             self.assertIn("Realmheart Terminal", rendered)

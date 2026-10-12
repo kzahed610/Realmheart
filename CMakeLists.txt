@@ -100,6 +100,7 @@ set(REALMHEART_RUNTIME_SOURCES
     src/services/Wifi.cpp
     src/services/UtilityManager.cpp
     src/services/WallpaperService.cpp
+    src/services/WallpaperRotationSettings.cpp
     src/services/SessionManager.cpp
     src/services/BatteryService.cpp
     src/services/MediaService.cpp
@@ -1756,6 +1757,22 @@ if(BUILD_TESTING)
 
     add_executable(realmheart_theme_service_tests tests/ThemeServiceTests.cpp src/services/ThemeService.cpp)
     realmheart_register_test(realmheart_theme_service_tests)
+
+    # Rotation settings: versioned, atomic, env-overridable, and off by default.
+    add_executable(
+        realmheart_wallpaper_rotation_settings_tests
+        tests/WallpaperRotationSettingsTests.cpp
+        src/services/WallpaperRotationSettings.cpp
+        src/core/Command.cpp
+    )
+    target_link_libraries(
+        realmheart_wallpaper_rotation_settings_tests
+        PRIVATE
+        PkgConfig::GIO
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_rotation_settings_tests)
 
     # Live wallpaper poster frames: the palette source that makes a video
     # themable (BUG-3), and the selector's preview source.

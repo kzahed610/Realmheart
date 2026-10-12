@@ -73,7 +73,7 @@ class DoctorManualTests(unittest.TestCase):
         code, payload = self.invoke("components", "--manifest-dir", "components", "--json")
         self.assertEqual(code, 0)
         self.assertEqual(payload["format_version"], 1)
-        self.assertEqual(len(payload["components"]), 18)
+        self.assertEqual(len(payload["components"]), 19)
         self.assertIn("lockscreen-auth", [item["id"] for item in payload["components"]])
 
     def test_validate_manifests_clean_error(self):
@@ -88,7 +88,7 @@ class DoctorManualTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(payload["status"], "ok")
         self.assertTrue(payload["repository"]["checked"])
-        self.assertEqual(payload["components"], 18)
+        self.assertEqual(payload["components"], 19)
         self.assertGreater(payload["health_checks"], 0)
 
     def test_validate_manifests_accepts_a_standalone_manifest(self):

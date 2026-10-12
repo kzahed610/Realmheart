@@ -98,6 +98,26 @@ repair_strategy_ids = ["rebuild_component", "install_missing_package"]
 id = "realmheart-core"
 required = true
 
+# The wallpaper engine decides *which* wallpaper is on screen and *when* it
+# changes; the renderer decides how it is displayed and the controller remains
+# the only component allowed to commit a wallpaper. It lives in the existing
+# shell binary, so it has no build unit of its own.
+[[components]]
+id = "wallpaper-engine"
+name = "Wallpaper Engine"
+component_version = "release"
+category = "qol"
+stage = "desktop"
+description = "Wallpaper library index, weighted rotation, and rotation settings."
+repair_strategy_ids = ["rebuild_component", "restart_service"]
+[[components.realmheart_dependencies]]
+id = "realmheart-core"
+required = true
+
+[[components.realmheart_dependencies]]
+id = "wallpaper-native"
+required = false
+
 [[components]]
 id = "terminal"
 name = "Realmheart Terminal"

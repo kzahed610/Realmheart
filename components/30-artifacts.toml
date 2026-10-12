@@ -159,6 +159,18 @@ required = true
 ownership = "release"
 managed = true
 
+# Rotation settings are user state: absent until the user configures rotation,
+# which is the desired end state. The engine's evidence is its capability probe,
+# so a healthy never-configured shell is not reported as broken.
+[[artifacts]]
+id = "wallpaper.rotation-settings"
+component_id = "wallpaper-engine"
+path = "$XDG_STATE_HOME/realmheart/wallpaper/rotation.json"
+type = "file"
+required = false
+ownership = "user"
+managed = false
+
 [[artifacts]]
 id = "clipboard.text-service"
 component_id = "clipboard-history"
