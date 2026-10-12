@@ -1,6 +1,7 @@
 #include "services/UtilityManager.hpp"
 #include "services/ThemeService.hpp"
 #include "services/MatugenParser.hpp"
+#include "services/WallpaperPosterCache.hpp"
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -92,6 +93,18 @@ std::optional<std::string> matugen_input_path(
         if (error || file_size > kMaxWallpaperSourceBytes) {
             if (error_message != nullptr) *error_message = "wallpaper source exceeds the Matugen budget";
             return std::nullopt;
+        }
+        // A live wallpaper is themeded from its poster frame. Matugen cannot
+        // read a video (it panics on the extension), so passing the video
+        // through left the palette untouched even though the wallpaper
+        // applied. The poster is the frame the selector already previews
+        // from, so the theme matches what the user sees.
+        if (is_live_wallpaper_source(*path)) {
+            const auto poster = WallpaperPosterCache::palette_source_for(
+                *path, error_message
+            );
+            if (!poster) return std::nullopt;
+            return poster->string();
         }
         return path->string();
     }

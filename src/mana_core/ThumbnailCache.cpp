@@ -1,6 +1,7 @@
 #include "mana_core/ThumbnailCache.hpp"
 
 #include "core/Command.hpp"
+#include "services/WallpaperPosterCache.hpp"
 
 #include <glib.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
@@ -311,61 +312,29 @@ std::filesystem::path preview_cache_path(
 }
 
 // Live videos are discovered but have no decodable still frame, so the selector
-// previews them from one poster frame. The shell never decodes video itself:
-// this is a bounded ffmpeg invocation, exactly the way the theme path already
-// shells out to matugen, and it produces one small image rather than playin
-// anything.
+// previews them from one poster frame. The predicate itself lives in
+// services: theming needs the same answer (BUG-3), and a second copy of this
+// list is how a video ends up discovered but neither previewable nor themable.
 bool is_video_source(const std::filesystem::path& path) {
-    std::string extension = path.extension().string();
-    std::transform(
-        extension.begin(), extension.end(), extension.begin(),
-        [](unsigned char value) { return static_cast<char>(std::tolower(value)); }
-    );
-    static constexpr std::string_view videos[] = {
-        ".mp4", ".m4v", ".webm", ".mkv", ".mov", ".avi"
-    };
-    return std::find(std::begin(videos), std::end(videos), extension) !=
-           std::end(videos);
+    return services::is_live_wallpaper_source(path);
 }
 
 
 } // namespace
 
 
-// Writes one scaled poster frame for 'video' into the cache directory. Bounded
-// by a deadline so a pathological file cannot stall the selector.
+// Writes one scaled poster frame for 'video' into the poster cache. Bounded by
+// a deadline so a pathological file cannot stall the selector, and shared with
+// the theme path so one video has exactly one poster: the selector previews
+// from it and theming takes its palette from it.
 std::filesystem::path extract_video_poster_frame(
     const std::filesystem::path& video,
     int target_dimension
 ) {
-    std::error_code directory_error;
-    auto parent = preview_cache_path(video, target_dimension).parent_path();
-    std::filesystem::create_directories(parent, directory_error);
-    if (directory_error) return {};
-
-    // A filename derived from the stem keeps parallel requests for the same
-    // video from colliding with each other's output.
-    const std::filesystem::path poster =
-        parent / (video.stem().string() + "-poster.png");
-
-    const int scale = target_dimension > 0 ? target_dimension : 360;
-    const std::vector<std::string> argv = {
-        "ffmpeg",
-        "-hide_banner", "-loglevel", "error", "-y",
-        "-i", video.string(),
-        "-frames:v", "1",
-        "-vf", "scale=" + std::to_string(scale) + ":-2:flags=area",
-        "-f", "image2",
-        poster.string(),
-    };
-
-    realmheart::core::CommandOptions options;
-    options.deadline = std::chrono::seconds(10);
-    options.max_output_bytes = 4 * 1024;
-    options.separate_stderr = true;
-    const auto result = realmheart::core::run_capture(argv, options);
-    if (!result.succeeded() || !std::filesystem::is_regular_file(poster)) return {};
-    return poster;
+    const auto poster = services::WallpaperPosterCache::poster_frame_for(
+        video, target_dimension
+    );
+    return poster.value_or(std::filesystem::path{});
 }
 
 GdkPixbuf* load_or_create_video_poster(
@@ -397,9 +366,9 @@ GdkPixbuf* load_or_create_video_poster(
     }
     g_clear_error(&decode_error);
 
-    // The poster is transient: the canonical preview cache is what survives.
-    std::error_code remove_error;
-    std::filesystem::remove(poster, remove_error);
+    // The poster frame survives in its own cache: the theme path reads the same
+    // file as the palette source, so removing it here would force a second
+    // ffmpeg extraction the next time the wallpaper is themed.
     return pixbuf;
 }
 
@@ -649,7 +618,7 @@ namespace realmheart::mana_core {
 bool ThumbnailCache::is_live_wallpaper(
     const std::filesystem::path& path
 ) noexcept {
-    return is_video_source(path);
+    return services::is_live_wallpaper_source(path);
 }
 
 GdkPixbuf* ThumbnailCache::load_or_create(

@@ -289,7 +289,7 @@ TEST(VideoWallpaperSourceTest, DecodesPresentsAndLoopsAfterStart) {
 // freed the FFmpeg contexts the worker was still decoding with. The renderer
 // process died, the controller fell back to GTK, and the screen went blank.
 TEST(VideoWallpaperSourceTest, ReApplyingAPlayingWallpaperKeepsItPlaying) {
-    const HangGuard hung_after(std::chrono::seconds(60));
+    const HangGuard hung_after(std::chrono::seconds(15));
     if (!ffmpeg_available()) GTEST_SKIP() << "ffmpeg unavailable";
     HeadlessGl gl;
     ASSERT_TRUE(gl.ready());
@@ -324,7 +324,7 @@ TEST(VideoWallpaperSourceTest, ReApplyingAPlayingWallpaperKeepsItPlaying) {
 // Repeated re-applies must be as harmless as the first one: this is what a user
 // clicking the same tile in the carousel produces.
 TEST(VideoWallpaperSourceTest, ReApplyingManyTimesKeepsDecoding) {
-    const HangGuard hung_after(std::chrono::seconds(60));
+    const HangGuard hung_after(std::chrono::seconds(15));
     if (!ffmpeg_available()) GTEST_SKIP() << "ffmpeg unavailable";
     HeadlessGl gl;
     ASSERT_TRUE(gl.ready());

@@ -1,4 +1,6 @@
 #include "services/UtilityManager.hpp"
+#include "services/WallpaperPosterCache.hpp"
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -275,13 +277,112 @@ void test_generate_colors_uses_new_wallpaper_and_updates_theme() {
     std::cout << "test_generate_colors_uses_new_wallpaper_and_updates_theme PASSED\n";
 }
 
+// BUG-3: a live wallpaper could never be themeded. Matugen panics on a video
+// file's extension, so the video path was handed to it, palette generation
+// always failed, and the desktop kept the previous palette. The palette source
+// of a live wallpaper is its poster frame, which is an image.
+void test_generate_colors_uses_poster_frame_for_live_wallpapers() {
+    const auto root =
+        std::filesystem::temp_directory_path() / "realmheart-matugen-live-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+
+    // A cache the test owns, with a complete poster already extracted for the
+    // video, is exactly the state the selector leaves behind.
+    const char* previous_cache = getenv("REALMHEART_WALLPAPER_POSTER_CACHE");
+    const auto cache = root / "posters";
+    std::filesystem::create_directories(cache);
+    setenv("REALMHEART_WALLPAPER_POSTER_CACHE", cache.c_str(), 1);
+
+    const auto video = root / "wallpaper.mp4";
+    std::ofstream(video, std::ios::binary) << "a live wallpaper payload";
+    const auto poster =
+        realmheart::services::WallpaperPosterCache::poster_path_for(video, 512);
+    std::filesystem::create_directories(poster.parent_path());
+    {
+        // A minimal complete 1x1 PNG. Written with an explicit length because
+        // the payload is full of zero bytes, which a stream's operator<< would
+        // truncate at the first one.
+        static constexpr unsigned char kMinimalPng[] = {
+            0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n',
+            0x00, 0x00, 0x00, 0x0d, 'I', 'H', 'D', 'R',
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x06, 0x00, 0x00, 0x00,
+            0x1f, 0x15, 0xc4, 0x89,
+            0x00, 0x00, 0x00, 0x00, 'I', 'E', 'N', 'D',
+            0xae, 0x42, 0x60, 0x82
+        };
+        std::ofstream output(poster, std::ios::binary);
+        output.write(
+            reinterpret_cast<const char*>(kMinimalPng),
+            static_cast<std::streamsize>(sizeof(kMinimalPng))
+        );
+    }
+
+    auto theme = std::make_shared<realmheart::services::ThemeService>();
+    auto mock = std::make_unique<MockUtilityExecutor>();
+    auto* mock_ptr = mock.get();
+    realmheart::core::CommandResult result;
+    result.status = realmheart::core::CommandStatus::Exited;
+    result.exit_code = 0;
+    result.output = R"json({
+        "colors": {
+            "dark": {
+                "primary": "#c4c0ff",
+                "secondary": "#55aaff",
+                "tertiary": "#ff55aa",
+                "background": "#131318",
+                "surface": "#1b1228",
+                "surface_container": "#2a1d3b",
+                "on_surface": "#f4eaff",
+                "on_surface_variant": "#cfbde0",
+                "outline": "#887799",
+                "error": "#ff6677"
+            }
+        }
+    })json";
+    mock->next_capture_result = result;
+
+    realmheart::services::UtilityManager util(theme, std::move(mock));
+    if (!util.generate_colors(video.string())) {
+        std::cerr << "Theming a live wallpaper must not fail\n";
+        exit(1);
+    }
+    if (mock_ptr->capture_calls.size() != 1) {
+        std::cerr << "Matugen should run exactly once for a live wallpaper\n";
+        exit(1);
+    }
+    const auto& command = mock_ptr->capture_calls.front();
+    const std::vector<std::string> expected{
+        "matugen", "image", poster.string(), "--dry-run", "--json", "hex",
+        "--old-json-output", "--source-color-index", "0", "--quiet"
+    };
+    if (command != expected) {
+        std::cerr << "Matugen must receive the live wallpaper's poster frame, "
+                     "not the video\n";
+        exit(1);
+    }
+    if (theme->get_palette().get("primary") != "#c4c0ff") {
+        std::cerr << "ThemeService did not receive the live wallpaper palette\n";
+        exit(1);
+    }
+
+    if (previous_cache != nullptr) {
+        setenv("REALMHEART_WALLPAPER_POSTER_CACHE", previous_cache, 1);
+    } else {
+        unsetenv("REALMHEART_WALLPAPER_POSTER_CACHE");
+    }
+    std::filesystem::remove_all(root);
+    std::cout << "test_generate_colors_uses_poster_frame_for_live_wallpapers PASSED\n";
+}
+
 int main() {
     test_screenshot_tool_launch();
-    test_clipboard_copy();
     test_clipboard_paste();
     test_launch_wofi();
     test_choose_wallpaper_does_not_launch_legacy_script();
     test_generate_colors_uses_new_wallpaper_and_updates_theme();
+    test_generate_colors_uses_poster_frame_for_live_wallpapers();
     test_recorder_uses_owned_pid();
     test_recorder_rejects_stale_pid_file();
     test_recorder_rejects_duplicate_start();

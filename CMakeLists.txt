@@ -105,6 +105,7 @@ set(REALMHEART_RUNTIME_SOURCES
     src/services/MediaService.cpp
     src/services/ThemeService.cpp
     src/services/MatugenParser.cpp
+    src/services/WallpaperPosterCache.cpp
 )
 
 
@@ -1752,6 +1753,31 @@ if(BUILD_TESTING)
     add_executable(realmheart_theme_service_tests tests/ThemeServiceTests.cpp src/services/ThemeService.cpp)
     realmheart_register_test(realmheart_theme_service_tests)
 
+    # Live wallpaper poster frames: the palette source that makes a video
+    # themable (BUG-3), and the selector's preview source.
+    add_executable(
+        realmheart_wallpaper_poster_cache_tests
+        tests/WallpaperPosterCacheTests.cpp
+        src/core/Command.cpp
+        src/services/WallpaperPosterCache.cpp
+    )
+    if(REALMHEART_HAVE_LIVE_WALLPAPER)
+        target_compile_definitions(
+            realmheart_wallpaper_poster_cache_tests
+            PRIVATE
+            REALMHEART_HAVE_LIVE_WALLPAPER=1
+        )
+    endif()
+    target_link_libraries(
+        realmheart_wallpaper_poster_cache_tests
+        PRIVATE
+        PkgConfig::GIO
+        PkgConfig::GDK_PIXBUF
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_poster_cache_tests)
+
     add_executable(realmheart_ui_foundation_tests
         tests/UiFoundationTests.cpp
         src/ui/AssetResolver.cpp
@@ -1776,6 +1802,7 @@ if(BUILD_TESTING)
         src/core/Command.cpp
         src/services/UtilityManager.cpp
         src/services/WallpaperService.cpp
+        src/services/WallpaperPosterCache.cpp
         src/services/ThemeService.cpp
         src/services/MatugenParser.cpp
         src/ui/AssetResolver.cpp
@@ -1784,6 +1811,7 @@ if(BUILD_TESTING)
         REALMHEART_INSTALL_ASSET_DIR="${CMAKE_INSTALL_FULL_DATADIR}/realmheart/assets"
         REALMHEART_SOURCE_ASSET_DIR="${CMAKE_SOURCE_DIR}/assets"
     )
+    target_link_libraries(realmheart_utility_manager_tests PRIVATE PkgConfig::GIO)
     realmheart_register_test(realmheart_utility_manager_tests)
 
     add_executable(realmheart_vertical_bar_model_tests tests/VerticalBarModelTests.cpp src/ui/bar/VerticalBarModel.cpp)
@@ -2141,7 +2169,7 @@ if(BUILD_TESTING)
     )
     realmheart_register_test(realmheart_wallpaper_controller_tests)
 
-    add_executable(realmheart_mana_cores_selector_tests tests/ManaCoresSelectorTests.cpp src/mana_core/ThumbnailCache.cpp src/mana_core/ManaCoresSelector.cpp src/mana_core/ManaCoresLayout.cpp src/mana_core/WallpaperLibrary.cpp src/ui/LayerSurface.cpp src/effects/core/ShaderSource.cpp src/core/TaskExecutor.cpp src/core/Command.cpp)
+    add_executable(realmheart_mana_cores_selector_tests tests/ManaCoresSelectorTests.cpp src/mana_core/ThumbnailCache.cpp src/mana_core/ManaCoresSelector.cpp src/mana_core/ManaCoresLayout.cpp src/mana_core/WallpaperLibrary.cpp src/services/WallpaperPosterCache.cpp src/ui/LayerSurface.cpp src/effects/core/ShaderSource.cpp src/core/TaskExecutor.cpp src/core/Command.cpp)
     target_link_libraries(realmheart_mana_cores_selector_tests PRIVATE PkgConfig::GTK4 PkgConfig::GTK4_LAYER_SHELL PkgConfig::GDK_PIXBUF PkgConfig::EPOXY GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_mana_cores_selector_tests)
 
