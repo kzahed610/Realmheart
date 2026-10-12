@@ -103,6 +103,7 @@ set(REALMHEART_RUNTIME_SOURCES
     src/services/WallpaperRotationSettings.cpp
     src/services/WallpaperLibraryIndex.cpp
     src/services/WallpaperDiscovery.cpp
+    src/services/WallpaperRotator.cpp
     src/services/SessionManager.cpp
     src/services/BatteryService.cpp
     src/services/MediaService.cpp
@@ -1775,6 +1776,26 @@ if(BUILD_TESTING)
         GTest::gtest_main
     )
     realmheart_register_test(realmheart_wallpaper_rotation_settings_tests)
+
+    # Rotation selection policy: the one place the weighted-pool rules live.
+    add_executable(
+        realmheart_wallpaper_rotator_tests
+        tests/WallpaperRotatorTests.cpp
+        src/services/WallpaperRotator.cpp
+        src/services/WallpaperLibraryIndex.cpp
+        src/services/WallpaperDiscovery.cpp
+        src/services/WallpaperRotationSettings.cpp
+        src/core/Command.cpp
+    )
+    target_link_libraries(
+        realmheart_wallpaper_rotator_tests
+        PRIVATE
+        PkgConfig::GIO
+        PkgConfig::GDK_PIXBUF
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_rotator_tests)
 
     # The unified wallpaper library: roots, cheap classification, pools, and the
     # renderer's authority over what a source is.

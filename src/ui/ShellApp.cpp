@@ -21,6 +21,8 @@
 #include "services/SessionManager.hpp"
 #include "services/ThemeService.hpp"
 #include "services/UtilityManager.hpp"
+#include "services/WallpaperLibraryIndex.hpp"
+#include "services/WallpaperRotator.hpp"
 #include "ui/ImageFileFilters.hpp"
 #include "ui/LayerSurface.hpp"
 #include "ui/MonitorResolver.hpp"
@@ -3758,6 +3760,118 @@ private:
         rebuild_monitor_surfaces();
     }
 
+    // The wallpaper engine: library, settings, and the timer that commits
+    // through the controller. Nothing here runs until rotation is enabled in
+    // its settings, so an untouched shell behaves exactly as it did before.
+    void ensure_wallpaper_engine_initialized() {
+        if (wallpaper_rotator_ != nullptr) return;
+
+        wallpaper_rotation_store_ =
+            std::make_shared<services::WallpaperRotationStore>();
+        wallpaper_rotator_ = std::make_unique<services::WallpaperRotator>(
+            wallpaper_library_index_, wallpaper_rotation_store_
+        );
+
+        // The apply seam is the controller, and only the controller: the rotator
+        // never touches a backend itself.
+        auto* controller = wallpaper_controller_.get();
+        wallpaper_rotator_->set_apply_seam(
+            [controller](
+                std::string_view output_name,
+                const std::filesystem::path& path,
+                std::function<void(bool, std::string)> completion
+            ) {
+                if (controller == nullptr) {
+                    if (completion) {
+                        completion(false, "wallpaper controller is unavailable");
+                    }
+                    return;
+                }
+                const auto source = wallpaper::WallpaperSource(path);
+                if (output_name.empty()) {
+                    controller->set_wallpaper_async(source, std::move(completion));
+                    return;
+                }
+                // A per-output override is its own transaction, exactly as a
+                // selector apply is.
+                controller->prepare_wallpaper_for_output_async(
+                    source,
+                    wallpaper::WallpaperOutputTarget{-1, std::string(output_name)},
+                    [completion = std::move(completion)](
+                        bool success, std::string error
+                    ) mutable {
+                        if (!success) {
+                            if (completion) completion(false, std::move(error));
+                            return;
+                        }
+                        if (completion) completion(true, {});
+                    }
+                );
+            }
+        );
+
+        std::string error;
+        static_cast<void>(wallpaper_rotator_->refresh(&error));
+        if (!error.empty()) {
+            std::cerr << "[WallpaperEngine] " << error << '\n';
+        }
+
+        const auto settings = wallpaper_rotator_->settings();
+        if (settings.enabled && !wallpaper_rotator_->start(&error)) {
+            std::cerr << "[WallpaperEngine] rotation could not start: " << error
+                      << '\n';
+        }
+
+        // One main-loop timer for rotation. It is installed unconditionally and
+        // each tick early-outs while rotation is paused or disabled, so a shell
+        // that never turns rotation on does no wallpaper work at all.
+        wallpaper_rotation_timer_ = g_timeout_add_seconds(
+            60,
+            [](gpointer user_data) -> gboolean {
+                auto* runtime = static_cast<ShellRuntime*>(user_data);
+                runtime->advance_wallpaper_rotation();
+                return G_SOURCE_CONTINUE;
+            },
+            this
+        );
+
+        // The index is warm from the first sweep, because the timer's first
+        // tick is one interval away and a cold index on that tick would be
+        // the slowest possible moment to build one.
+        const auto snapshot = wallpaper_library_index_.rescan();
+        if (!snapshot.entries.empty()) {
+            std::cerr << "[WallpaperEngine] indexed " << snapshot.entries.size()
+                      << " wallpapers in " << snapshot.scan_millis << "ms\n";
+        }
+        for (const auto& diagnostic : snapshot.diagnostics) {
+            std::cerr << "[WallpaperEngine] " << diagnostic << '\n';
+        }
+    }
+
+    // One rotation tick. The rotator decides whether anything is due, and the
+    // seam commits through the controller when it is.
+    void advance_wallpaper_rotation() {
+        if (wallpaper_rotator_ == nullptr) return;
+        if (mana_cores_launch_pending_ || mana_cores_restore_pending_) {
+            // The selector is open: browsing must not have a wallpaper change
+            // underneath it.
+            wallpaper_rotator_->set_paused(
+                services::RotationPauseReason::SelectorOpen
+            );
+        } else {
+            wallpaper_rotator_->set_paused(
+                services::RotationPauseReason::SelectorOpen, false
+            );
+        }
+
+        if (!wallpaper_rotator_->settings().enabled) {
+            // Rotation is off: no library sweep, no selection, nothing.
+            return;
+        }
+        static_cast<void>(wallpaper_library_index_.rescan());
+        wallpaper_rotator_->tick();
+    }
+
     void ensure_core_initialized() {
         if (!theme_styles_) {
             theme_styles_ = std::make_unique<ThemeStyles>(theme_service_);
@@ -3805,6 +3919,7 @@ private:
                 std::cerr << "Unable to initialize wallpaper backend: "
                           << error_message << '\n';
             }
+            ensure_wallpaper_engine_initialized();
         }
     }
 
@@ -4050,6 +4165,13 @@ private:
     std::string mana_cores_restore_monitor_connector_;
     std::uint64_t mana_cores_launch_generation_ = 0;
     std::unique_ptr<wallpaper::WallpaperController> wallpaper_controller_;
+    // The wallpaper engine's own state: the library it chooses from, the
+    // settings it chooses by, and the timer that chooses. Rotation is off until
+    // the user enables it, so nothing here changes wallpaper behaviour.
+    services::WallpaperLibraryIndex wallpaper_library_index_;
+    std::shared_ptr<services::WallpaperRotationStore> wallpaper_rotation_store_;
+    std::unique_ptr<services::WallpaperRotator> wallpaper_rotator_;
+    guint wallpaper_rotation_timer_ = 0;
     std::vector<wallpaper::WallpaperStartupJob> monitor_wallpaper_restore_jobs_;
     std::size_t monitor_wallpaper_restore_index_ = 0;
     bool monitor_wallpaper_restore_uses_output_plan_ = false;
