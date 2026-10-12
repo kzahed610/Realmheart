@@ -56,6 +56,17 @@ realmheart::core::ModuleRegistry build_confirmed_module_registry() {
         true
     });
 
+    // The engine half: which wallpaper is on screen and when it changes. It
+    // commits through the wallpaper controller, never directly.
+    registry.add(ModuleDescriptor{
+        "background.wallpaper-rotation",
+        "Wallpaper library index and weighted rotation across static and live "
+        "wallpapers, local and cached online",
+        ModulePhase::CoreService,
+        {"wallpaper"},
+        true
+    });
+
     registry.add(ModuleDescriptor{
         "overview.workspaces",
         "Workspace/window overview for day-to-day navigation",
