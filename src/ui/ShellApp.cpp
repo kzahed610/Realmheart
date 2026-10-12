@@ -82,6 +82,10 @@
 namespace realmheart::ui {
 namespace {
 
+// Stable notification identity for wallpaper backend state, so the situation is
+// announced in one place that updates instead of a stack of toasts.
+constexpr std::uint32_t kWallpaperBackendNotificationId = 0x57414C4CU;
+
 std::string current_executable_path() {
     std::array<char, 4096> buffer{};
     const ssize_t length = ::readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
@@ -1288,6 +1292,49 @@ public:
         request_wallpaper(
             wallpaper::WallpaperSource(std::filesystem::path(path)),
             "Unable to set wallpaper"
+        );
+    }
+
+    // BUG-2. The wallpaper backend the shell actually ended up on, and what
+    // that means for the wallpaper the user picked, surfaced where they will
+    // look for it instead of a log line nobody sees.
+    void report_wallpaper_backend_status(
+        const wallpaper::WallpaperController::BackendStatus& status
+    ) {
+        const std::string active =
+            wallpaper::wallpaper_backend_type_name(status.active) == "native"
+            ? "native renderer"
+            : "GTK fallback";
+        const std::string body = status.fell_back
+            ? "The native wallpaper renderer is unavailable (" + status.reason +
+                  "), so wallpapers are rendering through the GTK fallback. "
+                  "Live wallpapers cannot play on it; still images are unaffected."
+            : (status.live_wallpapers_playable
+                   ? "The native renderer is active. Live wallpapers play normally."
+                   : "Wallpapers are rendering through the GTK backend; live "
+                     "wallpapers need the native renderer.");
+
+        // One notification, always in the same place: a repeated fallback
+        // updates this entry rather than stacking a new one each time.
+        notification_server_.notify(
+            "realmheart-wallpaper",
+            kWallpaperBackendNotificationId,
+            status.fell_back
+                ? "Wallpaper renderer unavailable — using the fallback backend"
+                : "Wallpaper renderer: " + active,
+            body,
+            8000
+        );
+    }
+
+    void show_wallpaper_backend_status() {
+        ensure_core_initialized();
+        if (wallpaper_controller_ == nullptr) {
+            std::cerr << "Wallpaper backend status is unavailable\n";
+            return;
+        }
+        report_wallpaper_backend_status(
+            wallpaper_controller_->backend_status()
         );
     }
 
@@ -3745,6 +3792,14 @@ private:
                 application_,
                 requested_wallpaper_backend_
             );
+            // BUG-2: a fallback used to leave only a log line behind. The user
+            // only notices when a live wallpaper stops moving, long after the
+            // line scrolled past.
+            wallpaper_controller_->set_backend_status_callback(
+                [this](const wallpaper::WallpaperController::BackendStatus& status) {
+                    report_wallpaper_backend_status(status);
+                }
+            );
             std::string error_message;
             if (!wallpaper_controller_->initialize(&error_message)) {
                 std::cerr << "Unable to initialize wallpaper backend: "
@@ -4276,6 +4331,10 @@ void set_wallpaper_backend_action(GSimpleAction*, GVariant* parameter, gpointer 
     );
 }
 
+void wallpaper_backend_status_action(GSimpleAction*, GVariant*, gpointer user_data) {
+    static_cast<ShellRuntime*>(user_data)->show_wallpaper_backend_status();
+}
+
 void generate_theme_action(GSimpleAction*, GVariant*, gpointer user_data) {
     static_cast<ShellRuntime*>(user_data)->generate_theme();
 }
@@ -4330,6 +4389,7 @@ constexpr GActionEntry kShellActions[] = {
     {"set-wallpaper", set_wallpaper_action, nullptr, nullptr, nullptr, {}},
     {"set-wallpaper-path", set_wallpaper_path_action, "s", nullptr, nullptr, {}},
     {"set-wallpaper-backend", set_wallpaper_backend_action, "s", nullptr, nullptr, {}},
+    {"wallpaper-backend-status", wallpaper_backend_status_action, nullptr, nullptr, nullptr, {}},
     {"generate-theme", generate_theme_action, nullptr, nullptr, nullptr, {}},
     {"launch-launcher", launch_launcher_action, nullptr, nullptr, nullptr, {}},
     {"launch-launcher-query", launch_launcher_query_action, "s", nullptr, nullptr, {}},

@@ -87,6 +87,29 @@ public:
     [[nodiscard]] bool has_prepared_wallpaper() const noexcept;
     [[nodiscard]] bool has_prepared_output_target() const noexcept;
 
+    // What the user needs to know about wallpaper rendering right now: which
+    // backend is active, whether it is the one that was asked for, and whether
+    // the wallpaper they picked can actually play on it. BUG-2 was that a
+    // silent fallback left only a log line, at the moment the user notices
+    // their live wallpaper does not move.
+    struct BackendStatus {
+        WallpaperBackendType requested = WallpaperBackendType::Gtk;
+        WallpaperBackendType active = WallpaperBackendType::Gtk;
+        // The active backend is not the requested one.
+        bool fell_back = false;
+        // Why, when it did. Empty otherwise.
+        std::string reason;
+        // The active backend can play a live (video) wallpaper.
+        bool live_wallpapers_playable = false;
+    };
+
+    [[nodiscard]] BackendStatus backend_status() const noexcept;
+
+    // Invoked when the active backend changes: a fallback to GTK, or a switch
+    // back to the native renderer. Delivered on the GTK main thread.
+    using BackendStatusCallback = std::function<void(const BackendStatus&)>;
+    void set_backend_status_callback(BackendStatusCallback callback);
+
 private:
     struct AsyncState {
         std::atomic<bool> alive{true};
@@ -125,6 +148,14 @@ private:
     WallpaperSource prepared_wallpaper_;
     std::optional<WallpaperOutputTarget> prepared_target_;
     std::shared_ptr<AsyncState> async_state_ = std::make_shared<AsyncState>();
+    // The last reason the active backend is not the requested one, kept so a
+    // status query (or a notification) can explain a fallback that happened
+    // long before.
+    std::string backend_fallback_reason_;
+    BackendStatusCallback backend_status_callback_;
+
+    [[nodiscard]] BackendStatus make_backend_status() const noexcept;
+    void note_backend_change(const std::string& fallback_reason);
 };
 
 } // namespace realmheart::ui::wallpaper

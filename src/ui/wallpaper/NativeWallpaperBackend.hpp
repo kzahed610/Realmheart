@@ -25,6 +25,12 @@ public:
         return WallpaperBackendType::Native;
     }
 
+    // The only backend that can play a live wallpaper: it owns the renderer
+    // process that decodes video.
+    [[nodiscard]] bool supports_live_wallpapers() const noexcept override {
+        return true;
+    }
+
     [[nodiscard]] bool initialize(std::string* error_message = nullptr) override;
     [[nodiscard]] bool set_wallpaper(
         const WallpaperSource& source,

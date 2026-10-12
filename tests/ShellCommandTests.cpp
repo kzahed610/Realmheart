@@ -32,6 +32,9 @@ void parses_supported_shell_commands() {
             "set-wallpaper-path should parse");
     require(parse_shell_command("set-wallpaper-backend") == ShellCommand::SetWallpaperBackend,
             "set-wallpaper-backend should parse");
+    require(parse_shell_command("wallpaper-backend-status") ==
+                ShellCommand::WallpaperBackendStatus,
+            "wallpaper-backend-status should parse");
     require(parse_shell_command("launch-launcher-query") == ShellCommand::LaunchLauncherQuery,
             "launch-launcher-query should parse");
     require(parse_shell_command("workspace-overview-toggle") == ShellCommand::ToggleWorkspaceOverview,
@@ -92,6 +95,8 @@ void identifies_commands_that_require_arguments() {
             "launch-launcher-query should require a query argument");
     require(!shell_command_requires_argument(ShellCommand::SetWallpaper),
             "interactive set-wallpaper should remain parameterless");
+    require(!shell_command_requires_argument(ShellCommand::WallpaperBackendStatus),
+            "wallpaper-backend-status should remain parameterless");
     require(!shell_command_requires_argument(ShellCommand::ToggleBar),
             "ordinary shell commands should remain parameterless");
     require(!shell_command_requires_argument(ShellCommand::ToggleCharacter),

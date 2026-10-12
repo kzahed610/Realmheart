@@ -85,6 +85,11 @@ public:
 
     void discard_prepared_wallpaper() noexcept override { prepared = false; }
 
+    // Mirrors the real backends: only the native renderer decodes video.
+    bool supports_live_wallpapers() const noexcept override {
+        return backend_type == WallpaperBackendType::Native;
+    }
+
     WallpaperBackendType backend_type;
     bool initialize_success = true;
     bool set_success = true;
@@ -294,6 +299,104 @@ TEST(WallpaperControllerTest, NativeFailureFallsBackToGtkWithoutDroppingOwnedSou
     ASSERT_TRUE(controller.set_wallpaper(source, &error)) << error;
     EXPECT_EQ(controller.active_backend(), WallpaperBackendType::Gtk);
     EXPECT_EQ(gtk_backend->observed_source_bytes, "fallback-pixels");
+
+    // BUG-2: the fallback must be explainable after the fact, not just logged
+    // from an async path the user never sees.
+    const auto status = controller.backend_status();
+    EXPECT_EQ(status.requested, WallpaperBackendType::Native);
+    EXPECT_EQ(status.active, WallpaperBackendType::Gtk);
+    EXPECT_TRUE(status.fell_back);
+    EXPECT_FALSE(status.reason.empty());
+    EXPECT_FALSE(status.live_wallpapers_playable);
+}
+
+// The callback is how the shell turns a silent fallback into something the user
+// notices while it happens, rather than when their live wallpaper stops moving.
+TEST(WallpaperControllerTest, AFallbackReportsItsStatusThroughTheCallback) {
+    auto native_backend = std::make_shared<FakeWallpaperBackend>(WallpaperBackendType::Native);
+    native_backend->set_success = false;
+    auto gtk_backend = std::make_shared<FakeWallpaperBackend>(WallpaperBackendType::Gtk);
+    WallpaperController controller(
+        nullptr,
+        WallpaperBackendType::Native,
+        [native_backend, gtk_backend](GtkApplication*, WallpaperBackendType type) {
+            return type == WallpaperBackendType::Native
+                ? native_backend
+                : gtk_backend;
+        }
+    );
+
+    std::vector<WallpaperController::BackendStatus> reported;
+    controller.set_backend_status_callback(
+        [&reported](const WallpaperController::BackendStatus& status) {
+            reported.push_back(status);
+        }
+    );
+    ASSERT_TRUE(controller.initialize());
+
+    std::string error;
+    const auto source = WallpaperSource::owned_bytes(
+        "/project/fallback.png", "fallback-pixels"
+    );
+    ASSERT_TRUE(controller.set_wallpaper(source, &error)) << error;
+
+    ASSERT_EQ(reported.size(), 1U);
+    EXPECT_TRUE(reported.front().fell_back);
+    EXPECT_EQ(reported.front().active, WallpaperBackendType::Gtk);
+    EXPECT_FALSE(reported.front().live_wallpapers_playable);
+    EXPECT_FALSE(reported.front().reason.empty());
+}
+
+// A status query with no fallback at all must not invent one.
+TEST(WallpaperControllerTest, AHealthyBackendReportsNoFallback) {
+    auto backend = std::make_shared<FakeWallpaperBackend>(WallpaperBackendType::Native);
+    WallpaperController controller(
+        nullptr,
+        WallpaperBackendType::Native,
+        [backend](GtkApplication*, WallpaperBackendType) { return backend; }
+    );
+    ASSERT_TRUE(controller.initialize());
+
+    const auto status = controller.backend_status();
+    EXPECT_EQ(status.requested, WallpaperBackendType::Native);
+    EXPECT_EQ(status.active, WallpaperBackendType::Native);
+    EXPECT_FALSE(status.fell_back);
+    EXPECT_TRUE(status.reason.empty());
+    EXPECT_TRUE(status.live_wallpapers_playable);
+}
+
+// Back on the native renderer, the fallback reason is gone: a stale reason
+// would keep blaming a backend that is now working.
+TEST(WallpaperControllerTest, ReturningToTheNativeBackendClearsTheFallbackReason) {
+    auto native_backend = std::make_shared<FakeWallpaperBackend>(WallpaperBackendType::Native);
+    native_backend->set_success = false;
+    auto gtk_backend = std::make_shared<FakeWallpaperBackend>(WallpaperBackendType::Gtk);
+    WallpaperController controller(
+        nullptr,
+        WallpaperBackendType::Native,
+        [native_backend, gtk_backend](GtkApplication*, WallpaperBackendType type) {
+            return type == WallpaperBackendType::Native
+                ? native_backend
+                : gtk_backend;
+        }
+    );
+    ASSERT_TRUE(controller.initialize());
+    std::string error;
+    const auto source = WallpaperSource::owned_bytes(
+        "/project/fallback.png", "fallback-pixels"
+    );
+    ASSERT_TRUE(controller.set_wallpaper(source, &error)) << error;
+    EXPECT_TRUE(controller.backend_status().fell_back);
+
+    native_backend->set_success = true;
+    gtk_backend->set_success = true;
+    ASSERT_TRUE(controller.switch_backend(WallpaperBackendType::Native, &error)) << error;
+
+    const auto status = controller.backend_status();
+    EXPECT_EQ(status.active, WallpaperBackendType::Native);
+    EXPECT_FALSE(status.fell_back);
+    EXPECT_TRUE(status.reason.empty());
+    EXPECT_TRUE(status.live_wallpapers_playable);
 }
 
 } // namespace

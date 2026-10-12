@@ -76,7 +76,10 @@ bool WallpaperController::initialize(std::string* error_message) {
     if (requested_backend_ == WallpaperBackendType::Native) {
         std::cerr << "Native wallpaper backend unavailable: "
                   << requested_error << "; falling back to GTK\n";
-        if (activate_backend(WallpaperBackendType::Gtk, error_message)) return true;
+        if (activate_backend(WallpaperBackendType::Gtk, error_message)) {
+            note_backend_change(requested_error);
+            return true;
+        }
     }
 
     set_error(error_message, requested_error);
@@ -100,11 +103,13 @@ bool WallpaperController::set_wallpaper(
     if (backend_->type() == WallpaperBackendType::Native) {
         std::cerr << "Native wallpaper backend failed: " << backend_error
                   << "; switching to GTK\n";
-        if (activate_backend(WallpaperBackendType::Gtk, error_message) &&
-            backend_->set_wallpaper(source, error_message)) {
-            current_wallpaper_ = source;
-            clear_prepared_state();
-            return true;
+        if (activate_backend(WallpaperBackendType::Gtk, error_message)) {
+            note_backend_change(backend_error);
+            if (backend_->set_wallpaper(source, error_message)) {
+                current_wallpaper_ = source;
+                clear_prepared_state();
+                return true;
+            }
         }
         return false;
     }
@@ -185,7 +190,12 @@ void WallpaperController::set_wallpaper_async(
                 std::cerr << "Native wallpaper backend failed: "
                           << payload->error_message << "; switching to GTK\n";
                 std::string fallback_error;
-                if (!owner->activate_backend(WallpaperBackendType::Gtk, &fallback_error)) {
+                const bool fallback_ok =
+                    owner->activate_backend(WallpaperBackendType::Gtk, &fallback_error);
+                if (fallback_ok) {
+                    owner->note_backend_change(payload->error_message);
+                }
+                if (!fallback_ok) {
                     if (payload->callback) {
                         payload->callback(false, std::move(fallback_error));
                     }
@@ -291,7 +301,12 @@ void WallpaperController::prepare_wallpaper_async(
                     return G_SOURCE_REMOVE;
                 }
                 std::string fallback_error;
-                if (!owner->activate_backend(WallpaperBackendType::Gtk, &fallback_error)) {
+                const bool fallback_ok =
+                    owner->activate_backend(WallpaperBackendType::Gtk, &fallback_error);
+                if (fallback_ok) {
+                    owner->note_backend_change(payload->error_message);
+                }
+                if (!fallback_ok) {
                     owner->clear_prepared_state();
                     if (payload->callback) payload->callback(false, std::move(fallback_error));
                     return G_SOURCE_REMOVE;
@@ -387,7 +402,12 @@ void WallpaperController::prepare_wallpaper_for_output_async(
                     return G_SOURCE_REMOVE;
                 }
                 std::string fallback_error;
-                if (!owner->activate_backend(WallpaperBackendType::Gtk, &fallback_error)) {
+                const bool fallback_ok =
+                    owner->activate_backend(WallpaperBackendType::Gtk, &fallback_error);
+                if (fallback_ok) {
+                    owner->note_backend_change(payload->error_message);
+                }
+                if (!fallback_ok) {
                     owner->clear_prepared_state();
                     if (payload->callback) payload->callback(false, std::move(fallback_error));
                     return G_SOURCE_REMOVE;
@@ -487,7 +507,12 @@ void WallpaperController::commit_prepared_wallpaper_async(
                     return G_SOURCE_REMOVE;
                 }
                 std::string fallback_error;
-                if (!owner->activate_backend(WallpaperBackendType::Gtk, &fallback_error)) {
+                const bool fallback_ok =
+                    owner->activate_backend(WallpaperBackendType::Gtk, &fallback_error);
+                if (fallback_ok) {
+                    owner->note_backend_change(payload->error_message);
+                }
+                if (!fallback_ok) {
                     owner->clear_prepared_state();
                     if (payload->callback) payload->callback(false, std::move(fallback_error));
                     return G_SOURCE_REMOVE;
@@ -723,11 +748,45 @@ bool WallpaperController::switch_backend(
     requested_backend_ = backend;
     clear_prepared_state();
     release_backend(std::move(previous));
+    // Any earlier fallback is resolved: this switch is the requested backend
+    // becoming active again.
+    note_backend_change({});
     return true;
 }
 
 WallpaperBackendType WallpaperController::active_backend() const noexcept {
     return backend_ != nullptr ? backend_->type() : requested_backend_;
+}
+
+WallpaperController::BackendStatus WallpaperController::make_backend_status() const noexcept {
+    BackendStatus status;
+    status.requested = requested_backend_;
+    status.active = active_backend();
+    status.fell_back = status.active != status.requested;
+    status.reason = status.fell_back ? backend_fallback_reason_ : std::string{};
+    status.live_wallpapers_playable =
+        backend_ != nullptr && backend_->supports_live_wallpapers();
+    return status;
+}
+
+WallpaperController::BackendStatus WallpaperController::backend_status() const noexcept {
+    return make_backend_status();
+}
+
+void WallpaperController::set_backend_status_callback(BackendStatusCallback callback) {
+    backend_status_callback_ = std::move(callback);
+}
+
+void WallpaperController::note_backend_change(const std::string& fallback_reason) {
+    BackendStatus status;
+    {
+        // The status reads the backend, so it is built before the callback runs
+        // and cannot observe a half-swapped state.
+        status = make_backend_status();
+    }
+    backend_fallback_reason_ = status.fell_back ? fallback_reason : std::string{};
+    status.reason = backend_fallback_reason_;
+    if (backend_status_callback_) backend_status_callback_(status);
 }
 
 bool WallpaperController::has_prepared_wallpaper() const noexcept {

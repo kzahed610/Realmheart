@@ -46,6 +46,14 @@ public:
 
     [[nodiscard]] virtual WallpaperBackendType type() const noexcept = 0;
     [[nodiscard]] virtual bool initialize(std::string* error_message = nullptr) = 0;
+
+    // Whether this backend can play a live (video) wallpaper. Exactly one
+    // backend can, and a user who picked a video while the other one is active
+    // deserves to be told which one is rendering their wallpapers (BUG-2: the
+    // fallback used to leave nothing but a log line behind).
+    [[nodiscard]] virtual bool supports_live_wallpapers() const noexcept {
+        return false;
+    }
     [[nodiscard]] virtual bool set_wallpaper(
         const WallpaperSource& source,
         std::string* error_message = nullptr
