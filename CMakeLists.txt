@@ -101,6 +101,8 @@ set(REALMHEART_RUNTIME_SOURCES
     src/services/UtilityManager.cpp
     src/services/WallpaperService.cpp
     src/services/WallpaperRotationSettings.cpp
+    src/services/WallpaperLibraryIndex.cpp
+    src/services/WallpaperDiscovery.cpp
     src/services/SessionManager.cpp
     src/services/BatteryService.cpp
     src/services/MediaService.cpp
@@ -1774,6 +1776,25 @@ if(BUILD_TESTING)
     )
     realmheart_register_test(realmheart_wallpaper_rotation_settings_tests)
 
+    # The unified wallpaper library: roots, cheap classification, pools, and the
+    # renderer's authority over what a source is.
+    add_executable(
+        realmheart_wallpaper_library_index_tests
+        tests/WallpaperLibraryIndexTests.cpp
+        src/services/WallpaperLibraryIndex.cpp
+        src/services/WallpaperDiscovery.cpp
+        src/core/Command.cpp
+    )
+    target_link_libraries(
+        realmheart_wallpaper_library_index_tests
+        PRIVATE
+        PkgConfig::GIO
+        PkgConfig::GDK_PIXBUF
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_library_index_tests)
+
     # Live wallpaper poster frames: the palette source that makes a video
     # themable (BUG-3), and the selector's preview source.
     add_executable(
@@ -2230,7 +2251,7 @@ if(BUILD_TESTING)
     )
     realmheart_register_test(realmheart_wallpaper_controller_tests)
 
-    add_executable(realmheart_mana_cores_selector_tests tests/ManaCoresSelectorTests.cpp src/mana_core/ThumbnailCache.cpp src/mana_core/ManaCoresSelector.cpp src/mana_core/ManaCoresLayout.cpp src/mana_core/WallpaperLibrary.cpp src/services/WallpaperPosterCache.cpp src/ui/LayerSurface.cpp src/effects/core/ShaderSource.cpp src/core/TaskExecutor.cpp src/core/Command.cpp)
+    add_executable(realmheart_mana_cores_selector_tests tests/ManaCoresSelectorTests.cpp src/mana_core/ThumbnailCache.cpp src/mana_core/ManaCoresSelector.cpp src/mana_core/ManaCoresLayout.cpp src/mana_core/WallpaperLibrary.cpp src/services/WallpaperPosterCache.cpp src/services/WallpaperDiscovery.cpp src/ui/LayerSurface.cpp src/effects/core/ShaderSource.cpp src/core/TaskExecutor.cpp src/core/Command.cpp)
     target_link_libraries(realmheart_mana_cores_selector_tests PRIVATE PkgConfig::GTK4 PkgConfig::GTK4_LAYER_SHELL PkgConfig::GDK_PIXBUF PkgConfig::EPOXY GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_mana_cores_selector_tests)
 
@@ -2242,6 +2263,7 @@ if(BUILD_TESTING)
         realmheart_wallpaper_library_tests
         tests/WallpaperLibraryTests.cpp
         src/mana_core/WallpaperLibrary.cpp
+        src/services/WallpaperDiscovery.cpp
     )
     target_link_libraries(realmheart_wallpaper_library_tests PRIVATE PkgConfig::GDK_PIXBUF GTest::gtest GTest::gtest_main)
     realmheart_register_test(realmheart_wallpaper_library_tests)

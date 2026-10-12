@@ -1,15 +1,15 @@
 #pragma once
 
+#include "services/WallpaperDiscovery.hpp"
+
 #include <filesystem>
-#include <string>
-#include <vector>
 
 namespace realmheart::mana_core {
 
-struct WallpaperDiscovery {
-    std::vector<std::filesystem::path> paths;
-    std::vector<std::string> diagnostics;
-};
+// The selector's discovery type is the service one: the selector and wallpaper
+// rotation index exactly the same walls, so there is one shape for what a sweep
+// found.
+using WallpaperDiscovery = realmheart::services::WallpaperDiscovery;
 
 class WallpaperLibrary {
 public:
