@@ -46,6 +46,13 @@ constexpr int kDecoderThreadCount = 2;
 constexpr std::int64_t kProbeSizeBytes = 8LL * 1024LL * 1024LL;
 constexpr std::int64_t kMaxAnalyzeMicros = 2LL * AV_TIME_BASE;
 
+// The shader's conversion matrix is chosen from what FFmpeg says about the
+// frame rather than assumed.
+VideoColorSpace color_space_of(int colorspace) {
+    return colorspace == AVCOL_SPC_BT709 ? VideoColorSpace::Bt709
+                                          : VideoColorSpace::Bt601;
+}
+
 #endif
 
 } // namespace
@@ -351,32 +358,39 @@ bool VideoDecoder::receive_frames(
     const std::size_t pixel_count =
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     VideoFrame decoded;
-    decoded.format = VideoFrameFormat::Rgba8;
+    decoded.format = VideoFrameFormat::Nv12;
     decoded.width = width;
     decoded.height = height;
-    decoded.pixels.resize(pixel_count * 4U);
+    decoded.pixels.resize(pixel_count + pixel_count / 2);
+    decoded.color_space = color_space_of(decoded_frame_->colorspace);
+    decoded.color_range = decoded_frame_->color_range == AVCOL_RANGE_JPEG
+        ? VideoColorRange::Full
+        : VideoColorRange::Limited;
 
-    const int source_stride = converted_frame_->linesize[0];
-    if (source_stride == static_cast<int>(width) * 4) {
+    // swscale pads its rows; copy row by row rather than growing the
+    // destination buffer to the padded stride.
+    const int y_stride = converted_frame_->linesize[0];
+    for (int row = 0; row < height; ++row) {
         std::memcpy(
-            decoded.pixels.data(),
-            converted_frame_->data[0],
-            pixel_count * 4U
+            decoded.pixels.data() +
+                static_cast<std::size_t>(row) * static_cast<std::size_t>(width),
+            converted_frame_->data[0] +
+                static_cast<std::size_t>(row) * static_cast<std::size_t>(y_stride),
+            static_cast<std::size_t>(width)
         );
-    } else {
-        // The scaler pads rows; copy row by row rather than growing the
-        // destination buffer to the padded stride.
-        for (int row = 0; row < height; ++row) {
-            std::memcpy(
-                decoded.pixels.data() +
-                    static_cast<std::size_t>(row) *
-                        static_cast<std::size_t>(width) * 4U,
-                converted_frame_->data[0] +
-                    static_cast<std::size_t>(row) *
-                        static_cast<std::size_t>(source_stride),
-                static_cast<std::size_t>(width) * 4U
-            );
-        }
+    }
+    // NV12's second plane is the interleaved chroma, height / 2 rows of the
+    // same stride as luma.
+    unsigned char* chroma = decoded.pixels.data() + pixel_count;
+    const std::size_t chroma_rows = static_cast<std::size_t>(height) / 2;
+    const int chroma_stride = converted_frame_->linesize[1];
+    for (std::size_t row = 0; row < chroma_rows; ++row) {
+        std::memcpy(
+            chroma + row * static_cast<std::size_t>(width),
+            converted_frame_->data[1] +
+                row * static_cast<std::size_t>(chroma_stride),
+            static_cast<std::size_t>(width)
+        );
     }
 
     // Normalize presentation to playback time zero: the first usable
@@ -424,9 +438,21 @@ bool VideoDecoder::initialize_scaler(
     // FFmpeg-free so the renderer never sees one.
     const AVPixelFormat format = static_cast<AVPixelFormat>(format_code);
 
+    // The destination colourimetry is pinned to the source frame's, so a
+    // repack between two YUV formats can never quietly shift range or matrix.
+    const VideoColorSpace color_space = color_space_of(decoded_frame_->colorspace);
+    const VideoColorRange color_range =
+        decoded_frame_->color_range == AVCOL_RANGE_JPEG
+            ? VideoColorRange::Full
+            : VideoColorRange::Limited;
+    const int sws_color_space =
+        color_space == VideoColorSpace::Bt709 ? SWS_CS_ITU709 : SWS_CS_ITU601;
+    const int sws_color_range = color_range == VideoColorRange::Full;
+
     if (scaler_ != nullptr && converted_frame_->width == width &&
         converted_frame_->height == height &&
-        converted_frame_->format == AV_PIX_FMT_RGBA) {
+        converted_frame_->format == AV_PIX_FMT_NV12 &&
+        scaler_color_space_ == color_space && scaler_color_range_ == color_range) {
         return true;
     }
 
@@ -438,7 +464,7 @@ bool VideoDecoder::initialize_scaler(
         format,
         width,
         height,
-        AV_PIX_FMT_RGBA,
+        AV_PIX_FMT_NV12,
         SWS_BILINEAR,
         nullptr,
         nullptr,
@@ -450,13 +476,25 @@ bool VideoDecoder::initialize_scaler(
         }
         return false;
     }
+    scaler_color_space_ = color_space;
+    scaler_color_range_ = color_range;
+    static_cast<void>(sws_setColorspaceDetails(
+        scaler_,
+        sws_getCoefficients(sws_color_space),
+        sws_color_range,
+        sws_getCoefficients(sws_color_space),
+        sws_color_range,
+        0,
+        1 << 16,
+        1 << 16
+    ));
 
     // One persistent, reference-counted destination buffer, reused for every
     // same-size frame instead of allocating one per frame.
     av_frame_unref(converted_frame_);
     converted_frame_->width = width;
     converted_frame_->height = height;
-    converted_frame_->format = AV_PIX_FMT_RGBA;
+    converted_frame_->format = AV_PIX_FMT_NV12;
     if (av_frame_get_buffer(converted_frame_, 0) < 0) {
         if (error_message != nullptr) {
             *error_message = "unable to allocate the wallpaper video frame buffer";

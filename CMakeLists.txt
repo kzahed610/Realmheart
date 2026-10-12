@@ -595,6 +595,10 @@ if(REALMHEART_ENABLE_NATIVE_WALLPAPER)
             src/wallpaper-native/video/VideoDecodeCoordinator.cpp
             # Counters are reported in every build, not only live-capable ones.
             src/wallpaper-native/video/WallpaperVideoStats.cpp
+            # The crossfade pass exists in every build: a static wallpaper draws
+            # through the same program and uniforms as a live one.
+            src/wallpaper-native/gpu/WallpaperShaders.cpp
+            src/wallpaper-native/gpu/YuvColorimetry.cpp
             "${REALMHEART_LAYER_SHELL_HEADER}"
             "${REALMHEART_LAYER_SHELL_CODE}"
             "${REALMHEART_XDG_SHELL_CODE}"
@@ -1978,6 +1982,46 @@ if(BUILD_TESTING)
         GTest::gtest_main
     )
     realmheart_register_test(realmheart_wallpaper_source_registry_tests)
+
+    # YUV sampling and the shared crossfade program. Needs a GL context for the
+    # upload and the readback, which EGL provides headlessly through Mesa's
+    # software renderer.
+    add_executable(
+        realmheart_wallpaper_yuv_frame_tests
+        tests/WallpaperYuvFrameTests.cpp
+        src/wallpaper-native/gpu/CpuUploadFrameImporter.cpp
+        src/wallpaper-native/gpu/WallpaperShaders.cpp
+        src/wallpaper-native/gpu/YuvColorimetry.cpp
+    )
+    if(REALMHEART_HAVE_LIVE_WALLPAPER)
+        target_compile_definitions(
+            realmheart_wallpaper_yuv_frame_tests
+            PRIVATE
+            REALMHEART_HAVE_LIVE_WALLPAPER=1
+        )
+        target_sources(
+            realmheart_wallpaper_yuv_frame_tests
+            PRIVATE
+            src/wallpaper-native/video/VideoDecoder.cpp
+        )
+        target_link_libraries(
+            realmheart_wallpaper_yuv_frame_tests
+            PRIVATE
+            PkgConfig::REALMHEART_AVFORMAT
+            PkgConfig::REALMHEART_AVCODEC
+            PkgConfig::REALMHEART_AVUTIL
+            PkgConfig::REALMHEART_SWSCALE
+        )
+    endif()
+    target_link_libraries(
+        realmheart_wallpaper_yuv_frame_tests
+        PRIVATE
+        PkgConfig::EGL
+        PkgConfig::GLESV2
+        GTest::gtest
+        GTest::gtest_main
+    )
+    realmheart_register_test(realmheart_wallpaper_yuv_frame_tests)
 
     # Live wallpaper source lifecycle: prepare/start/stop across a re-apply of
     # the wallpaper that is already playing. Needs a GL context for the frame

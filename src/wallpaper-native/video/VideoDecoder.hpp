@@ -4,7 +4,6 @@
 
 #include <cstdint>
 #include <string>
-
 // FFmpeg's opaque types, declared at global scope. They are deliberately not
 // declared inside the namespace: a namespace-scoped declaration would create
 // distinct types that clash with the real ones at the definition site.
@@ -104,6 +103,12 @@ private:
     bool at_eof_ = false;
     bool flush_drained_ = true;
     bool opened_ = false;
+    // The colourimetry the scaler was built with. A frame that announces a
+    // different one rebuilds the converter instead of converting through the
+    // wrong matrix. Kept in the interface's own vocabulary so no FFmpeg type
+    // or macro appears in this header.
+    VideoColorSpace scaler_color_space_ = VideoColorSpace::Bt601;
+    VideoColorRange scaler_color_range_ = VideoColorRange::Limited;
 };
 
 } // namespace realmheart::wallpaper_native

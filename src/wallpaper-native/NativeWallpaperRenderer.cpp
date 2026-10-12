@@ -306,23 +306,7 @@ bool NativeWallpaperRenderer::initialize_egl(std::string* error_message) {
 
 bool NativeWallpaperRenderer::initialize_gl(std::string* error_message) {
     if (!make_pbuffer_current(error_message)) return false;
-    if (!link_program(error_message)) return false;
-
-    position_attribute_ = glGetAttribLocation(program_, "a_position");
-    uv_attribute_ = glGetAttribLocation(program_, "a_uv");
-    current_sampler_uniform_ = glGetUniformLocation(program_, "u_current");
-    next_sampler_uniform_ = glGetUniformLocation(program_, "u_next");
-    progress_uniform_ = glGetUniformLocation(program_, "u_progress");
-    current_uv_uniform_ = glGetUniformLocation(program_, "u_current_uv");
-    next_uv_uniform_ = glGetUniformLocation(program_, "u_next_uv");
-
-    if (position_attribute_ < 0 || uv_attribute_ < 0 ||
-        current_sampler_uniform_ < 0 || next_sampler_uniform_ < 0 ||
-        progress_uniform_ < 0 || current_uv_uniform_ < 0 ||
-        next_uv_uniform_ < 0) {
-        set_error(error_message, "native wallpaper shader interface is incomplete");
-        return false;
-    }
+    if (!shaders_.initialize(error_message)) return false;
 
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
@@ -1156,68 +1140,6 @@ RuntimeSourcePtr NativeWallpaperRenderer::create_bytes_source(
     return make_static_image_source(std::move(bytes));
 }
 
-GLuint NativeWallpaperRenderer::compile_shader(
-    GLenum type,
-    const char* source,
-    std::string* error_message
-) {
-    const GLuint shader = glCreateShader(type);
-    if (shader == 0) {
-        set_error(error_message, "OpenGL could not create a shader");
-        return 0;
-    }
-
-    glShaderSource(shader, 1, &source, nullptr);
-    glCompileShader(shader);
-
-    GLint status = GL_FALSE;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
-    if (status == GL_TRUE) return shader;
-
-    GLint length = 0;
-    glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &length);
-    std::string log(static_cast<std::size_t>(std::max(length, 1)), '\0');
-    glGetShaderInfoLog(shader, length, nullptr, log.data());
-    glDeleteShader(shader);
-    set_error(error_message, "wallpaper shader compilation failed: " + log);
-    return 0;
-}
-
-bool NativeWallpaperRenderer::link_program(std::string* error_message) {
-    const GLuint vertex = compile_shader(GL_VERTEX_SHADER, kVertexShader, error_message);
-    if (vertex == 0) return false;
-
-    const GLuint fragment = compile_shader(
-        GL_FRAGMENT_SHADER,
-        kFragmentShader,
-        error_message
-    );
-    if (fragment == 0) {
-        glDeleteShader(vertex);
-        return false;
-    }
-
-    program_ = glCreateProgram();
-    glAttachShader(program_, vertex);
-    glAttachShader(program_, fragment);
-    glLinkProgram(program_);
-    glDeleteShader(vertex);
-    glDeleteShader(fragment);
-
-    GLint status = GL_FALSE;
-    glGetProgramiv(program_, GL_LINK_STATUS, &status);
-    if (status == GL_TRUE) return true;
-
-    GLint length = 0;
-    glGetProgramiv(program_, GL_INFO_LOG_LENGTH, &length);
-    std::string log(static_cast<std::size_t>(std::max(length, 1)), '\0');
-    glGetProgramInfoLog(program_, length, nullptr, log.data());
-    set_error(error_message, "wallpaper shader linking failed: " + log);
-    glDeleteProgram(program_);
-    program_ = 0;
-    return false;
-}
-
 bool NativeWallpaperRenderer::draw_all(std::string* error_message) {
     if (!source_has_frame(current_source_) && !source_has_frame(next_source_)) {
         return true;
@@ -1292,19 +1214,6 @@ bool NativeWallpaperRenderer::draw_output(
     glClearColor(0.0F, 0.0F, 0.0F, 1.0F);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    constexpr std::array<float, 8> positions{
-        -1.0F, -1.0F,
-         1.0F, -1.0F,
-        -1.0F,  1.0F,
-         1.0F,  1.0F,
-    };
-    constexpr std::array<float, 8> uvs{
-        0.0F, 0.0F,
-        1.0F, 0.0F,
-        0.0F, 1.0F,
-        1.0F, 1.0F,
-    };
-
     // A transition blends the incoming frame over the current one. With no
     // incoming frame the shader still samples two units, so both point at the
     // current frame and progress is forced to 1.0, leaving it untouched.
@@ -1324,43 +1233,14 @@ bool NativeWallpaperRenderer::draw_output(
         pixel_height
     );
 
-    glUseProgram(program_);
-    glEnableVertexAttribArray(static_cast<GLuint>(position_attribute_));
-    glEnableVertexAttribArray(static_cast<GLuint>(uv_attribute_));
-    glVertexAttribPointer(
-        static_cast<GLuint>(position_attribute_),
-        2,
-        GL_FLOAT,
-        GL_FALSE,
-        0,
-        positions.data()
-    );
-    glVertexAttribPointer(
-        static_cast<GLuint>(uv_attribute_),
-        2,
-        GL_FLOAT,
-        GL_FALSE,
-        0,
-        uvs.data()
+    shaders_.draw(
+        current,
+        has_incoming ? incoming : current,
+        current_uv,
+        next_uv,
+        progress
     );
 
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, current.texture());
-    glUniform1i(current_sampler_uniform_, 0);
-
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, incoming.texture());
-    glUniform1i(next_sampler_uniform_, 1);
-
-    glUniform1f(progress_uniform_, has_incoming ? progress : 1.0F);
-    glUniform4fv(current_uv_uniform_, 1, current_uv.data());
-    glUniform4fv(next_uv_uniform_, 1, next_uv.data());
-
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-    glDisableVertexAttribArray(static_cast<GLuint>(position_attribute_));
-    glDisableVertexAttribArray(static_cast<GLuint>(uv_attribute_));
-    glBindTexture(GL_TEXTURE_2D, 0);
     const GLenum gl_error = glGetError();
     if (gl_error != GL_NO_ERROR) {
         set_error(error_message, "OpenGL failed while drawing the wallpaper frame");
@@ -1949,10 +1829,7 @@ void NativeWallpaperRenderer::cleanup() noexcept {
         prepared_source_.reset();
         next_source_.reset();
         current_source_.reset();
-        if (program_ != 0) {
-            glDeleteProgram(program_);
-            program_ = 0;
-        }
+        shaders_.release();
     } else {
         // Without a context the sources are still released so their workers
         // stop; only an initialized renderer can hold textures.

@@ -90,10 +90,13 @@ TEST(VideoDecoderTest, DecodesSequentialFramesAndReportsEndOfStream) {
         VideoFrame frame;
         if (!decoder.decode_next(frame, &error)) break;
         if (!frame.valid()) continue;
-        ASSERT_EQ(frame.format, VideoFrameFormat::Rgba8);
+        // NV12 is the working format: luma then interleaved chroma, 1.5 bytes
+        // per pixel instead of 4, with the colour conversion left to the
+        // shader.
+        ASSERT_EQ(frame.format, VideoFrameFormat::Nv12);
         ASSERT_EQ(frame.width, 64);
         ASSERT_EQ(frame.height, 64);
-        ASSERT_EQ(frame.pixels.size(), 64U * 64U * 4U);
+        ASSERT_EQ(frame.pixels.size(), 64U * 64U + 64U * 64U / 2U);
         ASSERT_FALSE(frame.pixels.empty());
         presentation.push_back(frame.presentation_us);
         ++frames;

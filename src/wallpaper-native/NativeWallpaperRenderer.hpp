@@ -3,6 +3,7 @@
 #include "wallpaper-native/NativeWallpaperContracts.hpp"
 #include "wallpaper-native/gpu/RenderFrame.hpp"
 #include "wallpaper-native/source/RuntimeSourceRegistry.hpp"
+#include "wallpaper-native/gpu/WallpaperShaders.hpp"
 #include "wallpaper-native/source/RuntimeWallpaperSource.hpp"
 #include "wallpaper-native/video/VideoDecodeCoordinator.hpp"
 
@@ -196,7 +197,6 @@ private:
         const char* source,
         std::string* error_message
     );
-    [[nodiscard]] bool link_program(std::string* error_message);
 
     [[nodiscard]] bool draw_all(std::string* error_message = nullptr);
     [[nodiscard]] bool draw_output(
@@ -240,15 +240,10 @@ private:
     EGLContext egl_context_ = EGL_NO_CONTEXT;
     EGLSurface pbuffer_surface_ = EGL_NO_SURFACE;
 
-    GLuint program_ = 0;
-    GLint position_attribute_ = -1;
-    GLint uv_attribute_ = -1;
-    GLint current_sampler_uniform_ = -1;
-    GLint next_sampler_uniform_ = -1;
-    GLint progress_uniform_ = -1;
-    GLint current_uv_uniform_ = -1;
-    GLint next_uv_uniform_ = -1;
-
+    // The crossfade pass. Owns the program and every uniform, so an RGB frame
+    // and a YUV frame are the same draw call and any transition between them
+    // needs no extra shader variant.
+    WallpaperShaders shaders_;
 
     RuntimeSourcePtr current_source_;
     RuntimeSourcePtr next_source_;
