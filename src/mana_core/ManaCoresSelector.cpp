@@ -2166,8 +2166,7 @@ int ManaCoresSelector::apply_preview_target_dimension(
     if (logical_width <= 0 || logical_height <= 0 || scale_factor <= 0 ||
         source_width <= 0 || source_height <= 0) {
         return 0;
-    }
-    const double output_width =
+    }    const double output_width =
         static_cast<double>(logical_width) * static_cast<double>(scale_factor);
     const double output_height =
         static_cast<double>(logical_height) * static_cast<double>(scale_factor);
@@ -2186,6 +2185,30 @@ int ManaCoresSelector::apply_preview_target_dimension(
     }
     return static_cast<int>(std::min(
         target_dimension,
+        static_cast<double>(ThumbnailCache::max_preview_dimension())
+    ));
+}
+
+// A live wallpaper has no GdkPixbuf format, so there is no source geometry to
+// fit a cover against. The poster frame the cache produces for it is scaled to
+// whatever dimension is asked for here, so ask for the output's own device long
+// edge — the same thing the still-image path would compute with a source that
+// exactly fills the output — and let the cache clamp it.
+int ManaCoresSelector::apply_preview_live_target_dimension(
+    int logical_width,
+    int logical_height,
+    int scale_factor
+) noexcept {
+    if (logical_width <= 0 || logical_height <= 0 || scale_factor <= 0) {
+        return 0;
+    }
+    const double long_edge = std::max(
+        static_cast<double>(logical_width) * static_cast<double>(scale_factor),
+        static_cast<double>(logical_height) * static_cast<double>(scale_factor)
+    );
+    if (!std::isfinite(long_edge) || long_edge < 1.0) return 0;
+    return static_cast<int>(std::min(
+        std::ceil(long_edge),
         static_cast<double>(ThumbnailCache::max_preview_dimension())
     ));
 }
@@ -2273,7 +2296,13 @@ void ManaCoresSelector::begin_apply_preparation() {
                     source_width,
                     source_height
                 )
-                : 0;
+                : (ThumbnailCache::is_live_wallpaper(wallpaper_path)
+                       ? ManaCoresSelector::apply_preview_live_target_dimension(
+                             output_geometry.width,
+                             output_geometry.height,
+                             output_geometry.scale_factor
+                         )
+                       : 0);
             if (target_dimension <= 0) {
                 payload->error = "unable to determine wallpaper dimensions for output cover";
             } else {

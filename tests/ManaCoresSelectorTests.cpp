@@ -440,6 +440,67 @@ TEST(ManaCoresSelector, OneFailedNeighbourKeepsTheShownWallpaperReady) {
     EXPECT_FALSE(selector.wallpaper_decode_ready_[1]);
 }
 
+// A live wallpaper's handoff cover comes from a poster frame, sized by the
+// output rather than fitted to a known source. The dimension probe that used to
+// return 0 for every video is exactly what made live wallpapers impossible to
+// apply from the selector.
+TEST(ManaCoresSelector, LiveCoverDimensionMatchesTheOutput) {
+    EXPECT_EQ(
+        realmheart::mana_core::ManaCoresSelector::
+            apply_preview_live_target_dimension(1920, 1080, 1),
+        1920
+    );
+    // Device pixels, not logical: a scaled output needs the larger cover.
+    EXPECT_EQ(
+        realmheart::mana_core::ManaCoresSelector::
+            apply_preview_live_target_dimension(960, 540, 2),
+        1920
+    );
+    // Bounded by the cache's own preview cap, so a huge output cannot ask for
+    // an unbounded poster.
+    EXPECT_EQ(
+        realmheart::mana_core::ManaCoresSelector::
+            apply_preview_live_target_dimension(20000, 12000, 1),
+        realmheart::mana_core::ThumbnailCache::max_preview_dimension()
+    );
+    // Just under the cap it passes through unchanged.
+    EXPECT_EQ(
+        realmheart::mana_core::ManaCoresSelector::
+            apply_preview_live_target_dimension(7680, 4320, 1),
+        7680
+    );
+}
+
+TEST(ManaCoresSelector, LiveCoverDimensionRejectsNonsense) {
+    EXPECT_EQ(
+        realmheart::mana_core::ManaCoresSelector::
+            apply_preview_live_target_dimension(0, 1080, 1),
+        0
+    );
+    EXPECT_EQ(
+        realmheart::mana_core::ManaCoresSelector::
+            apply_preview_live_target_dimension(1920, 1080, 0),
+        0
+    );
+    EXPECT_EQ(
+        realmheart::mana_core::ManaCoresSelector::
+            apply_preview_live_target_dimension(-1920, 1080, 1),
+        0
+    );
+}
+
+// One classifier, shared by the cache and the selector: two copies of this list
+// is how a video ends up discovered but not previewable.
+TEST(ManaCoresSelector, LiveWallpaperClassificationIsSharedAndCaseInsensitive) {
+    using realmheart::mana_core::ThumbnailCache;
+    EXPECT_TRUE(ThumbnailCache::is_live_wallpaper("/a/wallpaper.mp4"));
+    EXPECT_TRUE(ThumbnailCache::is_live_wallpaper("/a/wallpaper.MP4"));
+    EXPECT_TRUE(ThumbnailCache::is_live_wallpaper("/a/wallpaper.WebM"));
+    EXPECT_FALSE(ThumbnailCache::is_live_wallpaper("/a/wallpaper.png"));
+    EXPECT_FALSE(ThumbnailCache::is_live_wallpaper("/a/wallpaper.txt"));
+    EXPECT_FALSE(ThumbnailCache::is_live_wallpaper(""));
+}
+
 TEST(ManaCoresSelector, StaleOrFailedBatchRetainsVisibleBatchWithoutTransition) {
     realmheart::mana_core::ManaCoresSelector sel;
     seed_preview_batch(sel);

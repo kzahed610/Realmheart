@@ -255,6 +255,13 @@ private:
         int source_width,
         int source_height
     ) noexcept;
+    // Cover dimension for a live wallpaper, whose poster frame is produced at
+    // whatever dimension is asked for rather than fitted to a known source.
+    [[nodiscard]] static int apply_preview_live_target_dimension(
+        int logical_width,
+        int logical_height,
+        int scale_factor
+    ) noexcept;
     void finish_apply_if_ready(guint64 now_micros);
     void reset_apply_to_idle();
     void cancel_apply_preparation();

@@ -328,6 +328,10 @@ bool is_video_source(const std::filesystem::path& path) {
            std::end(videos);
 }
 
+
+} // namespace
+
+
 // Writes one scaled poster frame for 'video' into the cache directory. Bounded
 // by a deadline so a pathological file cannot stall the selector.
 std::filesystem::path extract_video_poster_frame(
@@ -639,6 +643,14 @@ void store_cached_preview(
 }
 
 } // namespace
+
+namespace realmheart::mana_core {
+
+bool ThumbnailCache::is_live_wallpaper(
+    const std::filesystem::path& path
+) noexcept {
+    return is_video_source(path);
+}
 
 GdkPixbuf* ThumbnailCache::load_or_create(
     const std::filesystem::path& source_path,
