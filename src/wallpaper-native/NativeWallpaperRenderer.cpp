@@ -1141,9 +1141,23 @@ RuntimeSourcePtr NativeWallpaperRenderer::create_bytes_source(
 }
 
 bool NativeWallpaperRenderer::draw_all(std::string* error_message) {
-    if (!source_has_frame(current_source_) && !source_has_frame(next_source_)) {
-        return true;
+    // Decide whether there is anything to draw at all: the global source, an
+    // incoming transition, or any output override. A per-output live wallpaper
+    // can be the only drawable frame (no global wallpaper at all), so the
+    // override sources count too — without this check draw_all() bails before
+    // redrawing ticked frames and the live override freezes on its first frame.
+    bool anything_to_draw =
+        source_has_frame(current_source_) || source_has_frame(next_source_);
+    if (!anything_to_draw) {
+        for (const auto& output : outputs_) {
+            if (output != nullptr && output->override_source != nullptr &&
+                output->override_source->has_frame()) {
+                anything_to_draw = true;
+                break;
+            }
+        }
     }
+    if (!anything_to_draw) return true;
 
     float progress = 1.0F;
     if (animating_) {
@@ -1159,10 +1173,21 @@ bool NativeWallpaperRenderer::draw_all(std::string* error_message) {
     bool rendered_output = false;
     bool success = true;
     for (const auto& output : outputs_) {
-        if (output->configured && !output->closed) {
-            rendered_output = true;
-            success = draw_output(*output, progress, error_message) && success;
-        }
+        if (!output->configured || output->closed) continue;
+
+        // An output draws its override when it has one, otherwise the global
+        // source. Outputs with neither are simply not drawn.
+        const RenderFrameView override_frame =
+            output->override_source != nullptr
+                ? output->override_source->current_frame()
+                : RenderFrameView{};
+        const RenderFrameView global_frame = source_has_frame(current_source_)
+            ? current_source_->current_frame()
+            : RenderFrameView{};
+        if (!override_frame.valid() && !global_frame.valid()) continue;
+
+        rendered_output = true;
+        success = draw_output(*output, progress, error_message) && success;
     }
     if (!rendered_output && error_message != nullptr && error_message->empty()) {
         *error_message = "native wallpaper has no renderable output surfaces";

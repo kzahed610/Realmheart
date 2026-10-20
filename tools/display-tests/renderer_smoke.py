@@ -271,7 +271,7 @@ def mean_pixel_delta(first: Path, second: Path) -> float:
         return total / (pixels * 3)
 
 
-def run_video_checks(setup, output_dir: Path) -> None:
+def run_video_checks(setup, output_dir: Path, requested: Path | None = None) -> None:
     """Play a real video wallpaper and prove it moves.
 
     This is the part the unit tests cannot cover: the decode worker, the frame
@@ -279,8 +279,16 @@ def run_video_checks(setup, output_dir: Path) -> None:
     live Wayland surface.
     """
     video = output_dir / "smoke-video.mp4"
-    build_video_fixture(video)
-    print(f"[video] fixture={video}")
+    if requested is not None:
+        # A caller-supplied video is what a real user would apply: geometry,
+        # profile and pixel format all come from it rather than from a fixture.
+        if not requested.is_file():
+            raise HarnessError(f"video not found: {requested}")
+        video = requested
+        print(f"[video] using {video} ({video.stat().st_size} bytes)")
+    else:
+        build_video_fixture(video)
+        print(f"[video] fixture={video}")
 
     encoded = encode_path(video)
     check = setup["check"]
@@ -312,6 +320,74 @@ def run_video_checks(setup, output_dir: Path) -> None:
     # A live wallpaper must not make the renderer unresponsive.
     check("alive-while-playing", "PING", "OK")
 
+    # A session usually restores the global wallpaper at startup, and then the
+    # Mana Core selector applies as a per-output override. That ordering means
+    # both slots point at the same video source through the registry, which is
+    # the case that must still move.
+    check("set-video-global", f"SET {encoded}", "OK")
+    time.sleep(0.8)
+    capture(setup["hyprctl"], setup["instance"], setup["grim"],
+            output_dir / "renderer-global-video-a.png")
+    time.sleep(0.6)
+    capture(setup["hyprctl"], setup["instance"], setup["grim"],
+            output_dir / "renderer-global-video-b.png")
+    global_delta = mean_pixel_delta(
+        output_dir / "renderer-global-video-a.png",
+        output_dir / "renderer-global-video-b.png",
+    )
+    print(f"[video] global SET mean frame delta = {global_delta:.2f}/255")
+    if global_delta < 1.0:
+        raise HarnessError("a live wallpaper applied with SET is not animating")
+
+    # The Mana Core selector applies a wallpaper as a per-output override, so
+    # that path has to move too: it is the one a user actually exercises.
+    output_token = base64.b64encode(OUTPUT_NAME.encode()).decode()
+    check(
+        "prepare-output-video",
+        f"PREPARE_OUTPUT {output_token} {encoded}",
+        "PREPARED",
+    )
+    check("commit-output-video", "COMMIT", "OK")
+    time.sleep(1.0)
+    capture(setup["hyprctl"], setup["instance"], setup["grim"],
+            output_dir / "renderer-output-video-a.png")
+    time.sleep(0.6)
+    capture(setup["hyprctl"], setup["instance"], setup["grim"],
+            output_dir / "renderer-output-video-b.png")
+    override_delta = mean_pixel_delta(
+        output_dir / "renderer-output-video-a.png",
+        output_dir / "renderer-output-video-b.png",
+    )
+    print(f"[video] per-output override mean frame delta = {override_delta:.2f}/255")
+    if override_delta < 1.0:
+        raise HarnessError(
+            "a live wallpaper applied as a per-output override is not animating"
+        )
+
+    # Re-applying must not freeze it either: this is the re-apply path that
+    # used to tear down the decode worker of a source that was still playing.
+    # A second full apply of the same wallpaper, exactly what a user does when
+    # they pick the tile again.
+    check(
+        "reapply-output-video",
+        f"PREPARE_OUTPUT {output_token} {encoded}",
+        "PREPARED",
+    )
+    check("reapply-commit-video", "COMMIT", "OK")
+    time.sleep(0.9)
+    capture(setup["hyprctl"], setup["instance"], setup["grim"],
+            output_dir / "renderer-reapply-video-a.png")
+    time.sleep(0.6)
+    capture(setup["hyprctl"], setup["instance"], setup["grim"],
+            output_dir / "renderer-reapply-video-b.png")
+    reapply_delta = mean_pixel_delta(
+        output_dir / "renderer-reapply-video-a.png",
+        output_dir / "renderer-reapply-video-b.png",
+    )
+    print(f"[video] re-applied mean frame delta = {reapply_delta:.2f}/255")
+    if reapply_delta < 1.0:
+        raise HarnessError("re-applying a live wallpaper froze it")
+
     # Switching back to a static image must work from a live source.
     check("set-static-from-video", f"SET {encode_path(setup['image'])}", "OK")
     time.sleep(1.0)
@@ -327,6 +403,11 @@ def main() -> int:
         default=str(REPO_ROOT / "build-verify" / "realmheart-wallpaper-renderer"),
     )
     parser.add_argument("--image", default=None, help="image used as a wallpaper")
+    parser.add_argument(
+        "--video",
+        default=None,
+        help="video used as the live wallpaper; default builds a fixture",
+    )
     parser.add_argument(
         "--skip-video",
         action="store_true",
@@ -583,7 +664,9 @@ def main() -> int:
                     "grim": grim,
                     "image": image,
                 }
-                run_video_checks(setup, output_dir)
+                run_video_checks(
+                    setup, output_dir, Path(args.video) if args.video else None
+                )
 
             renderer.close()
             renderer = None
