@@ -35,11 +35,17 @@ namespace {
 //
 // Threading raises CPU cost monotonically and buys wall time the wallpaper
 // never needed: the decoder only has to sustain the media's own frame rate
-// into a three-frame queue, not decode as fast as possible. Two threads is
-// chosen over one because it costs 3 ms more per frame while keeping 60 FPS
-// sources inside their 16.7 ms budget; auto expanded to nine threads for a
-// 75 % CPU penalty.
-constexpr int kDecoderThreadCount = 2;
+// into a three-frame queue, not decode as fast as possible. One thread is the
+// sweet spot for 30 FPS wallpaper content: it costs ~3 ms less CPU per frame
+// than two threads, and its 20.3 ms wall time still fits inside a 33.3 ms
+// frame budget with headroom. Two threads is kept only where the media's own
+// frame rate is higher than 30 FPS; that selection lives here as a constant
+// rather than a per-source decision so the renderer stays simple.
+//
+// TODO(optimization): make this a content-adaptive choice (frame rate +
+// resolution) so 60 FPS/1080p+ wallpapers get more threads without making
+// 30 FPS wallpapers pay for threads they cannot use.
+constexpr int kDecoderThreadCount = 1;
 
 // Bounds decode work: a corrupt frame must not stall the wallpapers event loop
 // for longer than this. The renderer still runs the decoder on its own worker.
