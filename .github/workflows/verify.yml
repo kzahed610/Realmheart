@@ -20,7 +20,11 @@ jobs:
 
   installer-doctor-tests:
     name: installer + doctor tests
-    runs-on: ubuntu-latest
+    # Ubuntu 26.04 ships uutils coreutils as symlinks. The Doctor deliberately
+    # rejects symlinked executables, and these tests probe /usr/bin/{true,
+    # printf,sleep} as artifact-less commands. Keep the execution suite on a
+    # regular-file coreutils image until the fixtures use copied ELF artifacts.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Installer, Doctor, forensics and acceptance test suite
