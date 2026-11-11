@@ -1518,6 +1518,12 @@ void applyAlphaNow(const PHLWINDOW& window) {
         return;
 
     window->presentation().updateDecorations();
+    // The applicator was mutated directly, so the presentation alpha goal still
+    // holds the previous value (the 1/255 ghost while hiding, or the ghost when
+    // restoring). refreshValues() recomputes it from the applicator before we
+    // warp, otherwise the window stays invisible until an unrelated focus
+    // change calls refreshValues() for us.
+    window->presentation().refreshValues();
     auto& alpha = window->presentation().alpha(Desktop::View::WINDOW_ALPHA_ACTIVE);
     alpha->setValueAndWarp(alpha->goal());
 }
