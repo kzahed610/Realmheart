@@ -10,8 +10,11 @@ local realmheart = "realmheart"
 local realmheartCommand = realmheart .. " --command "
 local hyprScripts = "$HOME/.config/hypr/hyprland/scripts"
 
-hl.bind("SUPER + SUPER_L", hl.dsp.exec_cmd(realmheartCommand .. "launch-launcher"), { description = "Shell: Toggle search" })
-hl.bind("SUPER + SUPER_R", hl.dsp.exec_cmd(realmheartCommand .. "launch-launcher"))
+-- Tap SUPER to open the launcher. Hyprland 0.57 resolves the pressed modifier
+-- itself, so without `release` this also fires while SUPER is held as a chord
+-- modifier (SUPER + Q, SUPER + 1, ...).
+hl.bind("SUPER + SUPER_L", hl.dsp.exec_cmd(realmheartCommand .. "launch-launcher"), { release = true, description = "Shell: Toggle search" })
+hl.bind("SUPER + SUPER_R", hl.dsp.exec_cmd(realmheartCommand .. "launch-launcher"), { release = true, description = "Shell: Toggle search" })
 hl.bind("SUPER + Tab", hl.dsp.exec_cmd(realmheartCommand .. "workspace-overview-toggle"), { description = "Shell: Workspace Overview" })
 hl.bind("SUPER + L", hl.dsp.exec_cmd(realmheartCommand .. "lock-session"), { description = "Lock session" })
 hl.bind(
