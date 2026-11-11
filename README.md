@@ -143,7 +143,8 @@ operations that actually need it.
 Current first-class install target: **CachyOS/Arch + Wayland + Hyprland**. Realmheart
 requires Hyprland **0.56.1 or newer**; the installer treats the tested 0.56.x/0.57.x
 lines separately from unknown future ABI revisions because `realmheart-fx.so` is
-Hyprland-ABI-sensitive.
+Hyprland-ABI-sensitive. Hyprland **0.57.2** (aquamarine 0.16) is validated on the
+2026-11-11 host update.
 
 ```bash
 cd ~
@@ -305,9 +306,10 @@ validated interactively.
 ## Versions and compatibility
 
 Realmheart moves with Hyprland. The current release requires Hyprland
-**0.56.1 or newer**. The installer treats **0.56.x and 0.57.x** as tested lines,
-with 0.56.2 retained as the preferred development baseline; newer minor lines
-are compatibility-unknown until Realmheart FX ABI support is validated.
+**0.56.1 or newer**. The installer treats **0.56.x and 0.57.x** as tested lines
+and still marks 0.56.2 as its preferred battle-tested line; **0.57.2 is
+validated** as of the 2026-11-11 host update, and newer minor lines are
+compatibility-unknown until Realmheart FX ABI support is validated.
 
 Currently used elsewhere: GTK 4.12 or newer (development on 4.24),
 GLib 2.90, gtk4-layer-shell 1.3, matugen 4.x.
@@ -315,9 +317,11 @@ GLib 2.90, gtk4-layer-shell 1.3, matugen 4.x.
 The required FX plugin compiles against Hyprland's internal plugin ABI and
 must be rebuilt after every Hyprland update. The installer binds the build to
 the exact detected Hyprland build/ABI identity rather than assuming minor-line
-compatibility is sufficient for a previously built plugin.
+compatibility is sufficient for a previously built plugin. On the 0.57 line
+the plugin builds against aquamarine 0.16, hyprgraphics 0.6, hyprutils 0.14,
+and hyprlang 0.6.8.
 
-Stable host baseline: CachyOS/Arch Linux, Hyprland 0.56.2, GTK 4.24,
+Stable host baseline: CachyOS/Arch Linux, Hyprland 0.57.2, GTK 4.24,
 GLib 2.90, Mesa 26.2. Display compatibility is additionally
 regression-tested in isolated Hyprland sessions across the standard,
 ultrawide, super-ultrawide, mixed-resolution, and mixed-DPI matrix
@@ -326,7 +330,10 @@ documented above.
 Toolstack qualification: the GTK 4.24 / GLib 2.90 line and the 26.2
 graphics stack were qualified against the 2026-10-10 CachyOS host update
 with a full clean rebuild, the native test suite, the Installer/Doctor
-suite, and the isolated multi-output display matrix. A Hyprland package
+suite, and the isolated multi-output display matrix. The Hyprland 0.57.2 /
+aquamarine 0.16 update was qualified on 2026-11-11 with a clean
+`build-main` build, 131/131 tests, a rebuilt and re-attested FX plugin, and
+live effect/IPC probes. A Hyprland package
 revision that keeps the same upstream commit and ABI hash (such as a
 0.56.x pkgrel bump) does not change the FX ABI contract, but the plugin
 is still rebuilt and re-attested against the detected build identity on
