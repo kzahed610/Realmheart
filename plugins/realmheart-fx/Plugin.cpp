@@ -10,11 +10,12 @@
 #include "WindowEffectRegistry.hpp"
 
 #include <hyprland/src/Compositor.hpp>
-#include <hyprland/src/desktop/Workspace.hpp>
 #include <hyprland/src/desktop/rule/windowRule/WindowRuleApplicator.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowMetadata.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
@@ -25,6 +26,7 @@
 #include <hyprland/src/render/Framebuffer.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/version.h>
+#include <hyprland/src/workspace/HLWorkspace.hpp>
 #include <hyprland/src/xwayland/XSurface.hpp>
 
 #include <algorithm>
@@ -350,7 +352,7 @@ struct SPluginState {
     bool automaticOpenEnabled = true;
     bool automaticCloseEnabled = true;
     wl_event_source* tick = nullptr;
-    SP<SHyprCtlCommand> command;
+    SP<IPC::Socket1::SCommand> command;
 };
 
 HANDLE g_handle = nullptr;
@@ -978,24 +980,14 @@ SP<Render::ITexture> surfaceTexture(
         return nullptr;
 
     // Use the same authoritative surface root Hyprland's renderer uses.
-    // Protocol-specific pointers can lag during early map for Qt Quick clients,
-    // while wlSurface()->resource() already identifies the surface that
-    // renderWindow() traverses.
+    // wlSurface()->resource() already identifies the surface that renderWindow()
+    // traverses for both Wayland and XWayland clients.
     SP<CWLSurfaceResource> surface;
     if (window->wlSurface())
         surface = window->wlSurface()->resource();
 
-    if (!surface && !window->m_xdgSurface.expired()) {
-        const auto xdg = window->m_xdgSurface.lock();
-        if (xdg && !xdg->m_surface.expired())
-            surface = xdg->m_surface.lock();
-    }
-
-    if (!surface && !window->m_xwaylandSurface.expired()) {
-        const auto xwayland = window->m_xwaylandSurface.lock();
-        if (xwayland && !xwayland->m_surface.expired())
-            surface = xwayland->m_surface.lock();
-    }
+    if (!surface)
+        surface = window->resource();
 
     if (!surface)
         return nullptr;
@@ -1219,7 +1211,7 @@ bool captureTiledReflowHold(
     std::string& reason
 ) {
     destination.clear();
-    if (!closingWindow || !monitor || closingWindow->m_isFloating)
+    if (!closingWindow || !monitor || closingWindow->isFloating())
         return true;
     if (!Desktop::windowState()) {
         reason = "Hyprland window state is unavailable";
@@ -1227,8 +1219,8 @@ bool captureTiledReflowHold(
     }
 
     for (const auto& candidate : Desktop::windowState()->windows()) {
-        if (!candidate || candidate == closingWindow || !candidate->m_isMapped ||
-            candidate->isHidden() || candidate->m_isFloating ||
+        if (!candidate || candidate == closingWindow || !candidate->mapped() ||
+            candidate->isHidden() || candidate->isFloating() ||
             candidate->m_workspace != closingWindow->m_workspace ||
             candidate->m_monitor.lock() != monitor ||
             windowIsFullscreen(candidate)) {
@@ -1258,7 +1250,7 @@ bool captureTiledReflowHold(
             .window = candidate,
             .oldPosition = oldPosition,
             .oldSize = oldSize,
-            .rounding = candidate->rounding(),
+            .rounding = candidate->presentation().rounding(),
             .frame = std::move(frame),
         });
     }
@@ -1275,8 +1267,8 @@ void applyTiledReflowHold(SWindowAnimation& animation) {
     std::size_t applied = 0;
     for (auto& hold : animation.heldReflowWindows) {
         const auto window = hold.window.lock();
-        if (!window || !window->m_isMapped || window->isHidden() ||
-            window->m_isFloating || windowIsFullscreen(window)) {
+        if (!window || !window->mapped() || window->isHidden() ||
+            window->isFloating() || windowIsFullscreen(window)) {
             continue;
         }
 
@@ -1325,8 +1317,8 @@ void releaseTiledReflowHold(SWindowAnimation& animation) {
     std::size_t released = 0;
     for (auto& hold : animation.heldReflowWindows) {
         const auto window = hold.window.lock();
-        if (!window || !window->m_isMapped || window->isHidden() ||
-            window->m_isFloating || windowIsFullscreen(window)) {
+        if (!window || !window->mapped() || window->isHidden() ||
+            window->isFloating() || windowIsFullscreen(window)) {
             continue;
         }
 
@@ -1360,9 +1352,9 @@ void releaseTiledReflowHold(SWindowAnimation& animation) {
 std::string_view effectiveWindowClass(const PHLWINDOW& window) noexcept {
     if (!window)
         return {};
-    if (!window->m_class.empty())
-        return window->m_class;
-    return window->m_initialClass;
+    if (!window->metadata().appID().empty())
+        return window->metadata().appID();
+    return window->metadata().initialAppID();
 }
 
 GLenum textureTarget(const SP<Render::ITexture>& texture) {
@@ -1416,6 +1408,28 @@ bool windowIsFullscreen(const PHLWINDOW& window) {
         Fullscreen::controller()->isFullscreen(window);
 }
 
+bool windowPinned(const PHLWINDOW& window) {
+    return window &&
+        static_cast<bool>(
+            window->m_state & Desktop::View::WINDOW_STATE_PINNED
+        );
+}
+
+bool windowHasPendingSizeAck(const PHLWINDOW& window) {
+    if (!window)
+        return false;
+
+    const Vector2D reported = window->backend().reportedSize();
+    const Vector2D current = window->size(
+        Desktop::View::IGeometric::GEOMETRIC_CURRENT
+    );
+    if (reported.x <= 0.0 || reported.y <= 0.0)
+        return false;
+
+    return std::abs(reported.x - current.x) > 0.5 ||
+        std::abs(reported.y - current.y) > 0.5;
+}
+
 CBox currentWindowRenderBox(const PHLWINDOW& window) {
     if (!window)
         return {};
@@ -1430,9 +1444,9 @@ CBox currentWindowRenderBox(const PHLWINDOW& window) {
     // Match Hyprland's live renderWindow geometry. The effect follows this box
     // every frame, so a late client configure cannot create a snapshot/live
     // handoff resize.
-    if (window->m_workspace && !window->m_pinned)
+    if (window->m_workspace && !windowPinned(window))
         position += window->m_workspace->m_renderOffset->value();
-    position += window->m_floatingOffset;
+    position += window->presentation().floatingOffset();
 
     return CBox{
         position.x,
@@ -1476,7 +1490,7 @@ bool openingSourceReady(
     GLenum target,
     bool relaxedToolkitReadiness
 ) noexcept {
-    if (!window || !window->m_isMapped || !texture || texture->m_texID == 0 ||
+    if (!window || !window->mapped() || !texture || texture->m_texID == 0 ||
         target == 0 || !validBox(currentWindowRenderBox(window))) {
         return false;
     }
@@ -1495,8 +1509,7 @@ bool openingSourceReady(
 
     // Only reject the known half-configured state. Once playback starts, the
     // source remains live and geometry is read again on every compositor frame.
-    return !window->m_pendingSizeAck.has_value() &&
-        window->m_pendingSizeAcks.empty() &&
+    return !windowHasPendingSizeAck(window) &&
         textureGeometryCoherent(window, texture);
 }
 
@@ -1504,8 +1517,8 @@ void applyAlphaNow(const PHLWINDOW& window) {
     if (!window)
         return;
 
-    window->updateDecorationValues();
-    auto& alpha = window->alpha(Desktop::View::WINDOW_ALPHA_ACTIVE);
+    window->presentation().updateDecorations();
+    auto& alpha = window->presentation().alpha(Desktop::View::WINDOW_ALPHA_ACTIVE);
     alpha->setValueAndWarp(alpha->goal());
 }
 
@@ -1588,7 +1601,7 @@ void settleWorkspaceReflowForOpening(const PHLWINDOW& target) {
         return;
 
     for (const auto& candidate : Desktop::windowState()->windows()) {
-        if (!candidate || candidate == target || !candidate->m_isMapped ||
+        if (!candidate || candidate == target || !candidate->mapped() ||
             candidate->m_workspace != workspace) {
             continue;
         }
@@ -1616,9 +1629,6 @@ void cancelAnimation(const std::string& reason, bool restoreWindow = true) {
     if (mode == EWindowAnimationMode::AutomaticClose)
         releaseTiledReflowHold(g_state->animation);
 
-    g_pHyprRenderer->m_renderPass.removeAllOfType(
-        "CRealmheartEffectPassElement"
-    );
     g_state->animation = {};
     damageExpandedBox(oldBox);
 
@@ -1645,11 +1655,11 @@ std::string armFocusedWindow(std::string_view effectName = "void") {
         return "effect is registered but its shader is unavailable";
 
     const PHLWINDOW window = Desktop::focusState()->window();
-    if (!window || !window->m_isMapped)
+    if (!window || !window->mapped())
         return "focus a mapped application window first";
     if (windowIsFullscreen(window))
         return "fullscreen windows are excluded";
-    if (window->isX11OverrideRedirect())
+    if (window->backend().traits().overrideRedirect)
         return "override-redirect windows are excluded";
     if (!window->m_ruleApplicator)
         return "focused window has no rule applicator";
@@ -1670,7 +1680,7 @@ std::string armFocusedWindow(std::string_view effectName = "void") {
         .closeFrame = {},
         .hiddenState = std::move(hiddenState),
         .box = currentWindowRenderBox(window),
-        .rounding = window->rounding(),
+        .rounding = window->presentation().rounding(),
         .windowClass = std::string{effectiveWindowClass(window)},
         .armedTime = now,
         .startTime = {},
@@ -1692,7 +1702,7 @@ bool automaticOpenEligibility(
     const SWindowEffectSpec& effect,
     std::string& reason
 ) {
-    if (!window || !window->m_isMapped) {
+    if (!window || !window->mapped()) {
         reason = "window is not mapped";
         return false;
     }
@@ -1708,15 +1718,15 @@ bool automaticOpenEligibility(
         reason = "fullscreen window";
         return false;
     }
-    if (window->isX11OverrideRedirect()) {
+    if (window->backend().traits().overrideRedirect) {
         reason = "override-redirect window";
         return false;
     }
-    if (window->parent()) {
+    if (window->backend().parent()) {
         reason = "transient or dialog window";
         return false;
     }
-    if (window->m_workspace && !window->m_workspace->isVisible()) {
+    if (window->m_workspace && !window->m_workspace->visible()) {
         reason = "window opened on a non-visible workspace";
         return false;
     }
@@ -1737,7 +1747,7 @@ bool automaticCloseEligibility(
     const SWindowEffectSpec& effect,
     std::string& reason
 ) {
-    if (!window || !window->m_isMapped) {
+    if (!window || !window->mapped()) {
         reason = "window is not mapped";
         return false;
     }
@@ -1753,15 +1763,15 @@ bool automaticCloseEligibility(
         reason = "fullscreen window";
         return false;
     }
-    if (window->isX11OverrideRedirect()) {
+    if (window->backend().traits().overrideRedirect) {
         reason = "override-redirect window";
         return false;
     }
-    if (window->parent()) {
+    if (window->backend().parent()) {
         reason = "transient or dialog window";
         return false;
     }
-    if (window->m_workspace && !window->m_workspace->isVisible()) {
+    if (window->m_workspace && !window->m_workspace->visible()) {
         reason = "window closed on a non-visible workspace";
         return false;
     }
@@ -1785,7 +1795,7 @@ void onWindowOpen(PHLWINDOW window) {
     const auto& effectPool = automaticOpenEffectsForWindow(
         g_state->effectConfig,
         windowClass,
-        window->m_title
+        window->metadata().title()
     );
     const std::string_view effectName = chooseWindowEffect(
         effectPool,
@@ -1843,7 +1853,7 @@ void onWindowOpen(PHLWINDOW window) {
         .closeFrame = {},
         .hiddenState = std::move(hiddenState),
         .box = currentWindowRenderBox(window),
-        .rounding = window->rounding(),
+        .rounding = window->presentation().rounding(),
         .windowClass = std::string(windowClass),
         .armedTime = now,
         .startTime = {},
@@ -1861,18 +1871,19 @@ void onWindowOpen(PHLWINDOW window) {
     damageExpandedBox(g_state->animation.box);
 }
 
-void onRenderStage(eRenderStage stage) {
+void onRenderStage(const Event::SRenderStageEvent& event) {
     if (!g_state || !g_state->animation.active)
         return;
 
     auto& animation = g_state->animation;
-    if (stage == RENDER_PRE_WINDOWS) {
+    if (event.stage == RENDER_PRE_WINDOWS) {
         applyTiledReflowHold(animation);
         return;
     }
-    if (stage != RENDER_POST_WINDOWS)
+    if (event.stage != RENDER_POST_WINDOWS || !event.context.has_value())
         return;
-    const auto currentMonitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+    auto& context = event.context->get();
+    const auto currentMonitor = event.monitor;
     if (!currentMonitor) {
         cancelAnimation("render monitor disappeared");
         return;
@@ -1899,7 +1910,7 @@ void onRenderStage(eRenderStage stage) {
         effectBox = animation.box;
         rounding = animation.rounding;
     } else {
-        if (!window || !window->m_isMapped) {
+        if (!window || !window->mapped()) {
             cancelAnimation("window disappeared");
             return;
         }
@@ -1928,9 +1939,9 @@ void onRenderStage(eRenderStage stage) {
             window->size(Desktop::View::IGeometric::GEOMETRIC_CURRENT)
         );
         animation.observedPendingSizeAck =
-            window->m_pendingSizeAck.has_value();
+            windowHasPendingSizeAck(window);
         animation.observedPendingSizeAckCount =
-            window->m_pendingSizeAcks.size();
+            animation.observedPendingSizeAck ? 1U : 0U;
 
         const CBox previousBox = animation.box;
         effectBox = currentWindowRenderBox(window);
@@ -2002,7 +2013,7 @@ void onRenderStage(eRenderStage stage) {
             return;
         sourceTextureId = liveTexture->m_texID;
 
-        rounding = window->rounding();
+        rounding = window->presentation().rounding();
         animation.monitor = liveMonitor;
         animation.box = effectBox;
         animation.rounding = rounding;
@@ -2142,7 +2153,8 @@ void onRenderStage(eRenderStage stage) {
             if (!hold.applied || hold.frame.texture == 0)
                 continue;
 
-            g_pHyprRenderer->m_renderPass.add(
+            Render::IHyprRenderer::addPassElement(
+                context,
                 makeUnique<CRealmheartEffectPassElement>(
                     CRealmheartEffectPassElement::SData{
                         .box = CBox{hold.oldPosition, hold.oldSize},
@@ -2159,7 +2171,8 @@ void onRenderStage(eRenderStage stage) {
         }
     }
 
-    g_pHyprRenderer->m_renderPass.add(
+    Render::IHyprRenderer::addPassElement(
+        context,
         makeUnique<CRealmheartEffectPassElement>(
             CRealmheartEffectPassElement::SData{
                 .box = effectBox,
@@ -2217,7 +2230,7 @@ int onTick(void* data) {
 
     if (effect == nullptr) {
         cancelAnimation("selected effect disappeared during tick");
-    } else if (!closing && (!window || !window->m_isMapped)) {
+    } else if (!closing && (!window || !window->mapped())) {
         cancelAnimation("window disappeared during tick");
     } else if (animation.mode == EWindowAnimationMode::AutomaticOpen &&
                automaticWindowClassIsExcluded(effectiveWindowClass(window))) {
@@ -2226,7 +2239,7 @@ int onTick(void* data) {
                windowIsFullscreen(window)) {
         cancelAnimation("window became fullscreen during opening");
     } else if (animation.mode == EWindowAnimationMode::AutomaticOpen &&
-               window->m_workspace && !window->m_workspace->isVisible()) {
+               window->m_workspace && !window->m_workspace->visible()) {
         cancelAnimation("window moved to a non-visible workspace during opening");
     } else if (closing && !animation.monitor.lock()) {
         cancelAnimation("closing target monitor disappeared");
@@ -2273,7 +2286,7 @@ int onTick(void* data) {
                 damageExpandedBox(animation.box);
                 damageExpandedBox(liveBox);
                 animation.box = liveBox;
-                animation.rounding = window->rounding();
+                animation.rounding = window->presentation().rounding();
             }
         } else {
             const float elapsed = std::chrono::duration<float>(
@@ -2302,7 +2315,7 @@ int onTick(void* data) {
                 damageExpandedBox(animation.box);
                 damageExpandedBox(liveBox);
                 animation.box = liveBox;
-                animation.rounding = window->rounding();
+                animation.rounding = window->presentation().rounding();
             }
         }
     }
@@ -2328,12 +2341,12 @@ void onWindowClose(PHLWINDOW window) {
     const auto& effectPool = automaticCloseEffectsForWindow(
         g_state->effectConfig,
         windowClass,
-        window->m_title
+        window->metadata().title()
     );
     const std::string_view effectName = chooseWindowEffect(
         effectPool,
         g_state->effectRandom(),
-        requiredCapabilitiesForTarget(GL_TEXTURE_2D, window->rounding() > 0.0F)
+        requiredCapabilitiesForTarget(GL_TEXTURE_2D, window->presentation().rounding() > 0.0F)
     );
     if (effectName == kNoWindowEffect) {
         appendDiagnostic(
@@ -2389,7 +2402,7 @@ void onWindowClose(PHLWINDOW window) {
         );
         return;
     }
-    if (!effectSupportsTarget(*effect, GL_TEXTURE_2D, window->rounding() > 0.0F)) {
+    if (!effectSupportsTarget(*effect, GL_TEXTURE_2D, window->presentation().rounding() > 0.0F)) {
         appendDiagnostic(
             "automatic close skipped: reason=effect does not support the owned 2D snapshot"
         );
@@ -2420,7 +2433,7 @@ void onWindowClose(PHLWINDOW window) {
         .heldReflowWindows = std::move(heldReflowWindows),
         .reflowHoldApplied = false,
         .box = closingBox,
-        .rounding = window->rounding(),
+        .rounding = window->presentation().rounding(),
         .windowClass = std::string(windowClass),
         .armedTime = now,
         .startTime = now,
@@ -2451,9 +2464,7 @@ void onWorkspace(PHLWORKSPACE) {
         cancelAnimation("workspace changed");
 }
 
-std::string controlCommand(eHyprCtlOutputFormat format, std::string request) {
-    (void)format;
-
+std::string controlCommand(std::string request) {
     std::istringstream stream(std::move(request));
     std::string command;
     std::string subcommand;
@@ -2570,15 +2581,6 @@ void cleanupPlugin() noexcept {
     }
 
     try {
-        if (g_pHyprRenderer != nullptr) {
-            g_pHyprRenderer->m_renderPass.removeAllOfType(
-                "CRealmheartEffectPassElement"
-            );
-        }
-    } catch (...) {
-    }
-
-    try {
         if (g_pHyprOpenGL != nullptr) {
             g_pHyprOpenGL->makeEGLCurrent();
             for (auto& effect : g_state->effects)
@@ -2638,10 +2640,14 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
         g_state->command = HyprlandAPI::registerHyprCtlCommand(
             g_handle,
-            SHyprCtlCommand{
+            IPC::Socket1::SCommand{
                 .name = kCommandName,
-                .exact = false,
-                .fn = controlCommand,
+                .match = IPC::Socket1::COMMAND_MATCH_PREFIX,
+                .handler = [](const IPC::Socket1::SRequest& request) {
+                    return IPC::Socket1::SResponse{
+                        controlCommand(request.command)
+                    };
+                },
             }
         );
         if (!g_state->command)

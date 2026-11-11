@@ -65,11 +65,11 @@ class CRealmheartEffectPassElement final : public IPassElement {
     explicit CRealmheartEffectPassElement(SData data);
     ~CRealmheartEffectPassElement() override = default;
 
-    std::vector<UP<IPassElement>> draw() override;
-    bool needsLiveBlur() override;
-    bool needsPrecomputeBlur() override;
-    std::optional<CBox> boundingBox() override;
-    bool disableSimplification() override;
+    std::vector<UP<IPassElement>> draw(Render::CRenderContext& ctx) override;
+    bool needsLiveBlur(Render::CRenderContext& ctx) override;
+    bool needsPrecomputeBlur(Render::CRenderContext& ctx) override;
+    std::optional<CBox> boundingBox(Render::CRenderContext& ctx) override;
+    bool disableSimplification(Render::CRenderContext& ctx) override;
 
     const char* passName() override {
         return "CRealmheartEffectPassElement";

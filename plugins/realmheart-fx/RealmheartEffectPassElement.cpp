@@ -4,6 +4,7 @@
 
 #include "RealmheartEffectPassElement.hpp"
 
+#include <hyprland/src/render/Context.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 
@@ -22,20 +23,20 @@ void SRealmheartEffectShader::destroy() {
 CRealmheartEffectPassElement::CRealmheartEffectPassElement(SData data)
     : m_data(std::move(data)) {}
 
-std::vector<UP<IPassElement>> CRealmheartEffectPassElement::draw() {
+std::vector<UP<IPassElement>> CRealmheartEffectPassElement::draw(Render::CRenderContext& ctx) {
     if (m_data.box.width <= 0 || m_data.box.height <= 0 || m_data.texture == 0 ||
         m_data.shader == nullptr || m_data.shader->program == 0) {
         return {};
     }
 
-    const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+    const auto monitor = ctx.m_data.pMonitor.lock();
     if (!monitor)
         return {};
 
     CBox renderBox = m_data.box;
     renderBox.translate(-monitor->m_position).scale(monitor->m_scale).round();
 
-    const Mat3x3 projection = g_pHyprRenderer->projectBoxToTarget(renderBox);
+    const Mat3x3 projection = g_pHyprRenderer->projectBoxToTarget(ctx, renderBox);
     const auto& shader = *m_data.shader;
 
     GLint previousProgram = 0;
@@ -103,7 +104,7 @@ std::vector<UP<IPassElement>> CRealmheartEffectPassElement::draw() {
     glVertexAttribPointer(positionLocation, 2, GL_FLOAT, GL_FALSE, 0, positions);
     glEnableVertexAttribArray(positionLocation);
 
-    g_pHyprRenderer->m_renderData.damage.forEachRect([&](const pixman_box32& rectangle) {
+    ctx.m_data.damage.forEachRect([&](const pixman_box32& rectangle) {
         const double left = std::max(static_cast<double>(rectangle.x1), renderBox.x);
         const double top = std::max(static_cast<double>(rectangle.y1), renderBox.y);
         const double right = std::min(
@@ -124,30 +125,31 @@ std::vector<UP<IPassElement>> CRealmheartEffectPassElement::draw() {
             bottom - top,
         };
         g_pHyprOpenGL->scissor(
+            ctx,
             targetDamage,
-            g_pHyprRenderer->m_renderData.transformDamage
+            ctx.m_data.transformDamage
         );
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     });
 
     glDisableVertexAttribArray(positionLocation);
-    g_pHyprOpenGL->scissor(nullptr);
+    g_pHyprOpenGL->disableScissor();
     glBindTexture(m_data.textureTarget, 0);
     glUseProgram(previousProgram);
 
     return {};
 }
 
-bool CRealmheartEffectPassElement::needsLiveBlur() {
+bool CRealmheartEffectPassElement::needsLiveBlur(Render::CRenderContext&) {
     return false;
 }
 
-bool CRealmheartEffectPassElement::needsPrecomputeBlur() {
+bool CRealmheartEffectPassElement::needsPrecomputeBlur(Render::CRenderContext&) {
     return false;
 }
 
-std::optional<CBox> CRealmheartEffectPassElement::boundingBox() {
-    const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+std::optional<CBox> CRealmheartEffectPassElement::boundingBox(Render::CRenderContext& ctx) {
+    const auto monitor = ctx.m_data.pMonitor.lock();
     if (!monitor)
         return std::nullopt;
 
@@ -155,6 +157,6 @@ std::optional<CBox> CRealmheartEffectPassElement::boundingBox() {
     return box.translate(-monitor->m_position).expand(2);
 }
 
-bool CRealmheartEffectPassElement::disableSimplification() {
+bool CRealmheartEffectPassElement::disableSimplification(Render::CRenderContext&) {
     return true;
 }
