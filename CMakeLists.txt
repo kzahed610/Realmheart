@@ -105,6 +105,7 @@ set(REALMHEART_RUNTIME_SOURCES
     src/services/WallpaperDiscovery.cpp
     src/services/WallpaperRotator.cpp
     src/services/SessionManager.cpp
+    src/services/SessionRestore.cpp
     src/services/BatteryService.cpp
     src/services/MediaService.cpp
     src/services/ThemeService.cpp
@@ -1601,6 +1602,16 @@ if(BUILD_TESTING)
 
     add_executable(realmheart_keep_awake_tests tests/KeepAwakeTests.cpp src/core/Command.cpp src/services/KeepAwake.cpp)
     realmheart_register_test(realmheart_keep_awake_tests)
+
+    add_executable(
+        realmheart_session_restore_tests
+        tests/SessionRestoreTests.cpp
+        src/core/Command.cpp
+        src/services/SessionRestore.cpp
+    )
+    target_include_directories(realmheart_session_restore_tests PRIVATE src third_party)
+    target_link_libraries(realmheart_session_restore_tests PRIVATE GTest::gtest GTest::gtest_main)
+    realmheart_register_test(realmheart_session_restore_tests)
 
     add_executable(
         realmheart_launcher_service_command_tests
