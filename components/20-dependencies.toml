@@ -791,8 +791,11 @@ component_id = "wallpaper-engine"
 [capabilities.probe]
 kind = "executable"
 executable = "realmheart"
-version_argv = ["--list-modules"]
-version_prefix = "Realmheart module registry"
+# `--version` is the one flag that prints a version token; `--list-modules`
+# prints the module registry and no version, so it can never establish the
+# canonical version evidence this capability's contract requires.
+version_argv = ["--version"]
+version_prefix = "Realmheart"
 
 [[capabilities]]
 id = "wallpaper.wayland-egl"

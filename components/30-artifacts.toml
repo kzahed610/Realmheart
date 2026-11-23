@@ -340,7 +340,9 @@ check = "version_probe"
 artifact_id = "core.binary"
 cost = "cheap"
 side_effects = "none"
-timeout_ms = 1000
+# The shell binary is large and may be paged in cold; a 1 s deadline on it
+# flakes under load and flips realmheart-core to UNKNOWN for that run.
+timeout_ms = 5000
 contexts = ["doctor_background", "doctor_manual"]
 [health_checks.args]
 version_argv = ["--version"]
@@ -374,7 +376,7 @@ check = "version_probe"
 artifact_id = "core.power-menu-renderer"
 cost = "cheap"
 side_effects = "none"
-timeout_ms = 1000
+timeout_ms = 5000
 contexts = ["doctor_background", "doctor_manual"]
 [health_checks.args]
 version_argv = ["--version"]
@@ -1012,3 +1014,147 @@ cost = "cheap"
 side_effects = "none"
 timeout_ms = 500
 contexts = ["install_verify", "doctor_background", "doctor_manual"]
+
+
+[[health_checks]]
+id = "check.session.hypridle.exists"
+component_id = "session"
+check = "artifact_exists"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+path = "$XDG_CONFIG_HOME/hypr/hypridle.conf"
+
+
+[[health_checks]]
+id = "check.session.hyprlock.exists"
+component_id = "session"
+check = "artifact_exists"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+path = "$XDG_CONFIG_HOME/hypr/hyprlock.conf"
+
+
+[[health_checks]]
+id = "check.hypr.realmheart-execs"
+component_id = "hypr-integration"
+check = "artifact_exists"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+path = "$XDG_CONFIG_HOME/hypr/hyprland/execs.lua"
+
+
+[[health_checks]]
+id = "check.hypr.realmheart-keybinds"
+component_id = "hypr-integration"
+check = "artifact_exists"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+path = "$XDG_CONFIG_HOME/hypr/hyprland/keybinds.lua"
+
+
+[[health_checks]]
+id = "check.hypr.realmheart-env"
+component_id = "hypr-integration"
+check = "artifact_exists"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+path = "$XDG_CONFIG_HOME/hypr/hyprland/env.lua"
+
+
+[[health_checks]]
+id = "check.theming.wallpaper-library.exists"
+component_id = "theming"
+check = "artifact_exists"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+path = "$XDG_STATE_HOME/realmheart/wallpaper/rotation.json"
+
+
+[[health_checks]]
+id = "check.wallpaper-engine.rotation.exists"
+component_id = "wallpaper-engine"
+check = "artifact_exists"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+path = "$XDG_STATE_HOME/realmheart/wallpaper/rotation.json"
+
+
+[[health_checks]]
+id = "check.lens.realmheart-config.exists"
+component_id = "lens"
+check = "artifact_exists"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+path = "$XDG_CONFIG_HOME/realmheart/config.json"
+
+
+[[health_checks]]
+id = "check.screenshot-ocr.realmheart-config.exists"
+component_id = "screenshot-ocr"
+check = "artifact_exists"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+path = "$XDG_CONFIG_HOME/realmheart/config.json"
+
+
+[[health_checks]]
+id = "check.desktop-portal.realmheart-config.exists"
+component_id = "desktop-portal"
+check = "artifact_exists"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+path = "$XDG_CONFIG_HOME/realmheart/config.json"
+
+
+[[health_checks]]
+id = "check.recorder.realmheart-config.exists"
+component_id = "recorder"
+check = "artifact_exists"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+path = "$XDG_CONFIG_HOME/realmheart/config.json"
+
+
+[[health_checks]]
+id = "check.native-tests.doctor.exists"
+component_id = "native-tests"
+check = "artifact_exists"
+cost = "cheap"
+side_effects = "none"
+timeout_ms = 500
+contexts = ["doctor_background", "doctor_manual"]
+[health_checks.args]
+path = "$XDG_CONFIG_HOME/systemd/user/realmheart-doctor-boot.service"

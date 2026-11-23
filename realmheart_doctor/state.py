@@ -212,27 +212,31 @@ def record_diagnosis(
         )
 
     for component in diagnosis.components:
-        if component.status is not ComponentHealth.HEALTHY:
-            continue
-        lkg_path = root / "components" / component.id / "last-healthy.json"
-        lkg_payload, lkg_corrupt = _load_json(lkg_path)
-        if lkg_corrupt:
-            recovered.append(f"components/{component.id}/last-healthy.json")
-            stamp = now.strftime("%Y%m%dT%H%M%S%f")
-            os.replace(lkg_path, root / "corrupt" / f"last-healthy-{component.id}-{stamp}.json")
-        lkg = {
-            "format_version": STATE_FORMAT_VERSION,
-            "component_id": component.id,
-            "captured_at": now.isoformat(),
-            "status": component.status.value,
-            "release_version": diagnosis.release_version,
-            "manifest_digest": diagnosis.manifest_digest,
-            "checks": [item.to_dict() for item in component.checks],
-            "capabilities": [item.to_dict() for item in component.capabilities],
-            "build_fingerprints": [item.to_dict() for item in component.build_fingerprints],
-        }
-        _atomic_write_json(lkg_path, lkg)
-        if resolve_incidents:
+        if component.status is ComponentHealth.HEALTHY:
+            lkg_path = root / "components" / component.id / "last-healthy.json"
+            lkg_payload, lkg_corrupt = _load_json(lkg_path)
+            if lkg_corrupt:
+                recovered.append(f"components/{component.id}/last-healthy.json")
+                stamp = now.strftime("%Y%m%dT%H%M%S%f")
+                os.replace(lkg_path, root / "corrupt" / f"last-healthy-{component.id}-{stamp}.json")
+            lkg = {
+                "format_version": STATE_FORMAT_VERSION,
+                "component_id": component.id,
+                "captured_at": now.isoformat(),
+                "status": component.status.value,
+                "release_version": diagnosis.release_version,
+                "manifest_digest": diagnosis.manifest_digest,
+                "checks": [item.to_dict() for item in component.checks],
+                "capabilities": [item.to_dict() for item in component.capabilities],
+                "build_fingerprints": [item.to_dict() for item in component.build_fingerprints],
+            }
+            _atomic_write_json(lkg_path, lkg)
+        if resolve_incidents and component.status is not ComponentHealth.FAILED:
+            # An incident records an observed failure.  Once that failure is no
+            # longer observed, the incident must close even when the component
+            # lands on UNKNOWN (for example a component with no declared health
+            # checks): otherwise a recovered condition nags forever.  The
+            # component still reads UNKNOWN, so this never claims proven health.
             from .incidents import record_component_recovery, unresolved_incident_ids
 
             open_incidents = unresolved_incident_ids(root, component.id)

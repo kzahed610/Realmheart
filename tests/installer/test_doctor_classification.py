@@ -3,7 +3,7 @@ from dataclasses import replace
 import unittest
 
 from realmheart_doctor.health import HealthCheckResult, HealthStatus
-from realmheart_doctor.classification import classify_failure
+from realmheart_doctor.classification import classify_component, classify_failure
 
 
 class DoctorClassificationTests(unittest.TestCase):
@@ -36,3 +36,71 @@ class DoctorClassificationTests(unittest.TestCase):
                                     HealthStatus.FAIL, "artifact_missing")
         result = classify_failure((missing,), failed_upstream=("realmheart-core",))
         self.assertEqual(result.failure_class, "COMPONENT_ARTIFACT_MISSING")
+
+    def test_unreachable_backend_is_not_reported_as_a_version_mismatch(self):
+        """A backend that is installed but did not answer is an availability
+        failure.  Calling it a version mismatch sends the reader to reinstall or
+        rebuild against a contract that was never violated."""
+        from realmheart_doctor.diagnosis import (
+            CapabilityEvidence, ComponentDiagnosis, ComponentHealth,
+        )
+
+        unreachable = CapabilityEvidence(
+            capability_id="runtime.powerprofilesctl",
+            dependency_id="dep.runtime.powerprofilesctl",
+            state="failed",
+            version=None,
+            detail="powerprofilesctl backend unreachable",
+            requirement="component",
+            blocking_failure=True,
+        )
+        component = ComponentDiagnosis(
+            "hardware-controls", "Hardware Controls", "core",
+            ComponentHealth.FAILED, (), capabilities=(unreachable,),
+        )
+        result = classify_component(component)
+        self.assertEqual(result.failure_class, "DEPENDENCY_UNAVAILABLE")
+        self.assertEqual(result.evidence_ids, ("runtime.powerprofilesctl",))
+
+    def test_failed_capability_with_version_stays_a_version_mismatch(self):
+        from realmheart_doctor.diagnosis import (
+            CapabilityEvidence, ComponentDiagnosis, ComponentHealth,
+        )
+
+        incompatible = CapabilityEvidence(
+            capability_id="runtime.hyprctl",
+            dependency_id="dep.runtime.hyprctl",
+            state="failed",
+            version="0.50.0",
+            detail="hyprctl version violates the canonical compatibility contract",
+            requirement="required",
+            blocking_failure=True,
+        )
+        component = ComponentDiagnosis(
+            "realmheart-core", "Realmheart Core", "core",
+            ComponentHealth.FAILED, (), capabilities=(incompatible,),
+        )
+        result = classify_component(component)
+        self.assertEqual(result.failure_class, "DEPENDENCY_VERSION_MISMATCH")
+        self.assertEqual(result.evidence_ids, ("runtime.hyprctl",))
+
+    def test_blank_version_is_not_version_evidence(self):
+        from realmheart_doctor.diagnosis import (
+            CapabilityEvidence, ComponentDiagnosis, ComponentHealth,
+        )
+
+        blank = CapabilityEvidence(
+            capability_id="runtime.powerprofilesctl",
+            dependency_id="dep.runtime.powerprofilesctl",
+            state="failed",
+            version="   ",
+            detail="powerprofilesctl backend unreachable",
+            requirement="component",
+            blocking_failure=True,
+        )
+        component = ComponentDiagnosis(
+            "hardware-controls", "Hardware Controls", "core",
+            ComponentHealth.FAILED, (), capabilities=(blank,),
+        )
+        self.assertEqual(classify_component(component).failure_class,
+                         "DEPENDENCY_UNAVAILABLE")

@@ -23,6 +23,12 @@ _TEMPLATES = {
         "A required runtime dependency or capability was observed missing. "
         "Check the affected packages before suspecting Realmheart itself."
     ),
+    "DEPENDENCY_UNAVAILABLE": (
+        "A declared backend is installed but did not answer when probed, or its "
+        "version could not be established. This is not a version conflict: the "
+        "dependency is present but not currently reachable. Verify the backing "
+        "service is running, then re-check before changing packages."
+    ),
     "DEPENDENCY_VERSION_MISMATCH": (
         "An observed dependency version violates the declared compatibility "
         "contract. This usually follows a system update; a rebuild can realign "

@@ -26,17 +26,35 @@ _RULES = (
 )
 
 
+def _has_version_evidence(item) -> bool:
+    """Whether a failed capability carries an actual observed version.
+
+    A capability that fails with a concrete version violates the compatibility
+    contract.  A capability that fails without one (a backend that is installed
+    but unreachable, a version probe that could not be queried) is a different
+    condition and must not be reported as a version mismatch.
+    """
+
+    version = getattr(item, "version", None)
+    return isinstance(version, str) and bool(version.strip())
+
+
 def classify_failure(
     checks: tuple[HealthCheckResult, ...],
     *,
     missing_capabilities: tuple[str, ...] = (),
     failed_capabilities: tuple[str, ...] = (),
     failed_upstream: tuple[str, ...] = (),
+    unavailable_capabilities: tuple[str, ...] = (),
 ) -> FailureClassification:
     """Classify one component's observed failures.
 
     Capability and upstream evidence participate only when it was actually
     observed failing; an unobserved condition never becomes a failure class.
+    ``failed_capabilities`` keeps its historical meaning (any failed capability)
+    so callers that only know "something failed" still classify; a version
+    class is chosen only when version evidence or an explicit unavailability
+    split is supplied.
     """
 
     observed = tuple(item for item in checks if item.status is HealthStatus.FAIL)
@@ -49,9 +67,17 @@ def classify_failure(
         return FailureClassification(
             "DEPENDENCY_MISSING", "HIGH", tuple(sorted(missing_capabilities))
         )
-    if failed_capabilities:
+    unavailable = tuple(sorted(set(unavailable_capabilities)))
+    mismatched = tuple(sorted(
+        set(failed_capabilities) - set(unavailable_capabilities)
+    ))
+    if mismatched:
         return FailureClassification(
-            "DEPENDENCY_VERSION_MISMATCH", "MEDIUM", tuple(sorted(failed_capabilities))
+            "DEPENDENCY_VERSION_MISMATCH", "MEDIUM", mismatched
+        )
+    if unavailable:
+        return FailureClassification(
+            "DEPENDENCY_UNAVAILABLE", "MEDIUM", unavailable
         )
     if failed_upstream:
         return FailureClassification(
@@ -74,9 +100,19 @@ def classify_component(component) -> FailureClassification:
         item.capability_id for item in capabilities
         if getattr(item, "blocking_failure", False) and getattr(item, "state", None) == "missing"
     ))
-    failed = tuple(sorted(
-        item.capability_id for item in capabilities
+    failed_items = tuple(
+        item for item in capabilities
         if getattr(item, "blocking_failure", False) and getattr(item, "state", None) == "failed"
+    )
+    # A failed capability only counts as a version mismatch when it actually
+    # produced version evidence.  "Backend unreachable" and "could not query
+    # the version" are availability failures, not contract violations, and
+    # reporting them as mismatches sends the reader after the wrong fix.
+    mismatched = tuple(sorted(
+        item.capability_id for item in failed_items if _has_version_evidence(item)
+    ))
+    unavailable = tuple(sorted(
+        item.capability_id for item in failed_items if not _has_version_evidence(item)
     ))
     upstream: set[str] = set()
     for entry in tuple(getattr(component, "uncertainties", ()) or ()):
@@ -85,6 +121,7 @@ def classify_component(component) -> FailureClassification:
     return classify_failure(
         tuple(getattr(component, "checks", ()) or ()),
         missing_capabilities=missing,
-        failed_capabilities=failed,
+        failed_capabilities=mismatched,
         failed_upstream=tuple(sorted(upstream)),
+        unavailable_capabilities=unavailable,
     )

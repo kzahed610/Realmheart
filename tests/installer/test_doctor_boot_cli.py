@@ -39,15 +39,48 @@ class BootCLITests(unittest.TestCase):
 
         from realmheart_doctor.cli import main
 
+        # Hermetic fixture: boot mode must create an incident for a component
+        # that is genuinely failing.  The previous version relied on the real
+        # manifest against the live machine, so the test silently stopped
+        # exercising this path once the machine became healthy.
         with tempfile.TemporaryDirectory() as temp:
-            with patch.dict(os.environ, {"REALMHEART_DOCTOR_NOTIFY_BACKEND": "none"}), \
-                 contextlib.redirect_stdout(io.StringIO()) as output:
-                code = main(["boot", "--state-dir", temp, "--session-key", "fixture", "--json"])
+            root = Path(temp)
+            manifest = root / "manifest"
+            manifest.mkdir()
+            (manifest / "demo.toml").write_text('''schema_version = 1
+release_version = "0.7.8"
+[[components]]
+id = "demo"
+name = "Demo"
+component_version = "release"
+category = "core"
+stage = "core_shell"
+[[artifacts]]
+id = "demo.marker"
+component_id = "demo"
+path = "$PREFIX/does-not-exist"
+type = "file"
+required = true
+ownership = "release"
+managed = true
+[[health_checks]]
+id = "demo.exists"
+component_id = "demo"
+check = "artifact_exists"
+artifact_id = "demo.marker"
+contexts = ["doctor_background", "doctor_manual"]
+''')
+            with patch.dict(os.environ, {
+                "REALMHEART_DOCTOR_NOTIFY_BACKEND": "none",
+                "PREFIX": str(root / "prefix"),
+            }), contextlib.redirect_stdout(io.StringIO()) as output:
+                code = main(["boot", "--state-dir", temp, "--session-key", "fixture",
+                             "--manifest-dir", str(manifest), "--json"])
             self.assertEqual(code, 0)
             payload = json.loads(output.getvalue())
             self.assertEqual(payload["mode"], "ran")
             self.assertEqual(payload["notifications"], 0)
-            incidents = list((Path(temp) / "incidents").glob("RH-*.json"))
+            incidents = list((root / "incidents").glob("RH-*.json"))
             self.assertTrue(incidents)
             for path in incidents:
                 self.assertNotIn("last_notified_state", json.loads(path.read_text()),

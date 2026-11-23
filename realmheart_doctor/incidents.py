@@ -306,15 +306,27 @@ def record_component_recovery(
     *,
     now: datetime | None = None,
 ) -> IncidentEvent | None:
-    """Resolve open incidents only when current evidence verifies recovery."""
+    """Resolve open incidents once the observed failure is no longer present.
+
+    Recovery is evidence-based, not optimism: an incident closes only when the
+    component's current record is not a failure.  ``healthy`` and ``degraded``
+    prove the failure cleared; ``unknown`` also counts, because an unobserved
+    condition cannot keep an "observed failure" open forever -- a component
+    with no declared health checks would otherwise nag permanently.  Closing the
+    incident never promotes UNKNOWN to healthy; the component keeps its status.
+    """
     if now is None:
         now = datetime.now(timezone.utc)
     root = Path(root)
     current = _read_payload(root / "current.json")
     components = current.get("components") if current else None
     record = components.get(component_id) if isinstance(components, dict) else None
-    if not isinstance(record, dict) or record.get("status") != "healthy":
+    if not isinstance(record, dict):
         return None
+    status = record.get("status")
+    if status == "failed":
+        return None
+    verified_healthy = status == "healthy"
     result = None
     for incident_path in sorted(_incidents_dir(root).glob("RH-*.json")):
         payload = _read_payload(incident_path)
@@ -325,8 +337,10 @@ def record_component_recovery(
         payload["timeline"].append({
             "timestamp": now.isoformat(),
             "event_type": "INCIDENT_RESOLVED",
-            "summary": "component returned to a reliably verified healthy state",
-            "details": {},
+            "summary": ("component returned to a reliably verified healthy state"
+                        if verified_healthy else
+                        "component is no longer observed failing; health is not yet established"),
+            "details": {"status": status},
         })
         payload["updated_at"] = now.isoformat()
         payload["resolution_state"] = _RESOLVED

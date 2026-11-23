@@ -145,7 +145,11 @@ class PostUpdateTests(unittest.TestCase):
         self.assertEqual(outcome.report.affected_components, ("screenshot-ocr",))
         check_ids = executor.execute.call_args.kwargs["check_ids"]
         checked_components = {self.registry.health_checks[item].component_id for item in check_ids}
-        self.assertEqual(checked_components, {"realmheart-core", "screenshot"})
+        # realmheart-core and screenshot are the required upstreams of
+        # screenshot-ocr; its own checks must be re-run too now that it
+        # declares them.
+        self.assertEqual(checked_components,
+                         {"realmheart-core", "screenshot", "screenshot-ocr"})
         self.assertLess(len(check_ids), len(self.registry.health_checks))
 
     def test_irrelevant_update_records_without_re_checking(self) -> None:

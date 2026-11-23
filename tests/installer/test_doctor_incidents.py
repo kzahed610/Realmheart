@@ -114,6 +114,53 @@ class DoctorIncidentTests(unittest.TestCase):
             incident = json.loads((root / "incidents" / f"{event.incident_id}.json").read_text())
             self.assertEqual(incident["resolution_state"], "unresolved")
 
+    def test_incident_resolves_when_component_is_no_longer_failing(self):
+        """A component with no declared health checks lands on UNKNOWN once its
+        capability recovers.  Holding the incident open forever would nag the
+        user about a failure that is no longer observed."""
+        from realmheart_maintenance.forensics import CapabilityObservation
+        from realmheart_doctor.diagnosis import CapabilityEvidence, ComponentDiagnosis, Diagnosis
+
+        failed = ComponentDiagnosis(
+            "demo", "Demo", "core", ComponentHealth.FAILED, (),
+            capabilities=(CapabilityEvidence(
+                capability_id="runtime.one", dependency_id="dep.runtime.one",
+                state="failed", version=None, detail="backend unreachable",
+                requirement="component", blocking_failure=True,
+            ),),
+        )
+        unknown = ComponentDiagnosis("demo", "Demo", "core", ComponentHealth.UNKNOWN, ())
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            record_diagnosis(root, Diagnosis(
+                release_version="0.7.8", manifest_digest="a" * 64,
+                overall=ComponentHealth.FAILED, components=(failed,),
+                budget_exhausted=False,
+            ))
+            event = record_component_failure(root, "demo")
+            assert event is not None
+            record_diagnosis(root, Diagnosis(
+                release_version="0.7.8", manifest_digest="a" * 64,
+                overall=ComponentHealth.UNKNOWN, components=(unknown,),
+                budget_exhausted=False,
+            ))
+            incident = json.loads(
+                (root / "incidents" / f"{event.incident_id}.json").read_text())
+            self.assertEqual(incident["resolution_state"], "resolved")
+            self.assertEqual(incident["timeline"][-1]["event_type"], "INCIDENT_RESOLVED")
+
+    def test_failed_component_keeps_its_incident_open(self):
+        """UNKNOWN must not be reachable as a way to silently drop a real failure."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            record_diagnosis(root, _diagnosis(ComponentHealth.FAILED))
+            event = record_component_failure(root, "demo")
+            assert event is not None
+            record_diagnosis(root, _diagnosis(ComponentHealth.FAILED))
+            incident = json.loads(
+                (root / "incidents" / f"{event.incident_id}.json").read_text())
+            self.assertEqual(incident["resolution_state"], "unresolved")
+
     def test_distinct_failure_condition_creates_distinct_incident(self):
         from dataclasses import replace
         with tempfile.TemporaryDirectory() as temp:

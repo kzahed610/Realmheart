@@ -115,6 +115,10 @@ _PLANNERS = {
         RepairAction("RUN_POST_REPAIR_CHECKS", "SAFE",
                      "re-run the failing checks after any dependency correction"),
     ),
+    "DEPENDENCY_UNAVAILABLE": (
+        RepairAction("RUN_POST_REPAIR_CHECKS", "SAFE",
+                     "re-run the failing checks after the backend is reachable again"),
+    ),
 }
 
 
@@ -234,7 +238,8 @@ def plan_incident_repair(
             and isinstance(item.get("capability_id"), str)
             and item.get("state") in {"missing", "failed"}
         ]
-    if failure_class in {"DEPENDENCY_MISSING", "DEPENDENCY_VERSION_MISMATCH"}:
+    if failure_class in {"DEPENDENCY_MISSING", "DEPENDENCY_VERSION_MISMATCH",
+                         "DEPENDENCY_UNAVAILABLE"}:
         evidence_ids = capability_ids
     if not evidence_ids:
         return None

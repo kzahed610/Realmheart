@@ -206,6 +206,20 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
             continue
         observations[capability.id] = capability_prober(capability, registry=registry)
     fingerprints_by_component = _build_fingerprint_evidence(registry, selected, observations, capability_prober)
+    # Components whose runtime capability contract was fully observed as
+    # satisfying.  Such a component has real positive evidence even when it
+    # declares no artifact health checks, so "no declared checks" must not
+    # by itself force UNKNOWN and hide that verification.
+    covered_capability_components: set[str] = set()
+    for capability in registry.capabilities.values():
+        if "runtime" not in capability.lifecycle:
+            continue
+        component_id = capability.component_id
+        if component_id is None or component_id not in selected:
+            continue
+        observation = observations.get(capability.id)
+        if observation is not None and capability_state_satisfied(registry, capability, observation.state):
+            covered_capability_components.add(component_id)
     for key in registry.component_order:
         if key not in selected:
             continue
@@ -224,7 +238,11 @@ def diagnose(registry: ManifestRegistry, component: str | None = None, *,
         if any(artifact.required and artifact.component_id == key and artifact.id not in covered_artifacts
                for artifact in registry.artifacts.values()):
             uncertainties.append("required_artifact_coverage_missing")
-        if not checks:
+        if not checks and key not in covered_capability_components:
+            # A component with no declared checks is only UNKNOWN when nothing
+            # else observed it.  Passing runtime capabilities are real evidence:
+            # reporting UNKNOWN forever hides the fact that the capability
+            # contract was verified.
             uncertainties.append("no_declared_health_checks")
         for capability in registry.capabilities.values():
             if capability.component_id not in (None, key) or "runtime" not in capability.lifecycle:
