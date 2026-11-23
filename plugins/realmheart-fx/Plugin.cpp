@@ -1239,11 +1239,16 @@ bool captureTiledReflowHold(
         SRetainedCloseFrame frame;
         std::string captureReason;
         if (!copySurfaceTexture(surfaceTexture(candidate), frame, captureReason)) {
-            reason = "failed to freeze surviving window " +
-                std::string(effectiveWindowClass(candidate)) + ": " +
-                captureReason;
-            destination.clear();
-            return false;
+            // Skip this one survivor rather than dropping the whole scene.  A
+            // window whose surface cannot be frozen (an unusual buffer format,
+            // a hardware overlay, a driver quirk) simply reflows live; every
+            // other survivor still gets the frozen-pixels hold.
+            appendDiagnostic(
+                "survivor hold: skipping " +
+                std::string(effectiveWindowClass(candidate)) +
+                " (" + captureReason + ")"
+            );
+            continue;
         }
 
         destination.push_back({
@@ -1404,8 +1409,16 @@ WindowEffectCapabilityMask requiredCapabilitiesForTarget(
 }
 
 bool windowIsFullscreen(const PHLWINDOW& window) {
+    // Only a true fullscreen window must be skipped.  Hyprland's mode enum also
+    // contains FSMODE_MAXIMIZED, and `isFullscreen` with a nullopt mode matches
+    // every mode -- so a merely maximized window (for example a terminal that
+    // restores its saved "maximized" state) was reported as fullscreen and had
+    // its open animation cancelled.  Ask for FSMODE_FULLSCREEN explicitly and
+    // set covering=false so a window covered by an unrelated fullscreen window
+    // is not treated as fullscreen either.
     return window && Fullscreen::controller() &&
-        Fullscreen::controller()->isFullscreen(window);
+        Fullscreen::controller()->isFullscreen(
+            window, Fullscreen::FSMODE_FULLSCREEN, false);
 }
 
 bool windowPinned(const PHLWINDOW& window) {
@@ -2422,10 +2435,16 @@ void onWindowClose(PHLWINDOW window) {
             heldReflowWindows,
             reason
         )) {
+        // A single survivor whose surface texture cannot be frozen must not
+        // cancel the close animation.  The reflow hold is a visual nicety: it
+        // keeps the surviving windows from visibly snapping to their new tiled
+        // positions until the close finishes.  The close itself is the feature.
+        // Degrade to an empty hold (applyTiledReflowHold already no-ops on an
+        // empty set) and say why the survivor scene was dropped.
         appendDiagnostic(
-            "automatic close skipped: reason=survivor scene capture failed: " + reason
+            "automatic close: survivor scene hold skipped (close continues): " + reason
         );
-        return;
+        heldReflowWindows.clear();
     }
 
     const auto now = std::chrono::steady_clock::now();
