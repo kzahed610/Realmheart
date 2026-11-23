@@ -807,6 +807,39 @@ void SidebarFrame::set_layout(SidebarFrameLayout layout) {
     gtk_widget_queue_draw(root_);
 }
 
+void SidebarFrame::set_input_region_enabled(bool enabled) {
+    auto* state = static_cast<FrameState*>(g_object_get_data(
+        G_OBJECT(root_),
+        "realmheart-sidebar-frame-state"
+    ));
+    if (state == nullptr) return;
+
+    GObject* object = static_cast<GObject*>(g_weak_ref_get(&state->window_ref));
+    if (object == nullptr) return;
+
+    GdkSurface* surface = gtk_native_get_surface(GTK_NATIVE(object));
+    if (surface == nullptr) {
+        g_object_unref(object);
+        return;
+    }
+
+    if (enabled) {
+        // Restore the real silhouette so the sidebar becomes interactive again.
+        const int width = gtk_widget_get_width(root_);
+        const int height = gtk_widget_get_height(root_);
+        if (width > 0 && height > 0) {
+            update_input_region(*state, width, height);
+        }
+    } else {
+        // Fully click-through: an empty input region lets pointer events fall
+        // through to whatever is beneath the invisible-but-mapped surface.
+        cairo_region_t* empty = cairo_region_create();
+        gdk_surface_set_input_region(surface, empty);
+        cairo_region_destroy(empty);
+    }
+    g_object_unref(object);
+}
+
 void SidebarFrame::set_child(GtkWidget* child) {
     if (child == nullptr || content_ != nullptr) return;
 

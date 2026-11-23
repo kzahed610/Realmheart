@@ -87,6 +87,14 @@ public:
     void animate_character_in();
     void set_surface_effect(effects::EffectId effect, double progress);
     [[nodiscard]] bool animate_character_out(std::function<void()> completion);
+
+    // Keeps the layer surface mapped between opens instead of unmapping it.
+    // When `mapped` is true the window is shown (opacity 1, interactive). When
+    // false the window stays mapped but at opacity 0 with an empty input region
+    // (fully click-through), so the next open skips the expensive layer-surface
+    // map round-trip (surface commit -> configure -> ack -> first frame) that
+    // otherwise cost ~100ms of dead time before the slide animation begins.
+    void set_surface_mapped(bool mapped);
     [[nodiscard]] bool character_enabled() const noexcept { return character_enabled_; }
     GtkWidget* get_window() const { return window_; }
     // One-time boot warmup: maps the panel once at opacity 0 for a single

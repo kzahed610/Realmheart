@@ -710,17 +710,40 @@ gboolean RightSidebar::finish_character_hide(gpointer raw) {
     return G_SOURCE_REMOVE;
 }
 
+void RightSidebar::set_surface_mapped(bool mapped) {
+    if (window_ == nullptr) return;
+
+    if (mapped) {
+        // Active: interactive silhouette, fully opaque. Mark presented so a
+        // concurrent prewarm tick (which settles the surface back to idle)
+        // can never hide a surface that is in the middle of being shown.
+        sidebar_presented_ = true;
+        if (frame_ != nullptr) frame_->set_input_region_enabled(true);
+        gtk_widget_set_opacity(window_, 1.0);
+        gtk_widget_set_visible(window_, TRUE);
+        return;
+    }
+
+    // Idle-but-mapped: keep the surface mapped so the next open skips the
+    // ~100ms layer-surface map round-trip, but make it invisible and fully
+    // click-through so it never intercepts input while closed.
+    if (frame_ != nullptr) frame_->set_input_region_enabled(false);
+    gtk_widget_set_opacity(window_, 0.0);
+    gtk_widget_set_visible(window_, TRUE);
+}
+
 void RightSidebar::prewarm() {
     if (prewarmed_) return;
     if (window_ == nullptr) return;
     prewarmed_ = true;
 
-    // First-map pipeline warmup: realize geometry, then map once at opacity
-    // 0 and let exactly one frame clock tick render through GSK/EGL before
-    // unmapping. The panel is invisible throughout; OnDemand keyboard mode
-    // means the map never grabs input.
+    // First-map pipeline warmup: realize geometry, then map once and let
+    // exactly one frame clock tick render through GSK/EGL. Rather than
+    // unmapping afterward (which forces a full map round-trip on every open),
+    // drop to the invisible-but-mapped idle state so the surface stays warm.
+    // OnDemand keyboard mode means the map never grabs input, and the empty
+    // input region set by set_surface_mapped(false) keeps it click-through.
     apply_geometry();
-    gtk_widget_set_opacity(window_, 0.0);
     gtk_widget_set_visible(window_, TRUE);
 
     prewarm_frame_active_ = true;
@@ -730,10 +753,11 @@ void RightSidebar::prewarm() {
             auto* self = static_cast<RightSidebar*>(data);
             self->prewarm_tick_id_ = 0;
             self->prewarm_frame_active_ = false;
+            // Settle into the invisible-but-mapped idle state instead of
+            // unmapping, so the first real open is instant.
             if (!self->sidebar_presented_) {
-                gtk_widget_set_visible(self->window_, FALSE);
+                self->set_surface_mapped(false);
             }
-            gtk_widget_set_opacity(self->window_, 1.0);
             return G_SOURCE_REMOVE;
         },
         this,

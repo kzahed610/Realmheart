@@ -26,6 +26,13 @@ public:
     void set_child(GtkWidget* child);
     void set_layout(SidebarFrameLayout layout);
 
+    // Toggles the window's input region between the real sidebar silhouette
+    // (interactive) and an empty region (fully click-through). Used by the
+    // keep-mapped-when-idle optimization: the surface stays mapped at opacity
+    // 0 between opens so the next open skips the map round-trip, but while
+    // idle it must not intercept pointer input.
+    void set_input_region_enabled(bool enabled);
+
     // These full-surface GtkFixed layers are intentionally empty today. Future
     // character renderers may place one or several animated widgets in them.
     GtkWidget* back_art_layer() const { return back_art_layer_; }

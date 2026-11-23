@@ -1232,10 +1232,16 @@ void CharacterCompositor::queue_hair_draw(bool force) {
 }
 
 void CharacterCompositor::queue_lifecycle_draw(gint64 frame_time_us) {
+    // During lifecycle motion the hair pose genuinely changes every frame, but
+    // re-rasterizing it on every tick blows the 16.7ms frame budget and starves
+    // the compositor transition. The pose-signature dedupe in queue_hair_draw()
+    // already suppresses redundant invalidations, so a hard rate floor here is
+    // safe: it caps hair deformation work at kLifecycleHairFrameIntervalUs
+    // without ever skipping a distinct pose. Previously this function also
+    // forced an invalidate whenever the animator was active, defeating that
+    // floor and invalidating the oversized hair widgets every single frame.
     const bool hair_due = last_hair_draw_time_us_ == 0 ||
-        frame_time_us - last_hair_draw_time_us_ >=
-            kLifecycleHairFrameIntervalUs ||
-        !animator_.active();
+        frame_time_us - last_hair_draw_time_us_ >= kLifecycleHairFrameIntervalUs;
     if (!hair_due) return;
 
     // Static body, expression and hand groups retain their existing render

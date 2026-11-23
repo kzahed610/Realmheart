@@ -337,12 +337,19 @@ gboolean enforce_sidebar_backdrop_input_region_on_tick(
     auto* setup = static_cast<BackdropInputSetup*>(data);
 
     if (!apply_sidebar_backdrop_input_region(widget, *setup)) {
+        // Surface not mapped yet; keep waiting for it to appear.
         return G_SOURCE_CONTINUE;
     }
 
-    gtk_widget_queue_draw(widget);
-    --setup->frames_remaining;
-    return setup->frames_remaining > 0 ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
+    // The input region is a pure function of the surface size and the fixed
+    // placement inputs. Once it has been applied successfully the region is
+    // correct until the geometry changes, and the geometry-change path invokes
+    // enforce_sidebar_backdrop_input_region() again to rebuild it. Rebuilding
+    // an identical fullscreen cairo region and calling gdk_surface_queue_render
+    // on every one of the 30 warmup frames was pure waste: it forced a
+    // fullscreen backdrop redraw per frame during the sidebar transition, which
+    // is exactly when the frame budget is tightest.
+    return G_SOURCE_REMOVE;
 }
 
 void destroy_backdrop_input_setup(gpointer data) {
@@ -3968,6 +3975,23 @@ private:
             return;
         }
 
+        // Seed the frame clock with the current frame time instead of leaving
+        // it at 0. Previously the first tick fell back to a hardcoded 1/60 s
+        // delta because sidebar_last_frame_time_ started at 0, so any time the
+        // window took to actually map (cold open, slow frame) was silently
+        // dropped from the animation and the slide finished late relative to
+        // the wall clock. Seeding here means the first tick measures the real
+        // elapsed time from this arming point.
+        gint64 now_us = 0;
+        if (GtkWidget* window = sidebar_->get_window(); window != nullptr) {
+            if (GdkFrameClock* clock = gtk_widget_get_frame_clock(window);
+                clock != nullptr) {
+                now_us = gdk_frame_clock_get_frame_time(clock);
+            }
+        }
+        if (now_us == 0) now_us = g_get_monotonic_time();
+        sidebar_last_frame_time_ = now_us;
+
         auto* tick = new SidebarFrameTick{
             .runtime = this,
             .generation = sidebar_frame_generation_,
@@ -4001,7 +4025,10 @@ private:
             return;
         }
 
-        gtk_widget_set_visible(sidebar_->get_window(), FALSE);
+        // Keep the layer surface mapped but invisible + click-through instead
+        // of unmapping it. Unmapping forced every subsequent open to pay a
+        // full map round-trip (~100ms of dead time before the slide starts).
+        sidebar_->set_surface_mapped(false);
     }
 
     void apply_right_sidebar_visibility() {
@@ -4027,9 +4054,27 @@ private:
             sidebar_->refresh();
             sidebar_->apply_geometry();
             apply_right_sidebar_surface_effect();
+
+            // Make the (already-mapped) surface visible, interactive, and
+            // opaque before the first animation frame. When the surface was
+            // kept mapped-but-idle on close this is just an opacity/input
+            // swap with no map round-trip, so the slide starts immediately.
+            sidebar_->set_surface_mapped(true);
+
+            // Arm the animation tick *before* presenting the window. The tick
+            // is gated on sidebar_transition_.active(), which is already true
+            // after .open(), so this is safe to do first. Previously the order
+            // was: present(window) -> animate_character_in() -> schedule tick.
+            // That left the window mapped and painted at translate_x = full
+            // extent for the one frame between present and the first tick,
+            // which is the visible "dead beat" before the slide starts: the
+            // panel sits off its own right edge, then pops into an already-
+            // advanced ease. Registering the tick first means the very first
+            // frame the window is composited already carries a non-zero
+            // progress, so the slide is moving the instant it is visible.
+            schedule_right_sidebar_frame();
             gtk_window_present(GTK_WINDOW(window));
             sidebar_->animate_character_in();
-            schedule_right_sidebar_frame();
             return;
         }
 
