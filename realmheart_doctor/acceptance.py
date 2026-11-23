@@ -6,6 +6,7 @@ input data, never executable Doctor behavior.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import stat
@@ -46,6 +47,7 @@ from realmheart_maintenance.manifest import (
     ParsedVersion,
     VersionCompatibility,
     canonical_artifact_path_matches,
+    resolve_canonical_artifact_path,
 )
 
 from .models import AcceptanceAssessment, AcceptanceFinding, AcceptanceRecommendation
@@ -380,13 +382,36 @@ class _ProbeFailure:
     detail: str
 
 
-def _run(argv: tuple[str, ...], *, timeout: float = 4.0) -> subprocess.CompletedProcess[str] | _ProbeFailure:
+def _run(argv: tuple[str, ...], *, timeout: float = 4.0,
+         env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str] | _ProbeFailure:
     try:
-        return subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
+        return subprocess.run(argv, text=True, capture_output=True, timeout=timeout,
+                              check=False, env=env)
     except subprocess.TimeoutExpired:
         return _ProbeFailure("timeout", f"command exceeded the {timeout:g}s observation deadline")
     except (OSError, UnicodeError) as exc:
         return _ProbeFailure("io_error", f"{type(exc).__name__}: {exc}")
+
+
+# System backends are resolved with the caller's PATH but must then execute in a
+# deterministic environment.  A host tool such as powerprofilesctl is a script
+# whose `#!/usr/bin/env python3` shebang would otherwise resolve to whatever
+# virtualenv the caller has activated, so a perfectly healthy system backend
+# reports "unreachable" merely because the Doctor was run from a project shell.
+SYSTEM_PROBE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _system_probe_env() -> dict[str, str]:
+    """Environment for probing host backends, independent of the caller's venv."""
+
+    env = dict(os.environ)
+    env["PATH"] = SYSTEM_PROBE_PATH
+    # A virtualenv's bin directory must not leak back in through these either.
+    for name in ("VIRTUAL_ENV", "CONDA_PREFIX"):
+        env.pop(name, None)
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    return env
 
 
 def _which(executable: str) -> str | None | _ProbeFailure:
@@ -452,7 +477,22 @@ def _probe_capability(
         if isinstance(path, _ProbeFailure):
             return _unknown_probe(spec, path)
         if not path:
-            return CapabilityObservation(spec.id, "missing", detail=f"{executable} not found")
+            # A declared artifact is authoritative for the executable's
+            # location.  PATH lookup alone reports "missing" for a perfectly
+            # good build that simply is not installed system-wide (a
+            # development tree, for example), which is a false failure.
+            declared = None
+            if registry is not None:
+                for artifact in registry.artifacts.values():
+                    if artifact.id == "core.binary":
+                        declared = artifact
+                        break
+            if declared is not None:
+                candidate = resolve_canonical_artifact_path(declared.path)
+                if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    path = candidate
+            if not path:
+                return CapabilityObservation(spec.id, "missing", detail=f"{executable} not found")
         version = None
         version_argv = tuple(str(x) for x in args.get("version_argv", ()))
         version_required = _version_required(spec, registry)
@@ -463,7 +503,7 @@ def _probe_capability(
                 detail=f"cannot establish {executable} version: no version probe is declared",
             )
         if version_argv:
-            result = _run((path, *version_argv))
+            result = _run((path, *version_argv), env=_system_probe_env())
             if isinstance(result, _ProbeFailure) or result is None:
                 return _unknown_probe(spec, result if isinstance(result, _ProbeFailure) else None)
             if result.returncode != 0:
@@ -494,12 +534,12 @@ def _probe_capability(
         module = str(args["module"])
         minimum = args.get("minimum_version")
         check_argv = (pc, f"--atleast-version={minimum}", module) if minimum else (pc, "--exists", module)
-        check = _run(check_argv)
+        check = _run(check_argv, env=_system_probe_env())
         if isinstance(check, _ProbeFailure) or check is None:
             return _unknown_probe(spec, check if isinstance(check, _ProbeFailure) else None)
         if check.returncode != 0:
             return CapabilityObservation(spec.id, "missing", detail=f"pkg-config module {module} unavailable")
-        version_result = _run((pc, "--modversion", module))
+        version_result = _run((pc, "--modversion", module), env=_system_probe_env())
         if isinstance(version_result, _ProbeFailure) or version_result is None:
             return _unknown_probe(spec, version_result if isinstance(version_result, _ProbeFailure) else None)
         if version_result.returncode != 0:
@@ -541,7 +581,7 @@ def _probe_capability(
             return _unknown_probe(spec, systemctl)
         if not systemctl:
             return CapabilityObservation(spec.id, "missing", detail="systemctl unavailable")
-        result = _run((systemctl, "--user", "show-environment"))
+        result = _run((systemctl, "--user", "show-environment"), env=_system_probe_env())
         if isinstance(result, _ProbeFailure) or result is None:
             return _unknown_probe(spec, result if isinstance(result, _ProbeFailure) else None)
         return CapabilityObservation(spec.id, "pass" if result.returncode == 0 else "failed", detail="systemd user manager probe")
@@ -553,7 +593,8 @@ def _probe_capability(
         if not systemctl:
             return CapabilityObservation(spec.id, "missing", detail="systemctl unavailable")
         unit = str(args.get("unit", "xdg-desktop-portal-hyprland.service"))
-        result = _run((systemctl, "--user", "list-unit-files", unit, "--no-legend", "--no-pager"))
+        result = _run((systemctl, "--user", "list-unit-files", unit, "--no-legend", "--no-pager"),
+                      env=_system_probe_env())
         if isinstance(result, _ProbeFailure) or result is None:
             return _unknown_probe(spec, result if isinstance(result, _ProbeFailure) else None)
         ok = result.returncode == 0 and unit in (result.stdout or "")
@@ -565,7 +606,7 @@ def _probe_capability(
             return _unknown_probe(spec, exe)
         if not exe:
             return CapabilityObservation(spec.id, "missing", detail="tesseract unavailable")
-        result = _run((exe, "--list-langs"), timeout=6.0)
+        result = _run((exe, "--list-langs"), timeout=6.0, env=_system_probe_env())
         if isinstance(result, _ProbeFailure) or result is None:
             return _unknown_probe(spec, result if isinstance(result, _ProbeFailure) else None)
         if result.returncode != 0:
@@ -590,7 +631,7 @@ def _probe_capability(
             "bluetooth_backend": (exe, "list"),
             "power_profiles_backend": (exe, "list"),
         }[kind]
-        result = _run(argv, timeout=5.0)
+        result = _run(argv, timeout=5.0, env=_system_probe_env())
         if isinstance(result, _ProbeFailure) or result is None:
             return _unknown_probe(spec, result if isinstance(result, _ProbeFailure) else None)
         if result.returncode != 0:

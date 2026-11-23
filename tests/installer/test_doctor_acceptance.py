@@ -979,6 +979,34 @@ class DoctorAcceptanceTests(unittest.TestCase):
             payload=build_installed_state_receipt(plan,report,doctor_assessment=assessment)
             self.assertEqual(payload["doctor_acceptance"]["recommendation"],"keep")
 
+    def test_system_probe_env_ignores_caller_virtualenv(self):
+        """Host backends must be probed with a system PATH.
+
+        A tool such as powerprofilesctl is a `#!/usr/bin/env python3` script;
+        inheriting an activated virtualenv makes a healthy backend look
+        unreachable and produces a false dependency incident.
+        """
+        from realmheart_doctor.acceptance import SYSTEM_PROBE_PATH, _system_probe_env
+
+        with patch.dict(os.environ, {
+            "PATH": "/home/zahed/.venv/bin:/usr/bin:/bin",
+            "VIRTUAL_ENV": "/home/zahed/.venv",
+            "PYTHONPATH": "/home/zahed/.venv/lib/python3/site-packages",
+            "PYTHONHOME": "/home/zahed/.venv",
+        }, clear=False):
+            env = _system_probe_env()
+
+        self.assertEqual(env["PATH"], SYSTEM_PROBE_PATH)
+        self.assertNotIn("VIRTUAL_ENV", env)
+        self.assertNotIn("PYTHONPATH", env)
+        self.assertNotIn("PYTHONHOME", env)
+        self.assertNotIn(".venv", env["PATH"])
+
+    def test_system_probe_path_contains_system_python_directory(self):
+        from realmheart_doctor.acceptance import SYSTEM_PROBE_PATH
+
+        self.assertIn("/usr/bin", SYSTEM_PROBE_PATH.split(":"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,18 @@ if python_root.is_dir():
     sys.path.insert(0, str(python_root))
     os.environ.setdefault("REALMHEART_DOCTOR_MANIFEST_DIR", str(manifest_root))
 else:
-    # Repository development invocation.
+    # Repository development invocation.  The repo layout (binaries in
+    # build-<name>/, assets at the repo root) does not match the manifest's
+    # installed layout, so the Doctor cannot resolve $PREFIX/$LIBEXEC/$SYSCONF
+    # on its own.  Prefer a generated dev prefix tree (.devprefix/) that mirrors
+    # the manifest layout; build it with tools/build-dev-prefix.py if absent.
+    # Explicit caller overrides (env or --prefix/--libexec/--sysconf) stay
+    # authoritative.
+    dev_prefix = prefix / ".devprefix"
+    if not os.environ.get("PREFIX") and (dev_prefix / "bin").is_dir():
+        os.environ.setdefault("PREFIX", str(dev_prefix))
+        os.environ.setdefault("LIBEXEC", str(dev_prefix / "libexec"))
+        os.environ.setdefault("SYSCONF", "/etc")
     sys.path.insert(0, str(prefix))
     os.environ.setdefault("REALMHEART_DOCTOR_MANIFEST_DIR", str(prefix / "components"))
 
