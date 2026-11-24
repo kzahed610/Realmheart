@@ -1752,6 +1752,188 @@ void draw_ocr_reveal_scan(
     cairo_restore(cr);
 }
 
+// Renders the recognized OCR text as a clean, fixed-size reading panel placed
+// beside the selection (never on top of the source pixels). Words the user has
+// selected are highlighted in gold, so the panel doubles as a live preview of
+// exactly what Ctrl+C / Enter will copy.
+void draw_ocr_text_panel(
+    cairo_t* cr,
+    OverlayContext& context,
+    const SelectionRect& region,
+    int width,
+    int height
+) {
+    if (context.ocr_words.empty()) return;
+
+    const auto& words = context.ocr_words;
+    const double kPad = 14.0;
+    const double kLineFactor = 1.42;
+    const double kParaFactor = 0.6;
+
+    struct RowWord {
+        std::size_t index;
+        double x_offset;
+        double width;
+    };
+    struct Row {
+        std::vector<RowWord> words;
+        double width = 0.0;
+        bool para_before = false;
+    };
+
+    auto measure = [&](const std::string& text) {
+        cairo_text_extents_t extents{};
+        cairo_text_extents(cr, text.c_str(), &extents);
+        return extents.x_advance;
+    };
+
+    // Pick the largest font size that keeps the panel inside the viewport.
+    const std::array<double, 6> candidates{15.0, 14.0, 13.0, 12.0, 11.0, 10.0};
+    std::vector<Row> rows;
+    double font_size = candidates.front();
+    double space_width = 0.0;
+    double line_height = 0.0;
+    double para_gap = 0.0;
+    double text_max_width = 0.0;
+    double panel_width = 0.0;
+    double panel_height = 0.0;
+
+    for (const double candidate : candidates) {
+        font_size = candidate;
+        cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+        cairo_set_font_size(cr, font_size);
+        space_width = measure(" ");
+        line_height = font_size * kLineFactor;
+        para_gap = line_height * kParaFactor;
+
+        const double max_panel_width = std::clamp(width * 0.42, 260.0, 540.0);
+        text_max_width = std::max(60.0, max_panel_width - kPad * 2.0);
+
+        rows.clear();
+        Row current;
+        const OcrWord* previous = nullptr;
+        for (std::size_t index = 0; index < words.size(); ++index) {
+            const OcrWord& word = words[index];
+            const bool line_break = previous != nullptr && (
+                word.block != previous->block ||
+                word.paragraph != previous->paragraph ||
+                word.line != previous->line
+            );
+            const bool para_break = previous != nullptr && (
+                word.block != previous->block ||
+                word.paragraph != previous->paragraph
+            );
+
+            if (line_break && !current.words.empty()) {
+                rows.push_back(std::move(current));
+                current = Row{};
+            }
+
+            const double word_width = measure(word.text);
+            if (!current.words.empty() &&
+                current.width + space_width + word_width > text_max_width) {
+                rows.push_back(std::move(current));
+                current = Row{};
+            }
+
+            const double x_offset =
+                current.words.empty() ? 0.0 : current.width + space_width;
+            current.words.push_back(RowWord{index, x_offset, word_width});
+            current.width = x_offset + word_width;
+            if (para_break) current.para_before = true;
+            previous = &word;
+        }
+        if (!current.words.empty() || rows.empty()) rows.push_back(std::move(current));
+
+        double max_row_width = 0.0;
+        for (const Row& row : rows) max_row_width = std::max(max_row_width, row.width);
+        panel_width = std::clamp(max_row_width + kPad * 2.0, 200.0, max_panel_width);
+
+        double content_height = 0.0;
+        for (const Row& row : rows) {
+            if (row.para_before) content_height += para_gap;
+            content_height += line_height;
+        }
+        panel_height = content_height + kPad * 2.0;
+
+        if (panel_height <= height - 16.0 || candidate == candidates.back()) break;
+    }
+
+    // Keep the panel clear of the OCR region and biased upward. Prefer above
+    // the selection, then below, then a side, and only overlap as a last resort.
+    constexpr double gap = 18.0;
+    const double max_x = std::max(8.0, width - panel_width - 8.0);
+    const double max_y = std::max(8.0, height - panel_height - 8.0);
+
+    double panel_x = std::clamp(region.x, 8.0, max_x);
+    double panel_y = 0.0;
+    if (region.y - gap - panel_height >= 8.0) {
+        panel_y = region.y - gap - panel_height;              // above
+    } else if (region.y + region.height + gap + panel_height <= height - 8.0) {
+        panel_y = region.y + region.height + gap;             // below
+    } else if (region.x + region.width + gap + panel_width <= width - 8.0) {
+        panel_x = region.x + region.width + gap;              // right
+        panel_y = std::clamp(region.y, 8.0, max_y);
+    } else if (region.x - gap - panel_width >= 8.0) {
+        panel_x = region.x - gap - panel_width;               // left
+        panel_y = std::clamp(region.y, 8.0, max_y);
+    } else {
+        panel_y = 8.0;                                        // top, last resort
+    }
+
+    cairo_save(cr);
+
+    // Panel body.
+    rounded_rectangle(cr, panel_x, panel_y, panel_width, panel_height, 12.0);
+    set_source_rgba(cr, Rgba{0.045, 0.045, 0.062, 0.94});
+    cairo_fill_preserve(cr);
+    cairo_set_line_width(cr, 1.0);
+    set_source_rgba(cr, kBackdropBorder, 1.0);
+    cairo_stroke(cr);
+
+    // Violet accent bar down the left edge.
+    rounded_rectangle(cr, panel_x + 3.0, panel_y + 8.0, 3.5, panel_height - 16.0, 2.0);
+    set_source_rgba(cr, kArcaneViolet, 0.95);
+    cairo_fill(cr);
+
+    // Render rows.
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, font_size);
+    cairo_font_extents_t font{};
+    cairo_font_extents(cr, &font);
+
+    double cursor_y = panel_y + kPad;
+    for (const Row& row : rows) {
+        if (row.para_before) cursor_y += para_gap;
+        const double baseline = cursor_y + font.ascent;
+
+        for (const RowWord& row_word : row.words) {
+            const bool selected = ocr_word_selected(context, row_word.index);
+            const double word_x = panel_x + kPad + row_word.x_offset;
+
+            if (selected) {
+                rounded_rectangle(
+                    cr,
+                    word_x - 2.0,
+                    cursor_y - 1.0,
+                    row_word.width + 4.0,
+                    line_height - 2.0,
+                    3.0
+                );
+                set_source_rgba(cr, kAetherGold, 0.22);
+                cairo_fill(cr);
+            }
+
+            cairo_move_to(cr, word_x, baseline);
+            set_source_rgba(cr, selected ? kAetherGold : kTextWhite, 1.0);
+            cairo_show_text(cr, words[row_word.index].text.c_str());
+        }
+        cursor_y += line_height;
+    }
+
+    cairo_restore(cr);
+}
+
 void draw_ocr_region_state(
     cairo_t* cr,
     OverlayContext& context,
@@ -1835,6 +2017,10 @@ void draw_ocr_region_state(
         }
         cairo_stroke(cr);
         cairo_restore(cr);
+    }
+
+    if (!context.ocr_text_selecting) {
+        draw_ocr_text_panel(cr, context, region, width, height);
     }
 
     std::string badge = "OCR · " + std::to_string(context.ocr_words.size()) + " words";
@@ -2407,7 +2593,17 @@ void on_motion(
         if (const auto word = ocr_word_at(*context, context->pointer_x, context->pointer_y, true)) {
             context->ocr_focus_word = *word;
         }
+        queue_canvas(context);
+        return;
     }
+
+    // In OCR-ready idle state the pointer does not affect anything on screen
+    // (no crosshair, and the text panel is pointer-independent), so avoid
+    // redrawing the whole panel on every mouse pixel.
+    if (context->ocr_ready) {
+        return;
+    }
+
     queue_canvas(context);
 }
 
