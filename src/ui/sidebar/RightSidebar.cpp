@@ -743,7 +743,12 @@ void RightSidebar::prewarm() {
     // drop to the invisible-but-mapped idle state so the surface stays warm.
     // OnDemand keyboard mode means the map never grabs input, and the empty
     // input region set by set_surface_mapped(false) keeps it click-through.
+    //
+    // Set opacity 0 + non-interactive BEFORE mapping so the very first mapped
+    // frame is already invisible and click-through — no boot flash.
     apply_geometry();
+    if (frame_ != nullptr) frame_->set_input_region_enabled(false);
+    gtk_widget_set_opacity(window_, 0.0);
     gtk_widget_set_visible(window_, TRUE);
 
     prewarm_frame_active_ = true;
@@ -753,11 +758,8 @@ void RightSidebar::prewarm() {
             auto* self = static_cast<RightSidebar*>(data);
             self->prewarm_tick_id_ = 0;
             self->prewarm_frame_active_ = false;
-            // Settle into the invisible-but-mapped idle state instead of
-            // unmapping, so the first real open is instant.
-            if (!self->sidebar_presented_) {
-                self->set_surface_mapped(false);
-            }
+            // The surface is already invisible + click-through from above;
+            // this tick just marks the warmup complete.
             return G_SOURCE_REMOVE;
         },
         this,

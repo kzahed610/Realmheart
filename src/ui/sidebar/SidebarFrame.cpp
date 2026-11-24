@@ -52,6 +52,11 @@ struct FrameGeometry {
 struct FrameState {
     GWeakRef window_ref{};
     SidebarFrameLayout layout{};
+    // Whether the surface should accept pointer input. When false (the
+    // invisible-but-mapped idle state used to avoid a per-open map round-trip),
+    // update_input_region() keeps an empty region so the mapped surface stays
+    // fully click-through even across geometry reallocations.
+    bool interactive = true;
 };
 
 void destroy_state(gpointer raw) {
@@ -594,6 +599,19 @@ void update_input_region(FrameState& state, int width, int height) {
         return;
     }
 
+    // Respect the interactive flag. When the sidebar is idle-but-mapped
+    // (invisible, kept mapped to avoid a per-open map round-trip) the region
+    // must stay empty so the surface never eats pointer input. This also runs
+    // from the shadow's resize handler, so geometry reallocations while idle
+    // can no longer silently restore the clickable silhouette.
+    if (!state.interactive) {
+        cairo_region_t* empty = cairo_region_create();
+        gdk_surface_set_input_region(surface, empty);
+        cairo_region_destroy(empty);
+        g_object_unref(object);
+        return;
+    }
+
     const auto points = silhouette_points(
         width,
         height,
@@ -814,30 +832,13 @@ void SidebarFrame::set_input_region_enabled(bool enabled) {
     ));
     if (state == nullptr) return;
 
-    GObject* object = static_cast<GObject*>(g_weak_ref_get(&state->window_ref));
-    if (object == nullptr) return;
+    state->interactive = enabled;
 
-    GdkSurface* surface = gtk_native_get_surface(GTK_NATIVE(object));
-    if (surface == nullptr) {
-        g_object_unref(object);
-        return;
-    }
-
-    if (enabled) {
-        // Restore the real silhouette so the sidebar becomes interactive again.
-        const int width = gtk_widget_get_width(root_);
-        const int height = gtk_widget_get_height(root_);
-        if (width > 0 && height > 0) {
-            update_input_region(*state, width, height);
-        }
-    } else {
-        // Fully click-through: an empty input region lets pointer events fall
-        // through to whatever is beneath the invisible-but-mapped surface.
-        cairo_region_t* empty = cairo_region_create();
-        gdk_surface_set_input_region(surface, empty);
-        cairo_region_destroy(empty);
-    }
-    g_object_unref(object);
+    // Route through update_input_region so the same logic (and its resize-time
+    // guard) owns both the silhouette and the empty click-through region.
+    const int width = gtk_widget_get_width(root_);
+    const int height = gtk_widget_get_height(root_);
+    update_input_region(*state, width, height);
 }
 
 void SidebarFrame::set_child(GtkWidget* child) {
