@@ -724,12 +724,17 @@ void RightSidebar::set_surface_mapped(bool mapped) {
         return;
     }
 
-    // Idle-but-mapped: keep the surface mapped so the next open skips the
-    // ~100ms layer-surface map round-trip, but make it invisible and fully
-    // click-through so it never intercepts input while closed.
+    // Idle: unmap for real. Keeping the surface mapped at opacity 0 does NOT
+    // work on GTK4/Wayland: an opacity-0 window is culled, so it never commits
+    // a buffer, and the input region we set here never reaches the compositor
+    // (gdk_surface_set_input_region only marks the region dirty; it is pushed
+    // with the next frame commit). The compositor then keeps the last region it
+    // ever received - the open silhouette - and the invisible surface eats
+    // clicks in a 726x972 rectangle. Unmapping is the only state that is
+    // guaranteed click-through.
     if (frame_ != nullptr) frame_->set_input_region_enabled(false);
     gtk_widget_set_opacity(window_, 0.0);
-    gtk_widget_set_visible(window_, TRUE);
+    gtk_widget_set_visible(window_, FALSE);
 }
 
 void RightSidebar::prewarm() {
@@ -737,19 +742,18 @@ void RightSidebar::prewarm() {
     if (window_ == nullptr) return;
     prewarmed_ = true;
 
-    // First-map pipeline warmup: realize geometry, then map once and let
-    // exactly one frame clock tick render through GSK/EGL. Rather than
-    // unmapping afterward (which forces a full map round-trip on every open),
-    // drop to the invisible-but-mapped idle state so the surface stays warm.
-    // OnDemand keyboard mode means the map never grabs input, and the empty
-    // input region set by set_surface_mapped(false) keeps it click-through.
-    //
-    // Set opacity 0 + non-interactive BEFORE mapping so the very first mapped
-    // frame is already invisible and click-through — no boot flash.
+    // Boot warmup: realize the widget tree and geometry once so the first real
+    // open does not pay construction + layout. This is NOT a compositor-level
+    // warm map: an opacity-0 window is culled by GTK, never commits a buffer,
+    // and therefore never becomes a layer surface the compositor can see. The
+    // surface is only genuinely mapped once the panel is shown, and it is
+    // unmapped again on close (see set_surface_mapped(false)) because a mapped
+    // but invisible surface cannot be made click-through on Wayland.
     apply_geometry();
     if (frame_ != nullptr) frame_->set_input_region_enabled(false);
     gtk_widget_set_opacity(window_, 0.0);
-    gtk_widget_set_visible(window_, TRUE);
+    gtk_window_present(GTK_WINDOW(window_));
+    gtk_widget_queue_draw(window_);
 
     prewarm_frame_active_ = true;
     prewarm_tick_id_ = gtk_widget_add_tick_callback(

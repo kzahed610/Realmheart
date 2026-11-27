@@ -608,6 +608,11 @@ void update_input_region(FrameState& state, int width, int height) {
         cairo_region_t* empty = cairo_region_create();
         gdk_surface_set_input_region(surface, empty);
         cairo_region_destroy(empty);
+        // gdk_surface_set_input_region() only records the region on Wayland; it
+        // reaches the compositor with the next frame commit. An idle-but-mapped
+        // sidebar never paints, so without this the click-through region would
+        // stay pending forever and the surface would keep the old silhouette.
+        gdk_surface_queue_render(surface);
         g_object_unref(object);
         return;
     }
@@ -670,6 +675,9 @@ void update_input_region(FrameState& state, int width, int height) {
     // without changing the shell silhouette.
     gdk_surface_set_input_region(surface, region);
     cairo_region_destroy(region);
+    // Same commit requirement as the click-through branch above: make the new
+    // silhouette live on this frame instead of whenever the panel next paints.
+    gdk_surface_queue_render(surface);
     g_object_unref(object);
 }
 
