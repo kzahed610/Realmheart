@@ -808,6 +808,28 @@ SidebarFrame::SidebarFrame(GtkWindow* window, SidebarFrameLayout layout)
     gtk_overlay_add_overlay(GTK_OVERLAY(root_), violet_details);
 
     g_signal_connect(shadow, "resize", G_CALLBACK(on_resize), state);
+
+    // Register the static cairo layers. Each keeps its own widget and z-order;
+    // the cache swaps only the draw function, so the character's host layers
+    // are never re-parented.
+    const std::vector<std::pair<GtkWidget*, GtkDrawingAreaDrawFunc>> static_reg = {
+        {shadow, draw_outer_shadow},
+        {outer_fill, draw_outer_fill},
+        {middle_fill, draw_middle_fill},
+        {inner_fill, draw_inner_fill},
+        {outer_contour, draw_outer_contour},
+        {inner_contour, draw_inner_contour},
+        {highlight_contour, draw_highlight_contour},
+        {gold_details, draw_gold_details},
+        {violet_details, draw_violet_details},
+    };
+    for (const auto& [widget, draw] : static_reg) {
+        auto entry = std::make_unique<StaticLayer>();
+        entry->widget = widget;
+        entry->draw = draw;
+        entry->state = state;
+        static_layers_.push_back(std::move(entry));
+    }
 }
 
 void SidebarFrame::set_layout(SidebarFrameLayout layout) {
@@ -847,6 +869,85 @@ void SidebarFrame::set_input_region_enabled(bool enabled) {
     const int width = gtk_widget_get_width(root_);
     const int height = gtk_widget_get_height(root_);
     update_input_region(*state, width, height);
+}
+
+void SidebarFrame::invalidate_static_cache() {
+    static_cache_valid_ = false;
+    if (static_layers_.empty() || static_layers_.front()->widget == nullptr) return;
+    if (cached_picture_ != nullptr) {
+        gtk_overlay_set_child(
+            GTK_OVERLAY(root_),
+            static_layers_.front()->widget
+        );
+        cached_picture_ = nullptr;
+    }
+    for (auto& entry : static_layers_) {
+        if (entry->widget != nullptr) gtk_widget_set_visible(entry->widget, TRUE);
+    }
+    gtk_widget_queue_draw(root_);
+}
+
+void SidebarFrame::ensure_static_cache() {
+    if (root_ == nullptr || static_cache_valid_) return;
+    if (static_layers_.empty() || static_layers_.front()->widget == nullptr) return;
+    const int width = gtk_widget_get_width(root_);
+    const int height = gtk_widget_get_height(root_);
+    if (width <= 0 || height <= 0) return;
+
+    // Rasterize all nine static layers into one image surface, then show that
+    // single texture as the overlay's main child and hide the originals. The
+    // character's host layers and the content holder are overlays and are never
+    // touched, so Tessia keeps working; only the paint cost collapses from nine
+    // full-surface rasterizations per frame to one textured quad.
+    auto* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width, height);
+    cairo_t* cr = cairo_create(surface);
+    for (const auto& entry : static_layers_) {
+        if (entry->widget == nullptr || entry->draw == nullptr) continue;
+        entry->draw(GTK_DRAWING_AREA(entry->widget), cr, width, height, entry->state);
+    }
+    cairo_destroy(cr);
+
+    const gsize stride = static_cast<gsize>(cairo_image_surface_get_stride(surface));
+    const gsize length = stride * static_cast<gsize>(height);
+    GBytes* bytes = g_bytes_new_with_free_func(
+        cairo_image_surface_get_data(surface),
+        length,
+        +[](gpointer data) {
+            cairo_surface_destroy(static_cast<cairo_surface_t*>(data));
+        },
+        surface
+    );
+
+    GdkTexture* texture = gdk_memory_texture_new(
+        width,
+        height,
+        GDK_MEMORY_B8G8R8A8_PREMULTIPLIED,
+        bytes,
+        stride
+    );
+    g_object_unref(bytes);
+
+    auto* picture = gtk_picture_new();
+    gtk_picture_set_paintable(GTK_PICTURE(picture), GDK_PAINTABLE(texture));
+    g_object_unref(texture);
+    gtk_widget_add_css_class(picture, "realmheart-sidebar-frame");
+    gtk_widget_set_can_target(picture, FALSE);
+    gtk_widget_set_hexpand(picture, TRUE);
+    gtk_widget_set_vexpand(picture, TRUE);
+
+    // Replace only the main child (the shadow); the eight static overlays are
+    // hidden in place. Nothing is re-parented, so z-order and the character's
+    // host layers survive untouched.
+    gtk_overlay_set_child(GTK_OVERLAY(root_), picture);
+    cached_picture_ = picture;
+    for (std::size_t index = 1; index < static_layers_.size(); ++index) {
+        if (static_layers_[index]->widget != nullptr) {
+            gtk_widget_set_visible(static_layers_[index]->widget, FALSE);
+        }
+    }
+
+    static_cache_valid_ = true;
+    gtk_widget_queue_draw(root_);
 }
 
 void SidebarFrame::set_child(GtkWidget* child) {

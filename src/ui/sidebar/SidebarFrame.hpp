@@ -4,6 +4,9 @@
 
 #include <gtk/gtk.h>
 
+#include <memory>
+#include <vector>
+
 namespace realmheart::ui::sidebar {
 
 // Decorative, non-rectangular shell for the right sidebar.
@@ -33,6 +36,13 @@ public:
     // idle it must not intercept pointer input.
     void set_input_region_enabled(bool enabled);
 
+    // Static-layer raster cache. The nine cairo layers never change while the
+    // panel is open, but GTK repaints all of them every animation frame (41-95
+    // ms of CPU). Rasterizing them once into a GdkMemoryTexture and showing a
+    // single GtkPicture turns that into one textured quad per frame.
+    void ensure_static_cache();
+    void invalidate_static_cache();
+
     // These full-surface GtkFixed layers are intentionally empty today. Future
     // character renderers may place one or several animated widgets in them.
     GtkWidget* back_art_layer() const { return back_art_layer_; }
@@ -46,6 +56,16 @@ private:
     GtkWidget* content_ = nullptr;
     GtkWidget* back_art_layer_ = nullptr;
     GtkWidget* front_art_layer_ = nullptr;
+
+    struct StaticLayer {
+        GtkWidget* widget = nullptr;
+        GtkDrawingAreaDrawFunc draw = nullptr;
+        gpointer state = nullptr;
+        cairo_surface_t* cache = nullptr;
+    };
+    std::vector<std::unique_ptr<StaticLayer>> static_layers_;
+    bool static_cache_valid_ = false;
+    GtkWidget* cached_picture_ = nullptr;
 };
 
 } // namespace realmheart::ui::sidebar

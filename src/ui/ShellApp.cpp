@@ -680,6 +680,23 @@ public:
         toggle_right_sidebar_on_monitor(invocation_monitor_index());
     }
 
+    // Hotspot hover warm-up: map the sidebar invisibly (content at 1/255 alpha,
+    // empty input region) so the click that follows opens instantly instead of
+    // paying the ~100ms layer-surface map round-trip. A fresh surface commits
+    // the empty region with its first frame, so this state is click-through.
+    void warm_right_sidebar_on_monitor(int monitor_index) {
+        // Never warm mid-transition: the pointer sits on the hotspot when the
+        // edge is used to close, and the surface reappearing at 1/255 alpha
+        // mid-slide reads as the panel blinking out. Only warm a settled,
+        // fully closed sidebar.
+        if (state_.right_sidebar_visible()) return;
+        if (sidebar_transition_.state() != effects::TransitionState::Hidden) {
+            return;
+        }
+        ensure_sidebar_initialized(monitor_index);
+        if (sidebar_ != nullptr) sidebar_->set_surface_warm();
+    }
+
     void toggle_right_sidebar_on_monitor(int monitor_index) {
         cancel_right_sidebar_prewarm();
 
@@ -3441,6 +3458,21 @@ private:
             this
         );
 
+        GtkEventController* motion = gtk_event_controller_motion_new();
+        gtk_widget_add_controller(button, GTK_EVENT_CONTROLLER(motion));
+        g_signal_connect(
+            motion,
+            "enter",
+            G_CALLBACK(+[](GtkEventController* controller, gpointer data) {
+                auto* runtime = static_cast<ShellRuntime*>(data);
+                GtkWidget* target = gtk_event_controller_get_widget(controller);
+                const int monitor = GPOINTER_TO_INT(g_object_get_data(
+                    G_OBJECT(target), "realmheart-monitor-index"));
+                runtime->warm_right_sidebar_on_monitor(monitor);
+            }),
+            this
+        );
+
         GtkWidget* overlay = gtk_overlay_new();
         gtk_widget_set_hexpand(overlay, TRUE);
         gtk_widget_set_vexpand(overlay, TRUE);
@@ -3954,6 +3986,11 @@ private:
             sidebar_transition_.state() == effects::TransitionState::Hidden) {
             finish_right_sidebar_hide_if_ready();
         }
+        if (!still_running &&
+            sidebar_transition_.state() == effects::TransitionState::Visible &&
+            sidebar_backdrop_pending_) {
+            present_sidebar_backdrop();
+        }
         return still_running;
     }
 
@@ -4031,6 +4068,27 @@ private:
         sidebar_->set_surface_mapped(false);
     }
 
+    // The backdrop is a fullscreen 1864x1080 layer surface. Repainting it
+    // during the slide cost ~28ms of every frame (measured), which is the
+    // single largest contributor to the 15fps open animation. It only exists to
+    // catch clicks outside the panel, so it is presented once the slide has
+    // settled instead of while it runs.
+    void present_sidebar_backdrop() {
+        if (sidebar_backdrop_ == nullptr) return;
+        if (gdk_surface_get_mapped(
+                gtk_native_get_surface(
+                    GTK_NATIVE(gtk_widget_get_native(GTK_WIDGET(sidebar_backdrop_)))))) {
+            return;
+        }
+        gtk_window_present(sidebar_backdrop_);
+        const auto placement = sidebar::sidebar_placement_for(
+            GTK_WIDGET(sidebar_backdrop_),
+            sidebar_monitor_index_
+        );
+        enforce_sidebar_backdrop_input_region(sidebar_backdrop_, placement);
+        sidebar_backdrop_pending_ = false;
+    }
+
     void apply_right_sidebar_visibility() {
         GtkWidget* window = sidebar_->get_window();
         if (sidebar_transition_.target_visible()) {
@@ -4040,18 +4098,11 @@ private:
 
             // Use an Overlay backdrop with a carved input region instead of
             // relying on cross-layer stacking. Only clicks outside the sidebar
-            // are accepted by this surface.
-            gtk_window_present(sidebar_backdrop_);
-            const auto placement = sidebar::sidebar_placement_for(
-                GTK_WIDGET(sidebar_backdrop_),
-                sidebar_monitor_index_
-            );
-            enforce_sidebar_backdrop_input_region(
-                sidebar_backdrop_,
-                placement
-            );
+            // are accepted by this surface. Deferred until the slide settles -
+            // see present_sidebar_backdrop().
+            sidebar_backdrop_pending_ = true;
 
-            sidebar_->refresh();
+                sidebar_->refresh();
             sidebar_->apply_geometry();
             apply_right_sidebar_surface_effect();
 
@@ -4169,6 +4220,9 @@ private:
     gint64 sidebar_last_frame_time_ = 0;
     std::uint64_t sidebar_frame_generation_ = 0;
     bool sidebar_character_exit_complete_ = true;
+    // Set while the open slide is running; the backdrop is presented when it
+    // settles (see present_sidebar_backdrop).
+    bool sidebar_backdrop_pending_ = false;
     std::unique_ptr<CommandReceiptOverlay> command_receipts_;
     std::unique_ptr<LauncherOverlay> launcher_overlay_;
     int launcher_monitor_index_ = -1;

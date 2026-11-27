@@ -491,6 +491,7 @@ void RightSidebar::apply_geometry() {
         }
     }
     sidebar_height_ = placement.height;
+    if (geometry_changed && frame_ != nullptr) frame_->invalidate_static_cache();
     geometry_initialized_ = true;
 
     if (frame_ != nullptr) frame_->set_layout(frame_layout_);
@@ -710,6 +711,20 @@ gboolean RightSidebar::finish_character_hide(gpointer raw) {
     return G_SOURCE_REMOVE;
 }
 
+void RightSidebar::set_surface_warm() {
+    if (window_ == nullptr) return;
+
+    // Invisible but genuinely mapped: the content sits at 1/255 alpha so GTK
+    // still paints (and therefore commits) a buffer, while the empty input
+    // region keeps the surface click-through. The window itself must stay at
+    // opacity 1 - an opacity-0 window is culled and never commits anything.
+    if (frame_ != nullptr) frame_->set_input_region_enabled(false);
+    gtk_widget_set_opacity(effect_view_, 1.0 / 255.0);
+    gtk_widget_set_opacity(window_, 1.0);
+    gtk_widget_set_visible(window_, TRUE);
+    gtk_widget_queue_draw(window_);
+}
+
 void RightSidebar::set_surface_mapped(bool mapped) {
     if (window_ == nullptr) return;
 
@@ -718,22 +733,26 @@ void RightSidebar::set_surface_mapped(bool mapped) {
         // concurrent prewarm tick (which settles the surface back to idle)
         // can never hide a surface that is in the middle of being shown.
         sidebar_presented_ = true;
-        if (frame_ != nullptr) frame_->set_input_region_enabled(true);
+        if (frame_ != nullptr) {
+            frame_->set_input_region_enabled(true);
+            frame_->ensure_static_cache();
+        }
+        // Warm state keeps the panel at 1/255 alpha; restore it fully.
+        gtk_widget_set_opacity(effect_view_, 1.0);
         gtk_widget_set_opacity(window_, 1.0);
         gtk_widget_set_visible(window_, TRUE);
         return;
     }
 
-    // Idle: unmap for real. Keeping the surface mapped at opacity 0 does NOT
-    // work on GTK4/Wayland: an opacity-0 window is culled, so it never commits
-    // a buffer, and the input region we set here never reaches the compositor
-    // (gdk_surface_set_input_region only marks the region dirty; it is pushed
-    // with the next frame commit). The compositor then keeps the last region it
-    // ever received - the open silhouette - and the invisible surface eats
-    // clicks in a 726x972 rectangle. Unmapping is the only state that is
-    // guaranteed click-through.
+    // Idle: unmap. A surface that has already been interactive cannot be
+    // returned to click-through while it stays mapped: the empty input region
+    // only reaches the compositor with a frame commit, and the compositor keeps
+    // the previous (silhouette) region until then. Unmapping is deterministic.
+    // Warmth is recovered by set_surface_warm() on hotspot hover, which maps a
+    // fresh surface whose first commit already carries the empty region.
     if (frame_ != nullptr) frame_->set_input_region_enabled(false);
-    gtk_widget_set_opacity(window_, 0.0);
+    gtk_widget_set_opacity(effect_view_, 1.0);
+    gtk_widget_set_opacity(window_, 1.0);
     gtk_widget_set_visible(window_, FALSE);
 }
 
@@ -750,10 +769,7 @@ void RightSidebar::prewarm() {
     // unmapped again on close (see set_surface_mapped(false)) because a mapped
     // but invisible surface cannot be made click-through on Wayland.
     apply_geometry();
-    if (frame_ != nullptr) frame_->set_input_region_enabled(false);
-    gtk_widget_set_opacity(window_, 0.0);
-    gtk_window_present(GTK_WINDOW(window_));
-    gtk_widget_queue_draw(window_);
+    set_surface_warm();
 
     prewarm_frame_active_ = true;
     prewarm_tick_id_ = gtk_widget_add_tick_callback(
@@ -762,8 +778,12 @@ void RightSidebar::prewarm() {
             auto* self = static_cast<RightSidebar*>(data);
             self->prewarm_tick_id_ = 0;
             self->prewarm_frame_active_ = false;
-            // The surface is already invisible + click-through from above;
-            // this tick just marks the warmup complete.
+            // The surface is already invisible + click-through from above.
+            // Bake the static-layer cache here, after the first real frame:
+            // doing it during the first open re-parents the character's host
+            // layers in the same call that initializes the compositor, which
+            // then rejects them as having invalid geometry.
+            if (self->frame_ != nullptr) self->frame_->ensure_static_cache();
             return G_SOURCE_REMOVE;
         },
         this,

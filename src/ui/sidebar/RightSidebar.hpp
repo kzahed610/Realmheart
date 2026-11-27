@@ -95,6 +95,12 @@ public:
     // map round-trip (surface commit -> configure -> ack -> first frame) that
     // otherwise cost ~100ms of dead time before the slide animation begins.
     void set_surface_mapped(bool mapped);
+
+    // Invisible but genuinely mapped idle state: content at 1/255 alpha so GTK
+    // commits a buffer, empty input region so the surface is click-through.
+    // Used for the boot warm-up and between opens so the next open skips the
+    // layer-surface map round-trip.
+    void set_surface_warm();
     [[nodiscard]] bool character_enabled() const noexcept { return character_enabled_; }
     GtkWidget* get_window() const { return window_; }
     // One-time boot warmup: maps the panel once at opacity 0 for a single
